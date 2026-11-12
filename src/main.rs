@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! matrix-rat — a mouse-friendly Matrix client for the terminal.
 
 mod action;
@@ -5,6 +6,7 @@ mod app;
 mod composer;
 mod config;
 mod emoji;
+mod format;
 mod keymap;
 mod lock;
 mod logging;

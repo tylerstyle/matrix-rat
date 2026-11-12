@@ -171,6 +171,59 @@ mod tests {
     }
 
     #[test]
+    fn message_kinds() {
+        use crate::model::{Message, MsgKind, SendState};
+        let mut app = App::demo();
+        let base = |sender: &str, body: &str| Message {
+            sender: sender.into(),
+            time: "12:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        };
+        let room = &mut app.rooms[0];
+        room.typing = None;
+        room.messages = vec![
+            Message {
+                kind: MsgKind::System,
+                ..base("", "alice created the room")
+            },
+            base("alice", "A normal message."),
+            Message {
+                kind: MsgKind::Emote,
+                ..base("bob", "waves")
+            },
+            Message {
+                kind: MsgKind::Redacted,
+                ..base("bob", "Message deleted")
+            },
+            Message {
+                kind: MsgKind::Undecryptable,
+                ..base("bob", "Unable to decrypt (waiting for keys)")
+            },
+            Message {
+                kind: MsgKind::ReadMarker,
+                ..Message::default()
+            },
+            Message {
+                reply_to: Some((String::new(), "an earlier message".into())),
+                ..base("alice", "A reply.")
+            },
+            Message {
+                state: SendState::Sending,
+                own: true,
+                ..base("you", "On its way")
+            },
+            Message {
+                state: SendState::Failed,
+                own: true,
+                ..base("you", "Did not make it")
+            },
+        ];
+        insta::assert_snapshot!(render(&mut app, 70, 26));
+    }
+
+    #[test]
     fn login_form() {
         let mut app = App::demo();
         app.rooms.clear();

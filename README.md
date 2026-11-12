@@ -3,8 +3,9 @@
 A mouse-friendly, themeable Matrix client for the terminal, built with
 [ratatui](https://ratatui.rs) and [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk).
 
-**Status: early development.** It can log in, sync and show your rooms; reading and
-sending messages comes next. See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
+**Status: early development.** It can log in, sync, and read and send messages (replies, edits,
+reactions, Markdown). Formatted messages are still shown as plain text, and images are not
+displayed yet. See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
 
 ```sh
 cargo run             # log in to your account

@@ -34,14 +34,52 @@ pub struct Reaction {
     pub own: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MsgKind {
+    #[default]
+    Text,
+    /// A `/me` action, shown as "* alice waves".
+    Emote,
+    /// Joins, leaves, renames and the like: one muted line, no header.
+    System,
+    Redacted,
+    Undecryptable,
+    /// The "new messages below" line.
+    ReadMarker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SendState {
+    #[default]
+    Sent,
+    Sending,
+    Failed,
+}
+
+/// How the Matrix side addresses a message, for replies, edits, reactions and deletion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemRef {
+    Event(String),
+    /// A message of ours that the server has not confirmed yet.
+    Transaction(String),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Message {
+    /// Stable identity within the room's timeline; empty for demo data.
+    pub id: String,
+    /// `None` for demo data and for lines that are not events.
+    pub item: Option<ItemRef>,
+    pub kind: MsgKind,
+    pub state: SendState,
     pub sender: String,
     pub time: String,
     pub day: String,
     pub body: String,
     pub own: bool,
     pub edited: bool,
+    /// The formatted (HTML) version of the body, when the sender provided one.
+    pub html: Option<String>,
     /// Sender and text of the message this one replies to.
     pub reply_to: Option<(String, String)>,
     pub reactions: Vec<Reaction>,

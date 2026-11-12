@@ -1,6 +1,8 @@
 //! The Matrix side of the app. Everything that talks to the SDK lives in this module and
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
+mod convert;
+mod rooms;
 mod session;
 
 use std::time::Duration;
@@ -15,6 +17,8 @@ use matrix_sdk_ui::room_list_service::filters::new_filter_non_left;
 use matrix_sdk_ui::sync_service::{State, SyncService};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::format::Outgoing;
+use crate::model::{ItemRef, Message};
 use crate::paths::Paths;
 
 /// Rooms shown before the user scrolls for more. Paging arrives with the timeline work.
@@ -34,6 +38,46 @@ pub enum MatrixCmd {
     Recover {
         key: String,
     },
+    /// Start delivering this room's timeline. `generation` comes back with every
+    /// update so the UI can drop ones that belong to an earlier open.
+    OpenRoom {
+        room_id: String,
+        generation: u64,
+    },
+    /// Load older messages.
+    Paginate {
+        room_id: String,
+        generation: u64,
+    },
+    Send {
+        room_id: String,
+        message: Outgoing,
+        /// Event id of the message being replied to.
+        reply_to: Option<String>,
+    },
+    Edit {
+        room_id: String,
+        item: ItemRef,
+        message: Outgoing,
+    },
+    ToggleReaction {
+        room_id: String,
+        item: ItemRef,
+        key: String,
+    },
+    Redact {
+        room_id: String,
+        item: ItemRef,
+    },
+    MarkRead {
+        room_id: String,
+    },
+    Join {
+        room_id: String,
+    },
+    Leave {
+        room_id: String,
+    },
     Shutdown,
 }
 
@@ -49,6 +93,16 @@ impl std::fmt::Debug for MatrixCmd {
             Self::LoginBrowser { homeserver } => write!(f, "LoginBrowser({homeserver})"),
             Self::CancelLogin => f.write_str("CancelLogin"),
             Self::Recover { .. } => f.write_str("Recover"),
+            Self::OpenRoom { room_id, .. } => write!(f, "OpenRoom({room_id})"),
+            Self::Paginate { room_id, .. } => write!(f, "Paginate({room_id})"),
+            // Message text is private too.
+            Self::Send { room_id, .. } => write!(f, "Send({room_id})"),
+            Self::Edit { room_id, .. } => write!(f, "Edit({room_id})"),
+            Self::ToggleReaction { room_id, .. } => write!(f, "ToggleReaction({room_id})"),
+            Self::Redact { room_id, .. } => write!(f, "Redact({room_id})"),
+            Self::MarkRead { room_id } => write!(f, "MarkRead({room_id})"),
+            Self::Join { room_id } => write!(f, "Join({room_id})"),
+            Self::Leave { room_id } => write!(f, "Leave({room_id})"),
             Self::Shutdown => f.write_str("Shutdown"),
         }
     }
@@ -112,6 +166,24 @@ pub enum MatrixEvent {
     Recovery(RecoveryStatus),
     /// Outcome of [`MatrixCmd::Recover`]: `Err` carries a message for the user.
     RecoverResult(Result<(), String>),
+    /// The complete, current content of the open room's timeline.
+    Timeline {
+        room_id: String,
+        generation: u64,
+        messages: Vec<Message>,
+    },
+    /// A request for older messages finished.
+    Paginated {
+        generation: u64,
+        reached_start: bool,
+    },
+    /// Who else is typing in the open room.
+    Typing {
+        generation: u64,
+        names: Vec<String>,
+    },
+    /// Something the user did could not be carried out.
+    ActionFailed(String),
     Error(String),
 }
 
@@ -121,6 +193,13 @@ pub struct MatrixHandle {
 }
 
 impl MatrixHandle {
+    /// A handle whose commands can be inspected, for tests.
+    #[cfg(test)]
+    pub fn for_test() -> (Self, UnboundedReceiver<MatrixCmd>) {
+        let (commands, receiver) = unbounded_channel();
+        (Self { commands }, receiver)
+    }
+
     pub fn send(&self, command: MatrixCmd) {
         // A closed channel means the worker is gone, which only happens at shutdown.
         let _ = self.commands.send(command);
@@ -300,6 +379,7 @@ impl Worker {
         self.emit(MatrixEvent::Recovery(recovery_status(recovery.state())));
 
         let mut rooms: Vector<RoomListItem> = Vector::new();
+        let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
         let end = loop {
             tokio::select! {
                 Some(diffs) = entries.next() => {
@@ -337,10 +417,11 @@ impl Worker {
                         });
                     }
                     Some(MatrixCmd::Shutdown) | None => break SessionEnd::Shutdown,
-                    Some(_) => {}
+                    Some(command) => timelines.handle(command).await,
                 },
             }
         };
+        timelines.close();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
         Ok(end)
@@ -470,6 +551,83 @@ mod tests {
         let (needed_login, rooms) = until_rooms(&mut events).await;
         assert!(!needed_login, "session was not restored");
         assert!(!rooms.is_empty());
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Sends a message into the first joined room and waits for the server to confirm
+    /// it. Same setup as above; the user must have joined at least one room.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn send_and_see_it_confirmed() {
+        use crate::model::SendState;
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let username = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let root = std::env::temp_dir().join(format!("matrix-rat-send-{}", std::process::id()));
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password,
+        });
+
+        let body = format!("integration test {}", std::process::id());
+        let wait = async {
+            let mut room_id = None;
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err)
+                    | MatrixEvent::Error(err)
+                    | MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) if room_id.is_none() => {
+                        let joined = rooms.iter().find(|r| r.category != RoomCategory::Invite);
+                        if let Some(room) = joined {
+                            room_id = Some(room.id.clone());
+                            handle.send(MatrixCmd::OpenRoom {
+                                room_id: room.id.clone(),
+                                generation: 1,
+                            });
+                            handle.send(MatrixCmd::Send {
+                                room_id: room.id.clone(),
+                                message: crate::format::parse(&format!("**{body}**")),
+                                reply_to: None,
+                            });
+                        }
+                    }
+                    MatrixEvent::Timeline {
+                        generation: 1,
+                        messages,
+                        ..
+                    } => {
+                        let confirmed = messages.iter().any(|m| {
+                            m.body.contains(&body)
+                                && m.state == SendState::Sent
+                                && m.own
+                                && m.html.as_deref().is_some_and(|h| h.contains("<strong>"))
+                                && matches!(m.item, Some(ItemRef::Event(_)))
+                        });
+                        if confirmed {
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), wait)
+            .await
+            .expect("timed out waiting for the sent message");
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);

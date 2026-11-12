@@ -16,13 +16,14 @@ use tokio::time::MissedTickBehavior;
 use crate::action::{Action, Dir, Pane};
 use crate::composer::Composer;
 use crate::config::Config;
+use crate::format::{self, Outgoing};
 use crate::keymap::{self, Context};
 use crate::matrix::{
     self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
     SyncStatus,
 };
 use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm};
-use crate::model::{Message, OWN_NAME, Reaction, Room, RoomKind, demo_rooms};
+use crate::model::{ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, demo_rooms};
 use crate::paths::Paths;
 use crate::terminal::{self, TerminalGuard};
 use crate::theme::{DEFAULT_THEME, Theme, truecolor_supported};
@@ -68,6 +69,11 @@ pub struct TimelineState {
     pub reveal_selected: bool,
     /// Visible rows, as of the last draw.
     pub page: usize,
+    /// Set by the draw when the oldest loaded message is on screen.
+    pub want_older: bool,
+    pub loading_older: bool,
+    /// There is no older history to load.
+    pub reached_start: bool,
 }
 
 /// Where the composer's text was drawn, for mapping clicks to a cursor position.
@@ -96,6 +102,8 @@ pub struct App {
     pub sync: Option<SyncStatus>,
     pub user_id: Option<String>,
     recovery_prompted: bool,
+    /// Counts timeline requests; see `request_timeline`.
+    generation: u64,
     pub theme: Theme,
     theme_names: Vec<String>,
     themes_dir: PathBuf,
@@ -156,6 +164,7 @@ impl App {
             sync: None,
             user_id: None,
             recovery_prompted: false,
+            generation: 0,
             theme,
             theme_names: Theme::builtin_names(),
             themes_dir: PathBuf::new(),
@@ -261,8 +270,8 @@ impl App {
         self.focus = pane;
         match pane {
             Pane::Timeline => {
-                if self.timeline.selected.is_none() && !self.messages().is_empty() {
-                    self.timeline.selected = Some(self.messages().len() - 1);
+                if self.timeline.selected.is_none() {
+                    self.timeline.selected = self.find_selectable(usize::MAX, false);
                 }
                 self.timeline.reveal_selected = true;
             }
@@ -296,6 +305,7 @@ impl App {
         self.rooms[index].mention = false;
         self.timeline = TimelineState::default();
         self.sidebar.filter.clear();
+        self.request_timeline();
         self.set_focus(Pane::Composer);
     }
 
@@ -311,21 +321,72 @@ impl App {
 
     fn send(&mut self) {
         let text = self.composer.text().trim().to_owned();
-        if text.is_empty() || self.room().is_none() {
+        let Some(room_id) = self.room().map(|room| room.id.clone()) else {
+            return;
+        };
+        if text.is_empty() {
             return;
         }
+        if self
+            .room()
+            .is_some_and(|room| room.kind == RoomKind::Invite)
+        {
+            self.show_toast("Accept the invitation first");
+            return;
+        }
+        let outgoing = match format::parse(&text) {
+            // The draft stays, so a typo in a command is easy to fix.
+            Outgoing::Rejected(reason) => return self.show_toast(reason),
+            outgoing => outgoing,
+        };
+
         if self.matrix.is_some() {
-            // The draft is kept so nothing typed is lost.
-            self.show_toast("Sending messages arrives with the next milestone");
+            let command = match self.compose_mode {
+                ComposeMode::Normal => MatrixCmd::Send {
+                    room_id,
+                    message: outgoing,
+                    reply_to: None,
+                },
+                ComposeMode::Reply(i) => {
+                    match self.messages().get(i).and_then(|m| m.item.clone()) {
+                        Some(ItemRef::Event(event_id)) => MatrixCmd::Send {
+                            room_id,
+                            message: outgoing,
+                            reply_to: Some(event_id),
+                        },
+                        _ => return self.show_toast("That message has not been sent yet"),
+                    }
+                }
+                ComposeMode::Edit(i) => match self.messages().get(i).and_then(|m| m.item.clone()) {
+                    Some(item) => MatrixCmd::Edit {
+                        room_id,
+                        item,
+                        message: outgoing,
+                    },
+                    None => return self.show_toast("That message cannot be edited"),
+                },
+            };
+            self.send_matrix(command);
+            self.composer.take();
+            self.compose_mode = ComposeMode::Normal;
+            self.timeline.scroll = 0;
             return;
         }
+
+        // Demo mode: everything happens locally.
         self.composer.take();
         let mode = std::mem::replace(&mut self.compose_mode, ComposeMode::Normal);
+        let (body, kind) = match outgoing {
+            Outgoing::Emote { plain, .. } => (plain, MsgKind::Emote),
+            Outgoing::Text { plain, .. } => (plain, MsgKind::Text),
+            Outgoing::Rejected(_) => return,
+        };
         let mut message = Message {
             sender: OWN_NAME.to_owned(),
             time: "now".to_owned(),
             day: "Today".to_owned(),
-            body: text,
+            body,
+            kind,
             own: true,
             ..Message::default()
         };
@@ -346,6 +407,101 @@ impl App {
         self.timeline.scroll = 0;
     }
 
+    /// System lines and the "new" marker cannot be selected.
+    fn selectable(&self, index: usize) -> bool {
+        self.messages()
+            .get(index)
+            .is_some_and(|m| !matches!(m.kind, MsgKind::System | MsgKind::ReadMarker))
+    }
+
+    /// The nearest selectable message from `from` in the given direction, inclusive.
+    fn find_selectable(&self, from: usize, forward: bool) -> Option<usize> {
+        if forward {
+            (from..self.messages().len()).find(|i| self.selectable(*i))
+        } else {
+            (0..=from.min(self.messages().len().checked_sub(1)?))
+                .rev()
+                .find(|i| self.selectable(*i))
+        }
+    }
+
+    fn room_id(&self) -> Option<String> {
+        self.room().map(|room| room.id.clone())
+    }
+
+    /// Asks the worker for the open room's timeline. Every call starts a new
+    /// generation, so late updates for an earlier room are recognised and dropped.
+    fn request_timeline(&mut self) {
+        self.generation += 1;
+        if let Some(room_id) = self.room_id() {
+            self.send_matrix(MatrixCmd::OpenRoom {
+                room_id,
+                generation: self.generation,
+            });
+        }
+    }
+
+    /// Called after each draw: loads older messages when the view shows the oldest
+    /// loaded one.
+    pub fn after_draw(&mut self) {
+        let view = &mut self.timeline;
+        if !std::mem::take(&mut view.want_older) || view.loading_older || view.reached_start {
+            return;
+        }
+        if self.matrix.is_none() || self.room().is_none_or(|r| r.kind == RoomKind::Invite) {
+            return;
+        }
+        self.timeline.loading_older = true;
+        if let Some(room_id) = self.room_id() {
+            self.send_matrix(MatrixCmd::Paginate {
+                room_id,
+                generation: self.generation,
+            });
+        }
+    }
+
+    /// Replaces the open room's messages with the worker's current list, keeping the
+    /// selection and a pending reply or edit on the same messages.
+    fn apply_timeline(&mut self, messages: Vec<Message>) {
+        let id_at = |i: usize| self.messages().get(i).map(|m| m.id.clone());
+        let selected_id = self.timeline.selected.and_then(id_at);
+        let compose_id = match self.compose_mode {
+            ComposeMode::Reply(i) | ComposeMode::Edit(i) => id_at(i),
+            ComposeMode::Normal => None,
+        };
+        let at_bottom = self.timeline.scroll == 0;
+        if let Some(target) = self.messages_mut() {
+            *target = messages;
+        }
+        let find = |messages: &[Message], id: Option<String>| {
+            id.and_then(|id| messages.iter().position(|m| m.id == id))
+        };
+        let selected_at = find(self.messages(), selected_id);
+        let compose_at = find(self.messages(), compose_id);
+
+        if self.timeline.selected.is_some() {
+            self.timeline.selected =
+                selected_at.or_else(|| self.find_selectable(usize::MAX, false));
+            if self.timeline.selected.is_none() && self.focus == Pane::Timeline {
+                self.set_focus(Pane::Composer);
+            }
+        }
+        self.compose_mode = match (self.compose_mode, compose_at) {
+            (ComposeMode::Reply(_), Some(i)) => ComposeMode::Reply(i),
+            (ComposeMode::Edit(_), Some(i)) => ComposeMode::Edit(i),
+            (ComposeMode::Edit(_), None) => {
+                // The message being edited is gone; its text must not be sent as new.
+                self.composer.take();
+                ComposeMode::Normal
+            }
+            _ => ComposeMode::Normal,
+        };
+        // Reading at the newest message: tell the server it has been seen.
+        if at_bottom && let Some(room_id) = self.room_id() {
+            self.send_matrix(MatrixCmd::MarkRead { room_id });
+        }
+    }
+
     fn push_message(&mut self, message: Message) {
         if let Some(messages) = self.messages_mut() {
             messages.push(message);
@@ -353,6 +509,17 @@ impl App {
     }
 
     fn toggle_reaction(&mut self, msg: usize, key: &str) {
+        if self.matrix.is_some() {
+            let item = self.messages().get(msg).and_then(|m| m.item.clone());
+            if let (Some(item), Some(room_id)) = (item, self.room_id()) {
+                self.send_matrix(MatrixCmd::ToggleReaction {
+                    room_id,
+                    item,
+                    key: key.to_owned(),
+                });
+            }
+            return;
+        }
         let Some(message) = self.messages_mut().and_then(|m| m.get_mut(msg)) else {
             return;
         };
@@ -386,6 +553,14 @@ impl App {
                 return;
             }
             Some(_) => {}
+        }
+        if self.matrix.is_some() {
+            // The timeline update that follows shows it as deleted.
+            let item = self.messages().get(index).and_then(|m| m.item.clone());
+            if let (Some(item), Some(room_id)) = (item, self.room_id()) {
+                self.send_matrix(MatrixCmd::Redact { room_id, item });
+            }
+            return;
         }
         if let Some(messages) = self.messages_mut() {
             messages.remove(index);
@@ -478,21 +653,32 @@ impl App {
 
             Action::SelectOlder => match self.timeline.selected {
                 Some(i) if self.focus == Pane::Timeline => {
-                    self.timeline.selected = Some(i.saturating_sub(1));
+                    if let Some(older) = i
+                        .checked_sub(1)
+                        .and_then(|j| self.find_selectable(j, false))
+                    {
+                        self.timeline.selected = Some(older);
+                    }
                     self.timeline.reveal_selected = true;
                 }
                 _ => self.set_focus(Pane::Timeline),
             },
-            Action::SelectNewer => match self.timeline.selected {
-                Some(i) if i + 1 < self.messages().len() => {
-                    self.timeline.selected = Some(i + 1);
-                    self.timeline.reveal_selected = true;
+            Action::SelectNewer => {
+                let newer = self
+                    .timeline
+                    .selected
+                    .and_then(|i| self.find_selectable(i + 1, true));
+                match newer {
+                    Some(newer) => {
+                        self.timeline.selected = Some(newer);
+                        self.timeline.reveal_selected = true;
+                    }
+                    None => {
+                        self.timeline.scroll = 0;
+                        self.set_focus(Pane::Composer);
+                    }
                 }
-                _ => {
-                    self.timeline.scroll = 0;
-                    self.set_focus(Pane::Composer);
-                }
-            },
+            }
             Action::Reply => {
                 if let Some(i) = self.timeline.selected {
                     if matches!(self.compose_mode, ComposeMode::Edit(_)) {
@@ -505,6 +691,12 @@ impl App {
             Action::Edit => {
                 let selected = self.timeline.selected;
                 match selected.and_then(|i| self.messages().get(i).map(|m| (i, m))) {
+                    Some((_, message))
+                        if message.own
+                            && !matches!(message.kind, MsgKind::Text | MsgKind::Emote) =>
+                    {
+                        self.show_toast("This message cannot be edited");
+                    }
                     Some((i, message)) if message.own => {
                         let body = message.body.clone();
                         self.composer.set_text(&body);
@@ -532,6 +724,16 @@ impl App {
             Action::Newline => self.composer.insert("\n"),
             Action::CancelCompose => self.cancel_compose(),
 
+            Action::AcceptInvite | Action::DeclineInvite => {
+                let invited = self.room().filter(|room| room.kind == RoomKind::Invite);
+                if let Some(room_id) = invited.map(|room| room.id.clone()) {
+                    self.send_matrix(if action == Action::AcceptInvite {
+                        MatrixCmd::Join { room_id }
+                    } else {
+                        MatrixCmd::Leave { room_id }
+                    });
+                }
+            }
             Action::OpenEmoji => {
                 if self.modal.is_none() {
                     self.set_focus(Pane::Composer);
@@ -769,6 +971,32 @@ impl App {
                 }
                 _ => self.show_toast(format!("Recovery failed: {error}")),
             },
+            MatrixEvent::Timeline {
+                room_id,
+                generation,
+                messages,
+            } => {
+                if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
+                    self.apply_timeline(messages);
+                }
+            }
+            MatrixEvent::Paginated {
+                generation,
+                reached_start,
+            } => {
+                if generation == self.generation {
+                    self.timeline.loading_older = false;
+                    self.timeline.reached_start = reached_start;
+                }
+            }
+            MatrixEvent::Typing { generation, names } => {
+                if generation == self.generation
+                    && let Some(room) = self.rooms.get_mut(self.active)
+                {
+                    room.typing = (!names.is_empty()).then(|| names.join(", "));
+                }
+            }
+            MatrixEvent::ActionFailed(error) => self.show_toast(error),
             MatrixEvent::Error(error) => {
                 self.sync = Some(SyncStatus::Error(error.clone()));
                 self.show_toast(error);
@@ -784,6 +1012,11 @@ impl App {
             .cursor_room()
             .and_then(|i| self.rooms.get(i))
             .map(|room| room.id.clone());
+        let old_kinds: std::collections::HashMap<String, RoomKind> = self
+            .rooms
+            .iter()
+            .map(|room| (room.id.clone(), room.kind))
+            .collect();
         let mut old: std::collections::HashMap<String, Room> = self
             .rooms
             .drain(..)
@@ -814,22 +1047,39 @@ impl App {
             id.as_ref()
                 .and_then(|id| rooms.iter().position(|room| room.id == *id))
         };
+        let was_invite = open_id
+            .as_ref()
+            .and_then(|id| old_kinds.get(id))
+            .is_some_and(|kind| *kind == RoomKind::Invite);
         match position(&self.rooms, &open_id) {
-            Some(index) => self.active = index,
+            Some(index) => {
+                self.active = index;
+                // An accepted invitation becomes a room with messages to load.
+                if was_invite && self.rooms[index].kind != RoomKind::Invite {
+                    self.timeline = TimelineState::default();
+                    self.request_timeline();
+                }
+            }
             None => {
-                // The open room is gone (or this is the first list): show the first one,
-                // with its own draft. A draft for the vanished room has nowhere to go.
-                self.active = 0;
+                // The open room is gone (or this is the first list): show the first one
+                // that is a real conversation, with its own draft. A draft for the
+                // vanished room has nowhere to go.
+                self.active = self
+                    .rooms
+                    .iter()
+                    .position(|room| room.kind != RoomKind::Invite)
+                    .unwrap_or(0);
                 self.timeline = TimelineState::default();
                 self.compose_mode = ComposeMode::Normal;
                 if open_id.is_some() {
                     let draft = self
                         .rooms
-                        .first_mut()
+                        .get_mut(self.active)
                         .map(|room| std::mem::take(&mut room.draft))
                         .unwrap_or_default();
                     self.composer.set_text(&draft);
                 }
+                self.request_timeline();
             }
         }
         if let Some(index) = position(&self.rooms, &cursor_id)
@@ -1055,7 +1305,9 @@ impl App {
                     Some(HitId::RoomFilter) => self.set_focus(Pane::Sidebar),
                     Some(HitId::Message(index)) => {
                         self.set_focus(Pane::Timeline);
-                        self.timeline.selected = Some(index);
+                        if self.selectable(index) {
+                            self.timeline.selected = Some(index);
+                        }
                     }
                     Some(HitId::Reaction(msg, reaction)) => {
                         let key = self
@@ -1187,6 +1439,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
         if app.dirty {
             app.dirty = false;
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
+            app.after_draw();
         }
         tokio::select! {
             event = events.next() => match event {
@@ -1691,6 +1944,233 @@ mod tests {
         assert_eq!(app.rooms[app.active].id, "!d");
         app.on_matrix(MatrixEvent::Rooms(Vec::new()));
         redraw(&mut app, &mut terminal);
+    }
+
+    /// An app connected to a fake worker, with two joined rooms and one invitation.
+    fn connected() -> (
+        App,
+        Terminal<TestBackend>,
+        tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>,
+    ) {
+        let (mut app, mut terminal) = drawn();
+        let (handle, commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        app.sync = Some(SyncStatus::Synced);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            summary("!b", "Beta", RoomCategory::Room, 0),
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+        ]));
+        redraw(&mut app, &mut terminal);
+        (app, terminal, commands)
+    }
+
+    fn drain(commands: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>) -> Vec<String> {
+        let mut seen = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            seen.push(format!("{command:?}"));
+        }
+        seen
+    }
+
+    fn remote(id: &str, sender: &str, body: &str) -> Message {
+        Message {
+            id: id.into(),
+            item: Some(ItemRef::Event(format!("$ev{id}"))),
+            sender: sender.into(),
+            time: "10:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            own: sender == "me",
+            ..Message::default()
+        }
+    }
+
+    fn timeline(app: &App, messages: Vec<Message>) -> MatrixEvent {
+        MatrixEvent::Timeline {
+            room_id: app.rooms[app.active].id.clone(),
+            generation: app.generation,
+            messages,
+        }
+    }
+
+    #[test]
+    fn timeline_requests_and_stale_updates() {
+        let (mut app, mut terminal, mut commands) = connected();
+        // The first room list opens the first room and asks for its history.
+        let seen = drain(&mut commands);
+        assert!(seen.contains(&"OpenRoom(!a)".to_owned()), "{seen:?}");
+
+        app.on_matrix(timeline(&app, vec![remote("1", "ann", "hello")]));
+        assert_eq!(app.rooms[0].messages.len(), 1);
+        // At the newest message, so it is marked as read.
+        assert!(drain(&mut commands).contains(&"MarkRead(!a)".to_owned()));
+
+        // An update from before the room switch must not land in the new room.
+        let stale = timeline(&app, vec![remote("9", "ann", "late")]);
+        app.open_room(1);
+        assert!(drain(&mut commands).contains(&"OpenRoom(!b)".to_owned()));
+        app.on_matrix(stale);
+        assert!(app.rooms[1].messages.is_empty());
+        // Same room id but an old generation is dropped too.
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!b".into(),
+            generation: app.generation - 1,
+            messages: vec![remote("9", "ann", "late")],
+        });
+        assert!(app.rooms[1].messages.is_empty());
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "Loading messages");
+    }
+
+    #[test]
+    fn history_is_requested_once_until_it_arrives() {
+        let (mut app, mut terminal, mut commands) = connected();
+        drain(&mut commands);
+        app.on_matrix(timeline(&app, vec![remote("1", "ann", "hello")]));
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        let seen = drain(&mut commands);
+        assert_eq!(
+            seen.iter().filter(|c| *c == "Paginate(!a)").count(),
+            1,
+            "{seen:?}"
+        );
+        // Done, more exists: the next draw at the top asks again.
+        app.on_matrix(MatrixEvent::Paginated {
+            generation: app.generation,
+            reached_start: false,
+        });
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        assert!(drain(&mut commands).contains(&"Paginate(!a)".to_owned()));
+        // The start of the room was reached: no more requests.
+        app.on_matrix(MatrixEvent::Paginated {
+            generation: app.generation,
+            reached_start: true,
+        });
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        assert!(!drain(&mut commands).contains(&"Paginate(!a)".to_owned()));
+    }
+
+    #[test]
+    fn selection_and_reply_follow_their_message_when_history_loads() {
+        let (mut app, _terminal, mut commands) = connected();
+        app.on_matrix(timeline(
+            &app,
+            vec![remote("1", "ann", "first"), remote("2", "me", "second")],
+        ));
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.timeline.selected, Some(0));
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.compose_mode, ComposeMode::Reply(0));
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.timeline.selected, Some(1));
+
+        // Older history arrives in front, with a system line and a marker mixed in.
+        let system = Message {
+            id: "s".into(),
+            kind: MsgKind::System,
+            body: "ann joined".into(),
+            ..Message::default()
+        };
+        let marker = Message {
+            id: "m".into(),
+            kind: MsgKind::ReadMarker,
+            ..Message::default()
+        };
+        app.on_matrix(timeline(
+            &app,
+            vec![
+                remote("0", "ann", "older"),
+                system,
+                remote("1", "ann", "first"),
+                marker,
+                remote("2", "me", "second"),
+            ],
+        ));
+        assert_eq!(app.timeline.selected, Some(4));
+        assert_eq!(app.compose_mode, ComposeMode::Reply(2));
+        // Moving up skips the marker and the system line.
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.timeline.selected, Some(2));
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.timeline.selected, Some(0));
+
+        // Send the reply: it names the right event and clears the draft.
+        app.on_event(key(KeyCode::Esc));
+        drain(&mut commands);
+        type_text(&mut app, "**hi**");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(drain(&mut commands), ["Send(!a)"]);
+        assert!(app.composer.is_empty());
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+
+        // If the message being edited disappears, its text is not left as a draft.
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Char('e')));
+        assert_eq!(app.composer.text(), "second");
+        app.on_matrix(timeline(&app, vec![remote("0", "ann", "older")]));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(app.composer.is_empty());
+    }
+
+    #[test]
+    fn actions_become_commands_when_connected() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.on_matrix(timeline(
+            &app,
+            vec![remote("1", "ann", "theirs"), remote("2", "me", "mine")],
+        ));
+        drain(&mut commands);
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Char('r')));
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(drain(&mut commands), ["ToggleReaction(!a)", "Redact(!a)"]);
+        // Nothing changes locally; the worker's next update shows the result.
+        assert_eq!(app.rooms[0].messages.len(), 2);
+
+        // Unknown commands are refused and the draft is kept.
+        app.on_event(key(KeyCode::Esc));
+        type_text(&mut app, "/nosuchcommand x");
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).is_empty());
+        assert_eq!(app.composer.text(), "/nosuchcommand x");
+        assert!(app.toast.is_some());
+        app.composer.take();
+
+        // Typing notices and failures reach the screen.
+        app.on_matrix(MatrixEvent::Typing {
+            generation: app.generation,
+            names: vec!["ann".into()],
+        });
+        app.on_matrix(MatrixEvent::ActionFailed("Could not send: offline".into()));
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "ann is typing");
+        find(&terminal, "Could not send: offline");
+
+        // Invitations: no sending, but accept and decline work by click.
+        app.open_room(2);
+        drain(&mut commands);
+        type_text(&mut app, "hello");
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).is_empty());
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "Accept");
+        app.on_event(click(col, row));
+        assert_eq!(drain(&mut commands), ["Join(!i)"]);
+        // Once joined, its history is requested.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            summary("!b", "Beta", RoomCategory::Room, 0),
+            summary("!i", "Invited", RoomCategory::Room, 0),
+        ]));
+        assert!(drain(&mut commands).contains(&"OpenRoom(!i)".to_owned()));
     }
 
     #[test]
