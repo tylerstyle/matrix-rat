@@ -24,3 +24,10 @@ Planned:
 ## Licence
 
 Apache-2.0. Parts are adapted from [iamb](https://github.com/ulyssa/iamb) (Apache-2.0); see `NOTICE`.
+
+## Themes
+
+Five themes are built in (`F3` cycles them); `theme = "terminal"` follows your terminal's
+own colours. Theme files in `~/.config/matrix-rat/themes/` are reloaded the moment they
+change, so tools like Noctalia, matugen, wallust and pywal can recolour the app:
+see [contrib/themes/README.md](contrib/themes/README.md).

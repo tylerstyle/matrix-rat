@@ -27,6 +27,14 @@ const BUILTIN: &[(&str, &str)] = &[
 
 pub const DEFAULT_THEME: &str = "rat-dark";
 
+/// Templates for theme generators, by the name used on the command line.
+pub const TEMPLATES: &[(&str, &str)] = &[
+    ("noctalia", include_str!("../contrib/themes/noctalia.toml")),
+    ("matugen", include_str!("../contrib/themes/noctalia.toml")),
+    ("wallust", include_str!("../contrib/themes/wallust.toml")),
+    ("pywal", include_str!("../contrib/themes/pywal.toml")),
+];
+
 macro_rules! roles {
     ($($variant:ident => $name:literal),* $(,)?) => {
         /// A semantic slot the UI asks the theme for.
@@ -498,6 +506,34 @@ mod tests {
                 .contains(Modifier::BOLD)
         );
         assert_eq!(theme.warnings.len(), 3, "{:?}", theme.warnings);
+    }
+
+    #[test]
+    fn templates_are_valid_themes_once_filled_in() {
+        for (name, template) in TEMPLATES {
+            // Stand in for the generator: replace every placeholder with a colour.
+            let mut filled = String::new();
+            let mut rest = *template;
+            while let Some(start) = rest.find('{') {
+                let close = if rest[start..].starts_with("{{") {
+                    "}}"
+                } else {
+                    "}"
+                };
+                let end =
+                    start + rest[start..].find(close).expect("unclosed placeholder") + close.len();
+                filled.push_str(&rest[..start]);
+                filled.push_str("#336699");
+                rest = &rest[end..];
+            }
+            filled.push_str(rest);
+            let theme = Theme::parse(&filled, name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(theme.warnings.is_empty(), "{name}: {:?}", theme.warnings);
+            assert_eq!(
+                theme.style(Role::BorderFocused).fg,
+                Some(Color::Rgb(0x33, 0x66, 0x99))
+            );
+        }
     }
 
     #[test]

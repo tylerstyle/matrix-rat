@@ -127,6 +127,9 @@ pub struct App {
     /// When we last told the room we are typing, if we did.
     typing_sent: Option<Instant>,
     typing_notices: bool,
+    /// The theme the user asked for, which may not exist yet (a generator may still
+    /// have to write it).
+    wanted_theme: String,
     /// Bumped whenever a theme is loaded.
     pub theme_rev: u64,
     /// Bumped whenever the open room's messages change, to invalidate `row_cache`.
@@ -199,6 +202,7 @@ impl App {
             edit_stash: None,
             typing_sent: None,
             typing_notices: true,
+            wanted_theme: DEFAULT_THEME.to_owned(),
             theme_rev: 0,
             timeline_rev: 0,
             row_cache: None,
@@ -280,7 +284,17 @@ impl App {
         self.toast = Some((text.into(), Instant::now()));
     }
 
+    /// Loads the wanted theme again, after its file changed. Quiet unless it fails:
+    /// a generator recolouring the desktop should not pop up messages.
+    pub fn reload_theme(&mut self) {
+        self.dirty = true;
+        self.theme_names = Theme::available(&self.themes_dir);
+        let name = self.wanted_theme.clone();
+        self.set_theme(&name);
+    }
+
     fn set_theme(&mut self, name: &str) {
+        self.wanted_theme = name.to_owned();
         match Theme::load(name, &self.themes_dir) {
             Ok(mut theme) => {
                 for warning in &theme.warnings {
@@ -1698,6 +1712,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
         (Some(handle), Some(events))
     };
     let mut app = App::new(config, paths.themes_dir(), matrix.clone());
+    let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
 
     while !app.should_quit {
         if app.suspend_requested {
@@ -1722,6 +1737,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
                     None => std::future::pending().await,
                 }
             } => app.on_matrix(event),
+            _ = theme_watch.changed() => app.reload_theme(),
             _ = tick.tick() => app.on_tick(),
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
             _ = sigterm.recv() => app.should_quit = true,
@@ -2782,6 +2798,55 @@ mod tests {
             summary("!b", "Beta", RoomCategory::Room, 0),
         ]));
         assert_eq!(app.rooms[app.active].id, "!i");
+    }
+
+    #[test]
+    fn theme_file_changes_are_picked_up() {
+        let dir = std::env::temp_dir().join(format!("matrix-rat-themes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = Config {
+            theme: "generated".into(),
+            ..Config::default()
+        };
+        // The generator has not run yet: the app starts on the default theme.
+        let mut app = App::new(&config, dir.clone(), None);
+        assert_eq!(app.theme.name, DEFAULT_THEME);
+        let rev = app.theme_rev;
+
+        std::fs::write(
+            dir.join("generated.toml"),
+            "[palette]\nprimary = \"#010203\"\n",
+        )
+        .unwrap();
+        app.reload_theme();
+        assert_eq!(app.theme.name, "generated");
+        assert!(app.theme_rev > rev);
+        assert_eq!(
+            app.theme.style(crate::theme::Role::BorderFocused).fg,
+            Some(app.theme.color(1, 2, 3))
+        );
+
+        // New colours under the same name are applied; a broken file keeps the old
+        // theme and says so.
+        std::fs::write(
+            dir.join("generated.toml"),
+            "[palette]\nprimary = \"#040506\"\n",
+        )
+        .unwrap();
+        app.reload_theme();
+        assert_eq!(
+            app.theme.style(crate::theme::Role::BorderFocused).fg,
+            Some(app.theme.color(4, 5, 6))
+        );
+        app.toast = None;
+        std::fs::write(dir.join("generated.toml"), "[palette\n").unwrap();
+        app.reload_theme();
+        assert_eq!(
+            app.theme.style(crate::theme::Role::BorderFocused).fg,
+            Some(app.theme.color(4, 5, 6))
+        );
+        assert!(app.toast.is_some());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
