@@ -15,7 +15,7 @@ pub struct Paths {
     pub data_dir: PathBuf,
     /// `~/.local/state/matrix-rat/<profile>` — logs.
     pub log_dir: PathBuf,
-    /// `$XDG_RUNTIME_DIR/matrix-rat` — pid files used for theme reload signals.
+    /// `$XDG_RUNTIME_DIR/matrix-rat` (or `~/.local/state/matrix-rat/run`) — pid files used for theme reload signals.
     pub runtime_dir: PathBuf,
     pub profile: String,
 }
@@ -25,14 +25,17 @@ impl Paths {
         validate_profile(profile)?;
         let base = choose_base_strategy().context("could not determine home directory")?;
         let state = base.state_dir().unwrap_or_else(|| base.data_dir());
-        let runtime = base
+        // Without XDG_RUNTIME_DIR, stay inside the user's own state directory; a fixed
+        // name under /tmp would be shared between users.
+        let runtime_dir = base
             .runtime_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join(format!("{APP}-runtime")));
+            .map(|dir| dir.join(APP))
+            .unwrap_or_else(|| state.join(APP).join("run"));
         Ok(Self {
             config_dir: base.config_dir().join(APP),
             data_dir: base.data_dir().join(APP).join(profile),
             log_dir: state.join(APP).join(profile),
-            runtime_dir: runtime.join(APP),
+            runtime_dir,
             profile: profile.to_owned(),
         })
     }

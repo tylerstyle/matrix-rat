@@ -50,7 +50,7 @@ License for matrix-rat: **Apache-2.0** (matches iamb and matrix-rust-sdk; needed
 
 | Concern | Choice | Notes |
 |---|---|---|
-| Matrix | `matrix-sdk` 0.19.1 + `matrix-sdk-ui` 0.19.1 | Features: default (`e2e-encryption`, `sqlite`, `rustls-aws-lc-rs`) + `bundled-sqlite`, `sso-login` (implies `local-server`), `socks`, `qrcode`, `markdown`. MSRV 1.96; machine has rustc 1.99.1. Pin exact versions — every minor release breaks APIs. |
+| Matrix | `matrix-sdk` 0.19.1 + `matrix-sdk-ui` 0.19.1 | Features: default (`e2e-encryption`, `sqlite`, `rustls-aws-lc-rs`) + `bundled-sqlite`, `sso-login` (implies `local-server`), `socks`, `qrcode`. MSRV 1.96; machine has rustc 1.99.1. Pin exact versions — every minor release breaks APIs. |
 | Sync / rooms / timeline | `SyncService`, `RoomListService`, `Timeline` from `matrix-sdk-ui` | Same stack as Element X. Gives sliding sync, `VectorDiff` streams, local echo, send queue, date dividers, read marker, thread focus. |
 | TUI | `ratatui` 0.30.2, `crossterm` 0.29 (`event-stream`) | |
 | Async | `tokio` multi-thread | |
@@ -224,7 +224,7 @@ and the cursor is already in the composer. Type, `Enter` sends.
 |---|---|
 | `Enter` / `Shift-Enter` | Send / line break (`Alt-Enter` as fallback where the terminal cannot tell them apart) |
 | `Tab` / `Shift-Tab` | Cycle focus: sidebar → timeline → composer |
-| `Alt-←` / `Alt-→` / `Alt-↑` / `Alt-↓` | Jump focus in that direction, matching the screen: `←` room list, `→` back to the chat (composer), `↑` messages, `↓` composer. With the right panel open, `Alt-→` from the chat goes there. |
+| `Alt-←` / `Alt-→` / `Alt-↑` / `Alt-↓` | Jump focus in that direction, matching the screen: `←` room list, `→` back to the chat (composer), `↑` messages, `↓` composer. With the right panel open, `Alt-→` from the chat goes there. Word-wise cursor movement in the composer is therefore on `Ctrl-←` / `Ctrl-→` (and `Alt-B` / `Alt-F`). Zellij grabs `Alt`-arrows by default; `Alt-1…4` and `Tab` are the fallback. |
 | `Alt-1` … `Alt-4` | Jump straight to a pane: 1 room list, 2 messages, 3 composer, 4 right panel (opens it if closed). The digit is shown in each pane's border title. |
 | `Alt-R` | Jump to the room filter (type to narrow the list, `Enter` opens) |
 | `↑` / `↓` in sidebar | Move through rooms; `Enter` opens the room and focuses the composer |
@@ -234,10 +234,13 @@ and the cursor is already in the composer. Type, `Enter` sends.
 | `Esc` | Close overlay → cancel reply/edit → drop selection and return to the composer |
 | `PgUp` / `PgDn` | Scroll the timeline |
 | `Ctrl-K` | Room switcher (fuzzy) |
-| `F1` | Help (lists every key) · `F2` settings |
+| `F1` (or `?` outside the composer) | Help (lists every key) |
+| `F2` (or `Ctrl-,`) | Settings |
 | `Ctrl-Q` | Quit |
 
-- Selected-message hints are shown in the status line, so nothing has to be memorised.
+- Message-selection mode is unmistakable: the selected message is highlighted, the composer is
+  visibly dimmed, and the action hints are shown in the status line. Unbound letters do nothing
+  there (they are never typed into the composer by surprise). Status-line hints are clickable.
 - Everything else (attach, toggle sidebar, command palette, next unread) is reachable by mouse,
   slash command or the palette; it gets a key only if the user binds one.
 - Keymap is context-scoped (`global`, `sidebar`, `timeline`, `composer`, `overlay`) in config.
@@ -263,7 +266,11 @@ way Element does — they do not conflict:
 | `@name`, `#room` (via completion) | mention pill | `matrix.to` link + `m.mentions` |
 | `:emoji:` | emoji character | — |
 
-- Engine: `comrak` (CommonMark + GFM) with its `strikethrough`, `spoiler` (`||…||`), `autolink`
+- Engine: `comrak` with `default-features = false` (its defaults pull in a CLI and the C
+  Oniguruma library). We post-process its output for Matrix: spoilers become
+  `<span data-mx-spoiler>` (comrak emits `class="spoiler"`) and the outer `<p>` is stripped from
+  single-paragraph messages. The SDK's own `markdown` feature is not used.
+- Extensions (CommonMark + GFM): its `strikethrough`, `spoiler` (`||…||`), `autolink`
   and `tasklist` extensions — this replaces `pulldown-cmark` in §3. Raw HTML in input is escaped.
 - If the text contains no formatting, only a plain `body` is sent (no redundant HTML).
 - A backslash escapes a marker (`\*not italic\*`).
@@ -448,3 +455,4 @@ differentiators and can be reviewed with fake data in days.
 | Date | Reviewer | Verdict | Outcome |
 |---|---|---|---|
 | 2026-11-12 | `matrix-agy` | Approve with changes | All 8 findings accepted: timeline cache key and header recompute (§4), event-cache init + timeline LRU + generation tags (§4), strict startup order and image clipping (§4), recovery-key entry moved to M2 (§10), `sso-login`/`socks` features and spinner pin (§3), own wrapping with hit rects and OSC 8 demoted (§4), parent-dir watching + `on_primary` + pid files + mode 2031 demoted (§8), profile lock and `TerminalGuard` (§4, §9). |
+| 2026-11-12 | `matrix-agy` | M0 + plan rev 2: approve with changes | All 5 findings accepted. Fixed in M0: SIGTERM/SIGHUP handling, terminal-restore ordering, runtime-dir fallback, case-insensitive quit, tick behaviour. Plan: word movement on `Ctrl-←/→`, help/settings aliases, clearer selection mode (§6), comrak without default features plus Matrix post-processing (§6a). Ctrl-Z suspend/resume lands in M1. |

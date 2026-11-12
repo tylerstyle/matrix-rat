@@ -50,6 +50,8 @@ impl TerminalGuard {
     /// kitty keyboard protocol so Shift-Enter can be told apart from Enter.
     pub fn activate(&self) -> Result<Tui> {
         let mut out = io::stdout();
+        // Set first: if a write below fails halfway, `restore` must still undo it.
+        ACTIVE.store(true, Ordering::SeqCst);
         queue!(
             out,
             EnterAlternateScreen,
@@ -64,7 +66,6 @@ impl TerminalGuard {
             )?;
         }
         out.flush()?;
-        ACTIVE.store(true, Ordering::SeqCst);
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         terminal.clear()?;
         Ok(terminal)

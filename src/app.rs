@@ -12,6 +12,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::time::MissedTickBehavior;
+
 use crate::terminal::TerminalGuard;
 
 #[derive(Debug, Default)]
@@ -69,7 +72,7 @@ impl App {
 
 fn is_quit(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('c'))
+        && matches!(key.code, KeyCode::Char('q' | 'Q' | 'c' | 'C'))
 }
 
 pub async fn run() -> Result<()> {
@@ -78,6 +81,10 @@ pub async fn run() -> Result<()> {
     let mut terminal = guard.activate()?;
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Without these, a kill or a closed terminal window would skip all cleanup.
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sighup = signal(SignalKind::hangup())?;
     let mut app = App::new();
 
     while !app.should_quit {
@@ -93,6 +100,8 @@ pub async fn run() -> Result<()> {
             },
             _ = tick.tick() => {}
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
+            _ = sigterm.recv() => app.should_quit = true,
+            _ = sighup.recv() => app.should_quit = true,
         }
     }
     Ok(())
@@ -109,7 +118,7 @@ mod tests {
         let mut app = App::new();
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(!app.should_quit);
-        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::CONTROL));
         assert!(app.should_quit);
     }
 
