@@ -1,0 +1,31 @@
+# Uses only the terminal's own 16 colours, so it follows whatever themes the terminal.
+name = "terminal"
+
+[palette]
+bg = "reset"
+surface = "reset"
+surface_high = "darkgray"
+fg = "reset"
+muted = "darkgray"
+outline = "darkgray"
+primary = "blue"
+on_primary = "black"
+secondary = "magenta"
+accent = "yellow"
+error = "red"
+success = "green"
+warning = "yellow"
+
+[ui]
+room_cursor = { bold = true, underline = true }
+hover = { underline = true }
+room_active = { fg = "blue", bold = true, reversed = true }
+message_selected = { reversed = true }
+status = { fg = "reset" }
+status_key = { fg = "blue", bold = true }
+status_ok = { fg = "green" }
+reaction = { fg = "reset" }
+reaction_own = { fg = "blue", bold = true }
+
+[users]
+colors = ["blue", "magenta", "green", "yellow", "cyan", "red", "lightblue", "lightmagenta"]

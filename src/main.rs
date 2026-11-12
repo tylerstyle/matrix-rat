@@ -1,10 +1,18 @@
 //! matrix-rat — a mouse-friendly Matrix client for the terminal.
 
+mod action;
 mod app;
+mod composer;
+mod config;
+mod keymap;
 mod lock;
 mod logging;
+mod model;
 mod paths;
 mod terminal;
+mod text;
+mod theme;
+mod ui;
 
 use anyhow::Result;
 use clap::Parser;
@@ -21,6 +29,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let paths = paths::Paths::new(&args.profile)?;
     paths.create_dirs()?;
+    let config = config::Config::load(&paths.config_file())?;
 
     // Held for the whole run: two instances on one profile would corrupt the SDK stores.
     let _lock = lock::ProfileLock::acquire(&paths)?;
@@ -30,7 +39,7 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(app::run());
+    let result = runtime.block_on(app::run(&paths, &config));
     if let Err(err) = &result {
         tracing::error!(?err, "exited with error");
     }

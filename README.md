@@ -3,7 +3,12 @@
 A mouse-friendly, themeable Matrix client for the terminal, built with
 [ratatui](https://ratatui.rs) and [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk).
 
-**Status: planning.** No usable release yet — see [docs/PLAN.md](docs/PLAN.md).
+**Status: early development.** The interface runs on demo data; it does not connect to
+Matrix yet. See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
+
+```sh
+cargo run          # F1 shows all keys, F3 cycles themes, Ctrl-Q quits
+```
 
 Planned:
 

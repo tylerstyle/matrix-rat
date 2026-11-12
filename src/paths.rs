@@ -53,6 +53,14 @@ impl Paths {
         Ok(())
     }
 
+    pub fn config_file(&self) -> PathBuf {
+        self.config_dir.join("config.toml")
+    }
+
+    pub fn themes_dir(&self) -> PathBuf {
+        self.config_dir.join("themes")
+    }
+
     pub fn lock_file(&self) -> PathBuf {
         self.data_dir.join("lock")
     }

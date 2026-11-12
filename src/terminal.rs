@@ -27,6 +27,7 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 static RAW: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+static MOUSE: AtomicBool = AtomicBool::new(true);
 
 /// Restores the terminal when dropped. Also restored by the panic hook.
 #[derive(Debug)]
@@ -36,8 +37,9 @@ pub struct TerminalGuard {
 
 impl TerminalGuard {
     /// Step 1: raw mode only. Run stdin-reading terminal queries after this.
-    pub fn enter() -> Result<Self> {
+    pub fn enter(mouse: bool) -> Result<Self> {
         install_panic_hook();
+        MOUSE.store(mouse, Ordering::SeqCst);
         enable_raw_mode()?;
         RAW.store(true, Ordering::SeqCst);
         // Queried here because it also reads a reply from stdin.
@@ -49,27 +51,46 @@ impl TerminalGuard {
     /// Step 2: alternate screen, mouse, paste, focus events and (where supported) the
     /// kitty keyboard protocol so Shift-Enter can be told apart from Enter.
     pub fn activate(&self) -> Result<Tui> {
-        let mut out = io::stdout();
-        // Set first: if a write below fails halfway, `restore` must still undo it.
-        ACTIVE.store(true, Ordering::SeqCst);
-        queue!(
-            out,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste,
-            EnableFocusChange
-        )?;
-        if KEYBOARD_ENHANCED.load(Ordering::SeqCst) {
-            queue!(
-                out,
-                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-            )?;
-        }
-        out.flush()?;
+        write_activation()?;
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         terminal.clear()?;
         Ok(terminal)
     }
+}
+
+fn write_activation() -> Result<()> {
+    let mut out = io::stdout();
+    // Set first: if a write below fails halfway, `restore` must still undo it.
+    ACTIVE.store(true, Ordering::SeqCst);
+    queue!(
+        out,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableFocusChange
+    )?;
+    if MOUSE.load(Ordering::SeqCst) {
+        queue!(out, EnableMouseCapture)?;
+    }
+    if KEYBOARD_ENHANCED.load(Ordering::SeqCst) {
+        queue!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Ctrl-Z: hand the terminal back, stop the process, and set everything up again when
+/// the shell resumes it with `fg`.
+pub fn suspend(terminal: &mut Tui) -> Result<()> {
+    restore();
+    signal_hook::low_level::emulate_default_handler(signal_hook::consts::SIGTSTP)?;
+    enable_raw_mode()?;
+    RAW.store(true, Ordering::SeqCst);
+    write_activation()?;
+    terminal.clear()?;
+    Ok(())
 }
 
 impl Drop for TerminalGuard {

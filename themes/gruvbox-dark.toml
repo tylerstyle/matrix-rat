@@ -1,0 +1,19 @@
+name = "gruvbox-dark"
+
+[palette]
+bg = "#282828"
+surface = "#3c3836"
+surface_high = "#504945"
+fg = "#ebdbb2"
+muted = "#928374"
+outline = "#665c54"
+primary = "#fabd2f"
+on_primary = "#282828"
+secondary = "#83a598"
+accent = "#d3869b"
+error = "#fb4934"
+success = "#b8bb26"
+warning = "#fe8019"
+
+[users]
+colors = ["#fabd2f", "#83a598", "#b8bb26", "#d3869b", "#fe8019", "#8ec07c", "#fb4934", "#d5c4a1"]

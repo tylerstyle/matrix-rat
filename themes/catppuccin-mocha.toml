@@ -1,0 +1,19 @@
+name = "catppuccin-mocha"
+
+[palette]
+bg = "#1e1e2e"
+surface = "#313244"
+surface_high = "#45475a"
+fg = "#cdd6f4"
+muted = "#7f849c"
+outline = "#585b70"
+primary = "#cba6f7"
+on_primary = "#1e1e2e"
+secondary = "#89b4fa"
+accent = "#f9e2af"
+error = "#f38ba8"
+success = "#a6e3a1"
+warning = "#fab387"
+
+[users]
+colors = ["#cba6f7", "#89b4fa", "#a6e3a1", "#f9e2af", "#fab387", "#f5c2e7", "#94e2d5", "#f38ba8"]

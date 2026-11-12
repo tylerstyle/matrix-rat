@@ -1,0 +1,24 @@
+---
+source: src/ui/mod.rs
+expression: "render(&mut app, 50, 20)"
+---
+"╭ 2 #rust ───────────────────────────────────────╮"
+"│● carol  09:12                                 ││"
+"│  Morning! Is the sliding sync proxy still     ││"
+"│  needed?                                      ││"
+"│                                               ││"
+"│● alice  09:15                                 ││"
+"│  ┃ carol: Morning! Is the sliding sync proxy …││"
+"│  No, it is native in the homeserver now.      ││"
+"│                                               ┃│"
+"│● you  09:20                                   ┃│"
+"│  Good to know, thanks. (edited)               ┃│"
+"│                                               ┃│"
+"│● dave  10:02                                  ┃│"
+"│  Shipping a TUI client on top of it this week ┃│"
+"│  🐀                                           ┃│" Hidden by multi-width symbols: [(4, " ")]
+"╰ carol is typing… ──────────────────────────────╯"
+"╭ 3 Message ─────────────────────────────────────╮"
+"│ Type a message…                                │"
+"╰────────────────────────────────────────────────╯"
+" ● demo data  Enter send  Sh F1 help  F3 rat-dark "

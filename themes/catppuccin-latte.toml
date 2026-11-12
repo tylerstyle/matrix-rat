@@ -1,0 +1,19 @@
+name = "catppuccin-latte"
+
+[palette]
+bg = "#eff1f5"
+surface = "#ccd0da"
+surface_high = "#bcc0cc"
+fg = "#4c4f69"
+muted = "#8c8fa1"
+outline = "#acb0be"
+primary = "#8839ef"
+on_primary = "#eff1f5"
+secondary = "#1e66f5"
+accent = "#df8e1d"
+error = "#d20f39"
+success = "#40a02b"
+warning = "#fe640b"
+
+[users]
+colors = ["#8839ef", "#1e66f5", "#40a02b", "#df8e1d", "#fe640b", "#ea76cb", "#179299", "#d20f39"]

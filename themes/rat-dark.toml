@@ -1,0 +1,19 @@
+name = "rat-dark"
+
+[palette]
+bg = "#16161d"
+surface = "#1f1f28"
+surface_high = "#2a2a37"
+fg = "#dcd7ba"
+muted = "#727169"
+outline = "#54546d"
+primary = "#7fb4ca"
+on_primary = "#16161d"
+secondary = "#957fb8"
+accent = "#e6c384"
+error = "#e46876"
+success = "#98bb6c"
+warning = "#ffa066"
+
+[users]
+colors = ["#7fb4ca", "#957fb8", "#e6c384", "#98bb6c", "#ffa066", "#d27e99", "#7aa89f", "#e46876"]
