@@ -224,6 +224,9 @@ and the cursor is already in the composer. Type, `Enter` sends.
 |---|---|
 | `Enter` / `Shift-Enter` | Send / line break (`Alt-Enter` as fallback where the terminal cannot tell them apart) |
 | `Tab` / `Shift-Tab` | Cycle focus: sidebar → timeline → composer |
+| `Alt-←` / `Alt-→` / `Alt-↑` / `Alt-↓` | Jump focus in that direction, matching the screen: `←` room list, `→` back to the chat (composer), `↑` messages, `↓` composer. With the right panel open, `Alt-→` from the chat goes there. |
+| `Alt-1` … `Alt-4` | Jump straight to a pane: 1 room list, 2 messages, 3 composer, 4 right panel (opens it if closed). The digit is shown in each pane's border title. |
+| `Alt-R` | Jump to the room filter (type to narrow the list, `Enter` opens) |
 | `↑` / `↓` in sidebar | Move through rooms; `Enter` opens the room and focuses the composer |
 | `↑` in composer (cursor on first line) | Leave the composer and select the newest message; keep pressing to walk up |
 | `↓` past the newest message | Back to the composer |
@@ -360,8 +363,8 @@ Shipped under `contrib/themes/` and installable with `matrix-rat theme install-t
 
 | Target | What we ship |
 |---|---|
-| Noctalia v4 (user's current setup, JSON config) | Template using `{{colors.primary.default.hex}}` tokens + `[templates.matrix-rat]` snippet for `~/.config/noctalia/user-templates.toml` with `post_hook = "matrix-rat --reload-theme"`. |
-| Noctalia v5 | Same template + `[theme.templates.user.matrix-rat]` snippet; later submit to the community template registry. |
+| Noctalia v5 (user's setup, TOML config) — **primary target** | Template using `{{colors.primary.default.hex}}` tokens (incl. v5's `hover` and `terminal_*` tokens for the user-colour list) + `[theme.templates.user.matrix-rat]` snippet for `~/.config/noctalia/templates.toml` with `post_hook = "matrix-rat --reload-theme"`; `input_path_modes` for dark/light. Tested live on the user's machine. Later submit to the community template registry. |
+| Noctalia v4 (legacy) | Same template body + `[templates.matrix-rat]` snippet for `~/.config/noctalia/user-templates.toml`. Untested locally. |
 | matugen (also DMS, end-4, Caelestia) | Tera-syntax template + `[templates.matrix-rat]` config snippet *(verify syntax)*. |
 | wallust | Template + config entry. |
 | pywal / pywal16 | Built-in `theme = "pywal"` that reads `~/.cache/wal/colors.json` directly and watches it. |
@@ -429,7 +432,7 @@ differentiators and can be reviewed with fake data in days.
 | Inline images while scrolling (clipping, sixel last-row scroll bug, multiplexers) | Sliced rendering, placeholder when clipped, protocol override, never draw sixel on the last row. |
 | `ratatui-textarea` lacks soft-wrap / mouse placement | Verify in M1; own minimal composer widget as fallback. |
 | Mode 2031 / OSC replies colliding with crossterm input parsing | Startup query before `EventStream`; live reports optional; file watcher is the reliable path. |
-| Noctalia v4 vs v5 template differences | Ship both snippets; same token names in the template body. |
+| Noctalia v4 vs v5 template differences | v5 is primary and tested; v4 snippet shares the template body and avoids v5-only tokens via a separate file if needed. |
 | Scope creep | v1 column in §9 is the contract; "Later" items wait. |
 
 ## 13. Decisions by the user (2026-11-12)

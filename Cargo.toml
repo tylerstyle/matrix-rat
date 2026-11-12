@@ -1,0 +1,36 @@
+[package]
+name = "matrix-rat"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+description = "A mouse-friendly, themeable Matrix client for the terminal"
+repository = "https://github.com/tylerstyle/matrix-rat"
+
+[dependencies]
+# Matrix. Pinned exactly: every minor release has breaking changes.
+matrix-sdk = { version = "=0.19.1", features = ["bundled-sqlite", "sso-login", "socks", "qrcode", "markdown"] }
+matrix-sdk-ui = "=0.19.1"
+
+# TUI
+ratatui = "0.30.2"
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+# Runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+futures = "0.3"
+
+# Support
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+etcetera = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+strip = true
