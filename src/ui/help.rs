@@ -65,6 +65,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     app.hits.add(area, HitId::Backdrop);
     app.hits.add(popup, HitId::Overlay);
 
+    // Dim everything behind the overlay.
+    frame.buffer_mut().set_style(
+        area,
+        ratatui::style::Style::new().add_modifier(ratatui::style::Modifier::DIM),
+    );
     frame.render_widget(Clear, popup);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)

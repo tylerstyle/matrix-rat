@@ -2,8 +2,9 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
+use super::NARROW_WIDTH;
 use super::hit::{Button, HitId};
-use crate::action::Pane;
+use crate::action::{Action, Pane};
 use crate::app::App;
 use crate::text::width;
 use crate::theme::Role;
@@ -48,25 +49,47 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some((text, _)) = &app.toast {
         spans.push(Span::styled(format!(" {text} "), theme.style(Role::Toast)));
     } else {
-        let hints: &[(&str, &str)] = match app.focus {
-            Pane::Composer => &[
-                ("Enter", "send"),
-                ("Shift-Enter", "line break"),
-                ("↑", "select message"),
+        use Action as A;
+        let mut hints: Vec<(&str, &str, Option<Action>)> = Vec::new();
+        if app.screen.width < NARROW_WIDTH && app.focus != Pane::Sidebar {
+            // The room list is hidden at this width; this is the mouse's way to it.
+            hints.push(("☰", "rooms", Some(A::Focus(Pane::Sidebar))));
+        }
+        hints.extend(match app.focus {
+            Pane::Composer => vec![
+                ("Enter", "send", Some(A::Send)),
+                ("Shift-Enter", "line break", Some(A::Newline)),
+                ("↑", "select message", Some(A::SelectOlder)),
             ],
-            Pane::Timeline => &[
-                ("Enter", "reply"),
-                ("e", "edit"),
-                ("r", "react"),
-                ("Del", "delete"),
-                ("c", "copy"),
-                ("Esc", "back"),
+            Pane::Timeline => vec![
+                ("Enter", "reply", Some(A::Reply)),
+                ("e", "edit", Some(A::Edit)),
+                ("r", "react", Some(A::React)),
+                ("Del", "delete", Some(A::Delete)),
+                ("c", "copy", Some(A::Copy)),
+                ("Esc", "back", Some(A::Back)),
             ],
-            Pane::Sidebar => &[("↑↓", "move"), ("Enter", "open"), ("type", "to filter")],
-        };
-        for (k, text) in hints {
-            spans.push(Span::styled((*k).to_owned(), key));
-            spans.push(Span::styled(format!(" {text}  "), status));
+            Pane::Sidebar => vec![
+                ("↑↓", "move", None),
+                ("Enter", "open", Some(A::SidebarOpen)),
+                ("type", "to filter", None),
+            ],
+        });
+        let mut col = area.x + spans.iter().map(|s| width(&s.content) as u16).sum::<u16>();
+        for (k, text, action) in hints {
+            let label = format!(" {text}  ");
+            let hint_width = (width(k) + width(&label)) as u16;
+            if let Some(action) = action {
+                // Clickable area: the key and its label, without the trailing gap.
+                let end = (col + hint_width.saturating_sub(2)).min(right);
+                if end > col {
+                    app.hits
+                        .add(Rect::new(col, area.y, end - col, 1), HitId::Do(action));
+                }
+            }
+            col += hint_width;
+            spans.push(Span::styled(k.to_owned(), key));
+            spans.push(Span::styled(label, status));
         }
     }
     let left = Rect::new(area.x, area.y, right - area.x, 1);

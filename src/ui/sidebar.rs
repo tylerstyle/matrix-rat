@@ -127,9 +127,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(format!(" {icon} "), theme.style(icon_role)),
                     Span::styled(
                         truncate(&room.name, name_width),
-                        ratatui::style::Style::new()
-                            .fg(name_style.fg.unwrap_or_default())
-                            .add_modifier(name_style.add_modifier),
+                        ratatui::style::Style {
+                            fg: name_style.fg,
+                            ..ratatui::style::Style::new()
+                        }
+                        .add_modifier(name_style.add_modifier),
                     ),
                 ]);
                 frame.render_widget(&line, rect);

@@ -3,7 +3,7 @@
 
 use ratatui::layout::{Position, Rect};
 
-use crate::action::Pane;
+use crate::action::{Action, Pane};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
@@ -26,6 +26,8 @@ pub enum HitId {
     ComposerText,
     Splitter,
     Button(Button),
+    /// A clickable hint that performs an action, like the ones in the status line.
+    Do(Action),
     /// The dimmed area around an overlay; clicking it closes the overlay.
     Backdrop,
     Overlay,

@@ -189,12 +189,19 @@ impl App {
             .copied()
     }
 
-    fn messages(&self) -> &Vec<Message> {
-        &self.rooms[self.active].messages
+    /// The open room. `None` when there are no rooms (before the first sync).
+    pub fn room(&self) -> Option<&Room> {
+        self.rooms.get(self.active)
     }
 
-    fn messages_mut(&mut self) -> &mut Vec<Message> {
-        &mut self.rooms[self.active].messages
+    fn messages(&self) -> &[Message] {
+        self.room().map_or(&[], |room| room.messages.as_slice())
+    }
+
+    fn messages_mut(&mut self) -> Option<&mut Vec<Message>> {
+        self.rooms
+            .get_mut(self.active)
+            .map(|room| &mut room.messages)
     }
 
     // ----- state changes -------------------------------------------------------------
@@ -251,11 +258,20 @@ impl App {
         if index >= self.rooms.len() {
             return;
         }
+        if index != self.active {
+            // An edit belongs to its room; a plain draft waits there until we come back.
+            self.cancel_compose();
+            let draft = self.composer.take();
+            if let Some(room) = self.rooms.get_mut(self.active) {
+                room.draft = draft;
+            }
+            let draft = std::mem::take(&mut self.rooms[index].draft);
+            self.composer.set_text(&draft);
+        }
         self.active = index;
         self.rooms[index].unread = 0;
         self.rooms[index].mention = false;
         self.timeline = TimelineState::default();
-        self.compose_mode = ComposeMode::Normal;
         self.sidebar.filter.clear();
         self.set_focus(Pane::Composer);
     }
@@ -272,7 +288,7 @@ impl App {
 
     fn send(&mut self) {
         let text = self.composer.text().trim().to_owned();
-        if text.is_empty() {
+        if text.is_empty() || self.room().is_none() {
             return;
         }
         self.composer.take();
@@ -287,22 +303,29 @@ impl App {
         };
         match mode {
             ComposeMode::Edit(i) if i < self.messages().len() => {
-                let target = &mut self.messages_mut()[i];
-                target.body = message.body;
-                target.edited = true;
+                if let Some(target) = self.messages_mut().and_then(|m| m.get_mut(i)) {
+                    target.body = message.body;
+                    target.edited = true;
+                }
             }
             ComposeMode::Reply(i) if i < self.messages().len() => {
                 let target = &self.messages()[i];
                 message.reply_to = Some((target.sender.clone(), target.body.clone()));
-                self.messages_mut().push(message);
+                self.push_message(message);
             }
-            _ => self.messages_mut().push(message),
+            _ => self.push_message(message),
         }
         self.timeline.scroll = 0;
     }
 
+    fn push_message(&mut self, message: Message) {
+        if let Some(messages) = self.messages_mut() {
+            messages.push(message);
+        }
+    }
+
     fn toggle_reaction(&mut self, msg: usize, key: &str) {
-        let Some(message) = self.messages_mut().get_mut(msg) else {
+        let Some(message) = self.messages_mut().and_then(|m| m.get_mut(msg)) else {
             return;
         };
         match message.reactions.iter().position(|r| r.key == key) {
@@ -328,11 +351,17 @@ impl App {
     }
 
     fn delete_message(&mut self, index: usize) {
-        if !self.messages()[index].own {
-            self.show_toast("You can only delete your own messages");
-            return;
+        match self.messages().get(index) {
+            None => return,
+            Some(message) if !message.own => {
+                self.show_toast("You can only delete your own messages");
+                return;
+            }
+            Some(_) => {}
         }
-        self.messages_mut().remove(index);
+        if let Some(messages) = self.messages_mut() {
+            messages.remove(index);
+        }
         // Keep a pending reply or edit pointing at the right message.
         self.compose_mode = match self.compose_mode {
             ComposeMode::Reply(i) | ComposeMode::Edit(i) if i == index => {
@@ -446,15 +475,16 @@ impl App {
                 }
             }
             Action::Edit => {
-                if let Some(i) = self.timeline.selected {
-                    if self.messages()[i].own {
-                        let body = self.messages()[i].body.clone();
+                let selected = self.timeline.selected;
+                match selected.and_then(|i| self.messages().get(i).map(|m| (i, m))) {
+                    Some((i, message)) if message.own => {
+                        let body = message.body.clone();
                         self.composer.set_text(&body);
                         self.compose_mode = ComposeMode::Edit(i);
                         self.set_focus(Pane::Composer);
-                    } else {
-                        self.show_toast("You can only edit your own messages");
                     }
+                    Some(_) => self.show_toast("You can only edit your own messages"),
+                    None => {}
                 }
             }
             Action::React => {
@@ -657,6 +687,7 @@ impl App {
                         Button::CancelCompose => Action::CancelCompose,
                         Button::JumpToNewest => Action::JumpToNewest,
                     }),
+                    Some(HitId::Do(action)) => self.perform(action),
                     Some(HitId::Pane(pane)) => self.set_focus(pane),
                     Some(HitId::Backdrop | HitId::Overlay) | None => {}
                 }
@@ -959,6 +990,73 @@ mod tests {
         assert_eq!(app.rooms[app.active].name, "nixos");
         assert_eq!(app.focus, Pane::Composer);
         assert!(app.sidebar.filter.is_empty());
+    }
+
+    #[test]
+    fn drafts_stay_with_their_room_and_edits_do_not_leak() {
+        let (mut app, _) = drawn();
+        type_text(&mut app, "draft for rust");
+        app.open_room(2);
+        assert!(app.composer.is_empty());
+        type_text(&mut app, "draft for bob");
+        app.open_room(0);
+        assert_eq!(app.composer.text(), "draft for rust");
+        app.composer.take();
+
+        // Start editing in room 0, then switch: the edit text must not follow.
+        app.timeline.selected = Some(5);
+        app.focus = Pane::Timeline;
+        app.on_event(key(KeyCode::Char('e')));
+        assert!(matches!(app.compose_mode, ComposeMode::Edit(5)));
+        app.open_room(2);
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.composer.text(), "draft for bob");
+        app.open_room(0);
+        assert!(app.composer.is_empty());
+    }
+
+    #[test]
+    fn no_rooms_is_a_calm_empty_state() {
+        let (mut app, mut terminal) = drawn();
+        app.rooms.clear();
+        redraw(&mut app, &mut terminal);
+        type_text(&mut app, "hello");
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Up,
+            KeyCode::Enter,
+            KeyCode::Delete,
+            KeyCode::Tab,
+        ] {
+            app.on_event(key(code));
+            app.on_event(key(KeyCode::Char('e')));
+            app.on_event(key(KeyCode::Char('r')));
+            redraw(&mut app, &mut terminal);
+        }
+        app.on_event(click(40, 10));
+        app.on_event(click(5, 5));
+        redraw(&mut app, &mut terminal);
+    }
+
+    #[test]
+    fn status_hints_are_clickable() {
+        let (mut app, mut terminal) = drawn();
+        app.on_event(key(KeyCode::Up));
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "reply");
+        app.on_event(click(col, row));
+        assert!(matches!(app.compose_mode, ComposeMode::Reply(_)));
+        assert_eq!(app.focus, Pane::Composer);
+    }
+
+    #[test]
+    fn narrow_mode_has_a_rooms_button() {
+        let mut app = App::demo();
+        let mut terminal = Terminal::new(TestBackend::new(50, 20)).unwrap();
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "rooms");
+        app.on_event(click(col, row));
+        assert_eq!(app.focus, Pane::Sidebar);
     }
 
     #[test]

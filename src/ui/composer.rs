@@ -36,9 +36,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     // Reply / edit banner.
     let banner = match app.compose_mode {
         ComposeMode::Normal => None,
-        ComposeMode::Reply(i) => app.rooms[app.active]
-            .messages
-            .get(i)
+        ComposeMode::Reply(i) => app
+            .room()
+            .and_then(|r| r.messages.get(i))
             .map(|m| format!("↩ Replying to {}: {}", m.sender, m.body.replace('\n', " "))),
         ComposeMode::Edit(_) => Some("✎ Editing your message".to_owned()),
     };
@@ -94,8 +94,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             text_area,
         );
     } else {
-        // While a message is selected the draft is dimmed: keys act on the message.
-        let style = if app.timeline.selected.is_some() {
+        // Dimmed whenever typing would not land here.
+        let style = if !focused {
             theme.style(Role::Muted)
         } else {
             ratatui::style::Style::new()

@@ -34,7 +34,11 @@ const INDENT: &str = "  ";
 
 pub fn build_rows(room: &Room, max_width: usize, theme: &Theme) -> Vec<Row> {
     let body_width = max_width.saturating_sub(INDENT.len()).max(1);
-    let text_style = Style::new().fg(theme.style(Role::Text).fg.unwrap_or_default());
+    // Foreground only, so the row's background (selection, hover) shows through.
+    let text_style = Style {
+        fg: theme.style(Role::Text).fg,
+        ..Style::new()
+    };
     let mut rows = Vec::new();
 
     for (i, message) in room.messages.iter().enumerate() {
@@ -150,7 +154,15 @@ pub fn build_rows(room: &Room, max_width: usize, theme: &Theme) -> Vec<Row> {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
-    let room = &app.rooms[app.active];
+    let Some(room) = app.rooms.get(app.active) else {
+        let block = super::pane_block(app, Pane::Timeline, "No room");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        app.hits.add(area, HitId::Pane(Pane::Timeline));
+        let line = Line::from(Span::styled(" No rooms yet.", app.theme.style(Role::Muted)));
+        frame.render_widget(line, inner);
+        return;
+    };
     let prefix = if room.kind == RoomKind::Person {
         "@"
     } else {

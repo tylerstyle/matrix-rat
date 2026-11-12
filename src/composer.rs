@@ -41,9 +41,20 @@ impl Composer {
         std::mem::take(&mut self.text)
     }
 
+    /// Inserts at the cursor. Tabs become spaces and other control characters are
+    /// dropped: they have no defined width and would corrupt the display.
     pub fn insert(&mut self, s: &str) {
-        self.text.insert_str(self.cursor, s);
-        self.cursor += s.len();
+        let clean: String = s
+            .chars()
+            .flat_map(|c| match c {
+                '\t' => vec![' '; 4],
+                '\n' => vec!['\n'],
+                c if c.is_control() => vec![],
+                c => vec![c],
+            })
+            .collect();
+        self.text.insert_str(self.cursor, &clean);
+        self.cursor += clean.len();
     }
 
     pub fn backspace(&mut self) {
@@ -112,8 +123,7 @@ impl Composer {
             let mut start = 0;
             let mut col = 0;
             let mut last_space_end = None;
-            let mut iter = paragraph.grapheme_indices(true).peekable();
-            while let Some((i, g)) = iter.next() {
+            for (i, g) in paragraph.grapheme_indices(true) {
                 let gw = width(g);
                 if col + gw > max && i > start {
                     // Break after the last space on this row if there is one.
@@ -125,12 +135,20 @@ impl Composer {
                     start = brk;
                     col = width(&paragraph[start..i]);
                     last_space_end = None;
+                    // The rest of the row plus a wide character may still not fit.
+                    if col + gw > max && i > start {
+                        lines.push(VisualLine {
+                            range: offset + start..offset + i,
+                            hard_end: false,
+                        });
+                        start = i;
+                        col = 0;
+                    }
                 }
                 col += gw;
                 if g == " " {
                     last_space_end = Some(i + g.len());
                 }
-                let _ = iter.peek();
             }
             lines.push(VisualLine {
                 range: offset + start..offset + paragraph.len(),
@@ -295,6 +313,25 @@ mod tests {
         c.place(20, 99, 0);
         c.insert(">");
         assert_eq!(c.text(), "hello!\n>wöXrld");
+    }
+
+    #[test]
+    fn rows_never_exceed_the_width() {
+        for text in [" bbb🐀", "a 日本語 b🐀🐀 cc", "🐀🐀🐀", " x 🐀"] {
+            for max in 2..8 {
+                let c = with(text);
+                for row in rows(&c, max) {
+                    assert!(width(row) <= max, "{text:?} at {max}: {row:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn insert_sanitizes_control_characters() {
+        let mut c = Composer::default();
+        c.insert("a\tb\u{1b}[31m\r\nc\u{7}");
+        assert_eq!(c.text(), "a    b[31m\nc");
     }
 
     #[test]

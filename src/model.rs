@@ -49,6 +49,8 @@ pub struct Room {
     pub online: bool,
     pub typing: Option<String>,
     pub messages: Vec<Message>,
+    /// Unsent text, kept while another room is open.
+    pub draft: String,
 }
 
 pub const OWN_NAME: &str = "you";
@@ -73,6 +75,7 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         online: false,
         typing: None,
         messages,
+        draft: String::new(),
     }
 }
 
