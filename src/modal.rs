@@ -4,7 +4,7 @@ use emojis::Emoji;
 
 use crate::emoji;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct LoginForm {
     pub homeserver: String,
     pub username: String,
@@ -50,11 +50,31 @@ impl LoginForm {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct RecoveryForm {
     pub key: String,
     pub busy: bool,
     pub error: Option<String>,
+}
+
+// Hand-written so the password and the recovery key can never end up in a log.
+impl std::fmt::Debug for LoginForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginForm")
+            .field("homeserver", &self.homeserver)
+            .field("username", &self.username)
+            .field("focus", &self.focus)
+            .field("busy", &self.busy)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RecoveryForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoveryForm")
+            .field("busy", &self.busy)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +162,24 @@ mod tests {
         form.next();
         form.field_mut().unwrap().push('a');
         assert_eq!(form.username, "a");
+    }
+
+    #[test]
+    fn debug_output_hides_secrets() {
+        let mut form = LoginForm::new(None);
+        form.password = "hunter2".into();
+        assert!(!format!("{form:?}").contains("hunter2"));
+        let recovery = RecoveryForm {
+            key: "EsTc secret".into(),
+            ..RecoveryForm::default()
+        };
+        assert!(!format!("{:?}", Modal::Recovery(recovery)).contains("secret"));
+        let command = crate::matrix::MatrixCmd::LoginPassword {
+            homeserver: "example.org".into(),
+            username: "alice".into(),
+            password: "hunter2".into(),
+        };
+        assert!(!format!("{command:?}").contains("hunter2"));
     }
 
     #[test]

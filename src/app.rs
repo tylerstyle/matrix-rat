@@ -534,17 +534,24 @@ impl App {
 
             Action::OpenEmoji => {
                 if self.modal.is_none() {
-                    self.help_open = false;
                     self.set_focus(Pane::Composer);
-                    self.modal = Some(Modal::Emoji(EmojiPicker::default()));
+                    self.open_modal(Modal::Emoji(EmojiPicker::default()));
                 }
             }
             Action::LoginSubmit => self.submit_login(false),
             Action::LoginBrowser => self.submit_login(true),
+            Action::RecoverySubmit => self.submit_recovery(),
+            Action::CloseModal => self.close_modal(),
         }
     }
 
     // ----- popups --------------------------------------------------------------------
+
+    /// Only one popup is shown at a time; the help overlay makes way too.
+    fn open_modal(&mut self, modal: Modal) {
+        self.help_open = false;
+        self.modal = Some(modal);
+    }
 
     fn send_matrix(&self, command: MatrixCmd) {
         if let Some(matrix) = &self.matrix {
@@ -586,7 +593,8 @@ impl App {
         }
         form.busy = true;
         form.error = None;
-        let key = form.key.clone();
+        // Not kept in the form once it is on its way.
+        let key = std::mem::take(&mut form.key);
         self.send_matrix(MatrixCmd::Recover { key });
     }
 
@@ -616,6 +624,20 @@ impl App {
 
     fn on_modal_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        // Ctrl-U clears the input being typed into.
+        if (code, mods) == (KeyCode::Char('u'), KeyModifiers::CONTROL) {
+            match self.modal.as_mut() {
+                Some(Modal::Login(form)) if form.busy.is_none() => {
+                    if let Some(field) = form.field_mut() {
+                        field.clear();
+                    }
+                }
+                Some(Modal::Recovery(form)) if !form.busy => form.key.clear(),
+                Some(Modal::Emoji(picker)) => picker.set_query(String::new()),
+                _ => {}
+            }
+            return;
+        }
         match self.modal.as_mut() {
             Some(Modal::Login(form)) => {
                 if form.busy.is_some() {
@@ -694,7 +716,16 @@ impl App {
         self.dirty = true;
         match event {
             MatrixEvent::NeedLogin { reason } => {
-                self.modal = Some(Modal::Login(LoginForm::new(reason)));
+                // Nothing of a previous session may linger behind the login form.
+                self.rooms.clear();
+                self.active = 0;
+                self.timeline = TimelineState::default();
+                self.composer.take();
+                self.compose_mode = ComposeMode::Normal;
+                self.user_id = None;
+                self.recovery_prompted = false;
+                self.sync = Some(SyncStatus::Stopped);
+                self.open_modal(Modal::Login(LoginForm::new(reason)));
             }
             MatrixEvent::LoginFailed(error) => {
                 if let Some(Modal::Login(form)) = &mut self.modal {
@@ -718,12 +749,11 @@ impl App {
             MatrixEvent::Sync(status) => self.sync = Some(status),
             MatrixEvent::Rooms(rooms) => self.apply_rooms(rooms),
             MatrixEvent::Recovery(status) => {
-                if status == RecoveryStatus::NeedsKey
-                    && !self.recovery_prompted
-                    && self.modal.is_none()
-                {
+                // Takes precedence over the emoji picker, never over the login form.
+                let free = matches!(self.modal, None | Some(Modal::Emoji(_)));
+                if status == RecoveryStatus::NeedsKey && !self.recovery_prompted && free {
                     self.recovery_prompted = true;
-                    self.modal = Some(Modal::Recovery(RecoveryForm::default()));
+                    self.open_modal(Modal::Recovery(RecoveryForm::default()));
                 }
             }
             MatrixEvent::RecoverResult(Ok(())) => {
@@ -780,20 +810,29 @@ impl App {
             })
             .collect();
 
-        let position = |id: &Option<String>| {
+        let position = |rooms: &[Room], id: &Option<String>| {
             id.as_ref()
-                .and_then(|id| self.rooms.iter().position(|room| room.id == *id))
+                .and_then(|id| rooms.iter().position(|room| room.id == *id))
         };
-        match position(&open_id) {
+        match position(&self.rooms, &open_id) {
             Some(index) => self.active = index,
             None => {
-                // The open room is gone (or this is the first list): show the first one.
+                // The open room is gone (or this is the first list): show the first one,
+                // with its own draft. A draft for the vanished room has nowhere to go.
                 self.active = 0;
                 self.timeline = TimelineState::default();
                 self.compose_mode = ComposeMode::Normal;
+                if open_id.is_some() {
+                    let draft = self
+                        .rooms
+                        .first_mut()
+                        .map(|room| std::mem::take(&mut room.draft))
+                        .unwrap_or_default();
+                    self.composer.set_text(&draft);
+                }
             }
         }
-        if let Some(index) = position(&cursor_id)
+        if let Some(index) = position(&self.rooms, &cursor_id)
             && let Some(at) = self.visible_rooms().iter().position(|i| *i == index)
         {
             self.sidebar.cursor = at;
@@ -830,18 +869,28 @@ impl App {
         self.dirty = true;
         let (code, mods) = keymap::normalize(key);
 
-        if self.modal.is_some() {
-            if (code, mods) == (KeyCode::Char('q'), KeyModifiers::CONTROL) {
-                self.should_quit = true;
-            } else {
-                self.on_modal_key(code, mods);
+        // Quit and suspend work everywhere, including behind popups (handy for fetching
+        // a password from another program).
+        if mods == KeyModifiers::CONTROL && (self.modal.is_some() || self.help_open) {
+            match code {
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                    return;
+                }
+                KeyCode::Char('z') => {
+                    self.suspend_requested = true;
+                    return;
+                }
+                _ => {}
             }
+        }
+        if self.modal.is_some() {
+            self.on_modal_key(code, mods);
             return;
         }
 
         if self.help_open {
             match (code, mods) {
-                (KeyCode::Char('q'), KeyModifiers::CONTROL) => self.should_quit = true,
                 (KeyCode::Esc | KeyCode::F(1) | KeyCode::Enter, _)
                 | (KeyCode::Char('?' | 'q'), KeyModifiers::NONE) => self.help_open = false,
                 _ => {}
@@ -1160,6 +1209,9 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     // Let the worker stop syncing cleanly, but never hang on the way out.
     if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
         matrix.send(MatrixCmd::Shutdown);
+        // Close every command sender so the worker also sees the channel end.
+        drop(matrix);
+        drop(app);
         let drained = async { while events.recv().await.is_some() {} };
         let _ = tokio::time::timeout(Duration::from_secs(3), drained).await;
     }
@@ -1570,8 +1622,36 @@ mod tests {
         find(&terminal, "bad key");
         app.on_matrix(MatrixEvent::RecoverResult(Ok(())));
         assert!(app.modal.is_none());
-        // Asked once per run only.
+        // Asked once per session only.
         app.on_matrix(MatrixEvent::Recovery(RecoveryStatus::NeedsKey));
+        assert!(app.modal.is_none());
+
+        // A new login starts clean and asks again; the prompt replaces the emoji picker
+        // and the help overlay, and Ctrl-Z still works behind a popup.
+        type_text(&mut app, "left over");
+        app.on_matrix(MatrixEvent::NeedLogin {
+            reason: Some("expired".into()),
+        });
+        assert!(app.composer.is_empty() && app.rooms.is_empty() && app.user_id.is_none());
+        app.on_event(key_mod(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert!(app.suspend_requested);
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@alice:example.org".into(),
+        });
+        app.on_event(alt('e'));
+        app.help_open = true;
+        app.on_matrix(MatrixEvent::Recovery(RecoveryStatus::NeedsKey));
+        assert!(matches!(app.modal, Some(Modal::Recovery(_))));
+        assert!(!app.help_open);
+        type_text(&mut app, "abc");
+        app.on_event(key_mod(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let Some(Modal::Recovery(form)) = &app.modal else {
+            unreachable!()
+        };
+        assert!(form.key.is_empty());
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "Later");
+        app.on_event(click(col, row));
         assert!(app.modal.is_none());
     }
 

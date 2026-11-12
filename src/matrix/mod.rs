@@ -20,7 +20,6 @@ use crate::paths::Paths;
 /// Rooms shown before the user scrolls for more. Paging arrives with the timeline work.
 const ROOM_PAGE: usize = 10_000;
 
-#[derive(Debug)]
 pub enum MatrixCmd {
     LoginPassword {
         homeserver: String,
@@ -36,6 +35,23 @@ pub enum MatrixCmd {
         key: String,
     },
     Shutdown,
+}
+
+/// Never prints the password or the recovery key, so commands are safe to log.
+impl std::fmt::Debug for MatrixCmd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LoginPassword {
+                homeserver,
+                username,
+                ..
+            } => write!(f, "LoginPassword({username} at {homeserver})"),
+            Self::LoginBrowser { homeserver } => write!(f, "LoginBrowser({homeserver})"),
+            Self::CancelLogin => f.write_str("CancelLogin"),
+            Self::Recover { .. } => f.write_str("Recover"),
+            Self::Shutdown => f.write_str("Shutdown"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +166,8 @@ impl Worker {
             let restored = match session::restore(&self.paths).await {
                 Ok(found) => found,
                 Err(err) => {
+                    // Restoring needs no network, so this is a local problem (damaged
+                    // session file or stores) that waiting will not fix.
                     tracing::warn!(?err, "could not restore session");
                     reason = Some(format!("Could not restore your session: {err:#}"));
                     None
@@ -177,9 +195,17 @@ impl Worker {
                     tracing::error!(?err, "session failed");
                     self.emit(MatrixEvent::Error(format!("{err:#}")));
                     // Keep the session on disk: this may be a temporary problem.
-                    match self.commands.recv().await {
-                        Some(MatrixCmd::Shutdown) | None => return,
-                        Some(_) => {}
+                    // Try again shortly, unless told to stop first.
+                    let retry = tokio::time::sleep(Duration::from_secs(5));
+                    tokio::pin!(retry);
+                    loop {
+                        tokio::select! {
+                            _ = &mut retry => break,
+                            command = self.commands.recv() => match command {
+                                Some(MatrixCmd::Shutdown) | None => return,
+                                Some(_) => {}
+                            },
+                        }
                     }
                 }
             }
@@ -188,31 +214,51 @@ impl Worker {
 
     /// Handles login commands until one succeeds. `None` means shut down.
     async fn wait_for_login(&mut self) -> Option<(Client, String)> {
+        let Worker {
+            paths,
+            commands,
+            events,
+        } = self;
         loop {
-            let result = match self.commands.recv().await? {
+            let request = match commands.recv().await? {
                 MatrixCmd::Shutdown => return None,
-                MatrixCmd::LoginPassword {
-                    homeserver,
-                    username,
-                    password,
-                } => session::login_password(&self.paths, &homeserver, &username, &password).await,
-                MatrixCmd::LoginBrowser { homeserver } => {
-                    session::login_browser(
-                        &self.paths,
-                        &homeserver,
-                        &self.events,
-                        &mut self.commands,
-                    )
-                    .await
-                }
                 MatrixCmd::CancelLogin | MatrixCmd::Recover { .. } => continue,
+                request => request,
+            };
+            let login = async {
+                match &request {
+                    MatrixCmd::LoginPassword {
+                        homeserver,
+                        username,
+                        password,
+                    } => session::login_password(paths, homeserver, username, password).await,
+                    MatrixCmd::LoginBrowser { homeserver } => {
+                        session::login_browser(paths, homeserver, events).await
+                    }
+                    _ => unreachable!("filtered above"),
+                }
+            };
+            tokio::pin!(login);
+            // The login runs alongside the command channel, so Esc and quitting work
+            // at every stage. Dropping the future abandons the attempt.
+            let result = loop {
+                tokio::select! {
+                    result = &mut login => break Some(result),
+                    command = commands.recv() => match command {
+                        Some(MatrixCmd::Shutdown) | None => return None,
+                        Some(MatrixCmd::CancelLogin) => break None,
+                        Some(_) => {}
+                    },
+                }
             };
             match result {
-                Ok(pair) => return Some(pair),
-                Err(err) => {
+                Some(Ok(pair)) => return Some(pair),
+                Some(Err(err)) => {
                     tracing::warn!(?err, "login failed");
-                    self.emit(MatrixEvent::LoginFailed(format!("{err:#}")));
+                    let _ = events.send(MatrixEvent::LoginFailed(format!("{err:#}")));
                 }
+                // Cancelled by the user: nothing to report.
+                None => {}
             }
         }
     }
@@ -225,7 +271,10 @@ impl Worker {
         self.emit(MatrixEvent::LoggedIn { user_id });
         self.emit(MatrixEvent::Sync(SyncStatus::Connecting));
 
+        // Offline mode: the service notices a lost connection, reports `Offline` and
+        // resumes by itself when the server is reachable again.
         let sync = SyncService::builder(client.clone())
+            .with_offline_mode()
             .build()
             .await
             .context("could not set up sync")?;

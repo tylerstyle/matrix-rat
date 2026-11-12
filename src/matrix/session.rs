@@ -15,10 +15,10 @@ use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::utils::local_server::LocalServerBuilder;
 use matrix_sdk::{AuthSession, Client};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
-use super::{MatrixCmd, MatrixEvent};
+use super::MatrixEvent;
 use crate::paths::Paths;
 
 const DEVICE_NAME: &str = "matrix-rat";
@@ -47,7 +47,8 @@ enum SavedAuth {
     },
 }
 
-async fn build_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Result<Client> {
+/// For a new login: accepts a server name or URL and looks the homeserver up online.
+async fn discover_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Result<Client> {
     Client::builder()
         .server_name_or_homeserver_url(homeserver)
         .sqlite_store(paths.store_dir(), Some(passphrase))
@@ -57,9 +58,28 @@ async fn build_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Resu
         .with_context(|| format!("could not reach homeserver {homeserver:?}"))
 }
 
-/// A new login is a new device, so it starts from empty stores.
+/// For a saved session: uses the known URL and makes no network request, so the app
+/// starts from its local stores even when offline.
+async fn offline_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Result<Client> {
+    Client::builder()
+        .homeserver_url(homeserver)
+        .sqlite_store(paths.store_dir(), Some(passphrase))
+        .handle_refresh_tokens()
+        .build()
+        .await
+        .context("could not open the local stores")
+}
+
+/// A new login is a new device, so it starts from empty stores. The previous stores hold
+/// encryption keys that may exist nowhere else, so they are set aside, not deleted.
 fn fresh_store(paths: &Paths) -> Result<String> {
-    forget(paths);
+    let store = paths.store_dir();
+    if store.exists() {
+        let backup = paths.data_dir.join("store.previous");
+        let _ = std::fs::remove_dir_all(&backup);
+        std::fs::rename(&store, &backup).context("could not set the old stores aside")?;
+    }
+    let _ = std::fs::remove_file(paths.session_file());
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
@@ -67,10 +87,10 @@ fn fresh_store(paths: &Paths) -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Removes the saved session and the local stores.
+/// Removes the saved session, for when the server no longer accepts it. The stores stay
+/// until the next login sets them aside.
 pub fn forget(paths: &Paths) {
     let _ = std::fs::remove_file(paths.session_file());
-    let _ = std::fs::remove_dir_all(paths.store_dir());
 }
 
 pub fn save(paths: &Paths, client: &Client, passphrase: &str) -> Result<()> {
@@ -115,7 +135,7 @@ pub async fn restore(paths: &Paths) -> Result<Option<(Client, String)>> {
     let json =
         std::fs::read(&path).with_context(|| format!("could not read {}", path.display()))?;
     let saved: Saved = serde_json::from_slice(&json).context("the session file is damaged")?;
-    let client = build_client(paths, &saved.homeserver, &saved.passphrase).await?;
+    let client = offline_client(paths, &saved.homeserver, &saved.passphrase).await?;
     let session = match saved.auth {
         SavedAuth::Password { session } => AuthSession::Matrix(session),
         SavedAuth::Browser { client_id, session } => AuthSession::OAuth(Box::new(OAuthSession {
@@ -137,7 +157,7 @@ pub async fn login_password(
         bail!("homeserver, username and password are all needed");
     }
     let passphrase = fresh_store(paths)?;
-    let client = build_client(paths, homeserver.trim(), &passphrase).await?;
+    let client = discover_client(paths, homeserver.trim(), &passphrase).await?;
     client
         .matrix_auth()
         .login_username(username.trim(), password)
@@ -151,18 +171,18 @@ pub async fn login_password(
 }
 
 /// OAuth 2.0 login: the user approves in a browser, which then redirects to a
-/// temporary web server on this machine.
+/// temporary web server on this machine. Dropping the future cancels the login and
+/// closes that server.
 pub async fn login_browser(
     paths: &Paths,
     homeserver: &str,
     events: &UnboundedSender<MatrixEvent>,
-    commands: &mut UnboundedReceiver<MatrixCmd>,
 ) -> Result<(Client, String)> {
     if homeserver.trim().is_empty() {
         bail!("a homeserver is needed");
     }
     let passphrase = fresh_store(paths)?;
-    let client = build_client(paths, homeserver.trim(), &passphrase).await?;
+    let client = discover_client(paths, homeserver.trim(), &passphrase).await?;
     client
         .oauth()
         .server_metadata()
@@ -191,19 +211,7 @@ pub async fn login_browser(
         .map_err(|err| anyhow!("could not start browser login: {err}"))?;
     let _ = events.send(MatrixEvent::BrowserLoginUrl(authorization.url.to_string()));
 
-    let mut redirect = std::pin::pin!(redirect.into_future());
-    let query = loop {
-        tokio::select! {
-            query = &mut redirect => break query,
-            command = commands.recv() => match command {
-                Some(MatrixCmd::CancelLogin) | Some(MatrixCmd::Shutdown) | None => {
-                    oauth.abort_login(&authorization.state).await;
-                    bail!("login cancelled");
-                }
-                Some(_) => {}
-            },
-        }
-    };
+    let query = redirect.await;
     let query = query.ok_or_else(|| anyhow!("the browser did not complete the login"))?;
     oauth
         .finish_login(query.into())

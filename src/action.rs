@@ -53,4 +53,7 @@ pub enum Action {
     OpenEmoji,
     LoginSubmit,
     LoginBrowser,
+    RecoverySubmit,
+    /// Esc on a popup.
+    CloseModal,
 }

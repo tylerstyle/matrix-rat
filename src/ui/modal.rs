@@ -220,7 +220,7 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
 }
 
 fn recovery(frame: &mut Frame, app: &mut App, area: Rect, form: &RecoveryForm) {
-    let Some(rect) = centered(area, 70, 11) else {
+    let Some(rect) = centered(area, 70, 13) else {
         return;
     };
     let inner = popup(
@@ -254,6 +254,20 @@ fn recovery(frame: &mut Frame, app: &mut App, area: Rect, form: &RecoveryForm) {
         &form.key,
         !form.busy,
     );
+    let buttons = row(inner, 6);
+    if !form.busy {
+        let mut x = buttons.x;
+        for (label, action, primary) in [
+            (" Unlock ", Action::RecoverySubmit, true),
+            (" Later ", Action::CloseModal, false),
+        ] {
+            let w = (width(label) as u16).min(buttons.right().saturating_sub(x));
+            let rect = Rect::new(x, buttons.y, w, buttons.height);
+            button(frame, theme, rect, label, primary);
+            app.hits.add(rect, HitId::Do(action));
+            x += w + 2;
+        }
+    }
     let (text, role) = match (&form.error, form.busy) {
         (_, true) => ("Unlocking…".to_owned(), Role::Muted),
         (Some(error), false) => (error.clone(), Role::Error),
@@ -265,9 +279,9 @@ fn recovery(frame: &mut Frame, app: &mut App, area: Rect, form: &RecoveryForm) {
             .wrap(Wrap { trim: false }),
         Rect::new(
             inner.x,
-            inner.y + 6.min(inner.height),
+            inner.y + 8.min(inner.height),
             inner.width,
-            inner.height.saturating_sub(6),
+            inner.height.saturating_sub(8),
         ),
     );
     if let Some(cursor) = cursor {
@@ -376,12 +390,13 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
             CELL,
             1,
         );
+        frame.render_widget(Line::from(emoji.as_str()), cell);
+        // After drawing: rendering a wide glyph resets the style of its second column.
         if n == picker.selected {
             frame.buffer_mut().set_style(cell, theme.style(Role::Pill));
         } else if app.hover == Some(HitId::Emoji(n)) {
             frame.buffer_mut().set_style(cell, theme.style(Role::Hover));
         }
-        frame.render_widget(Line::from(emoji.as_str()), cell);
         app.hits.add(cell, HitId::Emoji(n));
     }
 
