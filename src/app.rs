@@ -17,6 +17,11 @@ use crate::action::{Action, Dir, Pane};
 use crate::composer::Composer;
 use crate::config::Config;
 use crate::keymap::{self, Context};
+use crate::matrix::{
+    self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
+    SyncStatus,
+};
+use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm};
 use crate::model::{Message, OWN_NAME, Reaction, Room, RoomKind, demo_rooms};
 use crate::paths::Paths;
 use crate::terminal::{self, TerminalGuard};
@@ -84,6 +89,13 @@ pub struct App {
     pub compose_mode: ComposeMode,
     pub composer_view: ComposerView,
     pub help_open: bool,
+    /// A popup that takes all input while it is open.
+    pub modal: Option<Modal>,
+    /// `None` in demo mode.
+    matrix: Option<MatrixHandle>,
+    pub sync: Option<SyncStatus>,
+    pub user_id: Option<String>,
+    recovery_prompted: bool,
     pub theme: Theme,
     theme_names: Vec<String>,
     themes_dir: PathBuf,
@@ -99,9 +111,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: &Config, themes_dir: PathBuf) -> Self {
+    /// With `matrix` the app shows the account's rooms; without, built-in demo data.
+    pub fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
         let truecolor = truecolor_supported();
         let mut app = Self::with_theme(Theme::builtin(DEFAULT_THEME).expect("default theme"));
+        if matrix.is_some() {
+            app.rooms.clear();
+            app.sync = Some(SyncStatus::Connecting);
+        }
+        app.matrix = matrix;
         app.truecolor = truecolor;
         app.theme_names = Theme::available(&themes_dir);
         app.themes_dir = themes_dir;
@@ -133,6 +151,11 @@ impl App {
                 ..ComposerView::default()
             },
             help_open: false,
+            modal: None,
+            matrix: None,
+            sync: None,
+            user_id: None,
+            recovery_prompted: false,
             theme,
             theme_names: Theme::builtin_names(),
             themes_dir: PathBuf::new(),
@@ -289,6 +312,11 @@ impl App {
     fn send(&mut self) {
         let text = self.composer.text().trim().to_owned();
         if text.is_empty() || self.room().is_none() {
+            return;
+        }
+        if self.matrix.is_some() {
+            // The draft is kept so nothing typed is lost.
+            self.show_toast("Sending messages arrives with the next milestone");
             return;
         }
         self.composer.take();
@@ -503,6 +531,272 @@ impl App {
             Action::Send => self.send(),
             Action::Newline => self.composer.insert("\n"),
             Action::CancelCompose => self.cancel_compose(),
+
+            Action::OpenEmoji => {
+                if self.modal.is_none() {
+                    self.help_open = false;
+                    self.set_focus(Pane::Composer);
+                    self.modal = Some(Modal::Emoji(EmojiPicker::default()));
+                }
+            }
+            Action::LoginSubmit => self.submit_login(false),
+            Action::LoginBrowser => self.submit_login(true),
+        }
+    }
+
+    // ----- popups --------------------------------------------------------------------
+
+    fn send_matrix(&self, command: MatrixCmd) {
+        if let Some(matrix) = &self.matrix {
+            matrix.send(command);
+        }
+    }
+
+    fn submit_login(&mut self, browser: bool) {
+        let Some(Modal::Login(form)) = &mut self.modal else {
+            return;
+        };
+        if form.busy.is_some() {
+            return;
+        }
+        form.error = None;
+        form.browser_url = None;
+        let command = if browser {
+            form.busy = Some("Waiting for your browser…".to_owned());
+            MatrixCmd::LoginBrowser {
+                homeserver: form.homeserver.clone(),
+            }
+        } else {
+            form.busy = Some("Logging in…".to_owned());
+            MatrixCmd::LoginPassword {
+                homeserver: form.homeserver.clone(),
+                username: form.username.clone(),
+                password: std::mem::take(&mut form.password),
+            }
+        };
+        self.send_matrix(command);
+    }
+
+    fn submit_recovery(&mut self) {
+        let Some(Modal::Recovery(form)) = &mut self.modal else {
+            return;
+        };
+        if form.busy || form.key.trim().is_empty() {
+            return;
+        }
+        form.busy = true;
+        form.error = None;
+        let key = form.key.clone();
+        self.send_matrix(MatrixCmd::Recover { key });
+    }
+
+    /// Esc on a popup. The login form cannot be dismissed, only a running login.
+    fn close_modal(&mut self) {
+        match &mut self.modal {
+            Some(Modal::Login(form)) => {
+                if form.busy.take().is_some() {
+                    form.browser_url = None;
+                    self.send_matrix(MatrixCmd::CancelLogin);
+                }
+            }
+            Some(Modal::Recovery(_)) => {
+                self.modal = None;
+                self.show_toast("Encrypted history stays locked until you enter the key");
+            }
+            Some(Modal::Emoji(_)) => self.modal = None,
+            None => {}
+        }
+    }
+
+    fn insert_emoji(&mut self, emoji: &str) {
+        self.modal = None;
+        self.set_focus(Pane::Composer);
+        self.composer.insert(emoji);
+    }
+
+    fn on_modal_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match self.modal.as_mut() {
+            Some(Modal::Login(form)) => {
+                if form.busy.is_some() {
+                    if code == KeyCode::Esc {
+                        self.close_modal();
+                    }
+                    return;
+                }
+                match code {
+                    KeyCode::Tab | KeyCode::Down => form.next(),
+                    KeyCode::BackTab | KeyCode::Up => form.previous(),
+                    KeyCode::Enter => match form.focus {
+                        LoginForm::BROWSER_BUTTON => self.submit_login(true),
+                        focus if focus + 1 < LoginForm::FIELDS => form.next(),
+                        _ => self.submit_login(false),
+                    },
+                    KeyCode::Backspace => {
+                        if let Some(field) = form.field_mut() {
+                            field.pop();
+                        }
+                    }
+                    KeyCode::Char(c) if plain => {
+                        if let Some(field) = form.field_mut() {
+                            field.push(c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some(Modal::Recovery(form)) => match code {
+                KeyCode::Esc => self.close_modal(),
+                _ if form.busy => {}
+                KeyCode::Enter => self.submit_recovery(),
+                KeyCode::Backspace => {
+                    form.key.pop();
+                }
+                KeyCode::Char(c) if plain => form.key.push(c),
+                _ => {}
+            },
+            Some(Modal::Emoji(picker)) => {
+                let columns = picker.columns.max(1) as isize;
+                let page = columns * picker.rows.max(1) as isize;
+                match code {
+                    KeyCode::Esc => self.modal = None,
+                    KeyCode::Enter => {
+                        if let Some(emoji) = picker.selected() {
+                            self.insert_emoji(emoji.as_str());
+                        }
+                    }
+                    KeyCode::Left => picker.step(-1),
+                    KeyCode::Right => picker.step(1),
+                    KeyCode::Up => picker.step(-columns),
+                    KeyCode::Down => picker.step(columns),
+                    KeyCode::PageUp => picker.step(-page),
+                    KeyCode::PageDown => picker.step(page),
+                    KeyCode::Backspace => {
+                        let mut query = std::mem::take(&mut picker.query);
+                        query.pop();
+                        picker.set_query(query);
+                    }
+                    KeyCode::Char(c) if plain => {
+                        let mut query = std::mem::take(&mut picker.query);
+                        query.push(c);
+                        picker.set_query(query);
+                    }
+                    _ => {}
+                }
+            }
+            None => {}
+        }
+    }
+
+    // ----- Matrix events -------------------------------------------------------------
+
+    pub fn on_matrix(&mut self, event: MatrixEvent) {
+        self.dirty = true;
+        match event {
+            MatrixEvent::NeedLogin { reason } => {
+                self.modal = Some(Modal::Login(LoginForm::new(reason)));
+            }
+            MatrixEvent::LoginFailed(error) => {
+                if let Some(Modal::Login(form)) = &mut self.modal {
+                    form.busy = None;
+                    form.browser_url = None;
+                    form.error = Some(error);
+                }
+            }
+            MatrixEvent::BrowserLoginUrl(url) => {
+                open_in_browser(&url);
+                if let Some(Modal::Login(form)) = &mut self.modal {
+                    form.browser_url = Some(url);
+                }
+            }
+            MatrixEvent::LoggedIn { user_id } => {
+                if matches!(self.modal, Some(Modal::Login(_))) {
+                    self.modal = None;
+                }
+                self.user_id = Some(user_id);
+            }
+            MatrixEvent::Sync(status) => self.sync = Some(status),
+            MatrixEvent::Rooms(rooms) => self.apply_rooms(rooms),
+            MatrixEvent::Recovery(status) => {
+                if status == RecoveryStatus::NeedsKey
+                    && !self.recovery_prompted
+                    && self.modal.is_none()
+                {
+                    self.recovery_prompted = true;
+                    self.modal = Some(Modal::Recovery(RecoveryForm::default()));
+                }
+            }
+            MatrixEvent::RecoverResult(Ok(())) => {
+                if matches!(self.modal, Some(Modal::Recovery(_))) {
+                    self.modal = None;
+                }
+                self.show_toast("Encrypted history unlocked");
+            }
+            MatrixEvent::RecoverResult(Err(error)) => match &mut self.modal {
+                Some(Modal::Recovery(form)) => {
+                    form.busy = false;
+                    form.error = Some(error);
+                }
+                _ => self.show_toast(format!("Recovery failed: {error}")),
+            },
+            MatrixEvent::Error(error) => {
+                self.sync = Some(SyncStatus::Error(error.clone()));
+                self.show_toast(error);
+            }
+        }
+    }
+
+    /// Replaces the room list with the server's, keeping what belongs to the UI (drafts,
+    /// loaded messages) and keeping the same room open even if its position changed.
+    fn apply_rooms(&mut self, summaries: Vec<RoomSummary>) {
+        let open_id = self.room().map(|room| room.id.clone());
+        let cursor_id = self
+            .cursor_room()
+            .and_then(|i| self.rooms.get(i))
+            .map(|room| room.id.clone());
+        let mut old: std::collections::HashMap<String, Room> = self
+            .rooms
+            .drain(..)
+            .map(|room| (room.id.clone(), room))
+            .collect();
+        self.rooms = summaries
+            .into_iter()
+            .map(|summary| {
+                let kind = match summary.category {
+                    RoomCategory::Invite => RoomKind::Invite,
+                    RoomCategory::Favourite => RoomKind::Favourite,
+                    RoomCategory::Person => RoomKind::Person,
+                    RoomCategory::Room => RoomKind::Room,
+                };
+                let mut room = old
+                    .remove(&summary.id)
+                    .unwrap_or_else(|| Room::new(&summary.id, &summary.name, kind));
+                room.name = summary.name;
+                room.kind = kind;
+                room.unread = summary.notifications.min(u32::MAX as u64) as u32;
+                room.bold = summary.unread;
+                room.mention = summary.mention;
+                room
+            })
+            .collect();
+
+        let position = |id: &Option<String>| {
+            id.as_ref()
+                .and_then(|id| self.rooms.iter().position(|room| room.id == *id))
+        };
+        match position(&open_id) {
+            Some(index) => self.active = index,
+            None => {
+                // The open room is gone (or this is the first list): show the first one.
+                self.active = 0;
+                self.timeline = TimelineState::default();
+                self.compose_mode = ComposeMode::Normal;
+            }
+        }
+        if let Some(index) = position(&cursor_id)
+            && let Some(at) = self.visible_rooms().iter().position(|i| *i == index)
+        {
+            self.sidebar.cursor = at;
         }
     }
 
@@ -535,6 +829,15 @@ impl App {
     fn on_key(&mut self, key: KeyEvent) {
         self.dirty = true;
         let (code, mods) = keymap::normalize(key);
+
+        if self.modal.is_some() {
+            if (code, mods) == (KeyCode::Char('q'), KeyModifiers::CONTROL) {
+                self.should_quit = true;
+            } else {
+                self.on_modal_key(code, mods);
+            }
+            return;
+        }
 
         if self.help_open {
             match (code, mods) {
@@ -631,6 +934,29 @@ impl App {
     fn on_paste(&mut self, text: &str) {
         self.dirty = true;
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let first_line = text.lines().next().unwrap_or("").trim();
+        match &mut self.modal {
+            Some(Modal::Login(form)) => {
+                if form.busy.is_none()
+                    && let Some(field) = form.field_mut()
+                {
+                    field.push_str(first_line);
+                }
+                return;
+            }
+            Some(Modal::Recovery(form)) => {
+                if !form.busy {
+                    form.key.push_str(first_line);
+                }
+                return;
+            }
+            Some(Modal::Emoji(picker)) => {
+                let query = format!("{}{first_line}", picker.query);
+                picker.set_query(query);
+                return;
+            }
+            None => {}
+        }
         match self.focus {
             Pane::Sidebar => {
                 self.sidebar
@@ -650,13 +976,31 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.dirty = true;
-                if self.help_open {
-                    if hit == Some(HitId::Backdrop) {
-                        self.help_open = false;
-                    }
-                    return;
-                }
+                // An open popup covers everything else with its backdrop, so only its
+                // own controls can be hit.
                 match hit {
+                    Some(HitId::Backdrop) => {
+                        self.help_open = false;
+                        if matches!(self.modal, Some(Modal::Emoji(_))) {
+                            self.modal = None;
+                        }
+                    }
+                    Some(HitId::Field(slot)) => {
+                        if let Some(Modal::Login(form)) = &mut self.modal
+                            && form.busy.is_none()
+                        {
+                            form.focus = slot;
+                        }
+                    }
+                    Some(HitId::Emoji(index)) => {
+                        let emoji = match &self.modal {
+                            Some(Modal::Emoji(picker)) => picker.results.get(index).copied(),
+                            _ => None,
+                        };
+                        if let Some(emoji) = emoji {
+                            self.insert_emoji(emoji.as_str());
+                        }
+                    }
                     Some(HitId::Splitter) => self.dragging_splitter = true,
                     Some(HitId::Room(index)) => self.open_room(index),
                     Some(HitId::RoomFilter) => self.set_focus(Pane::Sidebar),
@@ -689,7 +1033,7 @@ impl App {
                     }),
                     Some(HitId::Do(action)) => self.perform(action),
                     Some(HitId::Pane(pane)) => self.set_focus(pane),
-                    Some(HitId::Backdrop | HitId::Overlay) | None => {}
+                    Some(HitId::Overlay) | None => {}
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -704,7 +1048,21 @@ impl App {
                     self.dirty = true;
                 }
             }
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if !self.help_open => {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if matches!(self.modal, Some(Modal::Emoji(_))) =>
+            {
+                if let Some(Modal::Emoji(picker)) = &mut self.modal {
+                    picker.scroll_by(if mouse.kind == MouseEventKind::ScrollUp {
+                        -2
+                    } else {
+                        2
+                    });
+                    self.dirty = true;
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if !self.help_open && self.modal.is_none() =>
+            {
                 let up = mouse.kind == MouseEventKind::ScrollUp;
                 // The wheel scrolls what is under the pointer, wherever the focus is.
                 match self.hits.pane_at(mouse.column, mouse.row) {
@@ -742,7 +1100,18 @@ impl App {
     }
 }
 
-pub async fn run(paths: &Paths, config: &Config) -> Result<()> {
+/// Best effort; the login form also shows the address to open by hand.
+fn open_in_browser(url: &str) {
+    use std::process::{Command, Stdio};
+    let _ = Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     let guard = TerminalGuard::enter(config.mouse)?;
     // Terminal queries (image protocol, background colour) go here, before the event stream.
     let mut terminal = guard.activate()?;
@@ -752,7 +1121,13 @@ pub async fn run(paths: &Paths, config: &Config) -> Result<()> {
     // Without these, a kill or a closed terminal window would skip all cleanup.
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sighup = signal(SignalKind::hangup())?;
-    let mut app = App::new(config, paths.themes_dir());
+    let (matrix, mut matrix_events) = if demo {
+        (None, None)
+    } else {
+        let (handle, events) = matrix::spawn(paths.clone());
+        (Some(handle), Some(events))
+    };
+    let mut app = App::new(config, paths.themes_dir(), matrix.clone());
 
     while !app.should_quit {
         if app.suspend_requested {
@@ -770,11 +1145,23 @@ pub async fn run(paths: &Paths, config: &Config) -> Result<()> {
                 Some(Err(err)) => return Err(err.into()),
                 None => break,
             },
+            Some(event) = async {
+                match matrix_events.as_mut() {
+                    Some(events) => events.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => app.on_matrix(event),
             _ = tick.tick() => app.on_tick(),
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
             _ = sigterm.recv() => app.should_quit = true,
             _ = sighup.recv() => app.should_quit = true,
         }
+    }
+    // Let the worker stop syncing cleanly, but never hang on the way out.
+    if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
+        matrix.send(MatrixCmd::Shutdown);
+        let drained = async { while events.recv().await.is_some() {} };
+        let _ = tokio::time::timeout(Duration::from_secs(3), drained).await;
     }
     Ok(())
 }
@@ -1057,6 +1444,173 @@ mod tests {
         let (col, row) = find(&terminal, "rooms");
         app.on_event(click(col, row));
         assert_eq!(app.focus, Pane::Sidebar);
+    }
+
+    fn alt(c: char) -> Event {
+        key_mod(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn emoji_picker_inserts_at_the_cursor() {
+        let (mut app, mut terminal) = drawn();
+        type_text(&mut app, "ab");
+        app.on_event(key(KeyCode::Left));
+        app.on_event(alt('e'));
+        assert!(matches!(app.modal, Some(Modal::Emoji(_))));
+        // Typing searches; Enter takes the first match and closes.
+        type_text(&mut app, "thumbsup");
+        assert_eq!(app.composer.text(), "ab");
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.composer.text(), "a👍b");
+        assert_eq!(app.focus, Pane::Composer);
+
+        // Arrow keys move through the grid.
+        app.on_event(alt('e'));
+        redraw(&mut app, &mut terminal);
+        let columns = match &app.modal {
+            Some(Modal::Emoji(picker)) => picker.columns,
+            _ => unreachable!(),
+        };
+        app.on_event(key(KeyCode::Right));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Left));
+        app.on_event(key(KeyCode::Enter));
+        let expected = crate::emoji::search("")[columns].as_str();
+        assert_eq!(app.composer.text(), format!("a👍{expected}b"));
+
+        // Esc closes without inserting.
+        app.on_event(alt('e'));
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert_eq!(app.composer.text(), format!("a👍{expected}b"));
+    }
+
+    #[test]
+    fn emoji_picker_by_mouse() {
+        let (mut app, mut terminal) = drawn();
+        let (col, row) = find(&terminal, "☺");
+        app.on_event(click(col, row));
+        assert!(matches!(app.modal, Some(Modal::Emoji(_))));
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "😃");
+        app.on_event(click(col, row));
+        assert!(app.modal.is_none());
+        assert_eq!(app.composer.text(), "😃");
+
+        // Clicking outside closes it; clicks do not reach what is underneath.
+        app.on_event(alt('e'));
+        redraw(&mut app, &mut terminal);
+        app.on_event(click(5, 5));
+        assert!(app.modal.is_none());
+        assert_eq!(app.focus, Pane::Composer);
+        assert_eq!(app.active, 0);
+    }
+
+    fn summary(id: &str, name: &str, category: RoomCategory, notifications: u64) -> RoomSummary {
+        RoomSummary {
+            id: id.into(),
+            name: name.into(),
+            category,
+            notifications,
+            mention: false,
+            unread: notifications > 0,
+        }
+    }
+
+    #[test]
+    fn login_flow() {
+        let (mut app, mut terminal) = drawn();
+        app.rooms.clear();
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        redraw(&mut app, &mut terminal);
+        // Homeserver is prefilled; replace it, then fill in the rest.
+        for _ in 0.."matrix.org".len() {
+            app.on_event(key(KeyCode::Backspace));
+        }
+        type_text(&mut app, "example.org");
+        app.on_event(key(KeyCode::Enter));
+        type_text(&mut app, "alice");
+        app.on_event(key(KeyCode::Tab));
+        type_text(&mut app, "secret");
+        app.on_event(key(KeyCode::Enter));
+        let Some(Modal::Login(form)) = &app.modal else {
+            panic!("login form closed early");
+        };
+        assert_eq!(
+            (form.homeserver.as_str(), form.username.as_str()),
+            ("example.org", "alice")
+        );
+        assert!(form.busy.is_some());
+        // The password is not kept around after submitting.
+        assert!(form.password.is_empty());
+        // Input is locked while busy.
+        type_text(&mut app, "x");
+        redraw(&mut app, &mut terminal);
+
+        app.on_matrix(MatrixEvent::LoginFailed("wrong password".into()));
+        let Some(Modal::Login(form)) = &app.modal else {
+            panic!("login form closed on failure");
+        };
+        assert!(form.busy.is_none());
+        assert_eq!(form.error.as_deref(), Some("wrong password"));
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "wrong password");
+
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@alice:example.org".into(),
+        });
+        assert!(app.modal.is_none());
+        app.on_matrix(MatrixEvent::Recovery(RecoveryStatus::NeedsKey));
+        assert!(matches!(app.modal, Some(Modal::Recovery(_))));
+        type_text(&mut app, "EsTc 1234");
+        app.on_event(key(KeyCode::Enter));
+        app.on_matrix(MatrixEvent::RecoverResult(Err("bad key".into())));
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "bad key");
+        app.on_matrix(MatrixEvent::RecoverResult(Ok(())));
+        assert!(app.modal.is_none());
+        // Asked once per run only.
+        app.on_matrix(MatrixEvent::Recovery(RecoveryStatus::NeedsKey));
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn room_updates_keep_the_open_room_and_its_draft() {
+        let (mut app, mut terminal) = drawn();
+        app.rooms.clear();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            summary("!b", "Beta", RoomCategory::Person, 2),
+            summary("!c", "Gamma", RoomCategory::Invite, 0),
+        ]));
+        redraw(&mut app, &mut terminal);
+        assert_eq!(app.rooms[app.active].id, "!a");
+        app.open_room(1);
+        type_text(&mut app, "draft");
+        // The server reorders and renames; Beta moves to the front, Alpha disappears.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!b", "Beta renamed", RoomCategory::Favourite, 0),
+            summary("!c", "Gamma", RoomCategory::Invite, 0),
+            summary("!d", "Delta", RoomCategory::Room, 7),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!b");
+        assert_eq!(app.rooms[app.active].name, "Beta renamed");
+        assert_eq!(app.composer.text(), "draft");
+        assert_eq!(app.rooms[2].unread, 7);
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "Invites");
+
+        // The open room vanishes: fall back to the first one without panicking.
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!d",
+            "Delta",
+            RoomCategory::Room,
+            0,
+        )]));
+        assert_eq!(app.rooms[app.active].id, "!d");
+        app.on_matrix(MatrixEvent::Rooms(Vec::new()));
+        redraw(&mut app, &mut terminal);
     }
 
     #[test]

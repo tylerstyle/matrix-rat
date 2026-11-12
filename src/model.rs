@@ -3,16 +3,23 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomKind {
+    Invite,
     Favourite,
     Person,
     Room,
 }
 
 impl RoomKind {
-    pub const SECTIONS: [RoomKind; 3] = [RoomKind::Favourite, RoomKind::Person, RoomKind::Room];
+    pub const SECTIONS: [RoomKind; 4] = [
+        RoomKind::Invite,
+        RoomKind::Favourite,
+        RoomKind::Person,
+        RoomKind::Room,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
+            RoomKind::Invite => "Invites",
             RoomKind::Favourite => "Favourites",
             RoomKind::Person => "People",
             RoomKind::Room => "Rooms",
@@ -42,9 +49,14 @@ pub struct Message {
 
 #[derive(Debug, Clone)]
 pub struct Room {
+    /// Stable identity (the Matrix room id); indices change as the list reorders.
+    pub id: String,
     pub name: String,
     pub kind: RoomKind,
+    /// Notification count shown as a badge.
     pub unread: u32,
+    /// Has unread messages, even without a notification count.
+    pub bold: bool,
     pub mention: bool,
     pub online: bool,
     pub typing: Option<String>,
@@ -66,11 +78,23 @@ fn msg(sender: &str, day: &str, time: &str, body: &str) -> Message {
     }
 }
 
+impl Room {
+    pub fn new(id: &str, name: &str, kind: RoomKind) -> Room {
+        Room {
+            id: id.into(),
+            ..room(name, kind, 0, Vec::new())
+        }
+    }
+}
+
+/// A demo room; its name doubles as its id.
 fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room {
     Room {
+        id: name.into(),
         name: name.into(),
         kind,
         unread,
+        bold: unread > 0,
         mention: false,
         online: false,
         typing: None,

@@ -6,6 +6,7 @@ use super::NARROW_WIDTH;
 use super::hit::{Button, HitId};
 use crate::action::{Action, Pane};
 use crate::app::App;
+use crate::matrix::SyncStatus;
 use crate::text::width;
 use crate::theme::Role;
 
@@ -42,9 +43,17 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Left side: connection state, then a toast, or hints for the focused pane.
+    let (dot, dot_role, text) = match &app.sync {
+        None => ("●", Role::StatusOk, "demo data".to_owned()),
+        Some(SyncStatus::Synced) => ("●", Role::StatusOk, "synced".to_owned()),
+        Some(SyncStatus::Connecting) => ("◌", Role::Muted, "connecting…".to_owned()),
+        Some(SyncStatus::Offline) => ("○", Role::Error, "offline".to_owned()),
+        Some(SyncStatus::Stopped) => ("○", Role::Muted, "stopped".to_owned()),
+        Some(SyncStatus::Error(_)) => ("✕", Role::Error, "sync error".to_owned()),
+    };
     let mut spans = vec![
-        Span::styled(" ● ", theme.style(Role::StatusOk)),
-        Span::styled("demo data  ", status),
+        Span::styled(format!(" {dot} "), theme.style(dot_role)),
+        Span::styled(format!("{text}  "), status),
     ];
     if let Some((text, _)) = &app.toast {
         spans.push(Span::styled(format!(" {text} "), theme.style(Role::Toast)));

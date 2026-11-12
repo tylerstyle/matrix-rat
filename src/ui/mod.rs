@@ -3,6 +3,7 @@
 mod composer;
 mod help;
 pub mod hit;
+mod modal;
 mod sidebar;
 mod status;
 mod timeline;
@@ -69,6 +70,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.help_open {
         help::draw(frame, app, area);
     }
+    modal::draw(frame, app, area);
 }
 
 pub fn max_sidebar(screen_width: u16) -> u16 {
@@ -153,12 +155,57 @@ mod tests {
     }
 
     #[test]
-    fn tiny_sizes_do_not_panic() {
+    fn emoji_picker() {
         let mut app = App::demo();
-        app.perform(Action::ToggleHelp);
-        for (w, h) in [(1, 1), (3, 2), (10, 4), (20, 3), (61, 5), (200, 2)] {
-            render(&mut app, w, h);
-            app.perform(Action::FocusNext);
+        render(&mut app, 100, 30);
+        app.perform(Action::OpenEmoji);
+        for c in "cat".chars() {
+            app.on_event(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+        }
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+    }
+
+    #[test]
+    fn login_form() {
+        let mut app = App::demo();
+        app.rooms.clear();
+        app.on_matrix(crate::matrix::MatrixEvent::NeedLogin { reason: None });
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+    }
+
+    #[test]
+    fn tiny_sizes_do_not_panic() {
+        use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm};
+        let modals = [
+            None,
+            Some(Modal::Emoji(EmojiPicker::default())),
+            Some(Modal::Login(LoginForm::new(Some("an error".into())))),
+            Some(Modal::Recovery(RecoveryForm::default())),
+        ];
+        for modal in modals {
+            let mut app = App::demo();
+            app.perform(Action::ToggleHelp);
+            app.modal = modal;
+            for (w, h) in [
+                (1, 1),
+                (3, 2),
+                (10, 4),
+                (20, 3),
+                (25, 7),
+                (61, 5),
+                (200, 2),
+                (80, 24),
+            ] {
+                render(&mut app, w, h);
+                if app.modal.is_none() {
+                    app.perform(Action::FocusNext);
+                }
+            }
         }
     }
 }

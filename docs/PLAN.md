@@ -233,6 +233,7 @@ and the cursor is already in the composer. Type, `Enter` sends.
 | On a selected message | `Enter` reply · `e` edit (own messages) · `r` react · `Del` delete (own) · `c` copy · `o` open link/image. The same actions appear as a clickable row on the selected message and in the right-click menu. |
 | `Esc` | Close overlay → cancel reply/edit → drop selection and return to the composer |
 | `PgUp` / `PgDn` | Scroll the timeline |
+| `Alt-E` (or click the ☺ at the right of the composer) | Emoji picker: search field focused, type to fuzzy-search, arrows move through the grid, `Enter` or a click inserts at the cursor and closes |
 | `Ctrl-K` | Room switcher (fuzzy) |
 | `F1` (or `?` outside the composer) | Help (lists every key) |
 | `F2` (or `Ctrl-,`) | Settings |
@@ -457,3 +458,4 @@ differentiators and can be reviewed with fake data in days.
 | 2026-11-12 | `matrix-agy` | Approve with changes | All 8 findings accepted: timeline cache key and header recompute (§4), event-cache init + timeline LRU + generation tags (§4), strict startup order and image clipping (§4), recovery-key entry moved to M2 (§10), `sso-login`/`socks` features and spinner pin (§3), own wrapping with hit rects and OSC 8 demoted (§4), parent-dir watching + `on_primary` + pid files + mode 2031 demoted (§8), profile lock and `TerminalGuard` (§4, §9). |
 | 2026-11-12 | `matrix-agy` | M0 + plan rev 2: approve with changes | All 5 findings accepted. Fixed in M0: SIGTERM/SIGHUP handling, terminal-restore ordering, runtime-dir fallback, case-insensitive quit, tick behaviour. Plan: word movement on `Ctrl-←/→`, help/settings aliases, clearer selection mode (§6), comrak without default features plus Matrix post-processing (§6a). Ctrl-Z suspend/resume lands in M1. |
 | 2026-11-12 | `matrix-agy` | M1: approve with changes | All 6 findings accepted. Fixed now: bounds-checked access and a calm empty state when there are no rooms, per-room drafts (an edit no longer leaks into another room), composer rows never exceed the width with wide characters, tabs/control characters sanitised on insert, clickable status-line hints and a rooms button in narrow mode, foreground inheritance, draft dimmed whenever unfocused, dimmed overlay backdrop. Deferred by design: stable room IDs replace indices in M2, stable timeline item IDs in M3. |
+| 2026-11-12 | user | Request | Emoji picker added (button in the composer, `Alt-E`, fuzzy search); built together with M2. |

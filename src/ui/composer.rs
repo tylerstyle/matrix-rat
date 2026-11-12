@@ -3,16 +3,18 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
 use super::hit::{Button, HitId};
-use crate::action::Pane;
+use crate::action::{Action, Pane};
 use crate::app::{App, ComposeMode};
 use crate::text::truncate;
 use crate::theme::Role;
 
 const MAX_TEXT_ROWS: usize = 6;
+/// Columns kept free at the right for the emoji button.
+const EMOJI_BUTTON: u16 = 3;
 
 fn text_width(pane_width: u16) -> usize {
-    // Borders plus one column of padding on each side.
-    pane_width.saturating_sub(4).max(1) as usize
+    // Borders, one column of padding on each side, and the emoji button.
+    pane_width.saturating_sub(4 + EMOJI_BUTTON).max(1) as usize
 }
 
 /// Height of the composer pane for the current text.
@@ -66,6 +68,19 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // Emoji button at the right end of the first text row.
+    if text_area.width > EMOJI_BUTTON + 4 {
+        text_area.width -= EMOJI_BUTTON;
+        let button = Rect::new(text_area.right() + 1, text_area.y, 2, 1);
+        let role = if app.hover == Some(HitId::Do(Action::OpenEmoji)) {
+            Role::TitleFocused
+        } else {
+            Role::Muted
+        };
+        frame.render_widget(Line::from(Span::styled("☺", theme.style(role))), button);
+        app.hits.add(button, HitId::Do(Action::OpenEmoji));
+    }
+
     let max = text_area.width as usize;
     let lines = app.composer.layout(max);
     let (cursor_row, cursor_col) = app.composer.cursor_position(&lines);
@@ -108,7 +123,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     app.hits.add(text_area, HitId::ComposerText);
 
-    if focused && !app.help_open {
+    if focused && !app.help_open && app.modal.is_none() {
         let x = text_area.x + (cursor_col as u16).min(text_area.width.saturating_sub(1));
         let y = text_area.y + (cursor_row - first) as u16;
         frame.set_cursor_position(Position::new(x, y));

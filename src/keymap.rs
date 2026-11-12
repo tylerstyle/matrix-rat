@@ -167,6 +167,14 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        Char('e'),
+        ALT,
+        Action::OpenEmoji,
+        "Alt-E",
+        "Emoji picker",
+    ),
+    bind(
+        Global,
         KeyCode::F(1),
         NONE,
         Action::ToggleHelp,

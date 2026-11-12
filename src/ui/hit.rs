@@ -24,6 +24,10 @@ pub enum HitId {
     /// Message index and reaction index.
     Reaction(usize, usize),
     ComposerText,
+    /// A text field or button slot in a form.
+    Field(usize),
+    /// Index into the emoji picker's results.
+    Emoji(usize),
     Splitter,
     Button(Button),
     /// A clickable hint that performs an action, like the ones in the status line.

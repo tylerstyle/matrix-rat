@@ -182,6 +182,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let theme = &app.theme;
+    if room.messages.is_empty() {
+        let text = if room.kind == RoomKind::Invite {
+            " You are invited to this room."
+        } else if app.sync.is_some() {
+            " Message history arrives with the next milestone."
+        } else {
+            " No messages yet."
+        };
+        frame.render_widget(
+            Line::from(Span::styled(text, theme.style(Role::Muted))),
+            inner,
+        );
+        return;
+    }
 
     // The last column is kept free for the scrollbar.
     let content = Rect::new(inner.x, inner.y, inner.width - 1, inner.height);

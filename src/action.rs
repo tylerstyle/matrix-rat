@@ -49,4 +49,8 @@ pub enum Action {
     Send,
     Newline,
     CancelCompose,
+
+    OpenEmoji,
+    LoginSubmit,
+    LoginBrowser,
 }

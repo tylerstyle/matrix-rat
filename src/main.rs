@@ -4,9 +4,12 @@ mod action;
 mod app;
 mod composer;
 mod config;
+mod emoji;
 mod keymap;
 mod lock;
 mod logging;
+mod matrix;
+mod modal;
 mod model;
 mod paths;
 mod terminal;
@@ -23,6 +26,10 @@ struct Args {
     /// Profile to use; each profile has its own account, config and store.
     #[arg(long, default_value = "default")]
     profile: String,
+
+    /// Run on built-in demo data without connecting to Matrix.
+    #[arg(long)]
+    demo: bool,
 }
 
 fn main() -> Result<()> {
@@ -39,7 +46,7 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(app::run(&paths, &config));
+    let result = runtime.block_on(app::run(&paths, &config, args.demo));
     if let Err(err) = &result {
         tracing::error!(?err, "exited with error");
     }

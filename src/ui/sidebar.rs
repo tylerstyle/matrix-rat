@@ -69,7 +69,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar.scroll = app.sidebar.scroll.min(rows.len().saturating_sub(height));
 
     if rows.is_empty() {
-        let line = Line::from(Span::styled(" no rooms match", theme.style(Role::Muted)));
+        let text = if app.sidebar.filter.is_empty() {
+            " no rooms yet"
+        } else {
+            " no rooms match"
+        };
+        let line = Line::from(Span::styled(text, theme.style(Role::Muted)));
         frame.render_widget(&line, list);
         return;
     }
@@ -94,7 +99,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 let active = *index == app.active;
                 let base = if active {
                     Role::RoomActive
-                } else if room.unread > 0 {
+                } else if room.bold {
                     Role::RoomUnread
                 } else {
                     Role::Room

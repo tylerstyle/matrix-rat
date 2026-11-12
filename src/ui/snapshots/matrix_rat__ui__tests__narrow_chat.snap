@@ -19,6 +19,6 @@ expression: "render(&mut app, 50, 20)"
 "│  🐀                                           ┃│" Hidden by multi-width symbols: [(4, " ")]
 "╰ carol is typing… ──────────────────────────────╯"
 "╭ 3 Message ─────────────────────────────────────╮"
-"│ Type a message…                                │"
+"│ Type a message…                             ☺  │"
 "╰────────────────────────────────────────────────╯"
 " ● demo data  ☰ rooms  Ente F1 help  F3 rat-dark " Hidden by multi-width symbols: [(15, " ")]

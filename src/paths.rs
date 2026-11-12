@@ -50,6 +50,10 @@ impl Paths {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("could not create {}", dir.display()))?;
         }
+        // Holds the session and the message stores: owner only.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&self.data_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("could not protect {}", self.data_dir.display()))?;
         Ok(())
     }
 
@@ -59,6 +63,14 @@ impl Paths {
 
     pub fn themes_dir(&self) -> PathBuf {
         self.config_dir.join("themes")
+    }
+
+    pub fn session_file(&self) -> PathBuf {
+        self.data_dir.join("session.json")
+    }
+
+    pub fn store_dir(&self) -> PathBuf {
+        self.data_dir.join("store")
     }
 
     pub fn lock_file(&self) -> PathBuf {
