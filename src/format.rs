@@ -49,15 +49,18 @@ pub fn parse(input: &str) -> Outgoing {
             plain: argument.to_owned(),
             html: None,
         }),
-        "html" => needs_text(Outgoing::Text {
-            plain: strip_tags(argument),
+        "html" if strip_tags(argument).trim().is_empty() => {
+            Outgoing::Rejected("/html needs some text between the tags".to_owned())
+        }
+        "html" => Outgoing::Text {
+            plain: strip_tags(argument).trim().to_owned(),
             html: Some(argument.to_owned()),
-        }),
+        },
         "spoiler" => needs_text(Outgoing::Text {
             plain: format!("||{argument}||"),
             html: Some(format!(
                 "<span data-mx-spoiler>{}</span>",
-                markdown_html(argument).unwrap_or_else(|| escape(argument))
+                inline_html(argument)
             )),
         }),
         "rainbow" => needs_text(Outgoing::Text {
@@ -113,12 +116,23 @@ pub fn markdown_html(text: &str) -> Option<String> {
     {
         html = inner.to_owned();
     }
-    // Only line breaks and no other markup: the plain body says it all.
-    let without_breaks = html.replace("<br />\n", "").replace("<br />", "");
-    if without_breaks.contains('<') {
-        Some(html)
-    } else {
-        None
+    // Only paragraphs and line breaks, no other markup: the plain body says it all.
+    let mut bare = html.clone();
+    for tag in ["<br />\n", "<br />", "</p>\n", "</p>", "<p>"] {
+        bare = bare.replace(tag, "");
+    }
+    if bare.contains('<') { Some(html) } else { None }
+}
+
+/// HTML for inside an inline element: Markdown formatting, but line and paragraph
+/// breaks as `<br />` instead of block tags.
+fn inline_html(text: &str) -> String {
+    match markdown_html(text) {
+        Some(html) => html
+            .replace("</p>\n<p>", "<br /><br />")
+            .replace("<p>", "")
+            .replace("</p>", ""),
+        None => escape(text).replace('\n', "<br />"),
     }
 }
 
@@ -132,15 +146,21 @@ fn escape(text: &str) -> String {
 /// A rough plain-text version of HTML, for the fallback body of `/html`.
 fn strip_tags(html: &str) -> String {
     let mut out = String::new();
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            c if !in_tag => out.push(c),
-            _ => {}
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find('>') else {
+            rest = &rest[start..];
+            break;
+        };
+        // Line and paragraph ends become newlines so words do not run together.
+        let tag = rest[start + 1..start + end].trim().to_ascii_lowercase();
+        if tag.starts_with("br") || tag == "/p" || tag == "/div" || tag == "/li" {
+            out.push('\n');
         }
+        rest = &rest[start + end + 1..];
     }
+    out.push_str(rest);
     out.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
@@ -197,6 +217,8 @@ mod tests {
         assert_eq!(parse("hello world"), text("hello world", None));
         assert_eq!(parse("  two\nlines  "), text("two\nlines", None));
         assert_eq!(parse("1 < 2 & 3 > 2"), text("1 < 2 & 3 > 2", None));
+        // Paragraphs alone are not formatting.
+        assert_eq!(parse("first\n\nsecond"), text("first\n\nsecond", None));
     }
 
     #[test]
@@ -281,6 +303,29 @@ mod tests {
         );
         assert_eq!(parse("//not a command"), text("/not a command", None));
         assert!(matches!(parse("/me"), Outgoing::Rejected(_)));
+        assert!(matches!(parse("/html <b>  </b>"), Outgoing::Rejected(_)));
+        assert_eq!(
+            parse("/html <p>one</p><p>two<br>three</p>"),
+            text("one\ntwo\nthree", Some("<p>one</p><p>two<br>three</p>"))
+        );
+        // Spoilers stay inline whatever is inside them.
+        assert_eq!(
+            parse("/spoiler line 1\nline 2"),
+            text(
+                "||line 1\nline 2||",
+                Some("<span data-mx-spoiler>line 1<br />line 2</span>")
+            )
+        );
+        let Outgoing::Text {
+            html: Some(html), ..
+        } = parse("/spoiler one\n\n**two**")
+        else {
+            panic!();
+        };
+        assert_eq!(
+            html,
+            "<span data-mx-spoiler>one<br /><br /><strong>two</strong></span>"
+        );
         assert!(matches!(parse("/nosuchthing x"), Outgoing::Rejected(_)));
         let Outgoing::Text { plain, html } = parse("/rainbow hi <") else {
             panic!();

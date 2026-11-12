@@ -9,14 +9,19 @@ use crate::action::Action;
 use crate::action::Pane;
 use crate::app::App;
 use crate::model::{MsgKind, Room, RoomKind, SendState};
+use crate::rich::{self, Format, Rich, Segment};
 use crate::text::{truncate, width, wrap};
 use crate::theme::{Role, Theme};
 
 /// One screen row of the timeline.
+#[derive(Debug, Clone)]
 pub struct Row {
     line: Line<'static>,
-    /// The message this row belongs to; `None` for dividers and spacing.
+    /// The message that can be selected through this row; `None` for dividers,
+    /// spacing and system lines.
     msg: Option<usize>,
+    /// The message this row was produced for, selectable or not.
+    source: usize,
     /// Clickable column ranges inside the row.
     hits: Vec<(u16, u16, HitId)>,
 }
@@ -26,6 +31,7 @@ impl Row {
         Self {
             line,
             msg,
+            source: 0,
             hits: Vec::new(),
         }
     }
@@ -33,7 +39,13 @@ impl Row {
 
 const INDENT: &str = "  ";
 
-pub fn build_rows(room: &Room, max_width: usize, theme: &Theme) -> Vec<Row> {
+/// Lays out a room's messages. `revealed` is the message whose spoilers are shown.
+pub fn build_rows(
+    room: &Room,
+    max_width: usize,
+    theme: &Theme,
+    revealed: Option<usize>,
+) -> Vec<Row> {
     let body_width = max_width.saturating_sub(INDENT.len()).max(1);
     // Foreground only, so the row's background (selection, hover) shows through.
     let text_style = Style {
@@ -46,166 +58,274 @@ pub fn build_rows(room: &Room, max_width: usize, theme: &Theme) -> Vec<Row> {
     let mut last_sender: Option<&str> = None;
 
     for (i, message) in room.messages.iter().enumerate() {
-        match message.kind {
-            MsgKind::ReadMarker => {
-                let label = " new ";
-                let fill = max_width.saturating_sub(width(label));
+        let start = rows.len();
+        'message: {
+            match message.kind {
+                MsgKind::ReadMarker => {
+                    let label = " new ";
+                    let fill = max_width.saturating_sub(width(label));
+                    let left = fill / 2;
+                    rows.push(Row::plain(
+                        Line::from(Span::styled(
+                            format!("{}{label}{}", "─".repeat(left), "─".repeat(fill - left)),
+                            theme.style(Role::BorderFocused),
+                        )),
+                        None,
+                    ));
+                    last_sender = None;
+                    break 'message;
+                }
+                MsgKind::System => {
+                    for text in wrap(&format!("· {}", message.body), body_width) {
+                        rows.push(Row::plain(
+                            Line::from(vec![
+                                Span::raw(INDENT),
+                                Span::styled(text, theme.style(Role::Muted)),
+                            ]),
+                            None,
+                        ));
+                    }
+                    last_sender = None;
+                    break 'message;
+                }
+                _ => {}
+            }
+
+            let new_day = last_day != Some(message.day.as_str());
+            let is_emote = message.kind == MsgKind::Emote;
+            let show_header =
+                !is_emote && (new_day || last_sender != Some(message.sender.as_str()));
+
+            if new_day {
+                let label = truncate(&format!(" {} ", message.day), max_width);
+                let fill = max_width.saturating_sub(width(&label));
                 let left = fill / 2;
                 rows.push(Row::plain(
                     Line::from(Span::styled(
                         format!("{}{label}{}", "─".repeat(left), "─".repeat(fill - left)),
-                        theme.style(Role::BorderFocused),
+                        theme.style(Role::DateDivider),
                     )),
                     None,
                 ));
-                last_sender = None;
-                continue;
+            } else if show_header || (is_emote && last_sender.is_some()) {
+                rows.push(Row::plain(Line::default(), None));
             }
-            MsgKind::System => {
-                for text in wrap(&format!("· {}", message.body), body_width) {
-                    rows.push(Row::plain(
-                        Line::from(vec![
-                            Span::raw(INDENT),
-                            Span::styled(text, theme.style(Role::Muted)),
-                        ]),
-                        None,
+            last_day = Some(message.day.as_str());
+            // An action line stands alone: whoever speaks next gets a header again.
+            last_sender = (!is_emote).then_some(message.sender.as_str());
+
+            if show_header {
+                let color = Style::new().fg(theme.user_color(&message.sender));
+                let mut spans = vec![Span::styled("● ", color)];
+                let with_time = 2 + width(&message.sender) + 2 + width(&message.time) <= max_width;
+                let name = truncate(&message.sender, max_width.saturating_sub(2));
+                spans.push(Span::styled(name, color.add_modifier(Modifier::BOLD)));
+                if with_time {
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(
+                        message.time.clone(),
+                        theme.style(Role::Timestamp),
                     ));
                 }
-                last_sender = None;
-                continue;
+                rows.push(Row::plain(Line::from(spans), Some(i)));
             }
-            _ => {}
-        }
 
-        let new_day = last_day != Some(message.day.as_str());
-        let is_emote = message.kind == MsgKind::Emote;
-        let show_header = !is_emote && (new_day || last_sender != Some(message.sender.as_str()));
-
-        if new_day {
-            let label = truncate(&format!(" {} ", message.day), max_width);
-            let fill = max_width.saturating_sub(width(&label));
-            let left = fill / 2;
-            rows.push(Row::plain(
-                Line::from(Span::styled(
-                    format!("{}{label}{}", "─".repeat(left), "─".repeat(fill - left)),
-                    theme.style(Role::DateDivider),
-                )),
-                None,
-            ));
-        } else if show_header || (is_emote && last_sender.is_some()) {
-            rows.push(Row::plain(Line::default(), None));
-        }
-        last_day = Some(message.day.as_str());
-        // An action line stands alone: whoever speaks next gets a header again.
-        last_sender = (!is_emote).then_some(message.sender.as_str());
-
-        if show_header {
-            let color = Style::new().fg(theme.user_color(&message.sender));
-            let mut spans = vec![Span::styled("● ", color)];
-            let with_time = 2 + width(&message.sender) + 2 + width(&message.time) <= max_width;
-            let name = truncate(&message.sender, max_width.saturating_sub(2));
-            spans.push(Span::styled(name, color.add_modifier(Modifier::BOLD)));
-            if with_time {
-                spans.push(Span::raw("  "));
-                spans.push(Span::styled(
-                    message.time.clone(),
-                    theme.style(Role::Timestamp),
+            if let Some((sender, quoted)) = &message.reply_to {
+                let quoted = quoted.replace('\n', " ");
+                let quote = if sender.is_empty() {
+                    format!("┃ {quoted}")
+                } else {
+                    format!("┃ {sender}: {quoted}")
+                };
+                rows.push(Row::plain(
+                    Line::from(vec![
+                        Span::raw(INDENT),
+                        Span::styled(truncate(&quote, body_width), theme.style(Role::ReplyQuote)),
+                    ]),
+                    Some(i),
                 ));
             }
-            rows.push(Row::plain(Line::from(spans), Some(i)));
-        }
 
-        if let Some((sender, quoted)) = &message.reply_to {
-            let quoted = quoted.replace('\n', " ");
-            let quote = if sender.is_empty() {
-                format!("┃ {quoted}")
-            } else {
-                format!("┃ {sender}: {quoted}")
+            let (body_style, intro) = match message.kind {
+                MsgKind::Emote => (
+                    Style::new().fg(theme.user_color(&message.sender)),
+                    Some(format!("* {} ", message.sender)),
+                ),
+                MsgKind::Redacted | MsgKind::Undecryptable => (theme.style(Role::ReplyQuote), None),
+                _ => (text_style, None),
             };
-            rows.push(Row::plain(
-                Line::from(vec![
-                    Span::raw(INDENT),
-                    Span::styled(truncate(&quote, body_width), theme.style(Role::ReplyQuote)),
-                ]),
-                Some(i),
-            ));
-        }
-
-        // Markers are wrapped together with the text so they can never overflow.
-        let marker = match (message.state, message.edited) {
-            (SendState::Sending, _) => Some(("◌ sending", Role::Muted)),
-            (SendState::Failed, _) => Some(("✕ not sent", Role::Error)),
-            (SendState::Sent, true) => Some(("(edited)", Role::Muted)),
-            (SendState::Sent, false) => None,
-        };
-        let (body_style, text) = match message.kind {
-            MsgKind::Emote => (
-                Style::new().fg(theme.user_color(&message.sender)),
-                format!("* {} {}", message.sender, message.body),
-            ),
-            MsgKind::Redacted | MsgKind::Undecryptable => {
-                (theme.style(Role::ReplyQuote), message.body.clone())
+            let mut rich = match &message.html {
+                Some(html) => rich::from_html(html),
+                None => Rich::plain(&message.body),
+            };
+            if let (Some(intro), Some(first)) = (intro, rich.lines.first_mut()) {
+                first.segments.insert(
+                    0,
+                    Segment {
+                        text: intro,
+                        format: Format::default(),
+                    },
+                );
             }
-            _ => (text_style, message.body.clone()),
-        };
-        let text = match marker {
-            Some((label, _)) => format!("{text} {label}"),
-            None => text,
-        };
-        let mut body = wrap(&text, body_width);
-        let last = body.len() - 1;
-        for (n, line) in body.drain(..).enumerate() {
-            let mut spans = vec![Span::raw(INDENT)];
-            match marker.and_then(|(label, role)| Some((line.strip_suffix(label)?, label, role))) {
-                Some((rest, label, role)) if n == last => {
-                    spans.push(Span::styled(rest.to_owned(), body_style));
-                    spans.push(Span::styled(label, theme.style(role)));
+            let reveal = revealed == Some(i);
+            let mut wrapped = rich::wrap(&rich, body_width);
+            let last = wrapped.len().saturating_sub(1);
+            for (n, row) in wrapped.drain(..).enumerate() {
+                let mut spans = vec![Span::raw(INDENT)];
+                let mut hits = Vec::new();
+                let mut col = INDENT.len();
+                if !row.prefix.is_empty() {
+                    col += width(&row.prefix);
+                    spans.push(Span::styled(row.prefix, theme.style(Role::Muted)));
                 }
-                _ => spans.push(Span::styled(line, body_style)),
+                for segment in row.segments {
+                    let segment_width = width(&segment.text);
+                    let (text, style) = styled(&segment, body_style, theme, reveal);
+                    if let Some(link) = segment.format.link {
+                        hits.push((
+                            col as u16,
+                            (col + segment_width) as u16,
+                            HitId::Link(i, link),
+                        ));
+                    }
+                    col += segment_width;
+                    spans.push(Span::styled(text, style));
+                }
+                // "(edited)", "sending" and "not sent" go after the text, or on a row of
+                // their own when there is no room left.
+                let marker = match (message.state, message.edited) {
+                    (SendState::Sending, _) => Some(("◌ sending", Role::Muted)),
+                    (SendState::Failed, _) => Some(("✕ not sent", Role::Error)),
+                    (SendState::Sent, true) => Some(("(edited)", Role::Muted)),
+                    (SendState::Sent, false) => None,
+                };
+                match marker {
+                    Some((label, role)) if n == last => {
+                        if col + 1 + width(label) <= max_width {
+                            spans.push(Span::raw(" "));
+                            spans.push(Span::styled(label, theme.style(role)));
+                            rows.push(Row {
+                                line: Line::from(spans),
+                                msg: Some(i),
+                                source: i,
+                                hits,
+                            });
+                        } else {
+                            rows.push(Row {
+                                line: Line::from(spans),
+                                msg: Some(i),
+                                source: i,
+                                hits,
+                            });
+                            rows.push(Row::plain(
+                                Line::from(vec![
+                                    Span::raw(INDENT),
+                                    Span::styled(truncate(label, body_width), theme.style(role)),
+                                ]),
+                                Some(i),
+                            ));
+                        }
+                    }
+                    _ => rows.push(Row {
+                        line: Line::from(spans),
+                        msg: Some(i),
+                        source: i,
+                        hits,
+                    }),
+                }
             }
-            rows.push(Row::plain(Line::from(spans), Some(i)));
-        }
 
-        // Reaction chips, wrapped onto further rows when they do not fit.
-        let mut spans = vec![Span::raw(INDENT)];
-        let mut hits = Vec::new();
-        let mut col = INDENT.len();
-        for (r, reaction) in message.reactions.iter().enumerate() {
-            let chip = truncate(
-                &format!(" {} {} ", reaction.key, reaction.count),
-                body_width,
-            );
-            let chip_width = width(&chip);
-            if col + chip_width > max_width && !hits.is_empty() {
-                rows.push(Row {
-                    line: Line::from(std::mem::replace(&mut spans, vec![Span::raw(INDENT)])),
-                    msg: Some(i),
-                    hits: std::mem::take(&mut hits),
-                });
-                col = INDENT.len();
+            // Reaction chips, wrapped onto further rows when they do not fit.
+            let mut spans = vec![Span::raw(INDENT)];
+            let mut hits = Vec::new();
+            let mut col = INDENT.len();
+            for (r, reaction) in message.reactions.iter().enumerate() {
+                let chip = truncate(
+                    &format!(" {} {} ", reaction.key, reaction.count),
+                    body_width,
+                );
+                let chip_width = width(&chip);
+                if col + chip_width > max_width && !hits.is_empty() {
+                    rows.push(Row {
+                        line: Line::from(std::mem::replace(&mut spans, vec![Span::raw(INDENT)])),
+                        msg: Some(i),
+                        source: i,
+                        hits: std::mem::take(&mut hits),
+                    });
+                    col = INDENT.len();
+                }
+                let role = if reaction.own {
+                    Role::ReactionOwn
+                } else {
+                    Role::Reaction
+                };
+                spans.push(Span::styled(chip, theme.style(role)));
+                hits.push((col as u16, (col + chip_width) as u16, HitId::Reaction(i, r)));
+                col += chip_width;
+                if col < max_width {
+                    spans.push(Span::raw(" "));
+                    col += 1;
+                }
             }
-            let role = if reaction.own {
-                Role::ReactionOwn
-            } else {
-                Role::Reaction
-            };
-            spans.push(Span::styled(chip, theme.style(role)));
-            hits.push((col as u16, (col + chip_width) as u16, HitId::Reaction(i, r)));
-            col += chip_width;
-            if col < max_width {
-                spans.push(Span::raw(" "));
-                col += 1;
+            if !hits.is_empty() {
+                rows.push(Row {
+                    line: Line::from(spans),
+                    msg: Some(i),
+                    source: i,
+                    hits,
+                });
             }
         }
-        if !hits.is_empty() {
-            rows.push(Row {
-                line: Line::from(spans),
-                msg: Some(i),
-                hits,
-            });
+        for row in &mut rows[start..] {
+            row.source = i;
         }
     }
     rows
+}
+
+/// Text and style for one formatted piece.
+fn styled(segment: &Segment, base: Style, theme: &Theme, reveal: bool) -> (String, Style) {
+    let format = &segment.format;
+    if format.spoiler && !reveal {
+        // Covered until the message is selected.
+        return ("▒".repeat(width(&segment.text)), theme.style(Role::Spoiler));
+    }
+    let mut style = base;
+    if format.code {
+        style = style.patch(theme.style(Role::Code));
+    }
+    if format.link.is_some() {
+        style = style.patch(theme.style(Role::Link));
+    }
+    if let Some((r, g, b)) = format.color {
+        style = style.fg(theme.color(r, g, b));
+    }
+    if format.spoiler {
+        style = style
+            .patch(theme.style(Role::Spoiler))
+            .fg(base.fg.unwrap_or_default());
+    }
+    for (on, modifier) in [
+        (format.bold, Modifier::BOLD),
+        (format.italic, Modifier::ITALIC),
+        (format.strike, Modifier::CROSSED_OUT),
+        (format.underline, Modifier::UNDERLINED),
+    ] {
+        if on {
+            style = style.add_modifier(modifier);
+        }
+    }
+    (segment.text.clone(), style)
+}
+
+/// The laid-out rows of the open room, reused between frames while nothing that
+/// affects them has changed.
+#[derive(Debug)]
+pub struct RowCache {
+    key: (String, u64, usize, String, Option<usize>),
+    rows: Vec<Row>,
+    /// Id of the newest message when the rows were built.
+    newest: String,
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -279,11 +399,47 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // The last column is kept free for the scrollbar.
     let content = Rect::new(inner.x, inner.y, inner.width - 1, inner.height);
-    let rows = build_rows(room, content.width as usize, theme);
+    // Spoilers are uncovered while their message is selected.
+    let revealed = app
+        .timeline
+        .selected
+        .filter(|i| room.messages.get(*i).is_some_and(|m| m.has_spoiler()));
+    let key = (
+        room.id.clone(),
+        app.timeline_rev,
+        content.width as usize,
+        theme.name.clone(),
+        revealed,
+    );
+    let newest = room
+        .messages
+        .last()
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
+    let previous = app.row_cache.take();
+    let cache = match previous {
+        Some(cache) if cache.key == key => cache,
+        previous => {
+            let rows = build_rows(room, content.width as usize, theme, revealed);
+            // Reading older messages: keep the same ones on screen when new ones
+            // arrive below.
+            if let Some(old) = previous.filter(|old| old.key.0 == key.0)
+                && app.timeline.scroll > 0
+                && !old.newest.is_empty()
+                && let Some(at) = room.messages.iter().position(|m| m.id == old.newest)
+            {
+                app.timeline.scroll += rows.iter().filter(|row| row.source > at).count();
+            }
+            RowCache { key, rows, newest }
+        }
+    };
+    let rows = &cache.rows;
     let height = content.height as usize;
     let max_scroll = rows.len().saturating_sub(height);
 
     let view = &mut app.timeline;
+    view.drawn = true;
+    view.view_full = rows.len() > height;
     view.page = height;
     view.scroll = view.scroll.min(max_scroll);
     let mut top = max_scroll - view.scroll;
@@ -369,6 +525,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             app.hits.add(rect, HitId::Button(Button::JumpToNewest));
         }
     }
+    app.row_cache = Some(cache);
 }
 
 #[cfg(test)]
@@ -382,7 +539,7 @@ mod tests {
         let theme = Theme::builtin(DEFAULT_THEME).unwrap();
         let room = &demo_rooms()[0];
         for max in [10, 20, 37, 80] {
-            let rows = build_rows(room, max, &theme);
+            let rows = build_rows(room, max, &theme, None);
             for row in &rows {
                 assert!(row.line.width() <= max, "width {max}: {:?}", row.line);
             }

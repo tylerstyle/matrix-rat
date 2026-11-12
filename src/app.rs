@@ -23,7 +23,9 @@ use crate::matrix::{
     SyncStatus,
 };
 use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm};
-use crate::model::{ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, demo_rooms};
+use crate::model::{
+    ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, SendState, demo_rooms,
+};
 use crate::paths::Paths;
 use crate::terminal::{self, TerminalGuard};
 use crate::theme::{DEFAULT_THEME, Theme, truecolor_supported};
@@ -74,6 +76,18 @@ pub struct TimelineState {
     pub loading_older: bool,
     /// There is no older history to load.
     pub reached_start: bool,
+    /// The user scrolled towards older messages since the last request.
+    pub older_armed: bool,
+    /// The rows do not fill the view (as of the last draw).
+    pub view_full: bool,
+    /// Message count when the running request for history was made.
+    pub count_at_request: usize,
+    /// Consecutive history requests that added nothing visible.
+    pub empty_batches: u8,
+    /// The messages were drawn in the last frame.
+    pub drawn: bool,
+    /// Event id of the newest message a read receipt was sent for.
+    pub marked_read: Option<String>,
 }
 
 /// Where the composer's text was drawn, for mapping clicks to a cursor position.
@@ -104,6 +118,18 @@ pub struct App {
     recovery_prompted: bool,
     /// Counts timeline requests; see `request_timeline`.
     generation: u64,
+    /// The open room was picked by the app, not by the user.
+    auto_opened: bool,
+    /// False while the terminal window is in the background.
+    window_focused: bool,
+    /// The draft that was in the composer when an edit started.
+    edit_stash: Option<String>,
+    /// When we last told the room we are typing, if we did.
+    typing_sent: Option<Instant>,
+    typing_notices: bool,
+    /// Bumped whenever the open room's messages change, to invalidate `row_cache`.
+    pub timeline_rev: u64,
+    pub row_cache: Option<crate::ui::RowCache>,
     pub theme: Theme,
     theme_names: Vec<String>,
     themes_dir: PathBuf,
@@ -132,6 +158,7 @@ impl App {
         app.theme_names = Theme::available(&themes_dir);
         app.themes_dir = themes_dir;
         app.sidebar.width = config.sidebar_width;
+        app.typing_notices = config.typing_notices;
         app.set_theme(&config.theme);
         app
     }
@@ -165,6 +192,13 @@ impl App {
             user_id: None,
             recovery_prompted: false,
             generation: 0,
+            auto_opened: true,
+            window_focused: true,
+            edit_stash: None,
+            typing_sent: None,
+            typing_notices: true,
+            timeline_rev: 0,
+            row_cache: None,
             theme,
             theme_names: Theme::builtin_names(),
             themes_dir: PathBuf::new(),
@@ -231,6 +265,7 @@ impl App {
     }
 
     fn messages_mut(&mut self) -> Option<&mut Vec<Message>> {
+        self.timeline_rev += 1;
         self.rooms
             .get_mut(self.active)
             .map(|room| &mut room.messages)
@@ -270,10 +305,14 @@ impl App {
         self.focus = pane;
         match pane {
             Pane::Timeline => {
-                if self.timeline.selected.is_none() {
-                    self.timeline.selected = self.find_selectable(usize::MAX, false);
+                // While reading older messages, focusing the pane (a click on empty
+                // space, Tab) must not pull the view back to the newest message.
+                if self.timeline.scroll == 0 {
+                    if self.timeline.selected.is_none() {
+                        self.timeline.selected = self.find_selectable(usize::MAX, false);
+                    }
+                    self.timeline.reveal_selected = true;
                 }
-                self.timeline.reveal_selected = true;
             }
             Pane::Sidebar => {
                 self.timeline.selected = None;
@@ -290,7 +329,16 @@ impl App {
         if index >= self.rooms.len() {
             return;
         }
+        self.auto_opened = false;
         if index != self.active {
+            if self.typing_sent.take().is_some()
+                && let Some(room_id) = self.room_id()
+            {
+                self.send_matrix(MatrixCmd::Typing {
+                    room_id,
+                    typing: false,
+                });
+            }
             // An edit belongs to its room; a plain draft waits there until we come back.
             self.cancel_compose();
             let draft = self.composer.take();
@@ -302,6 +350,7 @@ impl App {
         }
         self.active = index;
         self.rooms[index].unread = 0;
+        self.rooms[index].bold = false;
         self.rooms[index].mention = false;
         self.timeline = TimelineState::default();
         self.sidebar.filter.clear();
@@ -368,6 +417,9 @@ impl App {
             };
             self.send_matrix(command);
             self.composer.take();
+            if matches!(self.compose_mode, ComposeMode::Edit(_)) {
+                self.end_edit();
+            }
             self.compose_mode = ComposeMode::Normal;
             self.timeline.scroll = 0;
             return;
@@ -375,7 +427,11 @@ impl App {
 
         // Demo mode: everything happens locally.
         self.composer.take();
-        let mode = std::mem::replace(&mut self.compose_mode, ComposeMode::Normal);
+        let mode = self.compose_mode;
+        if matches!(mode, ComposeMode::Edit(_)) {
+            self.end_edit();
+        }
+        self.compose_mode = ComposeMode::Normal;
         let (body, kind) = match outgoing {
             Outgoing::Emote { plain, .. } => (plain, MsgKind::Emote),
             Outgoing::Text { plain, .. } => (plain, MsgKind::Text),
@@ -394,6 +450,7 @@ impl App {
             ComposeMode::Edit(i) if i < self.messages().len() => {
                 if let Some(target) = self.messages_mut().and_then(|m| m.get_mut(i)) {
                     target.body = message.body;
+                    target.kind = message.kind;
                     target.edited = true;
                 }
             }
@@ -405,6 +462,65 @@ impl App {
             _ => self.push_message(message),
         }
         self.timeline.scroll = 0;
+    }
+
+    /// Keeps the room informed about whether we are typing. Called after every change
+    /// to the draft; repeats the notice every few seconds while typing continues,
+    /// because servers let it expire.
+    fn update_typing(&mut self) {
+        const REPEAT: Duration = Duration::from_secs(4);
+        let text = self.composer.text();
+        // Commands are not messages, and nothing is typed "to" an invitation.
+        let typing = self.typing_notices
+            && self.matrix.is_some()
+            && !text.trim().is_empty()
+            && (!text.starts_with('/') || text.starts_with("//") || text.starts_with("/me "))
+            && self
+                .room()
+                .is_some_and(|room| room.kind != RoomKind::Invite);
+        let due = self.typing_sent.is_none_or(|sent| sent.elapsed() >= REPEAT);
+        let Some(room_id) = self.room_id() else {
+            return;
+        };
+        if typing && due {
+            self.typing_sent = Some(Instant::now());
+            self.send_matrix(MatrixCmd::Typing {
+                room_id,
+                typing: true,
+            });
+        } else if !typing && self.typing_sent.take().is_some() {
+            self.send_matrix(MatrixCmd::Typing {
+                room_id,
+                typing: false,
+            });
+        }
+    }
+
+    /// Opens the `n`th link of a message in the system browser.
+    fn open_link(&mut self, message: usize, n: usize) -> bool {
+        let link = self
+            .messages()
+            .get(message)
+            .and_then(|m| m.html.as_deref())
+            .and_then(|html| crate::rich::from_html(html).links.into_iter().nth(n));
+        match link {
+            Some(url) => {
+                if self.matrix.is_some() {
+                    open_in_browser(&url);
+                }
+                self.show_toast(format!("Opening {url}"));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the selected message is one of ours that could not be sent.
+    pub fn selected_failed(&self) -> bool {
+        self.timeline
+            .selected
+            .and_then(|i| self.messages().get(i))
+            .is_some_and(|m| m.state == SendState::Failed)
     }
 
     /// System lines and the "new" marker cannot be selected.
@@ -444,14 +560,57 @@ impl App {
     /// Called after each draw: loads older messages when the view shows the oldest
     /// loaded one.
     pub fn after_draw(&mut self) {
+        self.maybe_mark_read();
+        self.maybe_load_older();
+    }
+
+    /// Sends a read receipt, but only for what the user can actually be looking at:
+    /// the messages are on screen, at the newest one, nothing covers them and the
+    /// terminal window has the focus. Once per newest message.
+    fn maybe_mark_read(&mut self) {
+        let seen = std::mem::take(&mut self.timeline.drawn)
+            && self.timeline.scroll == 0
+            && self.modal.is_none()
+            && !self.help_open
+            && self.window_focused;
+        if !seen || self.matrix.is_none() {
+            return;
+        }
+        let newest = self.messages().iter().rev().find_map(|m| match &m.item {
+            Some(ItemRef::Event(id)) => Some(id.clone()),
+            _ => None,
+        });
+        if newest.is_none() || newest == self.timeline.marked_read {
+            return;
+        }
+        self.timeline.marked_read = newest;
+        if let Some(room_id) = self.room_id() {
+            self.send_matrix(MatrixCmd::MarkRead { room_id });
+        }
+    }
+
+    /// Loads older messages when the oldest loaded one is on screen. A request is only
+    /// made to fill a view that is not full yet, or after the user scrolled up; a
+    /// finished request alone never triggers the next one once the view is full.
+    fn maybe_load_older(&mut self) {
+        /// Requests that brought nothing to show (only hidden events) before giving
+        /// up on filling the view by ourselves.
+        const MAX_EMPTY: u8 = 5;
+        let count = self.messages().len();
         let view = &mut self.timeline;
         if !std::mem::take(&mut view.want_older) || view.loading_older || view.reached_start {
+            return;
+        }
+        let filling = !view.view_full && view.empty_batches < MAX_EMPTY;
+        if !(view.older_armed || filling) {
             return;
         }
         if self.matrix.is_none() || self.room().is_none_or(|r| r.kind == RoomKind::Invite) {
             return;
         }
+        self.timeline.older_armed = false;
         self.timeline.loading_older = true;
+        self.timeline.count_at_request = count;
         if let Some(room_id) = self.room_id() {
             self.send_matrix(MatrixCmd::Paginate {
                 room_id,
@@ -469,7 +628,6 @@ impl App {
             ComposeMode::Reply(i) | ComposeMode::Edit(i) => id_at(i),
             ComposeMode::Normal => None,
         };
-        let at_bottom = self.timeline.scroll == 0;
         if let Some(target) = self.messages_mut() {
             *target = messages;
         }
@@ -491,15 +649,28 @@ impl App {
             (ComposeMode::Edit(_), Some(i)) => ComposeMode::Edit(i),
             (ComposeMode::Edit(_), None) => {
                 // The message being edited is gone; its text must not be sent as new.
-                self.composer.take();
+                self.end_edit();
                 ComposeMode::Normal
             }
             _ => ComposeMode::Normal,
         };
-        // Reading at the newest message: tell the server it has been seen.
-        if at_bottom && let Some(room_id) = self.room_id() {
-            self.send_matrix(MatrixCmd::MarkRead { room_id });
+    }
+
+    /// Starts editing: the unsent draft is put aside and comes back afterwards.
+    fn begin_edit(&mut self, index: usize, text: &str) {
+        if !matches!(self.compose_mode, ComposeMode::Edit(_)) {
+            self.edit_stash = Some(self.composer.take());
         }
+        self.composer.set_text(text);
+        self.compose_mode = ComposeMode::Edit(index);
+        self.set_focus(Pane::Composer);
+    }
+
+    /// Ends an edit (sent, cancelled or impossible) and brings the draft back.
+    fn end_edit(&mut self) {
+        let draft = self.edit_stash.take().unwrap_or_default();
+        self.composer.set_text(&draft);
+        self.compose_mode = ComposeMode::Normal;
     }
 
     fn push_message(&mut self, message: Message) {
@@ -569,7 +740,7 @@ impl App {
         self.compose_mode = match self.compose_mode {
             ComposeMode::Reply(i) | ComposeMode::Edit(i) if i == index => {
                 if matches!(self.compose_mode, ComposeMode::Edit(_)) {
-                    self.composer.take();
+                    self.end_edit();
                 }
                 ComposeMode::Normal
             }
@@ -580,14 +751,19 @@ impl App {
         if self.messages().is_empty() {
             self.set_focus(Pane::Composer);
         } else {
-            self.timeline.selected = Some(index.min(self.messages().len() - 1));
+            self.timeline.selected = self
+                .find_selectable(index, false)
+                .or_else(|| self.find_selectable(index, true));
             self.timeline.reveal_selected = true;
+            if self.timeline.selected.is_none() {
+                self.set_focus(Pane::Composer);
+            }
         }
     }
 
     fn cancel_compose(&mut self) {
         if matches!(self.compose_mode, ComposeMode::Edit(_)) {
-            self.composer.take();
+            self.end_edit();
         }
         self.compose_mode = ComposeMode::Normal;
     }
@@ -631,15 +807,18 @@ impl App {
                 self.set_theme(&name);
             }
             Action::Back => self.back(),
-            Action::PageUp => self.timeline.scroll += self.timeline.page.saturating_sub(1).max(1),
+            Action::PageUp => {
+                self.timeline.scroll += self.timeline.page.saturating_sub(1).max(1);
+                self.timeline.older_armed = true;
+            }
             Action::PageDown => {
                 let step = self.timeline.page.saturating_sub(1).max(1);
                 self.timeline.scroll = self.timeline.scroll.saturating_sub(step);
             }
             Action::JumpToNewest => {
                 self.timeline.scroll = 0;
-                if self.focus == Pane::Timeline && !self.messages().is_empty() {
-                    self.timeline.selected = Some(self.messages().len() - 1);
+                if self.focus == Pane::Timeline {
+                    self.timeline.selected = self.find_selectable(usize::MAX, false);
                 }
             }
 
@@ -653,15 +832,25 @@ impl App {
 
             Action::SelectOlder => match self.timeline.selected {
                 Some(i) if self.focus == Pane::Timeline => {
-                    if let Some(older) = i
+                    match i
                         .checked_sub(1)
                         .and_then(|j| self.find_selectable(j, false))
                     {
-                        self.timeline.selected = Some(older);
+                        Some(older) => self.timeline.selected = Some(older),
+                        // At the oldest loaded message: ask for more history.
+                        None => self.timeline.older_armed = true,
                     }
                     self.timeline.reveal_selected = true;
                 }
-                _ => self.set_focus(Pane::Timeline),
+                _ => {
+                    self.set_focus(Pane::Timeline);
+                    // Asked for by key: select from the newest and show it, even if
+                    // the view was scrolled away.
+                    if self.timeline.selected.is_none() {
+                        self.timeline.selected = self.find_selectable(usize::MAX, false);
+                    }
+                    self.timeline.reveal_selected = true;
+                }
             },
             Action::SelectNewer => {
                 let newer = self
@@ -679,10 +868,27 @@ impl App {
                     }
                 }
             }
+            Action::Reply
+                if self.matrix.is_some()
+                    && self
+                        .timeline
+                        .selected
+                        .and_then(|i| self.messages().get(i))
+                        .is_some_and(|m| m.state == SendState::Failed) =>
+            {
+                let item = self
+                    .timeline
+                    .selected
+                    .and_then(|i| self.messages().get(i))
+                    .and_then(|m| m.item.clone());
+                if let (Some(item), Some(room_id)) = (item, self.room_id()) {
+                    self.send_matrix(MatrixCmd::Retry { room_id, item });
+                }
+            }
             Action::Reply => {
                 if let Some(i) = self.timeline.selected {
                     if matches!(self.compose_mode, ComposeMode::Edit(_)) {
-                        self.composer.take();
+                        self.end_edit();
                     }
                     self.compose_mode = ComposeMode::Reply(i);
                     self.set_focus(Pane::Composer);
@@ -698,10 +904,13 @@ impl App {
                         self.show_toast("This message cannot be edited");
                     }
                     Some((i, message)) if message.own => {
-                        let body = message.body.clone();
-                        self.composer.set_text(&body);
-                        self.compose_mode = ComposeMode::Edit(i);
-                        self.set_focus(Pane::Composer);
+                        // An action stays an action when edited.
+                        let text = if message.kind == MsgKind::Emote {
+                            format!("/me {}", message.body)
+                        } else {
+                            message.body.clone()
+                        };
+                        self.begin_edit(i, &text);
                     }
                     Some(_) => self.show_toast("You can only edit your own messages"),
                     None => {}
@@ -718,7 +927,15 @@ impl App {
                 }
             }
             Action::Copy => self.show_toast("Copying is not available yet"),
-            Action::Open => self.show_toast("Nothing to open in this message"),
+            Action::Open => {
+                let opened = match self.timeline.selected {
+                    Some(i) => self.open_link(i, 0),
+                    None => false,
+                };
+                if !opened {
+                    self.show_toast("Nothing to open in this message");
+                }
+            }
 
             Action::Send => self.send(),
             Action::Newline => self.composer.insert("\n"),
@@ -975,9 +1192,11 @@ impl App {
                 room_id,
                 generation,
                 messages,
+                reached_start,
             } => {
                 if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
                     self.apply_timeline(messages);
+                    self.timeline.reached_start |= reached_start;
                 }
             }
             MatrixEvent::Paginated {
@@ -985,8 +1204,13 @@ impl App {
                 reached_start,
             } => {
                 if generation == self.generation {
-                    self.timeline.loading_older = false;
-                    self.timeline.reached_start = reached_start;
+                    let view = &mut self.timeline;
+                    view.loading_older = false;
+                    view.reached_start |= reached_start;
+                    // Did this request bring anything to show?
+                    let grew = self.rooms.get(self.active).map_or(0, |r| r.messages.len())
+                        > view.count_at_request;
+                    view.empty_batches = if grew { 0 } else { view.empty_batches + 1 };
                 }
             }
             MatrixEvent::Typing { generation, names } => {
@@ -1007,7 +1231,16 @@ impl App {
     /// Replaces the room list with the server's, keeping what belongs to the UI (drafts,
     /// loaded messages) and keeping the same room open even if its position changed.
     fn apply_rooms(&mut self, summaries: Vec<RoomSummary>) {
-        let open_id = self.room().map(|room| room.id.clone());
+        let mut open_id = self.room().map(|room| room.id.clone());
+        // Rooms arrive in batches. If all we could show so far was an invitation,
+        // look again: a real conversation is the better default.
+        if self.auto_opened
+            && self
+                .room()
+                .is_some_and(|room| room.kind == RoomKind::Invite)
+        {
+            open_id = None;
+        }
         let cursor_id = self
             .cursor_room()
             .and_then(|i| self.rooms.get(i))
@@ -1064,6 +1297,7 @@ impl App {
                 // The open room is gone (or this is the first list): show the first one
                 // that is a real conversation, with its own draft. A draft for the
                 // vanished room has nowhere to go.
+                self.auto_opened = true;
                 self.active = self
                     .rooms
                     .iter()
@@ -1107,10 +1341,24 @@ impl App {
 
     pub fn on_event(&mut self, event: Event) {
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
-            Event::Mouse(mouse) => self.on_mouse(mouse),
-            Event::Paste(text) => self.on_paste(&text),
-            Event::Resize(..) | Event::FocusGained => self.dirty = true,
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                self.on_key(key);
+                self.update_typing();
+            }
+            Event::Mouse(mouse) => {
+                self.on_mouse(mouse);
+                self.update_typing();
+            }
+            Event::Paste(text) => {
+                self.on_paste(&text);
+                self.update_typing();
+            }
+            Event::Resize(..) => self.dirty = true,
+            Event::FocusGained => {
+                self.window_focused = true;
+                self.dirty = true;
+            }
+            Event::FocusLost => self.window_focused = false,
             _ => {}
         }
     }
@@ -1319,6 +1567,9 @@ impl App {
                             self.toggle_reaction(msg, &key);
                         }
                     }
+                    Some(HitId::Link(message, n)) => {
+                        self.open_link(message, n);
+                    }
                     Some(HitId::ComposerText) => {
                         self.set_focus(Pane::Composer);
                         let view = self.composer_view;
@@ -1368,6 +1619,7 @@ impl App {
                 // The wheel scrolls what is under the pointer, wherever the focus is.
                 match self.hits.pane_at(mouse.column, mouse.row) {
                     Some(Pane::Timeline) => {
+                        self.timeline.older_armed |= up;
                         self.timeline.scroll = if up {
                             self.timeline.scroll + WHEEL_LINES
                         } else {
@@ -1992,6 +2244,7 @@ mod tests {
             room_id: app.rooms[app.active].id.clone(),
             generation: app.generation,
             messages,
+            reached_start: false,
         }
     }
 
@@ -2004,8 +2257,6 @@ mod tests {
 
         app.on_matrix(timeline(&app, vec![remote("1", "ann", "hello")]));
         assert_eq!(app.rooms[0].messages.len(), 1);
-        // At the newest message, so it is marked as read.
-        assert!(drain(&mut commands).contains(&"MarkRead(!a)".to_owned()));
 
         // An update from before the room switch must not land in the new room.
         let stale = timeline(&app, vec![remote("9", "ann", "late")]);
@@ -2018,6 +2269,7 @@ mod tests {
             room_id: "!b".into(),
             generation: app.generation - 1,
             messages: vec![remote("9", "ann", "late")],
+            reached_start: false,
         });
         assert!(app.rooms[1].messages.is_empty());
         redraw(&mut app, &mut terminal);
@@ -2107,7 +2359,7 @@ mod tests {
         drain(&mut commands);
         type_text(&mut app, "**hi**");
         app.on_event(key(KeyCode::Enter));
-        assert_eq!(drain(&mut commands), ["Send(!a)"]);
+        assert!(drain(&mut commands).contains(&"Send(!a)".to_owned()));
         assert!(app.composer.is_empty());
         assert_eq!(app.compose_mode, ComposeMode::Normal);
 
@@ -2171,6 +2423,342 @@ mod tests {
             summary("!i", "Invited", RoomCategory::Room, 0),
         ]));
         assert!(drain(&mut commands).contains(&"OpenRoom(!i)".to_owned()));
+    }
+
+    #[test]
+    fn links_open_by_click_and_key() {
+        let (mut app, mut terminal) = drawn();
+        let last = app.rooms[0].messages.len() - 1;
+        app.rooms[0].messages[last].html =
+            Some("see <a href=\"https://example.org/x\">the page</a> now".into());
+        app.timeline_rev += 1;
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "the page");
+        app.on_event(click(col + 2, row));
+        assert_eq!(
+            app.toast.as_ref().unwrap().0,
+            "Opening https://example.org/x"
+        );
+        // Clicking beside the link selects the message instead.
+        app.toast = None;
+        app.on_event(click(col - 3, row));
+        assert!(app.toast.is_none());
+        assert_eq!(app.timeline.selected, Some(last));
+        app.on_event(key(KeyCode::Char('o')));
+        assert_eq!(
+            app.toast.as_ref().unwrap().0,
+            "Opening https://example.org/x"
+        );
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Char('o')));
+        assert_eq!(
+            app.toast.as_ref().unwrap().0,
+            "Nothing to open in this message"
+        );
+    }
+
+    #[test]
+    fn view_stays_put_when_messages_arrive_while_reading_history() {
+        let (mut app, mut terminal, _commands) = connected();
+        let many = |n: usize| -> Vec<Message> {
+            (0..n)
+                .map(|i| remote(&i.to_string(), "ann", &format!("message {i}")))
+                .collect()
+        };
+        app.on_matrix(timeline(&app, many(60)));
+        redraw(&mut app, &mut terminal);
+        // Scroll up, note what is at the top of the view.
+        app.timeline.scroll = 20;
+        redraw(&mut app, &mut terminal);
+        let before = format!("{}", terminal.backend());
+        app.on_matrix(timeline(&app, many(63)));
+        redraw(&mut app, &mut terminal);
+        assert_eq!(format!("{}", terminal.backend()), before);
+        // At the bottom, new messages are shown as they arrive.
+        app.timeline.scroll = 0;
+        app.on_matrix(timeline(&app, many(64)));
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "message 63");
+    }
+
+    #[test]
+    fn typing_notices_and_retry() {
+        let (mut app, mut terminal, mut commands) = connected();
+        drain(&mut commands);
+        type_text(&mut app, "he");
+        // One notice for a burst of typing, not one per key.
+        assert_eq!(drain(&mut commands), ["Typing(!a, true)"]);
+        // Commands are not announced as typing.
+        app.composer.take();
+        app.on_event(key(KeyCode::Char('/')));
+        assert_eq!(drain(&mut commands), ["Typing(!a, false)"]);
+        app.composer.take();
+        type_text(&mut app, "hello");
+        drain(&mut commands);
+        // Switching rooms stops the notice in the room we leave.
+        app.open_room(1);
+        assert!(drain(&mut commands).contains(&"Typing(!a, false)".to_owned()));
+        // Sending stops it too.
+        type_text(&mut app, "x");
+        app.on_event(key(KeyCode::Enter));
+        let seen = drain(&mut commands);
+        assert_eq!(
+            seen[seen.len() - 2..],
+            ["Send(!b)", "Typing(!b, false)"],
+            "{seen:?}"
+        );
+
+        // A failed message offers retry on Enter and discard on Delete.
+        let mut failed = remote("9", "me", "did not go");
+        failed.state = SendState::Failed;
+        failed.item = Some(ItemRef::Transaction("txn1".into()));
+        app.on_matrix(timeline(&app, vec![failed]));
+        drain(&mut commands);
+        app.on_event(key(KeyCode::Up));
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "try again");
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(drain(&mut commands), ["Retry(!b)", "Redact(!b)"]);
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+
+        // Switched off in the config: no notices at all.
+        app.typing_notices = false;
+        app.on_event(key(KeyCode::Esc));
+        type_text(&mut app, "quiet");
+        assert!(drain(&mut commands).is_empty());
+    }
+
+    /// Draws a frame and runs what follows a draw, like the event loop does.
+    fn frame(app: &mut App, terminal: &mut Terminal<TestBackend>) {
+        redraw(app, terminal);
+        app.after_draw();
+    }
+
+    fn marked_read(commands: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>) -> usize {
+        drain(commands)
+            .iter()
+            .filter(|c| c.starts_with("MarkRead"))
+            .count()
+    }
+
+    #[test]
+    fn read_receipts_only_for_what_was_really_seen() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let many = |n: usize| -> Vec<Message> {
+            (0..n)
+                .map(|i| remote(&i.to_string(), "ann", &format!("message {i}")))
+                .collect()
+        };
+        app.timeline.reached_start = true;
+        drain(&mut commands);
+
+        // Arriving alone marks nothing; being drawn at the newest message does, once.
+        app.on_matrix(timeline(&app, many(50)));
+        assert_eq!(marked_read(&mut commands), 0);
+        frame(&mut app, &mut terminal);
+        frame(&mut app, &mut terminal);
+        assert_eq!(marked_read(&mut commands), 1);
+        // The same messages again (a profile loaded, a reaction): nothing new to mark.
+        app.on_matrix(timeline(&app, many(50)));
+        frame(&mut app, &mut terminal);
+        assert_eq!(marked_read(&mut commands), 0);
+
+        // Not while a popup covers the messages...
+        app.on_event(key(KeyCode::F(1)));
+        app.on_matrix(timeline(&app, many(51)));
+        frame(&mut app, &mut terminal);
+        assert_eq!(marked_read(&mut commands), 0);
+        // ...but as soon as it is closed.
+        app.on_event(key(KeyCode::Esc));
+        frame(&mut app, &mut terminal);
+        assert_eq!(marked_read(&mut commands), 1);
+
+        // Not while the terminal window is in the background.
+        app.on_event(Event::FocusLost);
+        app.on_matrix(timeline(&app, many(52)));
+        frame(&mut app, &mut terminal);
+        assert_eq!(marked_read(&mut commands), 0);
+        app.on_event(Event::FocusGained);
+        frame(&mut app, &mut terminal);
+        assert_eq!(marked_read(&mut commands), 1);
+
+        // Not while reading older messages; yes after scrolling back down.
+        app.on_event(key(KeyCode::PageUp));
+        frame(&mut app, &mut terminal);
+        app.on_matrix(timeline(&app, many(53)));
+        frame(&mut app, &mut terminal);
+        assert_eq!(marked_read(&mut commands), 0);
+        app.on_event(key(KeyCode::PageDown));
+        app.on_event(key(KeyCode::PageDown));
+        frame(&mut app, &mut terminal);
+        assert_eq!(marked_read(&mut commands), 1);
+
+        // Not when the room list hides the messages in a narrow window.
+        let mut narrow = Terminal::new(TestBackend::new(50, 20)).unwrap();
+        app.on_event(alt('1'));
+        app.on_matrix(timeline(&app, many(54)));
+        frame(&mut app, &mut narrow);
+        assert_eq!(marked_read(&mut commands), 0);
+    }
+
+    #[test]
+    fn history_loading_cannot_spin() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let paginations = |commands: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>| {
+            drain(commands)
+                .iter()
+                .filter(|c| c.starts_with("Paginate"))
+                .count()
+        };
+        let generation = app.generation;
+        app.on_matrix(timeline(&app, vec![remote("1", "ann", "hello")]));
+        drain(&mut commands);
+        // A view that is not full keeps asking, but gives up when requests bring
+        // nothing to show.
+        let mut asked = 0;
+        for _ in 0..20 {
+            frame(&mut app, &mut terminal);
+            asked += paginations(&mut commands);
+            app.on_matrix(MatrixEvent::Paginated {
+                generation,
+                reached_start: false,
+            });
+        }
+        assert_eq!(asked, 5);
+        // The user scrolling up asks once more.
+        app.on_event(key(KeyCode::PageUp));
+        frame(&mut app, &mut terminal);
+        assert_eq!(paginations(&mut commands), 1);
+        app.on_matrix(MatrixEvent::Paginated {
+            generation,
+            reached_start: false,
+        });
+
+        // A full view asks only when the user scrolls to the top.
+        let many: Vec<Message> = (0..80)
+            .map(|i| remote(&i.to_string(), "ann", &format!("message {i}")))
+            .collect();
+        app.on_matrix(timeline(&app, many.clone()));
+        for _ in 0..5 {
+            frame(&mut app, &mut terminal);
+        }
+        assert_eq!(paginations(&mut commands), 0);
+        app.timeline.scroll = usize::MAX / 2;
+        app.timeline.older_armed = true;
+        frame(&mut app, &mut terminal);
+        assert_eq!(paginations(&mut commands), 1);
+        // Finishing does not start the next one by itself, even at the top.
+        app.on_matrix(MatrixEvent::Paginated {
+            generation,
+            reached_start: false,
+        });
+        for _ in 0..5 {
+            frame(&mut app, &mut terminal);
+        }
+        assert_eq!(paginations(&mut commands), 0);
+
+        // A snapshot that contains the start of the room ends all loading.
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation,
+            messages: many,
+            reached_start: true,
+        });
+        app.on_event(key(KeyCode::PageUp));
+        frame(&mut app, &mut terminal);
+        assert_eq!(paginations(&mut commands), 0);
+    }
+
+    #[test]
+    fn editing_keeps_the_draft_and_the_message_kind() {
+        let (mut app, _terminal, mut commands) = connected();
+        let mut emote = remote("2", "me", "waves");
+        emote.kind = MsgKind::Emote;
+        app.on_matrix(timeline(&app, vec![remote("1", "ann", "hi"), emote]));
+        type_text(&mut app, "my draft");
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Char('e')));
+        // An action is edited as an action.
+        assert_eq!(app.composer.text(), "/me waves");
+        // Cancelling brings the draft back.
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "my draft");
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        // So does sending the edit.
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Char('e')));
+        type_text(&mut app, " again");
+        drain(&mut commands);
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).contains(&"Edit(!a)".to_owned()));
+        assert_eq!(app.composer.text(), "my draft");
+    }
+
+    #[test]
+    fn selection_never_lands_on_system_lines_and_clicks_do_not_yank_the_view() {
+        let (mut app, mut terminal, _commands) = connected();
+        let system = |id: &str| Message {
+            id: id.into(),
+            kind: MsgKind::System,
+            body: "bob joined".into(),
+            ..Message::default()
+        };
+        let mut messages: Vec<Message> = (0..60)
+            .map(|i| remote(&i.to_string(), "ann", &format!("message {i}")))
+            .collect();
+        messages.push(system("s1"));
+        app.on_matrix(timeline(&app, messages));
+        redraw(&mut app, &mut terminal);
+
+        // End / jump to newest picks the newest real message, not the system line.
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::End));
+        assert_eq!(app.timeline.selected, Some(59));
+
+        // Reading older messages, a click on the pane's empty area or a system line
+        // focuses it without scrolling back to the bottom.
+        app.on_event(key(KeyCode::Esc));
+        app.timeline.scroll = 30;
+        redraw(&mut app, &mut terminal);
+        let before = app.timeline.scroll;
+        app.on_event(click(app.screen.width - 3, 0));
+        assert_eq!(app.focus, Pane::Timeline);
+        redraw(&mut app, &mut terminal);
+        assert_eq!(app.timeline.scroll, before);
+    }
+
+    #[test]
+    fn a_real_room_is_preferred_over_an_invitation_at_startup() {
+        let (mut app, _terminal) = drawn();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        // The invitation arrives first, the joined room a moment later.
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!i",
+            "Invited",
+            RoomCategory::Invite,
+            0,
+        )]));
+        assert_eq!(app.rooms[app.active].id, "!i");
+        type_text(&mut app, "typed early");
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!a");
+        assert!(drain(&mut commands).contains(&"OpenRoom(!a)".to_owned()));
+        // What was typed meanwhile is not lost.
+        assert_eq!(app.composer.text(), "typed early");
+        // An invitation the user opened themselves stays open.
+        app.open_room(0);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            summary("!b", "Beta", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!i");
     }
 
     #[test]

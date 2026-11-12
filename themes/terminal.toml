@@ -26,6 +26,7 @@ status_key = { fg = "blue", bold = true }
 status_ok = { fg = "green" }
 reaction = { fg = "reset" }
 reaction_own = { fg = "blue", bold = true }
+spoiler = { fg = "darkgray", reversed = true }
 
 [users]
 colors = ["blue", "magenta", "green", "yellow", "cyan", "red", "lightblue", "lightmagenta"]

@@ -85,6 +85,14 @@ pub struct Message {
     pub reactions: Vec<Reaction>,
 }
 
+impl Message {
+    pub fn has_spoiler(&self) -> bool {
+        self.html
+            .as_deref()
+            .is_some_and(|html| html.contains("data-mx-spoiler"))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Room {
     /// Stable identity (the Matrix room id); indices change as the list reorders.

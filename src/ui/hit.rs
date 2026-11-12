@@ -23,6 +23,8 @@ pub enum HitId {
     Message(usize),
     /// Message index and reaction index.
     Reaction(usize, usize),
+    /// Message index and link index within it.
+    Link(usize, usize),
     ComposerText,
     /// A text field or button slot in a form.
     Field(usize),

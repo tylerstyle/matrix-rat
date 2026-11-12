@@ -69,6 +69,16 @@ pub enum MatrixCmd {
         room_id: String,
         item: ItemRef,
     },
+    /// Try again to send a message that failed.
+    Retry {
+        room_id: String,
+        item: ItemRef,
+    },
+    /// Tell the room whether we are typing.
+    Typing {
+        room_id: String,
+        typing: bool,
+    },
     MarkRead {
         room_id: String,
     },
@@ -100,6 +110,8 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Edit { room_id, .. } => write!(f, "Edit({room_id})"),
             Self::ToggleReaction { room_id, .. } => write!(f, "ToggleReaction({room_id})"),
             Self::Redact { room_id, .. } => write!(f, "Redact({room_id})"),
+            Self::Retry { room_id, .. } => write!(f, "Retry({room_id})"),
+            Self::Typing { room_id, typing } => write!(f, "Typing({room_id}, {typing})"),
             Self::MarkRead { room_id } => write!(f, "MarkRead({room_id})"),
             Self::Join { room_id } => write!(f, "Join({room_id})"),
             Self::Leave { room_id } => write!(f, "Leave({room_id})"),
@@ -149,7 +161,6 @@ pub struct RoomSummary {
     pub unread: bool,
 }
 
-#[derive(Debug)]
 pub enum MatrixEvent {
     /// No usable session; show the login form. `reason` explains a failed restore.
     NeedLogin {
@@ -171,6 +182,8 @@ pub enum MatrixEvent {
         room_id: String,
         generation: u64,
         messages: Vec<Message>,
+        /// The oldest message of the room is loaded; there is no more history.
+        reached_start: bool,
     },
     /// A request for older messages finished.
     Paginated {
@@ -185,6 +198,44 @@ pub enum MatrixEvent {
     /// Something the user did could not be carried out.
     ActionFailed(String),
     Error(String),
+}
+
+/// Hand-written so that message text never ends up in a log.
+impl std::fmt::Debug for MatrixEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NeedLogin { reason } => write!(f, "NeedLogin({reason:?})"),
+            Self::LoginFailed(error) => write!(f, "LoginFailed({error})"),
+            Self::BrowserLoginUrl(_) => f.write_str("BrowserLoginUrl"),
+            Self::LoggedIn { user_id } => write!(f, "LoggedIn({user_id})"),
+            Self::Sync(status) => write!(f, "Sync({status:?})"),
+            Self::Rooms(rooms) => write!(f, "Rooms({})", rooms.len()),
+            Self::Recovery(status) => write!(f, "Recovery({status:?})"),
+            Self::RecoverResult(result) => write!(f, "RecoverResult(ok: {})", result.is_ok()),
+            Self::Timeline {
+                room_id,
+                generation,
+                messages,
+                reached_start,
+            } => write!(
+                f,
+                "Timeline({room_id}, generation {generation}, {} messages, start: {reached_start})",
+                messages.len()
+            ),
+            Self::Paginated {
+                generation,
+                reached_start,
+            } => write!(
+                f,
+                "Paginated(generation {generation}, start: {reached_start})"
+            ),
+            Self::Typing { generation, names } => {
+                write!(f, "Typing(generation {generation}, {})", names.len())
+            }
+            Self::ActionFailed(error) => write!(f, "ActionFailed({error})"),
+            Self::Error(error) => write!(f, "Error({error})"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -610,6 +661,17 @@ mod tests {
                         messages,
                         ..
                     } => {
+                        // The debug output must not contain message text.
+                        let debug = format!(
+                            "{:?}",
+                            MatrixEvent::Timeline {
+                                room_id: String::new(),
+                                generation: 1,
+                                messages: messages.clone(),
+                                reached_start: false,
+                            }
+                        );
+                        assert!(!debug.contains(&body));
                         let confirmed = messages.iter().any(|m| {
                             m.body.contains(&body)
                                 && m.state == SendState::Sent

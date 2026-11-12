@@ -14,6 +14,7 @@ mod matrix;
 mod modal;
 mod model;
 mod paths;
+mod rich;
 mod terminal;
 mod text;
 mod theme;

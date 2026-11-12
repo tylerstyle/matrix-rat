@@ -16,6 +16,8 @@ pub struct Config {
     pub sidebar_width: u16,
     /// Capture the mouse. Turn off to use the terminal's own text selection.
     pub mouse: bool,
+    /// Let others see when you are typing.
+    pub typing_notices: bool,
 }
 
 impl Default for Config {
@@ -24,6 +26,7 @@ impl Default for Config {
             theme: DEFAULT_THEME.to_owned(),
             sidebar_width: 24,
             mouse: true,
+            typing_notices: true,
         }
     }
 }

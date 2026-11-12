@@ -1,6 +1,6 @@
 //! Per-room work: timelines, sending, reactions, receipts, invites.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -10,10 +10,12 @@ use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::events::room::message::{
     RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
 };
-use matrix_sdk::ruma::{EventId, OwnedTransactionId, RoomId};
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, RoomId};
 use matrix_sdk::{Client, Room};
+use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
-    RoomExt, Timeline, TimelineEventItemId, TimelineFocus, TimelineReadReceiptTracking,
+    RoomExt, Timeline, TimelineDetails, TimelineEventItemId, TimelineFocus, TimelineItem,
+    TimelineReadReceiptTracking,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
@@ -34,6 +36,8 @@ pub struct Timelines {
     cache: VecDeque<(String, Arc<Timeline>)>,
     /// Forwards the open room's timeline to the UI.
     forwarder: Option<JoinHandle<()>>,
+    /// The running request for older messages, if any.
+    paginator: Option<JoinHandle<()>>,
 }
 
 impl Timelines {
@@ -43,11 +47,15 @@ impl Timelines {
             events,
             cache: VecDeque::new(),
             forwarder: None,
+            paginator: None,
         }
     }
 
     pub fn close(&mut self) {
-        if let Some(task) = self.forwarder.take() {
+        for task in [self.forwarder.take(), self.paginator.take()]
+            .into_iter()
+            .flatten()
+        {
             task.abort();
         }
     }
@@ -150,27 +158,34 @@ impl Timelines {
                 room_id,
                 generation,
             } => {
-                let events = self.events.clone();
-                self.with_timeline(
-                    &room_id,
-                    "Could not load older messages",
-                    |timeline| async move {
-                        let reached_start = match timeline.paginate_backwards(PAGE).await {
-                            Ok(reached_start) => reached_start,
-                            Err(err) => {
-                                tracing::warn!(?err, "could not load older messages");
-                                // Report "done" so the UI does not retry in a loop.
-                                true
-                            }
-                        };
-                        let _ = events.send(MatrixEvent::Paginated {
-                            generation,
-                            reached_start,
-                        });
-                        Ok(())
-                    },
-                )
-                .await;
+                // One request at a time per open room.
+                if self
+                    .paginator
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished())
+                {
+                    return;
+                }
+                match self.timeline(&room_id).await {
+                    Ok(timeline) => {
+                        let events = self.events.clone();
+                        self.paginator = Some(tokio::spawn(async move {
+                            let reached_start = match timeline.paginate_backwards(PAGE).await {
+                                Ok(reached_start) => reached_start,
+                                Err(err) => {
+                                    tracing::warn!(?err, "could not load older messages");
+                                    // Report "done" so the UI does not retry in a loop.
+                                    true
+                                }
+                            };
+                            let _ = events.send(MatrixEvent::Paginated {
+                                generation,
+                                reached_start,
+                            });
+                        }));
+                    }
+                    Err(err) => self.fail("Could not load older messages", format!("{err:#}")),
+                }
             }
             MatrixCmd::Send {
                 room_id,
@@ -219,6 +234,30 @@ impl Timelines {
                     Ok(())
                 })
                 .await;
+            }
+            MatrixCmd::Retry { room_id, item } => {
+                self.with_timeline(&room_id, "Could not retry", |timeline| async move {
+                    let wanted = item_id(&item)?;
+                    let items = timeline.items().await;
+                    let handle = items
+                        .iter()
+                        .filter_map(|item| item.as_event())
+                        .find(|event| event.identifier() == wanted)
+                        .and_then(|event| event.local_echo_send_handle())
+                        .ok_or_else(|| anyhow!("this message is no longer waiting"))?;
+                    handle.unwedge().await?;
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::Typing { room_id, typing } => {
+                if let Ok(room) = self.room(&room_id) {
+                    tokio::spawn(async move {
+                        if let Err(err) = room.typing_notice(typing).await {
+                            tracing::debug!(?err, "could not send typing notice");
+                        }
+                    });
+                }
             }
             MatrixCmd::MarkRead { room_id } => {
                 if let Ok(timeline) = self.timeline(&room_id).await {
@@ -296,11 +335,36 @@ async fn forward(
     let (mut items, changes) = timeline.subscribe().await;
     pin_mut!(changes);
     let (_typing_guard, mut typing) = room.subscribe_to_typing_notifications();
-    let snapshot = |items: &_| MatrixEvent::Timeline {
+    let snapshot = |items: &Vector<Arc<TimelineItem>>| MatrixEvent::Timeline {
         room_id: room_id.clone(),
         generation,
         messages: convert(items, &own),
+        reached_start: items.iter().any(|item| item.is_timeline_start()),
     };
+    // Replies to messages that are not loaded only say "an earlier message" until the
+    // original is fetched. Ask once per reply.
+    let mut asked: HashSet<OwnedEventId> = HashSet::new();
+    let mut fetch_replies = |items: &Vector<Arc<TimelineItem>>| {
+        for event in items.iter().filter_map(|item| item.as_event()) {
+            let unavailable = event
+                .content()
+                .as_msglike()
+                .and_then(|content| content.in_reply_to.as_ref())
+                .is_some_and(|reply| matches!(reply.event, TimelineDetails::Unavailable));
+            if let (true, Some(event_id)) = (unavailable, event.event_id())
+                && asked.insert(event_id.to_owned())
+            {
+                let timeline = timeline.clone();
+                let event_id = event_id.to_owned();
+                tokio::spawn(async move {
+                    if let Err(err) = timeline.fetch_details_for_event(&event_id).await {
+                        tracing::debug!(?err, "could not fetch the replied-to message");
+                    }
+                });
+            }
+        }
+    };
+    fetch_replies(&items);
     if events.send(snapshot(&items)).is_err() {
         return;
     }
@@ -311,6 +375,7 @@ async fn forward(
                 for diff in diffs {
                     diff.apply(&mut items);
                 }
+                fetch_replies(&items);
                 if events.send(snapshot(&items)).is_err() {
                     return;
                 }

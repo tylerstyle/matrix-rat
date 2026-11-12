@@ -76,6 +76,9 @@ roles! {
     Scrollbar => "scrollbar",
     ScrollbarThumb => "scrollbar_thumb",
     Pill => "pill",
+    Code => "code",
+    Link => "link",
+    Spoiler => "spoiler",
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +102,8 @@ pub struct Theme {
     pub name: String,
     styles: Vec<Style>,
     users: Vec<Color>,
+    /// Set when the terminal has no 24-bit colour.
+    low_color: bool,
     /// Problems found while loading (unknown keys, bad colours). Never fatal.
     pub warnings: Vec<String>,
 }
@@ -343,13 +348,24 @@ impl Theme {
             name: file.name.unwrap_or_else(|| fallback_name.to_owned()),
             styles,
             users,
+            low_color: false,
             warnings,
         })
     }
 
     /// Replaces 24-bit colours with the nearest of the 256-colour palette, for terminals
     /// without truecolor support.
+    /// A colour that comes from a message rather than from the theme.
+    pub fn color(&self, r: u8, g: u8, b: u8) -> Color {
+        if self.low_color {
+            to_256(Color::Rgb(r, g, b))
+        } else {
+            Color::Rgb(r, g, b)
+        }
+    }
+
     pub fn downgrade_to_256(&mut self) {
+        self.low_color = true;
         for style in &mut self.styles {
             style.fg = style.fg.map(to_256);
             style.bg = style.bg.map(to_256);
@@ -387,6 +403,9 @@ fn default_style(role: Role, p: &Palette) -> Style {
         Role::Status => s.fg(p.muted),
         Role::StatusKey => s.fg(p.accent).add_modifier(bold),
         Role::Error => s.fg(p.error),
+        Role::Code => s.fg(p.accent),
+        Role::Link => s.fg(p.secondary).add_modifier(Modifier::UNDERLINED),
+        Role::Spoiler => s.fg(p.muted).bg(p.surface),
     }
 }
 

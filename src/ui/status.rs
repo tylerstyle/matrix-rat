@@ -70,6 +70,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 ("Shift-Enter", "line break", Some(A::Newline)),
                 ("↑", "select message", Some(A::SelectOlder)),
             ],
+            Pane::Timeline if app.selected_failed() => vec![
+                ("Enter", "try again", Some(A::Reply)),
+                ("Del", "discard", Some(A::Delete)),
+                ("Esc", "back", Some(A::Back)),
+            ],
             Pane::Timeline => vec![
                 ("Enter", "reply", Some(A::Reply)),
                 ("e", "edit", Some(A::Edit)),

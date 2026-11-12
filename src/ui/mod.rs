@@ -8,6 +8,8 @@ mod sidebar;
 mod status;
 mod timeline;
 
+pub use timeline::RowCache;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -221,6 +223,41 @@ mod tests {
             },
         ];
         insta::assert_snapshot!(render(&mut app, 70, 26));
+    }
+
+    #[test]
+    fn formatted_messages() {
+        use crate::model::Message;
+        let mut app = App::demo();
+        let html = |html: &str| Message {
+            sender: "alice".into(),
+            time: "12:00".into(),
+            day: "Today".into(),
+            body: "plain fallback".into(),
+            html: Some(html.into()),
+            ..Message::default()
+        };
+        let room = &mut app.rooms[0];
+        room.typing = None;
+        room.messages = vec![
+            html(
+                "Some <strong>bold</strong>, <em>italic</em>, <del>struck</del> and <code>code</code>.",
+            ),
+            html(
+                "<blockquote><p>A quote that is long enough to need wrapping onto a second row here.</p></blockquote><p>And the answer.</p>",
+            ),
+            html("<ul><li>first</li><li>second</li></ul><ol><li>one</li><li>two</li></ol>"),
+            html(
+                "<pre><code class=\"language-rust\">fn main() {\n    println!(\"hi\");\n}\n</code></pre>",
+            ),
+            html(
+                "A <a href=\"https://example.org\">link</a> and a <span data-mx-spoiler>secret</span>.",
+            ),
+        ];
+        insta::assert_snapshot!("formatted_covered", render(&mut app, 64, 30));
+        // Selecting the message uncovers its spoiler.
+        app.perform(Action::SelectOlder);
+        insta::assert_snapshot!("formatted_revealed", render(&mut app, 64, 30));
     }
 
     #[test]
