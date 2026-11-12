@@ -7,6 +7,39 @@ pub fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
+/// Makes text from outside safe to put on the screen: control characters (which could
+/// carry terminal escape sequences) are removed, tabs become spaces. Newlines stay.
+pub fn sanitize(text: &str) -> String {
+    if !text.contains(|c: char| unsafe_char(c) && c != '\n') {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            '\t' => out.push_str("    "),
+            c if unsafe_char(c) => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Like [`sanitize`], for text that must stay on one line (names, reaction keys).
+pub fn sanitize_line(text: &str) -> String {
+    sanitize(text).replace('\n', " ")
+}
+
+/// Control characters, and the invisible direction overrides that can reorder the rest
+/// of a terminal row.
+fn unsafe_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
 /// Word-wraps `text` to `max` columns. Explicit newlines are kept; words longer than a
 /// line are split. Always returns at least one line.
 pub fn wrap(text: &str, max: usize) -> Vec<String> {
@@ -102,6 +135,17 @@ mod tests {
                 assert!(width(&line) <= max.max(2), "{max}: {line:?}");
             }
         }
+    }
+
+    #[test]
+    fn sanitize_removes_escape_sequences() {
+        assert_eq!(sanitize("plain\ntext"), "plain\ntext");
+        assert_eq!(
+            sanitize("a\u{1b}[31mred\u{7}\tb\r\u{9b}x\u{0}"),
+            "a[31mred    bx"
+        );
+        assert_eq!(sanitize("abc\u{202e}def\u{2066}"), "abcdef");
+        assert_eq!(sanitize_line("a\nb\tc"), "a b    c");
     }
 
     #[test]

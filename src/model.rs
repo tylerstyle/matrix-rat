@@ -87,9 +87,13 @@ pub struct Message {
 
 impl Message {
     pub fn has_spoiler(&self) -> bool {
-        self.html
-            .as_deref()
-            .is_some_and(|html| html.contains("data-mx-spoiler"))
+        const MARK: &[u8] = b"data-mx-spoiler";
+        // Attribute names are case-insensitive, like in the parser.
+        self.html.as_deref().is_some_and(|html| {
+            html.as_bytes()
+                .windows(MARK.len())
+                .any(|window| window.eq_ignore_ascii_case(MARK))
+        })
     }
 }
 

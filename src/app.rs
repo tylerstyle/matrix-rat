@@ -127,6 +127,8 @@ pub struct App {
     /// When we last told the room we are typing, if we did.
     typing_sent: Option<Instant>,
     typing_notices: bool,
+    /// Bumped whenever a theme is loaded.
+    pub theme_rev: u64,
     /// Bumped whenever the open room's messages change, to invalidate `row_cache`.
     pub timeline_rev: u64,
     pub row_cache: Option<crate::ui::RowCache>,
@@ -197,6 +199,7 @@ impl App {
             edit_stash: None,
             typing_sent: None,
             typing_notices: true,
+            theme_rev: 0,
             timeline_rev: 0,
             row_cache: None,
             theme,
@@ -293,6 +296,7 @@ impl App {
                     theme.downgrade_to_256();
                 }
                 self.theme = theme;
+                self.theme_rev += 1;
             }
             Err(err) => {
                 tracing::warn!(theme = name, ?err, "could not load theme");
@@ -474,6 +478,8 @@ impl App {
         let typing = self.typing_notices
             && self.matrix.is_some()
             && !text.trim().is_empty()
+            // Correcting an old message is not "typing a message".
+            && !matches!(self.compose_mode, ComposeMode::Edit(_))
             && (!text.starts_with('/') || text.starts_with("//") || text.starts_with("/me "))
             && self
                 .room()
@@ -498,11 +504,12 @@ impl App {
 
     /// Opens the `n`th link of a message in the system browser.
     fn open_link(&mut self, message: usize, n: usize) -> bool {
-        let link = self
-            .messages()
-            .get(message)
-            .and_then(|m| m.html.as_deref())
-            .and_then(|html| crate::rich::from_html(html).links.into_iter().nth(n));
+        let link = self.messages().get(message).and_then(|m| {
+            crate::rich::Rich::of(m.html.as_deref(), &m.body)
+                .links
+                .into_iter()
+                .nth(n)
+        });
         match link {
             Some(url) => {
                 if self.matrix.is_some() {
@@ -1141,6 +1148,8 @@ impl App {
                 self.timeline = TimelineState::default();
                 self.composer.take();
                 self.compose_mode = ComposeMode::Normal;
+                self.edit_stash = None;
+                self.typing_sent = None;
                 self.user_id = None;
                 self.recovery_prompted = false;
                 self.sync = Some(SyncStatus::Stopped);
@@ -1304,7 +1313,11 @@ impl App {
                     .position(|room| room.kind != RoomKind::Invite)
                     .unwrap_or(0);
                 self.timeline = TimelineState::default();
+                if matches!(self.compose_mode, ComposeMode::Edit(_)) {
+                    self.end_edit();
+                }
                 self.compose_mode = ComposeMode::Normal;
+                self.typing_sent = None;
                 if open_id.is_some() {
                     let draft = self
                         .rooms
@@ -1568,6 +1581,10 @@ impl App {
                         }
                     }
                     Some(HitId::Link(message, n)) => {
+                        self.set_focus(Pane::Timeline);
+                        if self.selectable(message) {
+                            self.timeline.selected = Some(message);
+                        }
                         self.open_link(message, n);
                     }
                     Some(HitId::ComposerText) => {
@@ -2439,7 +2456,9 @@ mod tests {
             app.toast.as_ref().unwrap().0,
             "Opening https://example.org/x"
         );
-        // Clicking beside the link selects the message instead.
+        assert_eq!(app.timeline.selected, Some(last));
+        // Clicking beside the link selects the message without opening anything.
+        app.on_event(key(KeyCode::Esc));
         app.toast = None;
         app.on_event(click(col - 3, row));
         assert!(app.toast.is_none());
@@ -2678,9 +2697,13 @@ mod tests {
         app.on_matrix(timeline(&app, vec![remote("1", "ann", "hi"), emote]));
         type_text(&mut app, "my draft");
         app.on_event(key(KeyCode::Up));
+        drain(&mut commands);
         app.on_event(key(KeyCode::Char('e')));
-        // An action is edited as an action.
+        // An action is edited as an action, and editing is not announced as typing.
         assert_eq!(app.composer.text(), "/me waves");
+        type_text(&mut app, "!");
+        assert!(!drain(&mut commands).iter().any(|c| c.contains("true")));
+        app.on_event(key(KeyCode::Backspace));
         // Cancelling brings the draft back.
         app.on_event(key(KeyCode::Esc));
         assert_eq!(app.composer.text(), "my draft");

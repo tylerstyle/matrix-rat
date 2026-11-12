@@ -382,7 +382,10 @@ async fn forward(
             }
             users = typing.recv() => {
                 let names = match users {
-                    Ok(users) => users.iter().map(|u| u.localpart().to_owned()).collect(),
+                    Ok(users) => users
+                        .iter()
+                        .map(|u| crate::text::sanitize_line(u.localpart()))
+                        .collect(),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => return,
                 };

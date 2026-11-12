@@ -154,10 +154,7 @@ pub fn build_rows(
                 MsgKind::Redacted | MsgKind::Undecryptable => (theme.style(Role::ReplyQuote), None),
                 _ => (text_style, None),
             };
-            let mut rich = match &message.html {
-                Some(html) => rich::from_html(html),
-                None => Rich::plain(&message.body),
-            };
+            let mut rich = Rich::of(message.html.as_deref(), &message.body);
             if let (Some(intro), Some(first)) = (intro, rich.lines.first_mut()) {
                 first.segments.insert(
                     0,
@@ -394,6 +391,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         // Ask for history: an empty view may just not have loaded any yet.
         app.timeline.want_older = true;
+        app.timeline.view_full = false;
         return;
     }
 
@@ -408,7 +406,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         room.id.clone(),
         app.timeline_rev,
         content.width as usize,
-        theme.name.clone(),
+        // Changes whenever a theme is (re)loaded, even under the same name.
+        app.theme_rev.to_string(),
         revealed,
     );
     let newest = room
@@ -474,7 +473,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _)) if m == msg)
+            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _)) if m == msg)
             {
                 frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }

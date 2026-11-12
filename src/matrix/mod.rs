@@ -525,7 +525,7 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
         let notifications = room.num_unread_notifications();
         summaries.push(RoomSummary {
             id: room.room_id().to_string(),
-            name,
+            name: crate::text::sanitize_line(&name),
             category,
             notifications,
             mention: room.num_unread_mentions() > 0,

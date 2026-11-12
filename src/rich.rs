@@ -6,7 +6,7 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::text::width;
+use crate::text::{sanitize, width};
 
 /// How a piece of text should look. Resolved to colours by the theme at draw time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -47,20 +47,68 @@ pub struct Rich {
 }
 
 impl Rich {
-    /// Plain text: one line per line, no styling.
+    /// Plain text: one line per line, no styling, but web addresses become links.
     pub fn plain(text: &str) -> Rich {
-        Rich {
-            lines: text
-                .split('\n')
-                .map(|line| RichLine {
-                    segments: vec![Segment {
-                        text: line.to_owned(),
+        let text = sanitize(text);
+        let mut rich = Rich::default();
+        for line in text.split('\n') {
+            let mut segments = Vec::new();
+            let mut rest = line;
+            while let Some(start) = ["https://", "http://"]
+                .iter()
+                .filter_map(|scheme| rest.find(scheme))
+                .min()
+            {
+                let tail = &rest[start..];
+                let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+                // Punctuation that ends the sentence is not part of the address.
+                let url =
+                    tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'', '"']);
+                if url.len() <= "https://".len() {
+                    // Just the scheme: not a link.
+                    let cut = start + end.max(1);
+                    segments.push(Segment {
+                        text: rest[..cut].to_owned(),
                         format: Format::default(),
-                    }],
-                    ..RichLine::default()
-                })
-                .collect(),
-            links: Vec::new(),
+                    });
+                    rest = &rest[cut..];
+                    continue;
+                }
+                if start > 0 {
+                    segments.push(Segment {
+                        text: rest[..start].to_owned(),
+                        format: Format::default(),
+                    });
+                }
+                segments.push(Segment {
+                    text: url.to_owned(),
+                    format: Format {
+                        link: Some(rich.links.len()),
+                        ..Format::default()
+                    },
+                });
+                rich.links.push(url.to_owned());
+                rest = &tail[url.len()..];
+            }
+            if !rest.is_empty() || segments.is_empty() {
+                segments.push(Segment {
+                    text: rest.to_owned(),
+                    format: Format::default(),
+                });
+            }
+            rich.lines.push(RichLine {
+                segments,
+                ..RichLine::default()
+            });
+        }
+        rich
+    }
+
+    /// A message's text as it should be shown: its formatted version if it has one.
+    pub fn of(html: Option<&str>, body: &str) -> Rich {
+        match html {
+            Some(html) => from_html(html),
+            None => Rich::plain(body),
         }
     }
 }
@@ -231,10 +279,12 @@ impl Builder {
     }
 
     fn indent(&self) -> String {
+        // Deep nesting is capped so the text always keeps room on the row.
+        const MAX_DEPTH: usize = 4;
         format!(
             "{}{}",
-            "┃ ".repeat(self.quotes),
-            "  ".repeat(self.lists.len().saturating_sub(1))
+            "┃ ".repeat(self.quotes.min(MAX_DEPTH)),
+            "  ".repeat(self.lists.len().saturating_sub(1).min(MAX_DEPTH))
         )
     }
 
@@ -371,7 +421,16 @@ impl Builder {
                 self.end_line();
                 return;
             }
-            "p" | "div" => self.block_break(),
+            "p" | "div" | "tr" => self.block_break(),
+            "td" | "th" => {
+                // Table cells on one row, separated.
+                if self.open && !self.current.segments.is_empty() {
+                    self.push_piece(" │ ", &Format::default());
+                }
+                if name == "th" {
+                    format.bold = true;
+                }
+            }
             "blockquote" => {
                 self.block_break();
                 self.quotes += 1;
@@ -414,11 +473,12 @@ impl Builder {
             "code" | "tt" => format.code = true,
             "a" => {
                 if let Some(href) = attribute(attributes, "href") {
-                    let href = decode_entities(href);
+                    let href = sanitize(&decode_entities(href)).trim().to_owned();
                     // Only addresses that are safe to hand to the system opener.
                     let safe = ["https://", "http://", "mailto:", "matrix:"]
                         .iter()
-                        .any(|scheme| href.starts_with(scheme));
+                        .any(|scheme| href.starts_with(scheme))
+                        && !href.contains(char::is_whitespace);
                     if safe {
                         format.link = Some(self.rich.links.len());
                         self.rich.links.push(href);
@@ -450,7 +510,9 @@ impl Builder {
             self.formats.truncate(at);
         }
         match name {
-            "p" | "div" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => self.block_break(),
+            "p" | "div" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                self.block_break()
+            }
             "blockquote" => {
                 self.block_break();
                 self.quotes = self.quotes.saturating_sub(1);
@@ -503,7 +565,7 @@ pub fn from_html(html: &str) -> Rich {
             }
             Token::Text(text) => {
                 if builder.skip == 0 {
-                    builder.push_text(&decode_entities(text));
+                    builder.push_text(&sanitize(&decode_entities(text)));
                 }
             }
         }
@@ -771,8 +833,79 @@ mod tests {
     }
 
     #[test]
+    fn control_characters_never_reach_the_screen() {
+        for rich in [
+            from_html("<b>a\u{1b}[2Jb</b>&#27;&#x1b;c\u{9b}d\u{202e}e<pre>x\ty\u{1b}[0m\rz</pre>"),
+            Rich::plain("a\u{1b}[2Jb\u{7}\tc\u{202e}d"),
+        ] {
+            for line in &rich.lines {
+                for segment in &line.segments {
+                    assert!(
+                        !segment
+                            .text
+                            .contains(|c: char| c.is_control() || c == '\u{202e}'),
+                        "{segment:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn plain_text_passes_through() {
         let rich = Rich::plain("a <b> &amp;\nsecond");
         assert_eq!(texts(&rich), ["a <b> &amp;", "second"]);
+        assert!(rich.links.is_empty());
+    }
+
+    #[test]
+    fn plain_text_addresses_become_links() {
+        let rich = Rich::plain(
+            "see https://example.org/a?b=1, or (http://x.test). https:// alone\nhttps://last.example",
+        );
+        assert_eq!(
+            rich.links,
+            [
+                "https://example.org/a?b=1",
+                "http://x.test",
+                "https://last.example"
+            ]
+        );
+        assert_eq!(
+            texts(&rich),
+            [
+                "see https://example.org/a?b=1, or (http://x.test). https:// alone",
+                "https://last.example"
+            ]
+        );
+        let linked: Vec<&str> = rich.lines[0]
+            .segments
+            .iter()
+            .filter(|s| s.format.link.is_some())
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(linked, ["https://example.org/a?b=1", "http://x.test"]);
+    }
+
+    #[test]
+    fn tables_and_deep_nesting() {
+        assert_eq!(
+            texts(&from_html(
+                "<table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>"
+            )),
+            ["a │ b", "1 │ 2"]
+        );
+        let deep = format!(
+            "{}x{}",
+            "<blockquote>".repeat(100),
+            "</blockquote>".repeat(100)
+        );
+        for row in wrap(&from_html(&deep), 20) {
+            assert!(width(&row.prefix) <= 8, "{row:?}");
+        }
+        let rich = from_html(
+            "<a href=\" https://ok.example \">x</a><a href=\"https://bad example\">y</a>",
+        );
+        assert_eq!(rich.links, ["https://ok.example"]);
     }
 }

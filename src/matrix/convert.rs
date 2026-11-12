@@ -12,6 +12,7 @@ use matrix_sdk_ui::timeline::{
 };
 
 use crate::model::{ItemRef, Message, MsgKind, Reaction, SendState};
+use crate::text::{sanitize, sanitize_line};
 
 pub fn convert(items: &Vector<Arc<TimelineItem>>, own: &UserId) -> Vec<Message> {
     let now = Local::now();
@@ -43,7 +44,7 @@ fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) -> String {
         TimelineDetails::Ready(Profile {
             display_name: Some(name),
             ..
-        }) if !name.trim().is_empty() => name.clone(),
+        }) if !sanitize_line(name).trim().is_empty() => sanitize_line(name),
         _ => user.localpart().to_owned(),
     }
 }
@@ -201,6 +202,16 @@ fn event_message(
             system(&mut message, format!("{sender} started a call"));
         }
         _ => system(&mut message, "An event this app cannot read".to_owned()),
+    }
+    // Text from other people goes to the terminal: no control characters.
+    message.sender = sanitize_line(&message.sender);
+    message.body = sanitize(&message.body);
+    if let Some((sender, quoted)) = &mut message.reply_to {
+        *sender = sanitize_line(sender);
+        *quoted = sanitize_line(quoted);
+    }
+    for reaction in &mut message.reactions {
+        reaction.key = sanitize_line(&reaction.key);
     }
     Some(message)
 }
