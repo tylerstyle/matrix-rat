@@ -18,6 +18,9 @@ const SETTLE: Duration = Duration::from_millis(120);
 pub struct ThemeWatch {
     _watcher: Option<RecommendedWatcher>,
     changes: UnboundedReceiver<()>,
+    /// When the current burst of changes is considered over. Kept here, not in the
+    /// future, so that a change is never lost when `changed()` is cancelled.
+    settle_at: Option<tokio::time::Instant>,
 }
 
 impl ThemeWatch {
@@ -63,25 +66,31 @@ impl ThemeWatch {
         Ok(Self {
             _watcher: watcher,
             changes,
+            settle_at: None,
         })
     }
 
-    /// Waits for a change, then for the burst of changes around it to end.
+    /// Waits for a change, then briefly for the burst of changes around it to end.
+    ///
+    /// Safe to cancel and call again (it is one branch of the event loop's `select!`):
+    /// a change that was already received is remembered in `settle_at`.
     pub async fn changed(&mut self) {
-        if self.changes.recv().await.is_none() {
-            // Nothing can ever arrive; never resolve.
-            std::future::pending::<()>().await;
-        }
-        loop {
-            tokio::time::sleep(SETTLE).await;
-            let mut more = false;
-            while self.changes.try_recv().is_ok() {
-                more = true;
+        let settle_at = match self.settle_at {
+            Some(at) => at,
+            None => {
+                if self.changes.recv().await.is_none() {
+                    // Nothing can ever arrive; never resolve.
+                    std::future::pending::<()>().await;
+                }
+                let at = tokio::time::Instant::now() + SETTLE;
+                self.settle_at = Some(at);
+                at
             }
-            if !more {
-                return;
-            }
-        }
+        };
+        tokio::time::sleep_until(settle_at).await;
+        self.settle_at = None;
+        // Whatever arrived meanwhile is covered by the reload that follows.
+        while self.changes.try_recv().is_ok() {}
     }
 }
 
@@ -93,6 +102,11 @@ fn watch(watcher: &mut RecommendedWatcher, dir: &Path) -> Result<()> {
 
 /// `matrix-rat --reload-theme`: asks every running instance to reload its theme.
 /// Returns how many were told.
+///
+/// A pid file alone proves nothing: after a crash the number may belong to another
+/// program, and SIGUSR1 would end it. A running instance keeps its pid file locked, so
+/// only files that are locked right now are trusted, and the process is checked to be
+/// this program before it is signalled.
 pub fn signal_running_instances(paths: &Paths) -> usize {
     let Ok(entries) = std::fs::read_dir(&paths.runtime_dir) else {
         return 0;
@@ -102,12 +116,27 @@ pub fn signal_running_instances(paths: &Paths) -> usize {
         if path.extension().is_none_or(|ext| ext != "pid") {
             continue;
         }
+        let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) else {
+            continue;
+        };
+        match file.try_lock() {
+            // Nobody holds it: left behind by an instance that is gone.
+            Ok(()) => {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(_)) => continue,
+        }
         // Only ever a plain process number, never anything else from the file.
         let pid = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| text.trim().parse::<u32>().ok())
             .filter(|pid| *pid > 1);
         let Some(pid) = pid else { continue };
+        if !is_this_program(pid) {
+            continue;
+        }
         let sent = std::process::Command::new("kill")
             .args(["-USR1", &pid.to_string()])
             .stdout(std::process::Stdio::null())
@@ -116,12 +145,18 @@ pub fn signal_running_instances(paths: &Paths) -> usize {
             .is_ok_and(|status| status.success());
         if sent {
             told += 1;
-        } else {
-            // A leftover from an instance that did not exit cleanly.
-            let _ = std::fs::remove_file(&path);
         }
     }
     told
+}
+
+/// Whether process `pid` is a matrix-rat. Where the system cannot tell us (no /proc),
+/// the lock on the pid file has to be proof enough.
+fn is_this_program(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(name) => name.trim() == env!("CARGO_PKG_NAME"),
+        Err(_) => !std::path::Path::new("/proc/self").exists(),
+    }
 }
 
 #[cfg(test)]
@@ -169,8 +204,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn a_change_survives_cancellation() {
+        let (sender, changes) = unbounded_channel();
+        let mut watch = ThemeWatch {
+            _watcher: None,
+            changes,
+            settle_at: None,
+        };
+        sender.send(()).unwrap();
+        // Cancelled during the settle time, as happens when another event arrives in
+        // the event loop...
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), watch.changed())
+                .await
+                .is_err()
+        );
+        // ...the change is still reported by the next call.
+        tokio::time::timeout(Duration::from_secs(2), watch.changed())
+            .await
+            .expect("the change was lost");
+        // And only once.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), watch.changed())
+                .await
+                .is_err()
+        );
+    }
+
     #[test]
-    fn stale_and_bogus_pid_files_are_ignored() {
+    fn only_locked_pid_files_of_this_program_are_signalled() {
         let root = std::env::temp_dir().join(format!("matrix-rat-pids-{}", std::process::id()));
         let paths = Paths {
             config_dir: root.join("config"),
@@ -180,14 +243,28 @@ mod tests {
             profile: "t".into(),
         };
         paths.create_dirs().unwrap();
-        std::fs::write(paths.runtime_dir.join("a.pid"), "-1; rm -rf /\n").unwrap();
-        std::fs::write(paths.runtime_dir.join("b.pid"), "1\n").unwrap();
+        // Leftovers: a live but unrelated process (this test), nonsense, a dead pid.
+        std::fs::write(
+            paths.runtime_dir.join("a.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        std::fs::write(paths.runtime_dir.join("b.pid"), "-1; rm -rf /\n").unwrap();
         std::fs::write(paths.runtime_dir.join("c.pid"), "4194000\n").unwrap();
         std::fs::write(paths.runtime_dir.join("d.txt"), "123\n").unwrap();
+        // Nothing is signalled (we are still alive to assert it), leftovers are removed.
         assert_eq!(signal_running_instances(&paths), 0);
-        // The dead instance's file was cleaned up; the malformed ones were not touched.
-        assert!(!paths.runtime_dir.join("c.pid").exists());
-        assert!(paths.runtime_dir.join("a.pid").exists());
+        for name in ["a.pid", "b.pid", "c.pid"] {
+            assert!(!paths.runtime_dir.join(name).exists(), "{name}");
+        }
+        assert!(paths.runtime_dir.join("d.txt").exists());
+
+        // A held lock marks a live instance: its file is never removed. It is not
+        // signalled here either, because this test binary is not matrix-rat.
+        let lock = crate::lock::ProfileLock::acquire(&paths).unwrap();
+        assert_eq!(signal_running_instances(&paths), 0);
+        assert!(paths.pid_file().exists());
+        drop(lock);
         let _ = std::fs::remove_dir_all(root);
     }
 }

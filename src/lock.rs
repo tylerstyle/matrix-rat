@@ -12,6 +12,7 @@ use crate::paths::Paths;
 #[derive(Debug)]
 pub struct ProfileLock {
     _file: File,
+    _pid: File,
     pid_file: PathBuf,
 }
 
@@ -36,13 +37,25 @@ impl ProfileLock {
             }
         }
 
+        // The pid file stays open and locked for as long as we run. The lock, which the
+        // system drops even if we are killed, is what tells `--reload-theme` that the
+        // number in the file still belongs to a matrix-rat.
         let pid_file = paths.pid_file();
-        let mut pid = File::create(&pid_file)
+        let mut pid = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&pid_file)
             .with_context(|| format!("could not write {}", pid_file.display()))?;
+        pid.try_lock()
+            .map_err(|_| anyhow::anyhow!("could not lock {}", pid_file.display()))?;
+        pid.set_len(0)?;
         writeln!(pid, "{}", std::process::id())?;
+        pid.flush()?;
 
         Ok(Self {
             _file: file,
+            _pid: pid,
             pid_file,
         })
     }

@@ -86,7 +86,12 @@ matrix-rat --print-template pywal > ~/.config/wal/templates/matrix-rat.toml
 ln -sf ~/.cache/wal/matrix-rat.toml ~/.config/matrix-rat/themes/pywal.toml
 ```
 
-Set `theme = "pywal"`.
+Set `theme = "pywal"`. Because the theme file is a link into pywal's cache, changes are
+not noticed automatically; let pywal tell the app:
+
+```sh
+wal -i wallpaper.png -o "matrix-rat --reload-theme"
+```
 
 ## Writing a theme by hand
 

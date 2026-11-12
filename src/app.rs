@@ -130,6 +130,10 @@ pub struct App {
     /// The theme the user asked for, which may not exist yet (a generator may still
     /// have to write it).
     wanted_theme: String,
+    /// Where the configuration lives, to notice a changed `theme` setting.
+    config_file: Option<PathBuf>,
+    /// The `theme` setting as last read from the configuration.
+    config_theme: String,
     /// Bumped whenever a theme is loaded.
     pub theme_rev: u64,
     /// Bumped whenever the open room's messages change, to invalidate `row_cache`.
@@ -164,6 +168,7 @@ impl App {
         app.themes_dir = themes_dir;
         app.sidebar.width = config.sidebar_width;
         app.typing_notices = config.typing_notices;
+        app.config_theme = config.theme.clone();
         app.set_theme(&config.theme);
         app
     }
@@ -203,6 +208,8 @@ impl App {
             typing_sent: None,
             typing_notices: true,
             wanted_theme: DEFAULT_THEME.to_owned(),
+            config_file: None,
+            config_theme: String::new(),
             theme_rev: 0,
             timeline_rev: 0,
             row_cache: None,
@@ -284,13 +291,26 @@ impl App {
         self.toast = Some((text.into(), Instant::now()));
     }
 
-    /// Loads the wanted theme again, after its file changed. Quiet unless it fails:
-    /// a generator recolouring the desktop should not pop up messages.
+    /// Called when something in the config or themes directory changed (or on
+    /// request): follows a changed `theme` setting and loads the wanted theme again.
+    /// Quiet unless a theme file is broken: a desktop recolouring itself should not
+    /// pop up messages, and a theme that a generator has yet to write is just awaited.
     pub fn reload_theme(&mut self) {
         self.dirty = true;
         self.theme_names = Theme::available(&self.themes_dir);
+        if let Some(file) = &self.config_file
+            && let Ok(config) = Config::load(file)
+            && config.theme != self.config_theme
+        {
+            self.config_theme = config.theme.clone();
+            self.wanted_theme = config.theme;
+        }
         let name = self.wanted_theme.clone();
-        self.set_theme(&name);
+        let exists = Theme::builtin(&name).is_some()
+            || self.themes_dir.join(format!("{name}.toml")).exists();
+        if exists {
+            self.set_theme(&name);
+        }
     }
 
     fn set_theme(&mut self, name: &str) {
@@ -819,10 +839,12 @@ impl App {
             }
             Action::ToggleHelp => self.help_open = !self.help_open,
             Action::CycleTheme => {
+                // Look again: a generator may have written a new theme since.
+                self.theme_names = Theme::available(&self.themes_dir);
                 let at = self
                     .theme_names
                     .iter()
-                    .position(|n| *n == self.theme.name)
+                    .position(|n| *n == self.wanted_theme)
                     .map_or(0, |i| (i + 1) % self.theme_names.len());
                 let name = self.theme_names[at].clone();
                 self.set_theme(&name);
@@ -1712,6 +1734,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
         (Some(handle), Some(events))
     };
     let mut app = App::new(config, paths.themes_dir(), matrix.clone());
+    app.config_file = Some(paths.config_file());
     let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
 
     while !app.should_quit {
@@ -2838,6 +2861,34 @@ mod tests {
             app.theme.style(crate::theme::Role::BorderFocused).fg,
             Some(app.theme.color(4, 5, 6))
         );
+        // The theme vanishing for a moment (a generator rewriting it) is not an error.
+        app.toast = None;
+        std::fs::remove_file(dir.join("generated.toml")).unwrap();
+        app.reload_theme();
+        assert!(app.toast.is_none());
+        assert_eq!(app.theme.name, "generated");
+
+        // A changed `theme` setting in the config file is followed.
+        // Lives next to the themes directory, not inside it.
+        let config_file = dir.with_extension("config.toml");
+        std::fs::write(&config_file, "theme = \"terminal\"\n").unwrap();
+        app.config_file = Some(config_file.clone());
+        app.reload_theme();
+        assert_eq!(app.theme.name, "terminal");
+        // F3 moves on from the theme in use, and finds newly written themes.
+        std::fs::write(dir.join("zz-new.toml"), "[palette]\n").unwrap();
+        app.perform(Action::CycleTheme);
+        assert_eq!(app.theme.name, "zz-new");
+        std::fs::write(&config_file, "theme = \"generated\"\n").unwrap();
+        app.reload_theme();
+        std::fs::write(
+            dir.join("generated.toml"),
+            "[palette]\nprimary = \"#040506\"\n",
+        )
+        .unwrap();
+        app.reload_theme();
+        assert_eq!(app.theme.name, "generated");
+
         app.toast = None;
         std::fs::write(dir.join("generated.toml"), "[palette\n").unwrap();
         app.reload_theme();
@@ -2846,6 +2897,7 @@ mod tests {
             Some(app.theme.color(4, 5, 6))
         );
         assert!(app.toast.is_some());
+        let _ = std::fs::remove_file(config_file);
         let _ = std::fs::remove_dir_all(dir);
     }
 

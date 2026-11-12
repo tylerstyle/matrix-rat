@@ -1,5 +1,5 @@
 # matrix-rat theme template for pywal / pywal16. See contrib/themes/README.md.
-name = "pywal"
+# No name here: the theme is called after its file.
 
 [palette]
 bg = "{background}"

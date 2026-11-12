@@ -1,6 +1,6 @@
 # matrix-rat theme template for Noctalia (v5 and v4) and for matugen — they share the
 # {{colors.<name>.default.hex}} syntax. See contrib/themes/README.md for how to register it.
-name = "noctalia"
+# No name here: the theme is called after its file.
 
 [palette]
 bg = "{{colors.surface.default.hex}}"
@@ -22,5 +22,4 @@ colors = [
     "{{colors.tertiary.default.hex}}",
     "{{colors.error.default.hex}}",
     "{{colors.inverse_primary.default.hex}}",
-    "{{colors.on_surface_variant.default.hex}}",
 ]
