@@ -58,8 +58,19 @@ fn marker(message: &Message) -> Option<(String, Role)> {
     match (message.state, message.edited) {
         (SendState::Sending, _) => Some((message.sending_label(), Role::Muted)),
         (SendState::Failed, _) => Some((message.failed_label(), Role::Error)),
-        (SendState::Sent, true) => Some(("(edited)".to_owned(), Role::Muted)),
-        (SendState::Sent, false) => None,
+        (SendState::Sent, edited) => {
+            let role = match message.shield {
+                Some(shield) if shield.serious() => Role::Error,
+                _ => Role::Muted,
+            };
+            let parts: Vec<&str> = message
+                .shield
+                .map(|shield| shield.label())
+                .into_iter()
+                .chain(edited.then_some("(edited)"))
+                .collect();
+            (!parts.is_empty()).then(|| (parts.join(" "), role))
+        }
     }
 }
 
@@ -766,6 +777,44 @@ mod tests {
     use crate::images::Graphics;
     use crate::model::demo_rooms;
     use crate::theme::DEFAULT_THEME;
+
+    #[test]
+    fn shields_are_marked_after_the_text() {
+        use crate::model::Shield;
+        let mut message = Message {
+            body: "hello".into(),
+            ..Message::default()
+        };
+        assert_eq!(marker(&message), None);
+        message.shield = Some(Shield::UnverifiedDevice);
+        message.edited = true;
+        assert_eq!(
+            marker(&message),
+            Some((
+                "⚠ from an unverified device (edited)".to_owned(),
+                Role::Error
+            ))
+        );
+        // Not a warning, only a remark; and it shows up in the laid-out rows.
+        message.shield = Some(Shield::NotEncrypted);
+        message.edited = false;
+        assert_eq!(
+            marker(&message),
+            Some(("not encrypted".to_owned(), Role::Muted))
+        );
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let mut room = demo_rooms().remove(0);
+        room.messages = vec![message];
+        let images = ImageStore::new(Graphics::halfblocks());
+        let text: String = build_rows(&room, 60, &theme, None, &images)
+            .iter()
+            .map(|row| row.line.to_string())
+            .collect();
+        assert!(
+            text.contains("hello") && text.contains("not encrypted"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn rows_fit_and_group_by_sender() {

@@ -14,6 +14,7 @@ use matrix_sdk_ui::timeline::{
 
 use crate::model::{
     Attachment, ImageInfo, ImageSource, ItemRef, MediaRef, Message, MsgKind, Reaction, SendState,
+    Shield,
 };
 use crate::text::{sanitize, sanitize_line};
 
@@ -77,6 +78,7 @@ fn event_message(
     let sender = display_name(event.sender_profile(), event.sender());
     let when = local_time(event.timestamp());
     let mut message = Message {
+        shield: shield(event),
         id,
         item: Some(match event.identifier() {
             TimelineEventItemId::EventId(id) => ItemRef::Event(id.to_string()),
@@ -280,6 +282,24 @@ fn event_message(
         reaction.key = sanitize_line(&reaction.key);
     }
     Some(message)
+}
+
+/// What the SDK advises to warn about. Messages whose keys came from the backup
+/// ("authenticity not guaranteed") are left unmarked: that is all of the older
+/// history on a new device, and a mark on every line would say nothing.
+fn shield(event: &EventTimelineItem) -> Option<Shield> {
+    use matrix_sdk_ui::timeline::TimelineEventShieldState as State;
+    use matrix_sdk_ui::timeline::TimelineEventShieldStateCode as Code;
+    let (State::Red { code } | State::Grey { code }) = event.get_shield(false) else {
+        return None;
+    };
+    match code {
+        Code::UnknownDevice | Code::UnsignedDevice => Some(Shield::UnverifiedDevice),
+        Code::VerificationViolation => Some(Shield::IdentityChanged),
+        Code::MismatchedSender => Some(Shield::SenderMismatch),
+        Code::SentInClear => Some(Shield::NotEncrypted),
+        Code::AuthenticityNotGuaranteed | Code::UnverifiedIdentity => None,
+    }
 }
 
 /// Marks a message as carrying a file and returns the line that stands for it.

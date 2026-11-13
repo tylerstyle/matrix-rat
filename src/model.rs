@@ -93,6 +93,37 @@ pub struct Message {
     pub upload: Option<(u64, u64)>,
     /// Why sending failed, in a few words.
     pub send_error: Option<String>,
+    /// A doubt about who really sent this (encrypted rooms only).
+    pub shield: Option<Shield>,
+}
+
+/// Why a message in an encrypted room cannot be fully trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shield {
+    /// Sent from a device its owner has not verified (or that is unknown).
+    UnverifiedDevice,
+    /// The sender's identity changed after having been verified.
+    IdentityChanged,
+    /// The sender named in the message is not the one who encrypted it.
+    SenderMismatch,
+    /// Arrived unencrypted although the room is encrypted.
+    NotEncrypted,
+}
+
+impl Shield {
+    pub fn label(self) -> &'static str {
+        match self {
+            Shield::UnverifiedDevice => "⚠ from an unverified device",
+            Shield::IdentityChanged => "⚠ sender's identity has changed",
+            Shield::SenderMismatch => "⚠ sender could not be confirmed",
+            Shield::NotEncrypted => "not encrypted",
+        }
+    }
+
+    /// A warning, as opposed to a remark.
+    pub fn serious(self) -> bool {
+        self != Shield::NotEncrypted
+    }
 }
 
 /// The one line under a message that started a thread.
