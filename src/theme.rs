@@ -523,6 +523,11 @@ mod tests {
     #[test]
     fn templates_are_valid_themes_once_filled_in() {
         for (name, template) in TEMPLATES {
+            // Generators render comments too and fail on a placeholder they cannot
+            // resolve (issue #1).
+            for comment in template.lines().filter(|l| l.trim_start().starts_with('#')) {
+                assert!(!comment.contains('{'), "{name}: {comment}");
+            }
             // Stand in for the generator: replace every placeholder with a colour.
             let mut filled = String::new();
             let mut rest = *template;

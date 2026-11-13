@@ -1,5 +1,6 @@
-# matrix-rat theme template for Noctalia (v5 and v4) and for matugen — they share the
-# {{colors.<name>.default.hex}} syntax. See contrib/themes/README.md for how to register it.
+# matrix-rat theme template for Noctalia (v5 and v4) and for matugen, which share the same
+# colors.<name>.default.hex placeholder syntax. See contrib/themes/README.md for how to register it.
+# Do not write a literal placeholder in these comments: Noctalia renders comments too.
 # No name here: the theme is called after its file.
 
 [palette]

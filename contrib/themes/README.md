@@ -17,8 +17,9 @@ The templates in this directory are also built into the program:
 matrix-rat --print-template noctalia   # also: matugen, wallust, pywal
 ```
 
-> These templates were written from each tool's documentation and have not yet been
-> tested against the tools themselves. Reports and fixes are welcome.
+> The Noctalia template is tested with Noctalia v5.4.1. The others were written from each
+> tool's documentation and have not yet been run against the tools themselves. Reports
+> and fixes are welcome.
 
 ## Noctalia v5
 
@@ -36,8 +37,16 @@ output_path = "$XDG_CONFIG_HOME/matrix-rat/themes/noctalia.toml"
 post_hook   = "matrix-rat --reload-theme"
 ```
 
-Then set `theme = "noctalia"` in `~/.config/matrix-rat/config.toml` (or pick it with
-`F3`). The `post_hook` is optional; the file watcher notices the change by itself.
+Then set `theme = "noctalia"` in `~/.config/matrix-rat/config.toml` (or pick it in the
+settings, `F2`), and apply once with `noctalia msg templates-apply`.
+
+The `post_hook` is optional; the file watcher notices the change by itself. If you keep
+it: hooks run in Noctalia's own environment, so either `matrix-rat` must be on the `PATH`
+Noctalia was started with, or the hook needs the full path (for example
+`~/.cargo/bin/matrix-rat --reload-theme`). The `$XDG_CONFIG_HOME` paths work even when
+that variable is not set; Noctalia falls back to `~/.config`.
+
+Tested with Noctalia v5.4.1.
 
 ## Noctalia v4 (legacy)
 

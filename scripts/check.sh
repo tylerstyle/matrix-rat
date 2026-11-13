@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Everything a milestone must pass before review.
+# Everything a milestone must pass before review. Needs cargo, rustfmt and clippy from
+# the same Rust release; `nix-shell --run scripts/check.sh` provides them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo fmt --check
