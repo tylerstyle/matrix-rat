@@ -840,11 +840,10 @@ impl App {
         {
             return;
         }
-        let text = self.composer.text().trim().to_owned();
         let Some(room_id) = self.room().map(|room| room.id.clone()) else {
             return;
         };
-        if text.is_empty() {
+        if self.composer.text().trim().is_empty() {
             return;
         }
         if self
@@ -854,7 +853,7 @@ impl App {
             self.show_toast("Accept the invitation first");
             return;
         }
-        let outgoing = match self.format_outgoing(&text) {
+        let outgoing = match self.format_outgoing(self.composer.text()) {
             // The draft stays, so a typo in a command is easy to fix.
             Outgoing::Rejected(reason) => return self.show_toast(reason),
             outgoing => outgoing,
@@ -1467,7 +1466,7 @@ impl App {
             }
 
             Action::Send => self.send(),
-            Action::Newline => self.composer.insert("\n"),
+            Action::Newline => self.insert_composer_text("\n"),
             Action::CancelCompose => self.cancel_compose(),
 
             Action::AcceptInvite | Action::DeclineInvite => {
@@ -1608,7 +1607,7 @@ impl App {
         };
         let Some((index, id)) = picker.react_to else {
             self.set_focus(Pane::Composer);
-            self.composer.insert(emoji);
+            self.insert_composer_text(emoji);
             return;
         };
         // The message may have moved while the picker was open.
@@ -2167,6 +2166,7 @@ impl App {
         let ctrl = mods.contains(KeyModifiers::CONTROL);
         let alt = mods.contains(KeyModifiers::ALT);
         let before = self.composer.text().to_owned();
+        let before_cursor = self.composer.cursor();
         match code {
             KeyCode::Char(c) if !ctrl && !alt => self.type_char(c),
             KeyCode::Char('b') if alt => self.composer.word_left(),
@@ -2187,6 +2187,7 @@ impl App {
             _ => {}
         }
         if self.composer.text() != before {
+            self.adjust_marks_for_cursor_edit(before_cursor, before.len());
             self.allow_text_edit_reopen_completion();
         } else {
             self.sync_completion();
@@ -2248,7 +2249,7 @@ impl App {
             }
             _ => {
                 self.set_focus(Pane::Composer);
-                self.composer.insert(&text);
+                self.insert_composer_text(&text);
                 self.allow_text_edit_reopen_completion();
             }
         }
