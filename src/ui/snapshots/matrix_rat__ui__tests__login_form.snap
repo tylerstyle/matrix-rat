@@ -29,6 +29,6 @@ expression: "render(&mut app, 100, 30)"
 "│                      ││                                                                          │"
 "│                      │╰──────────────────────────────────────────────────────────────────────────╯"
 "│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
-"│                      ││ Type a message…                                                       ☺  │"
+"│                      ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ○ stopped  Enter send  Shift-Enter line break  ↑ select message  F1 help  F2 settings  F3 rat-dark "

@@ -45,6 +45,7 @@ pub struct Timelines {
     /// `timeline` then answers with that thread's timeline instead of the room's.
     thread: Option<String>,
     read_marks: threads::ReadMarks,
+    uploads: super::upload::Uploads,
 }
 
 impl Timelines {
@@ -52,6 +53,7 @@ impl Timelines {
         Self {
             media: super::media::Media::new(client.clone(), events.clone()),
             member_fetches: tokio::task::JoinSet::new(),
+            uploads: super::upload::Uploads::new(client.clone(), events.clone()),
             client,
             events,
             cache: VecDeque::new(),
@@ -279,6 +281,9 @@ impl Timelines {
                         .and_then(|event| event.local_echo_send_handle())
                         .ok_or_else(|| anyhow!("this message is no longer waiting"))?;
                     handle.unwedge().await?;
+                    // The SDK stops a room's queue after any failure; nothing would
+                    // be tried again without this.
+                    timeline.room().send_queue().set_enabled(true);
                     Ok(())
                 })
                 .await;
@@ -355,6 +360,21 @@ impl Timelines {
                 self.thread = Some(root);
                 Box::pin(self.handle(*command)).await;
                 self.thread = None;
+            }
+            MatrixCmd::SendFiles {
+                room_id,
+                files,
+                caption,
+                reply_to,
+            } => {
+                let reply_to = match reply_to.map(EventId::parse).transpose() {
+                    Ok(reply_to) => reply_to,
+                    Err(_) => return self.fail("Could not send", "invalid event id"),
+                };
+                match self.timeline(&room_id).await {
+                    Ok(timeline) => self.uploads.send(timeline, files, caption, reply_to),
+                    Err(err) => self.fail("Could not send", format!("{err:#}")),
+                }
             }
             // Handled by the session loop.
             MatrixCmd::LoginPassword { .. }

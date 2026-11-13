@@ -44,6 +44,8 @@ pub enum HitId {
     Image(usize),
     /// The thread line under the message at this index.
     Thread(usize),
+    /// The ✕ of the waiting file at this index in the composer.
+    Attachment(usize),
 }
 
 #[derive(Debug, Default)]

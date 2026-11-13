@@ -23,6 +23,7 @@ mod termquery;
 mod text;
 mod theme;
 mod ui;
+mod upload;
 mod verify;
 mod watch;
 

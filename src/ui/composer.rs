@@ -9,8 +9,8 @@ use crate::text::truncate;
 use crate::theme::Role;
 
 const MAX_TEXT_ROWS: usize = 6;
-/// Columns kept free at the right for the emoji button.
-const EMOJI_BUTTON: u16 = 3;
+/// Columns kept free at the right for the attach and emoji buttons.
+const EMOJI_BUTTON: u16 = 6;
 
 fn text_width(pane_width: u16) -> usize {
     // Borders, one column of padding on each side, and the emoji button.
@@ -21,7 +21,8 @@ fn text_width(pane_width: u16) -> usize {
 pub fn height(app: &App, pane_width: u16) -> u16 {
     let rows = app.composer.layout(text_width(pane_width)).len();
     let banner = u16::from(app.compose_mode != ComposeMode::Normal);
-    rows.clamp(1, MAX_TEXT_ROWS) as u16 + 2 + banner
+    let files = super::attach::rows(app.attachments().len());
+    rows.clamp(1, MAX_TEXT_ROWS) as u16 + 2 + banner + files
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -66,21 +67,35 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         text_area.y += 1;
         text_area.height = text_area.height.saturating_sub(1);
     }
+    // Files waiting to be sent, one line each; the text keeps at least one row.
+    let room_id = app.room().map(|room| room.id.as_str()).unwrap_or_default();
+    let files = app.attach.files(room_id);
+    let file_rows = super::attach::rows(files.len()).min(text_area.height.saturating_sub(1));
+    if file_rows > 0 {
+        let rect = Rect::new(text_area.x, text_area.y, text_area.width, file_rows);
+        super::attach::draw(frame, files, theme, app.hover, &mut app.hits, rect);
+        text_area.y += file_rows;
+        text_area.height -= file_rows;
+    }
+    let has_files = !files.is_empty();
     if text_area.height == 0 {
         return;
     }
 
-    // Emoji button at the right end of the first text row.
+    // Attach and emoji buttons at the right end of the first text row.
     if text_area.width > EMOJI_BUTTON + 4 {
         text_area.width -= EMOJI_BUTTON;
-        let button = Rect::new(text_area.right() + 1, text_area.y, 2, 1);
-        let role = if app.hover == Some(HitId::Do(Action::OpenEmoji)) {
-            Role::TitleFocused
-        } else {
-            Role::Muted
-        };
-        frame.render_widget(Line::from(Span::styled("☺", theme.style(role))), button);
-        app.hits.add(button, HitId::Do(Action::OpenEmoji));
+        for (offset, symbol, action) in [(1, "📎", Action::Attach), (4, "☺", Action::OpenEmoji)]
+        {
+            let button = Rect::new(text_area.right() + offset, text_area.y, 2, 1);
+            let role = if app.hover == Some(HitId::Do(action)) {
+                Role::TitleFocused
+            } else {
+                Role::Muted
+            };
+            frame.render_widget(Line::from(Span::styled(symbol, theme.style(role))), button);
+            app.hits.add(button, HitId::Do(action));
+        }
     }
 
     let max = text_area.width as usize;
@@ -101,7 +116,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let focused = app.focus == Pane::Composer;
     if app.composer.is_empty() {
-        let hint = if focused && in_thread {
+        let hint = if has_files && focused {
+            "Add a caption, or press Enter to send"
+        } else if focused && in_thread {
             "Reply in thread…"
         } else if focused {
             "Type a message…"

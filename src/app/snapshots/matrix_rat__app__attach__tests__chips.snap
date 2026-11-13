@@ -1,0 +1,18 @@
+---
+source: src/app/attach.rs
+expression: "screen(&mut app, 70, 14)"
+---
+"╭ 1 Rooms ─────────────╮╭ 2 #rust ───────────────────────────────────╮"
+"│ Filter rooms…        ││● you  09:20                               ││"
+"│ Favourites           ││  Good to know, thanks. (edited)           ││"
+"│▌R  rust              ││                                           ││"
+"│ M  matrix-rat        ││● dave  10:02                              ││"
+"│ People               ││  Shipping a TUI client on top of it this  ││"
+"│ B  bob            2  ││  week 🐀                                  ┃│" Hidden by multi-width symbols: [(33, " ")]
+"│ C  carol             │╰ carol is typing… ──────────────────────────╯"
+"│ Rooms                │╭ 3 Message ─────────────────────────────────╮"
+"│ D  design         5  ││ 📎 holiday.jpg · 1.2 MB  ✕                 │" Hidden by multi-width symbols: [(27, " ")]
+"│ N  nixos             ││ 📎 a rather long file name tha… · 88 B  ✕  │" Hidden by multi-width symbols: [(27, " ")]
+"│ O  off-topic     12  ││ Add a caption, or press Enter to sen 📎 ☺  │" Hidden by multi-width symbols: [(64, " ")]
+"╰──────────────────────╯╰────────────────────────────────────────────╯"
+" ● demo data  Enter send            F1 help  F2 settings  F3 rat-dark "

@@ -79,6 +79,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 ("Enter", "send", Some(A::Send)),
                 ("Shift-Enter", "line break", Some(A::Newline)),
                 ("↑", "select message", Some(A::SelectOlder)),
+                ("Alt-A", "attach file", Some(A::Attach)),
             ],
             Pane::Timeline if app.selected_failed() => vec![
                 ("Enter", "try again", Some(A::Reply)),

@@ -191,7 +191,8 @@ impl App {
                 | MatrixCmd::Redact { .. }
                 | MatrixCmd::Retry { .. }
                 | MatrixCmd::Paginate { .. }
-                | MatrixCmd::MarkRead { .. }),
+                | MatrixCmd::MarkRead { .. }
+                | MatrixCmd::SendFiles { .. }),
             ) => MatrixCmd::InThread {
                 root,
                 command: Box::new(command),

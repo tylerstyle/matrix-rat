@@ -73,4 +73,6 @@ pub enum Action {
     OpenThread,
     /// Leave the thread and return to the room.
     CloseThread,
+    /// Start attaching a file: puts `/upload ` into the composer.
+    Attach,
 }
