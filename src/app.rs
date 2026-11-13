@@ -162,6 +162,8 @@ pub struct App {
     /// The user's spaces, and the one the room list is narrowed to (by id).
     pub spaces: Vec<crate::matrix::SpaceSummary>,
     pub space: Option<String>,
+    /// Its position in `spaces`.
+    space_at: Option<usize>,
     /// Rooms of the selected space, sub-spaces included.
     space_rooms: std::collections::HashSet<String>,
     /// When and for which room notifications were shown lately, to limit bursts.
@@ -295,6 +297,7 @@ impl App {
             detailed_notices: Default::default(),
             spaces: Vec::new(),
             space: None,
+            space_at: None,
             space_rooms: Default::default(),
             shown_notices: Vec::new(),
             repaint: false,
@@ -661,6 +664,7 @@ impl App {
         self.logged_out = true;
         self.spaces.clear();
         self.space = None;
+        self.space_at = None;
         self.space_rooms.clear();
         self.session_started = None;
         self.pending_notices.clear();
@@ -743,34 +747,47 @@ impl App {
         self.set_focus(Pane::Composer);
     }
 
-    /// The name of the selected space, for the room list's header.
-    pub fn space_name(&self) -> Option<&str> {
-        let id = self.space.as_ref()?;
-        self.spaces
-            .iter()
-            .find(|space| space.id == *id)
-            .map(|space| space.name.as_str())
+    /// The name of the selected space, for the room list's header. A space inside
+    /// another is shown with its parent, so it is clear where it sits.
+    pub fn space_name(&self) -> Option<String> {
+        let at = self.space_at?;
+        let space = self.spaces.get(at)?;
+        if space.level == 0 {
+            return Some(space.name.clone());
+        }
+        match self.spaces[..at].iter().rev().find(|s| s.level == 0) {
+            Some(parent) => Some(format!("{} › {}", parent.name, space.name)),
+            None => Some(space.name.clone()),
+        }
     }
 
-    /// Narrows the room list to a space (`None`: all rooms).
-    pub fn select_space(&mut self, id: Option<String>) {
-        self.space_rooms.clear();
-        self.space = None;
-        if let Some(at) = id.and_then(|id| self.spaces.iter().position(|s| s.id == id)) {
-            let space = &self.spaces[at];
-            self.space_rooms.extend(space.rooms.iter().cloned());
-            // A top-level space lists only what is directly in it; the rooms of the
-            // spaces inside it follow in the list and belong to the view as well.
-            if space.level == 0 {
-                for inner in self.spaces[at + 1..].iter().take_while(|s| s.level > 0) {
-                    self.space_rooms.extend(inner.rooms.iter().cloned());
-                }
-            }
-            self.space = Some(space.id.clone());
-        }
+    /// Narrows the room list to the space at this position in `spaces` (`None`: all
+    /// rooms). By position, not id: a space inside two others is listed twice.
+    pub fn select_space(&mut self, at: Option<usize>) {
+        self.set_space(at);
         self.sidebar.cursor = 0;
         self.sidebar.scroll = 0;
         self.sidebar.reveal_cursor = true;
+    }
+
+    fn set_space(&mut self, at: Option<usize>) {
+        self.space_rooms.clear();
+        self.space = None;
+        self.space_at = None;
+        let Some(at) = at.filter(|at| *at < self.spaces.len()) else {
+            return;
+        };
+        let space = &self.spaces[at];
+        self.space_rooms.extend(space.rooms.iter().cloned());
+        // A top-level space lists only what is directly in it; the rooms of the
+        // spaces inside it follow in the list and belong to the view as well.
+        if space.level == 0 {
+            for inner in self.spaces[at + 1..].iter().take_while(|s| s.level > 0) {
+                self.space_rooms.extend(inner.rooms.iter().cloned());
+            }
+        }
+        self.space = Some(space.id.clone());
+        self.space_at = Some(at);
     }
 
     /// Alt-S and the arrows in the room list: all rooms, then each space in turn.
@@ -781,25 +798,26 @@ impl App {
         }
         // Position 0 is "all rooms".
         let count = self.spaces.len() as isize + 1;
-        let at = self
-            .space
-            .as_ref()
-            .and_then(|id| self.spaces.iter().position(|s| s.id == *id))
-            .map_or(0, |i| i as isize + 1);
+        let at = self.space_at.map_or(0, |i| i as isize + 1);
         let next = (at + delta).rem_euclid(count);
-        let id = (next > 0).then(|| self.spaces[next as usize - 1].id.clone());
-        self.select_space(id);
+        self.select_space((next > 0).then(|| next as usize - 1));
     }
 
     fn apply_spaces(&mut self, spaces: Vec<crate::matrix::SpaceSummary>) {
-        self.spaces = spaces;
-        // Refresh the selected space's rooms; a space that is gone means all rooms.
+        // The selected space again, where it is now: at the same place if it still
+        // is that space, else wherever it went. Gone means all rooms.
         let selected = self.space.take();
-        let (cursor, scroll) = (self.sidebar.cursor, self.sidebar.scroll);
-        self.select_space(selected);
-        if self.space.is_some() {
-            (self.sidebar.cursor, self.sidebar.scroll) = (cursor, scroll);
-        }
+        let was_at = self.space_at.take();
+        self.spaces = spaces;
+        let at = selected.and_then(|id| {
+            was_at
+                .filter(|at| self.spaces.get(*at).is_some_and(|s| s.id == id))
+                .or_else(|| self.spaces.iter().position(|s| s.id == id))
+        });
+        // A background update does not move the list under the user.
+        self.set_space(at);
+        let last = self.visible_rooms().len().saturating_sub(1);
+        self.sidebar.cursor = self.sidebar.cursor.min(last);
     }
 
     /// Ctrl-↑/↓: opens the neighbouring room in the list, wrapping at the ends, and
@@ -3989,22 +4007,20 @@ mod tests {
         // A top-level space shows the rooms of the spaces inside it too; invitations
         // stay visible everywhere.
         app.on_event(key_mod(KeyCode::Char('s'), KeyModifiers::ALT));
-        assert_eq!(app.space_name(), Some("Work"));
+        assert_eq!(app.space_name().as_deref(), Some("Work"));
         assert_eq!(names(&app), ["Invited", "Alpha"]);
         redraw(&mut app, &mut terminal);
         let (col, row) = find(&terminal, "▸");
         // The arrow in the list steps on: Team, then Fun, then all rooms again.
         app.on_event(click(col, row));
-        assert_eq!(app.space_name(), Some("Team"));
+        assert_eq!(app.space_name().as_deref(), Some("Work › Team"));
         app.on_event(key_mod(KeyCode::Char('s'), KeyModifiers::ALT));
-        assert_eq!(
-            (app.space_name(), names(&app)),
-            (Some("Fun"), vec!["Invited".to_owned(), "Beta".to_owned()])
-        );
+        assert_eq!(app.space_name().as_deref(), Some("Fun"));
+        assert_eq!(names(&app), ["Invited", "Beta"]);
         app.on_event(key_mod(KeyCode::Char('s'), KeyModifiers::ALT));
         assert!(app.space.is_none());
         // A space that disappears while selected gives the whole list back.
-        app.select_space(Some("!fun".into()));
+        app.select_space(Some(2));
         app.on_matrix(MatrixEvent::Spaces(vec![space(
             "!work",
             "Work",
@@ -4013,6 +4029,48 @@ mod tests {
         )]));
         assert!(app.space.is_none());
         assert_eq!(names(&app).len(), 3);
+
+        // A space inside two others is listed twice; stepping still visits every
+        // entry and comes back to all rooms, forwards and backwards.
+        app.on_matrix(MatrixEvent::Spaces(vec![
+            space("!one", "One", 0, &[]),
+            space("!shared", "Shared", 1, &["!a"]),
+            space("!two", "Two", 0, &[]),
+            space("!shared", "Shared", 1, &["!a"]),
+            space("!three", "Three", 0, &["!b"]),
+        ]));
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            app.perform(Action::SpaceNext);
+            seen.push(app.space_name().unwrap_or_else(|| "All".into()));
+        }
+        assert_eq!(
+            seen,
+            ["One", "One › Shared", "Two", "Two › Shared", "Three", "All"]
+        );
+        app.perform(Action::SpacePrev);
+        assert_eq!(app.space_name().as_deref(), Some("Three"));
+        app.perform(Action::SpacePrev);
+        assert_eq!(app.space_name().as_deref(), Some("Two › Shared"));
+        // An update keeps that very entry selected, and an empty space says so.
+        app.on_matrix(MatrixEvent::Spaces(vec![
+            space("!one", "One", 0, &[]),
+            space("!shared", "Shared", 1, &["!a"]),
+            space("!two", "Two", 0, &[]),
+            space("!shared", "Shared", 1, &["!a"]),
+            space("!empty", "Empty", 0, &[]),
+        ]));
+        assert_eq!(app.space_name().as_deref(), Some("Two › Shared"));
+        app.select_space(Some(4));
+        app.rooms.retain(|room| room.kind != RoomKind::Invite);
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "no rooms in this space");
+
+        // While all rooms are shown, an update leaves the cursor where it is.
+        app.select_space(None);
+        app.sidebar.cursor = 1;
+        app.on_matrix(MatrixEvent::Spaces(vec![space("!one", "One", 0, &[])]));
+        assert_eq!(app.sidebar.cursor, 1);
     }
 
     #[test]

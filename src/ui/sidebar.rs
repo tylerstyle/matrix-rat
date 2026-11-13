@@ -65,8 +65,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut top = 1;
     if !app.spaces.is_empty() && inner.height > 3 && inner.width >= 8 {
         let area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-        let name = app.space_name().unwrap_or("All rooms");
-        let label = truncate(name, (inner.width as usize).saturating_sub(6));
+        let name = app.space_name().unwrap_or_else(|| "All rooms".to_owned());
+        let label = truncate(&name, (inner.width as usize).saturating_sub(6));
         let role = if app.space.is_some() {
             Role::TitleFocused
         } else {
@@ -86,10 +86,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             Rect::new(area.x, area.y, 3, 1),
             HitId::Do(crate::action::Action::SpacePrev),
         );
-        app.hits.add(
-            Rect::new(next_x, area.y, 2, 1),
-            HitId::Do(crate::action::Action::SpaceNext),
-        );
+        let _ = next_x;
         top = 2;
     }
     let list = Rect::new(
@@ -120,7 +117,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar.scroll = app.sidebar.scroll.min(rows.len().saturating_sub(height));
 
     if rows.is_empty() {
-        let text = if app.sidebar.filter.is_empty() {
+        let text = if !app.sidebar.filter.is_empty() {
+            " no rooms match"
+        } else if app.space.is_some() {
+            " no rooms in this space"
+        } else if app.sidebar.filter.is_empty() {
             " no rooms yet"
         } else {
             " no rooms match"
