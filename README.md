@@ -222,5 +222,9 @@ log of every code review are in [docs/PLAN.md](docs/PLAN.md); the reviews themse
 ## Licence and credits
 
 Apache-2.0. Built on [ratatui](https://ratatui.rs) and
-[matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk). The design draws on
-[iamb](https://github.com/ulyssa/iamb); see `NOTICE`.
+[matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk).
+
+The spark came from trying [iamb](https://github.com/ulyssa/iamb): a Matrix client in the
+terminal is a great idea. iamb is modal and vim-like through and through; matrix-rat is
+the take for people who would rather click, press a few plain shortcuts, and look at
+pictures. It shares no code with iamb.
