@@ -78,17 +78,19 @@ pub fn parse(input: &str) -> Outgoing {
 /// When `preserve_empty_mentions` is true (e.g. editing a message that previously carried
 /// mentions), empty mentions are emitted as `Some(Mentions::new())` so the edit clears them.
 pub fn parse_with_mentions(
-    input: &str,
+    raw_input: &str,
     marks: &[MentionMark],
     preserve_empty_mentions: bool,
 ) -> Outgoing {
-    let input = input.trim();
+    let input = raw_input.trim();
     // `//text` sends a message that starts with a literal slash.
     if let Some(rest) = input.strip_prefix("//") {
-        return markdown_message(&format!("/{rest}"), marks, preserve_empty_mentions);
+        let shifted = shift_marks(raw_input, rest, 1, marks);
+        return markdown_message(&format!("/{rest}"), &shifted, preserve_empty_mentions);
     }
     let Some(command) = input.strip_prefix('/') else {
-        return markdown_message(input, marks, preserve_empty_mentions);
+        let shifted = shift_marks(raw_input, input, 0, marks);
+        return markdown_message(input, &shifted, preserve_empty_mentions);
     };
     let (name, argument) = match command.split_once(char::is_whitespace) {
         Some((name, argument)) => (name, argument.trim()),
@@ -101,9 +103,10 @@ pub fn parse_with_mentions(
             outgoing
         }
     };
+    let arg_marks = shift_marks(raw_input, argument, 0, marks);
     match name {
         "me" => {
-            let (linked, mentions) = resolve_marks(argument, marks);
+            let (linked, mentions) = resolve_marks(argument, &arg_marks);
             needs_text(Outgoing::Emote {
                 plain: argument.to_owned(),
                 html: markdown_html(&linked),
@@ -111,7 +114,7 @@ pub fn parse_with_mentions(
             })
         }
         "plain" => {
-            let (_, mentions) = resolve_marks(argument, marks);
+            let (_, mentions) = resolve_marks(argument, &arg_marks);
             needs_text(Outgoing::Text {
                 plain: argument.to_owned(),
                 html: None,
@@ -123,7 +126,10 @@ pub fn parse_with_mentions(
         }
         "html" => {
             let plain = strip_tags(argument).trim().to_owned();
-            let (_, mentions) = resolve_marks(&plain, marks);
+            // Tag stripping changes byte offsets, so fall back to unanchored matching.
+            let unanchored: Vec<MentionMark> =
+                marks.iter().map(|m| m.clone().with_at(None)).collect();
+            let (_, mentions) = resolve_marks(&plain, &unanchored);
             Outgoing::Text {
                 plain,
                 html: Some(argument.to_owned()),
@@ -131,7 +137,7 @@ pub fn parse_with_mentions(
             }
         }
         "spoiler" => {
-            let (linked, mentions) = resolve_marks(argument, marks);
+            let (linked, mentions) = resolve_marks(argument, &arg_marks);
             needs_text(Outgoing::Text {
                 plain: format!("||{argument}||"),
                 html: Some(format!(
@@ -142,20 +148,30 @@ pub fn parse_with_mentions(
             })
         }
         "rainbow" => {
-            let (_, mentions) = resolve_marks(argument, marks);
+            let (_, mentions) = resolve_marks(argument, &arg_marks);
             needs_text(Outgoing::Text {
                 plain: argument.to_owned(),
                 html: Some(rainbow(argument)),
                 mentions: finish_mentions(mentions, preserve_empty_mentions),
             })
         }
-        "shrug" => face_message(SHRUG, argument, marks, preserve_empty_mentions),
-        "tableflip" => face_message(TABLEFLIP, argument, marks, preserve_empty_mentions),
-        "lenny" => face_message(LENNY, argument, marks, preserve_empty_mentions),
+        "shrug" => face_message(SHRUG, argument, &arg_marks, preserve_empty_mentions),
+        "tableflip" => face_message(TABLEFLIP, argument, &arg_marks, preserve_empty_mentions),
+        "lenny" => face_message(LENNY, argument, &arg_marks, preserve_empty_mentions),
         _ => Outgoing::Rejected(format!(
             "Unknown command /{name}. Start with // to send it as text."
         )),
     }
+}
+
+fn shift_marks(raw: &str, sub: &str, extra_left: usize, marks: &[MentionMark]) -> Vec<MentionMark> {
+    if marks.is_empty() || sub.is_empty() {
+        return Vec::new();
+    }
+    let delta = (sub.as_ptr() as usize)
+        .saturating_sub(raw.as_ptr() as usize)
+        .saturating_sub(extra_left);
+    marks.iter().map(|m| m.shifted(delta)).collect()
 }
 
 fn prepend(face: &str, text: &str) -> String {
@@ -447,14 +463,8 @@ mod tests {
     #[test]
     fn mentions_render_matrix_to_links_and_populate_m_mentions() {
         let marks = vec![
-            MentionMark::User {
-                label: "Alice".to_owned(),
-                user_id: "@alice:hs".to_owned(),
-            },
-            MentionMark::RoomLink {
-                label: "#rust:hs".to_owned(),
-                uri: "https://matrix.to/#/%23rust:hs".to_owned(),
-            },
+            MentionMark::user("Alice", "@alice:hs"),
+            MentionMark::room_link("#rust:hs", "https://matrix.to/#/%23rust:hs"),
         ];
         let Outgoing::Text {
             plain,

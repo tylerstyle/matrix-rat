@@ -1,7 +1,7 @@
 //! Composer completions (`@` mentions, `:emoji:`, `#` rooms, `/` commands) and
 //! resolution of accepted mentions and room links into Matrix HTML + `m.mentions`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use matrix_sdk::ruma::events::Mentions;
@@ -62,12 +62,84 @@ pub struct Candidate {
     pub target: Target,
 }
 
-/// An accepted mention or room link tracked alongside composer text.
+/// What kind of target a [`MentionMark`] resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MentionMark {
+pub enum MentionKind {
     User { label: String, user_id: String },
     RoomNotification,
     RoomLink { label: String, uri: String },
+}
+
+/// An accepted mention or room link tracked alongside composer text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MentionMark {
+    pub kind: MentionKind,
+    /// Byte offset in composer text where this completion was accepted, if known.
+    pub at: Option<usize>,
+}
+
+impl MentionMark {
+    pub fn user(label: impl Into<String>, user_id: impl Into<String>) -> Self {
+        Self {
+            kind: MentionKind::User {
+                label: label.into(),
+                user_id: user_id.into(),
+            },
+            at: None,
+        }
+    }
+
+    pub fn room_notification() -> Self {
+        Self {
+            kind: MentionKind::RoomNotification,
+            at: None,
+        }
+    }
+
+    pub fn room_link(label: impl Into<String>, uri: impl Into<String>) -> Self {
+        Self {
+            kind: MentionKind::RoomLink {
+                label: label.into(),
+                uri: uri.into(),
+            },
+            at: None,
+        }
+    }
+
+    pub fn with_at(mut self, at: Option<usize>) -> Self {
+        self.at = at;
+        self
+    }
+
+    pub fn needle(&self) -> &str {
+        match &self.kind {
+            MentionKind::User { label, .. } | MentionKind::RoomLink { label, .. } => label.as_str(),
+            MentionKind::RoomNotification => "@room",
+        }
+    }
+
+    /// Returns a copy whose anchor has been shifted left by `delta` bytes (or cleared
+    /// if `delta` moves past the anchor).
+    pub fn shifted(&self, delta: usize) -> Self {
+        let mut copy = self.clone();
+        copy.at = self.at.and_then(|pos| pos.checked_sub(delta));
+        copy
+    }
+
+    /// Updates the stored byte anchor after replacing `edit_start..old_end` with `new_end`.
+    pub fn adjust_for_edit(&mut self, edit_start: usize, old_end: usize, new_end: usize) {
+        let Some(start) = self.at else {
+            return;
+        };
+        let end = start + self.needle().len();
+        if old_end <= start {
+            let delta = new_end as isize - old_end as isize;
+            self.at = Some((start as isize + delta).max(0) as usize);
+        } else if edit_start < end {
+            // Edit overlapped the accepted label span itself; fall back to first unused match.
+            self.at = None;
+        }
+    }
 }
 
 /// Active completion state while the user is typing in the composer.
@@ -132,22 +204,18 @@ pub fn replacement(
             display_name,
         } => (
             format!("{display_name}{suffix}"),
-            Some(MentionMark::User {
-                label: display_name.clone(),
-                user_id: user_id.clone(),
-            }),
+            Some(
+                MentionMark::user(display_name.clone(), user_id.clone()).with_at(Some(range.start)),
+            ),
         ),
         Target::RoomMention => (
             format!("@room{suffix}"),
-            Some(MentionMark::RoomNotification),
+            Some(MentionMark::room_notification().with_at(Some(range.start))),
         ),
         Target::Emoji(ch) => (ch.clone(), None),
         Target::RoomLink { label, uri } => (
             format!("{label}{suffix}"),
-            Some(MentionMark::RoomLink {
-                label: label.clone(),
-                uri: uri.clone(),
-            }),
+            Some(MentionMark::room_link(label.clone(), uri.clone()).with_at(Some(range.start))),
         ),
         Target::Command(cmd) => {
             let needs_space = !text
@@ -675,26 +743,20 @@ fn mark_inline_code(line: &str, mask: &mut [bool], treat_unclosed_as_code: bool)
 }
 
 /// Applies `marks` to `text` outside code spans/blocks, returning `(markdown_with_links, mentions)`.
+/// Each accepted mark produces at most one mention: first at its recorded byte offset (`mark.at`),
+/// or failing that at the first unused boundary-valid occurrence left to right.
 /// Plain-text body stays `text`; Markdown link replacement is intended solely for HTML rendering.
 pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
     if marks.is_empty() || text.is_empty() {
         return (text.to_owned(), Mentions::new());
     }
-    let mask = code_mask(text, false);
+    let mut occupied = code_mask(text, false);
 
     // Order marks longest-label first while keeping original index to disambiguate identical names.
     let mut ordered: Vec<(usize, &MentionMark, &str)> = marks
         .iter()
         .enumerate()
-        .map(|(idx, mark)| {
-            let needle = match mark {
-                MentionMark::User { label, .. } | MentionMark::RoomLink { label, .. } => {
-                    label.as_str()
-                }
-                MentionMark::RoomNotification => "@room",
-            };
-            (idx, mark, needle)
-        })
+        .map(|(idx, mark)| (idx, mark, mark.needle()))
         .filter(|(_, _, needle)| !needle.is_empty())
         .collect();
     ordered.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(a.0.cmp(&b.0)));
@@ -703,9 +765,53 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
     let mut user_ids: BTreeSet<OwnedUserId> = BTreeSet::new();
     let mut room_mention = false;
     let mut replacements: Vec<(Range<usize>, String)> = Vec::new();
-    let mut occupied = mask;
 
-    // Collect non-overlapping matches left to right; unused marks match before reused duplicates.
+    let mut apply = |pos: usize, end: usize, mark: &MentionMark| match &mark.kind {
+        MentionKind::User { label, user_id } => {
+            if let Ok(uid) = UserId::parse(user_id) {
+                let uri = uid.matrix_to_uri().to_string();
+                user_ids.insert(uid);
+                replacements.push((pos..end, markdown_link(label, &uri)));
+            }
+        }
+        MentionKind::RoomNotification => {
+            room_mention = true;
+        }
+        MentionKind::RoomLink { label, uri } => {
+            if is_safe_matrix_to(uri) {
+                replacements.push((pos..end, markdown_link(label, uri)));
+            }
+        }
+    };
+
+    // Pass 1: honour exact accepted positions first so an earlier ordinary word (e.g. "May") does
+    // not steal a completion accepted later in the message.
+    for &(idx, mark, needle) in &ordered {
+        if used[idx] {
+            continue;
+        }
+        let Some(pos) = mark.at else {
+            continue;
+        };
+        let Some(end) = pos.checked_add(needle.len()) else {
+            continue;
+        };
+        if end > text.len()
+            || !text.is_char_boundary(pos)
+            || !text.is_char_boundary(end)
+            || !text[pos..].starts_with(needle)
+            || occupied[pos..end].iter().any(|&b| b)
+            || !is_mark_boundary(text, pos, end)
+        {
+            continue;
+        }
+        used[idx] = true;
+        occupied[pos..end].fill(true);
+        apply(pos, end, mark);
+    }
+
+    // Pass 2: match any remaining unused mark against the first unused occurrence left to right.
+    // Already-used marks are never reused on subsequent occurrences.
     let mut pos = 0;
     while pos < text.len() {
         if occupied[pos] {
@@ -713,55 +819,35 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
             continue;
         }
         let mut chosen: Option<(usize, &MentionMark, &str)> = None;
-        for pass in 0..2 {
-            for &(idx, mark, needle) in &ordered {
-                if (pass == 0 && used[idx]) || (pass == 1 && !used[idx]) {
-                    continue;
-                }
-                if !text[pos..].starts_with(needle) {
-                    continue;
-                }
-                let end = pos + needle.len();
-                if occupied[pos..end].iter().any(|&b| b) {
-                    continue;
-                }
-                if !is_mark_boundary(text, pos, end) {
-                    continue;
-                }
-                chosen = Some((idx, mark, needle));
-                break;
+        for &(idx, mark, needle) in &ordered {
+            if used[idx] {
+                continue;
             }
-            if chosen.is_some() {
-                break;
+            if !text[pos..].starts_with(needle) {
+                continue;
             }
+            let end = pos + needle.len();
+            if occupied[pos..end].iter().any(|&b| b) {
+                continue;
+            }
+            if !is_mark_boundary(text, pos, end) {
+                continue;
+            }
+            chosen = Some((idx, mark, needle));
+            break;
         }
         if let Some((idx, mark, needle)) = chosen {
             let end = pos + needle.len();
             used[idx] = true;
             occupied[pos..end].fill(true);
-            match mark {
-                MentionMark::User { label, user_id } => {
-                    if let Ok(uid) = UserId::parse(user_id) {
-                        let uri = uid.matrix_to_uri().to_string();
-                        user_ids.insert(uid);
-                        replacements.push((pos..end, markdown_link(label, &uri)));
-                    }
-                }
-                MentionMark::RoomNotification => {
-                    room_mention = true;
-                }
-                MentionMark::RoomLink { label, uri } => {
-                    if is_safe_matrix_to(uri) {
-                        replacements.push((pos..end, markdown_link(label, uri)));
-                    }
-                }
-            }
+            apply(pos, end, mark);
             pos = end;
         } else {
             pos += next_char_len(text, pos);
         }
     }
 
+    replacements.sort_by_key(|(range, _)| range.start);
     let mut linked = String::with_capacity(text.len() + replacements.len() * 32);
     let mut last = 0;
     for (range, rep) in replacements {
@@ -821,8 +907,6 @@ fn escape_link_label(label: &str) -> String {
 /// when beginning an edit).
 pub fn marks_from_message(html: Option<&str>, mentions: Option<&Mentions>) -> Vec<MentionMark> {
     let mut marks = Vec::new();
-    let mut seen_users: HashSet<String> = HashSet::new();
-    let mut seen_rooms: HashSet<String> = HashSet::new();
 
     if let Some(html) = html {
         for (href, label) in extract_matrix_to_links(html) {
@@ -830,32 +914,24 @@ pub fn marks_from_message(html: Option<&str>, mentions: Option<&Mentions>) -> Ve
                 continue;
             }
             if let Some(uid) = parse_matrix_to_user(&href) {
-                if seen_users.insert(format!("{uid}\0{label}")) {
-                    marks.push(MentionMark::User {
-                        label,
-                        user_id: uid,
-                    });
-                }
-            } else if seen_rooms.insert(format!("{href}\0{label}")) {
-                marks.push(MentionMark::RoomLink { label, uri: href });
+                marks.push(MentionMark::user(label, uid));
+            } else {
+                marks.push(MentionMark::room_link(label, href));
             }
         }
     }
 
     if let Some(mentions) = mentions {
         if mentions.room {
-            marks.push(MentionMark::RoomNotification);
+            marks.push(MentionMark::room_notification());
         }
         for uid in &mentions.user_ids {
             let uid_str = uid.to_string();
-            let already = marks
-                .iter()
-                .any(|m| matches!(m, MentionMark::User { user_id, .. } if user_id == &uid_str));
+            let already = marks.iter().any(
+                |m| matches!(&m.kind, MentionKind::User { user_id, .. } if user_id == &uid_str),
+            );
             if !already {
-                marks.push(MentionMark::User {
-                    label: uid_str.clone(),
-                    user_id: uid_str,
-                });
+                marks.push(MentionMark::user(uid_str.clone(), uid_str));
             }
         }
     }
@@ -1088,7 +1164,10 @@ mod tests {
         assert_eq!(&text[found.range.clone()], "@bo");
         let (ins, mark) = replacement(text, &found.range, &found.items[0].target);
         assert_eq!(ins, "Bob ");
-        assert!(matches!(mark, Some(MentionMark::User { .. })));
+        assert!(matches!(
+            mark.map(|m| m.kind),
+            Some(MentionKind::User { .. })
+        ));
 
         // Cursor in the middle of text, before trailing wide emoji.
         let both = "Hey @bo 👋!";
@@ -1138,15 +1217,9 @@ mod tests {
     #[test]
     fn resolve_marks_builds_links_and_skips_code() {
         let marks = vec![
-            MentionMark::User {
-                label: "Alice [bot]".to_owned(),
-                user_id: "@alice:hs".to_owned(),
-            },
-            MentionMark::RoomLink {
-                label: "#rust:hs".to_owned(),
-                uri: "https://matrix.to/#/%23rust:hs".to_owned(),
-            },
-            MentionMark::RoomNotification,
+            MentionMark::user("Alice [bot]", "@alice:hs"),
+            MentionMark::room_link("#rust:hs", "https://matrix.to/#/%23rust:hs"),
+            MentionMark::room_notification(),
         ];
         let text = "Hey Alice [bot], check #rust:hs and @room! Also `Alice [bot]`";
         let (linked, mentions) = resolve_marks(text, &marks);
@@ -1159,6 +1232,47 @@ mod tests {
     }
 
     #[test]
+    fn resolve_marks_common_word_mentions_at_most_once_per_accepted_completion() {
+        // Common word ("Rat" / "May") accepted once must NOT turn later plain occurrences into
+        // mentions; a second mention requires a second accepted completion.
+        let one_at_start = vec![MentionMark::user("Rat", "@rat:hs").with_at(Some(3))];
+        let (linked, mentions) = resolve_marks("Hi Rat, a rat is a Rat", &one_at_start);
+        assert_eq!(
+            linked,
+            "Hi [Rat](<https://matrix.to/#/@rat:hs>), a rat is a Rat"
+        );
+        assert_eq!(mentions.user_ids.len(), 1);
+
+        // Plain word first, accepted completion second: honours `mark.at` on the second one.
+        let second_only = vec![MentionMark::user("May", "@may:hs").with_at(Some(10))];
+        let (linked_second, _) = resolve_marks("May I ask May?", &second_only);
+        assert_eq!(
+            linked_second,
+            "May I ask [May](<https://matrix.to/#/@may:hs>)?"
+        );
+
+        // Failing the anchored offset falls back to the first unused occurrence, still once.
+        let stale_offset = vec![MentionMark::user("Will", "@will:hs").with_at(Some(99))];
+        let (linked_fallback, _) = resolve_marks("Will asked Will to come", &stale_offset);
+        assert_eq!(
+            linked_fallback,
+            "[Will](<https://matrix.to/#/@will:hs>) asked Will to come"
+        );
+
+        // Two accepted completions for the same person mention both accepted slots.
+        let twice = vec![
+            MentionMark::user("Rat", "@rat:hs").with_at(Some(0)),
+            MentionMark::user("Rat", "@rat:hs").with_at(Some(9)),
+        ];
+        let (linked_twice, mentions_twice) = resolve_marks("Rat said Rat again", &twice);
+        assert_eq!(
+            linked_twice,
+            "[Rat](<https://matrix.to/#/@rat:hs>) said [Rat](<https://matrix.to/#/@rat:hs>) again"
+        );
+        assert_eq!(mentions_twice.user_ids.len(), 1);
+    }
+
+    #[test]
     fn marks_from_message_extracts_for_edit_and_ignores_mx_reply() {
         let html = "<mx-reply><blockquote><a href=\"https://matrix.to/#/@ignored:hs\">Ignored</a></blockquote></mx-reply>Hi <a href=\"https://matrix.to/#/@alice:hs\">Alice</a> see <a href=\"https://matrix.to/#/%23rust:hs\">#rust:hs</a>";
         let orig = Mentions::with_user_ids(["@alice:hs".try_into().unwrap()]);
@@ -1166,14 +1280,8 @@ mod tests {
         assert_eq!(
             marks,
             vec![
-                MentionMark::User {
-                    label: "Alice".to_owned(),
-                    user_id: "@alice:hs".to_owned()
-                },
-                MentionMark::RoomLink {
-                    label: "#rust:hs".to_owned(),
-                    uri: "https://matrix.to/#/%23rust:hs".to_owned()
-                },
+                MentionMark::user("Alice", "@alice:hs"),
+                MentionMark::room_link("#rust:hs", "https://matrix.to/#/%23rust:hs"),
             ]
         );
     }

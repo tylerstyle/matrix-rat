@@ -768,10 +768,10 @@ mod tests {
         let expected_uid = bob_member.user_id.clone();
         let outgoing = parse_with_mentions(
             &text,
-            &[MentionMark::User {
-                label: bob_member.display_name,
-                user_id: bob_member.user_id,
-            }],
+            &[MentionMark::user(
+                bob_member.display_name,
+                bob_member.user_id,
+            )],
             false,
         );
         handle.send(MatrixCmd::Send {

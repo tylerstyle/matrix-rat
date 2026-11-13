@@ -268,6 +268,33 @@ impl App {
         }
     }
 
+    pub(super) fn adjust_marks_for_cursor_edit(&mut self, before_cursor: usize, before_len: usize) {
+        let after_len = self.composer.text().len();
+        let after_cursor = self.composer.cursor();
+        let suffix_len = after_len.saturating_sub(after_cursor);
+        let edit_start = before_cursor.min(after_cursor);
+        let old_end = before_len.saturating_sub(suffix_len).max(edit_start);
+        self.adjust_marks_for_splice(edit_start, old_end, after_cursor);
+    }
+
+    pub(super) fn adjust_marks_for_splice(
+        &mut self,
+        edit_start: usize,
+        old_end: usize,
+        new_end: usize,
+    ) {
+        for mark in &mut self.complete.marks {
+            mark.adjust_for_edit(edit_start, old_end, new_end);
+        }
+    }
+
+    pub(super) fn insert_composer_text(&mut self, text: &str) {
+        let before_len = self.composer.text().len();
+        let before_cursor = self.composer.cursor();
+        self.composer.insert(text);
+        self.adjust_marks_for_cursor_edit(before_cursor, before_len);
+    }
+
     pub(super) fn accept_completion(&mut self, index: Option<usize>) -> bool {
         let Some(completion) = self.complete.active.take() else {
             return false;
@@ -278,7 +305,9 @@ impl App {
         };
         let (ins, mark) =
             complete::replacement(self.composer.text(), &completion.range, &candidate.target);
-        self.composer.replace_range(completion.range, &ins);
+        let range = completion.range;
+        self.composer.replace_range(range.clone(), &ins);
+        self.adjust_marks_for_splice(range.start, range.end, self.composer.cursor());
         if let Some(mark) = mark {
             self.complete.marks.push(mark);
         }
@@ -731,5 +760,53 @@ mod tests {
             .filter(|c| matches!(c, MatrixCmd::FetchMembers { room_id } if room_id == "!b"))
             .count();
         assert_eq!(after_switch, 1);
+    }
+
+    #[test]
+    fn common_word_display_name_mentions_only_accepted_occurrence() {
+        let (mut app, _terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::RoomMembers {
+            room_id: "!a".into(),
+            members: vec![Member {
+                user_id: "@may:hs".into(),
+                display_name: "May".into(),
+            }],
+            can_mention_room: false,
+        });
+        while commands.try_recv().is_ok() {}
+
+        // Ordinary word "May" appears first; only the second one is completed via `@may`.
+        type_text(&mut app, "May I talk to @may");
+        app.on_event(key(KeyCode::Tab));
+        assert_eq!(app.composer.text(), "May I talk to May ");
+
+        // Editing before the accepted mention keeps the anchor on the accepted occurrence.
+        app.on_event(key(KeyCode::Home));
+        type_text(&mut app, "Well, ");
+        assert_eq!(app.composer.text(), "Well, May I talk to May ");
+        app.on_event(key(KeyCode::Enter));
+
+        let sent = std::iter::from_fn(|| commands.try_recv().ok())
+            .find_map(|c| match c {
+                MatrixCmd::Send { message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("expected Send command");
+        match sent {
+            Outgoing::Text {
+                plain,
+                html,
+                mentions,
+            } => {
+                assert_eq!(plain, "Well, May I talk to May");
+                assert_eq!(
+                    html.as_deref(),
+                    Some("Well, May I talk to <a href=\"https://matrix.to/#/@may:hs\">May</a>")
+                );
+                let m = mentions.unwrap();
+                assert_eq!(m.user_ids.len(), 1);
+            }
+            other => panic!("unexpected outgoing: {other:?}"),
+        }
     }
 }

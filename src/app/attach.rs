@@ -301,7 +301,7 @@ impl App {
         let caption = if text.is_empty() {
             None
         } else {
-            match self.format_outgoing(&text) {
+            match self.format_outgoing(self.composer.text()) {
                 Outgoing::Rejected(reason) => {
                     self.show_toast(reason);
                     return true;
