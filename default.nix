@@ -20,6 +20,9 @@ rustPlatform.buildRustPackage {
 
   # aws-lc-rs (TLS) and the bundled SQLite compile C code.
   nativeBuildInputs = with pkgs; [ pkg-config cmake perl ];
+  # nixpkgs tells the -sys crates to link the system libraries instead of building
+  # their bundled copies.
+  buildInputs = [ pkgs.aws-lc pkgs.sqlite ];
 
   # The test suite runs in scripts/check.sh; skipping it here halves the build time.
   doCheck = false;
