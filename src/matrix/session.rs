@@ -66,6 +66,7 @@ async fn discover_client(paths: &Paths, homeserver: &str, passphrase: &str) -> R
         .server_name_or_homeserver_url(homeserver)
         .sqlite_store(paths.store_dir(), Some(passphrase))
         .with_encryption_settings(encryption_settings())
+        .with_threading_support(super::threads::SUPPORT)
         .handle_refresh_tokens()
         .build()
         .await
@@ -79,6 +80,7 @@ async fn offline_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Re
         .homeserver_url(homeserver)
         .sqlite_store(paths.store_dir(), Some(passphrase))
         .with_encryption_settings(encryption_settings())
+        .with_threading_support(super::threads::SUPPORT)
         .handle_refresh_tokens()
         .build()
         .await

@@ -5,6 +5,7 @@ mod convert;
 mod media;
 mod rooms;
 mod session;
+mod threads;
 mod verify;
 
 pub use verify::{
@@ -123,6 +124,19 @@ pub enum MatrixCmd {
         /// Its `mxc://` address.
         url: String,
     },
+    /// Like [`MatrixCmd::OpenRoom`], for the thread that starts at the event `root`
+    /// (which may have no replies yet).
+    OpenThread {
+        room_id: String,
+        root: String,
+        generation: u64,
+    },
+    /// A command about messages (send, edit, react, delete, retry, load older, mark
+    /// read) that is meant for the thread starting at `root`, not for the room.
+    InThread {
+        root: String,
+        command: Box<MatrixCmd>,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -156,6 +170,9 @@ impl std::fmt::Debug for MatrixCmd {
             Self::FetchAvatar { .. } => f.write_str("FetchAvatar"),
             Self::Verification(command) => write!(f, "Verification({command:?})"),
             Self::SaveFile { open, .. } => write!(f, "SaveFile(open: {open})"),
+            Self::OpenThread { room_id, root, .. } => write!(f, "OpenThread({room_id}, {root})"),
+            // The inner command prints no content either.
+            Self::InThread { root, command } => write!(f, "InThread({root}, {command:?})"),
         }
     }
 }

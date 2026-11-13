@@ -88,6 +88,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             Pane::Timeline => vec![
                 ("v", "view", Some(A::Open)),
                 ("Enter", "reply", Some(A::Reply)),
+                ("t", "thread", Some(A::OpenThread)),
                 ("e", "edit", Some(A::Edit)),
                 ("r", "react", Some(A::React)),
                 ("Del", "delete", Some(A::Delete)),
@@ -101,6 +102,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 ("type", "to filter", None),
             ],
         });
+        if app.thread_open() {
+            // Inside a thread: no thread of a thread, and Esc leads back to the room.
+            hints.retain(|(_, text, _)| *text != "thread");
+            if app.focus == Pane::Composer {
+                hints.insert(0, ("Esc", "back to room", Some(A::CloseThread)));
+            }
+        }
         // Saving is only offered where there is something to save.
         let can_save = app.can_save();
         hints.retain(|(_, text, _)| *text != "save" || can_save);

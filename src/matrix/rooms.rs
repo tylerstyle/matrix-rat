@@ -21,7 +21,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
 use super::convert::convert;
-use super::{MatrixCmd, MatrixEvent};
+use super::{MatrixCmd, MatrixEvent, threads};
 use crate::format::Outgoing;
 use crate::model::ItemRef;
 
@@ -41,6 +41,10 @@ pub struct Timelines {
     media: super::media::Media,
     /// Running requests for member lists (for sender names).
     member_fetches: tokio::task::JoinSet<()>,
+    /// Set while a command for a thread is handled: the event the thread starts at.
+    /// `timeline` then answers with that thread's timeline instead of the room's.
+    thread: Option<String>,
+    read_marks: threads::ReadMarks,
 }
 
 impl Timelines {
@@ -53,6 +57,8 @@ impl Timelines {
             cache: VecDeque::new(),
             forwarder: None,
             paginator: None,
+            thread: None,
+            read_marks: Default::default(),
         }
     }
 
@@ -74,7 +80,8 @@ impl Timelines {
     }
 
     async fn timeline(&mut self, room_id: &str) -> Result<Arc<Timeline>> {
-        if let Some(at) = self.cache.iter().position(|(id, _)| id == room_id) {
+        let key = threads::key(room_id, self.thread.as_deref());
+        if let Some(at) = self.cache.iter().position(|(id, _)| *id == key) {
             // Move to the back: most recently used.
             let entry = self.cache.remove(at).expect("position is valid");
             let timeline = entry.1.clone();
@@ -82,10 +89,18 @@ impl Timelines {
             return Ok(timeline);
         }
         let room = self.room(room_id)?;
+        if let Some(root) = &self.thread {
+            let timeline = Arc::new(threads::open(&room, root).await?);
+            // One thread at a time stays alive; rooms keep their places.
+            self.cache.retain(|(id, _)| !threads::is_thread(id));
+            self.cache.push_back((key, timeline.clone()));
+            return Ok(timeline);
+        }
         let timeline = room
             .timeline_builder()
             .with_focus(TimelineFocus::Live {
-                hide_threaded_events: false,
+                // Replies in a thread are shown in the thread (see `threads`).
+                hide_threaded_events: true,
             })
             .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
             .build()
@@ -102,7 +117,7 @@ impl Timelines {
             self.member_fetches
                 .spawn(async move { members.fetch_members().await });
         }
-        self.cache.push_back((room_id.to_owned(), timeline.clone()));
+        self.cache.push_back((key, timeline.clone()));
         while self.cache.len() > KEEP_TIMELINES {
             self.cache.pop_front();
         }
@@ -165,6 +180,8 @@ impl Timelines {
                             room_id,
                             generation,
                             self.events.clone(),
+                            self.thread.is_some(),
+                            self.read_marks.clone(),
                         )));
                     }
                     Err(err) => self.fail("Could not open the room", format!("{err:#}")),
@@ -281,10 +298,20 @@ impl Timelines {
                 } else {
                     ReceiptType::ReadPrivate
                 };
+                // A thread that was read is remembered here as well (see `ReadMarks`).
+                let mark = self
+                    .thread
+                    .as_deref()
+                    .map(|root| (threads::key(&room_id, Some(root)), self.read_marks.clone()));
                 if let Ok(timeline) = self.timeline(&room_id).await {
                     tokio::spawn(async move {
                         if let Err(err) = timeline.mark_as_read(receipt).await {
                             tracing::debug!(?err, "could not send read receipt");
+                        }
+                        if let Some((key, marks)) = mark
+                            && let Some(newest) = timeline.latest_event_id().await
+                        {
+                            marks.set(key, newest.to_string());
                         }
                     });
                 }
@@ -311,6 +338,24 @@ impl Timelines {
                 full,
             } => self.media.fetch(key, *media, size, full),
             MatrixCmd::SaveFile { file, dir, open } => self.media.save(file, dir, open),
+            MatrixCmd::OpenThread {
+                room_id,
+                root,
+                generation,
+            } => {
+                let open = MatrixCmd::OpenRoom {
+                    room_id,
+                    generation,
+                };
+                self.thread = Some(root);
+                Box::pin(self.handle(open)).await;
+                self.thread = None;
+            }
+            MatrixCmd::InThread { root, command } => {
+                self.thread = Some(root);
+                Box::pin(self.handle(*command)).await;
+                self.thread = None;
+            }
             // Handled by the session loop.
             MatrixCmd::LoginPassword { .. }
             | MatrixCmd::LoginBrowser { .. }
@@ -355,22 +400,37 @@ fn content_without_relation(message: &Outgoing) -> Result<RoomMessageEventConten
 }
 
 /// Sends the whole timeline to the UI whenever it changes, and who is typing.
+/// `in_thread`: the timeline is a thread's, not the room's.
 async fn forward(
     room: Room,
     timeline: Arc<Timeline>,
     room_id: String,
     generation: u64,
     events: UnboundedSender<MatrixEvent>,
+    in_thread: bool,
+    read_marks: threads::ReadMarks,
 ) {
     let own = room.own_user_id().to_owned();
     let (mut items, changes) = timeline.subscribe().await;
     pin_mut!(changes);
     let (_typing_guard, mut typing) = room.subscribe_to_typing_notifications();
-    let snapshot = |items: &Vector<Arc<TimelineItem>>| MatrixEvent::Timeline {
-        room_id: room_id.clone(),
-        generation,
-        messages: convert(items, &own),
-        reached_start: items.iter().any(|item| item.is_timeline_start()),
+    let snapshot = |items: &Vector<Arc<TimelineItem>>, unread: HashSet<String>| {
+        let mut messages = convert(items, &own);
+        threads::annotate(&mut messages, in_thread, &unread);
+        MatrixEvent::Timeline {
+            room_id: room_id.clone(),
+            generation,
+            messages,
+            reached_start: items.iter().any(|item| item.is_timeline_start()),
+        }
+    };
+    // Which threads have unread replies; nothing to look up inside a thread.
+    let unread = async |items: &Vector<Arc<TimelineItem>>| {
+        if in_thread {
+            HashSet::new()
+        } else {
+            threads::unread(&room, items, &read_marks).await
+        }
     };
     // Replies to messages that are not loaded only say "an earlier message" until the
     // original is fetched. Ask once per reply.
@@ -396,7 +456,8 @@ async fn forward(
         }
     };
     fetch_replies(&items);
-    if events.send(snapshot(&items)).is_err() {
+    let marks = unread(&items).await;
+    if events.send(snapshot(&items, marks)).is_err() {
         return;
     }
     loop {
@@ -407,7 +468,8 @@ async fn forward(
                     diff.apply(&mut items);
                 }
                 fetch_replies(&items);
-                if events.send(snapshot(&items)).is_err() {
+                let marks = unread(&items).await;
+                if events.send(snapshot(&items, marks)).is_err() {
                     return;
                 }
             }

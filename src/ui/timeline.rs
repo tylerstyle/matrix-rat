@@ -9,7 +9,7 @@ use crate::action::Action;
 use crate::action::Pane;
 use crate::app::App;
 use crate::images::{ImageStore, Slot};
-use crate::model::{Message, MsgKind, Room, RoomKind, SendState};
+use crate::model::{Message, MsgKind, Room, RoomKind, SendState, ThreadSummary};
 use crate::rich::{self, Format, Rich, Segment};
 use crate::text::{truncate, width, wrap};
 use crate::theme::{Role, Theme};
@@ -357,12 +357,61 @@ pub fn build_rows(
                     image: None,
                 });
             }
+            if let Some(thread) = &message.thread {
+                rows.push(thread_row(thread, i, body_width, theme));
+            }
         }
         for row in &mut rows[start..] {
             row.source = i;
         }
     }
     rows
+}
+
+/// The line under a message that started a thread: how many replies, and who said
+/// what last. Clicking it opens the thread.
+fn thread_row(thread: &ThreadSummary, msg: usize, body_width: usize, theme: &Theme) -> Row {
+    let count = match thread.replies {
+        1 => "💬 1 reply".to_owned(),
+        n => format!("💬 {n} replies"),
+    };
+    let count = truncate(&count, body_width);
+    let mut link = Style {
+        fg: theme.style(Role::Link).fg,
+        ..Style::new()
+    };
+    let mut used = width(&count);
+    let mut spans = vec![Span::raw(INDENT)];
+    if thread.unread {
+        link = link.add_modifier(Modifier::BOLD);
+    }
+    spans.push(Span::styled(count, link));
+    let mut more = |text: String, style: Style| {
+        let text = truncate(&text, body_width - used);
+        // Not worth a lone "…".
+        if width(&text) > 1 {
+            used += width(&text);
+            spans.push(Span::styled(text, style));
+        }
+    };
+    if thread.unread {
+        more(" · new".to_owned(), link);
+    }
+    if let Some((sender, text)) = &thread.latest {
+        let text = text.replace('\n', " ");
+        more(
+            format!(" · {sender}: {text}"),
+            theme.style(Role::ReplyQuote),
+        );
+    }
+    let start = INDENT.len() as u16;
+    Row {
+        line: Line::from(spans),
+        msg: Some(msg),
+        source: msg,
+        hits: vec![(start, start + used as u16, HitId::Thread(msg))],
+        image: None,
+    }
 }
 
 /// Text and style for one formatted piece.
@@ -437,7 +486,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         "#"
     };
-    let mut block = super::pane_block(app, Pane::Timeline, &format!("{prefix}{}", room.name));
+    let in_thread = app.threads.open.is_some();
+    let title = if in_thread {
+        format!("Thread · {prefix}{}", room.name)
+    } else {
+        format!("{prefix}{}", room.name)
+    };
+    let mut block = super::pane_block(app, Pane::Timeline, &title);
     if let Some(who) = &room.typing {
         block = block.title_bottom(Line::from(Span::styled(
             format!(" {who} is typing… "),
@@ -447,6 +502,19 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.hits.add(area, HitId::Pane(Pane::Timeline));
+    // The mouse's way out of a thread, at the right end of the title row.
+    let back = " ← back ";
+    let back_width = width(back) as u16;
+    if in_thread && area.width > back_width + width(&title) as u16 + 8 {
+        let rect = Rect::new(area.right() - back_width - 2, area.y, back_width, 1);
+        let role = if app.hover == Some(HitId::Do(Action::CloseThread)) {
+            Role::Hover
+        } else {
+            Role::Pill
+        };
+        frame.render_widget(Line::from(Span::styled(back, app.theme.style(role))), rect);
+        app.hits.add(rect, HitId::Do(Action::CloseThread));
+    }
     if inner.width < 2 || inner.height == 0 {
         return;
     }
@@ -579,7 +647,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m)) if m == msg)
+            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m)) if m == msg)
             {
                 frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }
@@ -716,5 +784,39 @@ mod tests {
                 .count();
             assert_eq!(headers, room.messages.len() - 1);
         }
+    }
+
+    #[test]
+    fn thread_line_fits_any_width_and_is_one_click_target() {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let mut room = demo_rooms().remove(0);
+        room.messages[1].thread = Some(ThreadSummary {
+            replies: 12,
+            latest: Some(("carol".into(), "a long answer\nover two lines".into())),
+            unread: true,
+            demo_replies: Vec::new(),
+        });
+        for max in [3, 4, 9, 14, 20, 31, 80] {
+            let rows = build_rows(&room, max, &theme, None, &images);
+            let lines: Vec<&Row> = rows
+                .iter()
+                .filter(|row| row.hits.iter().any(|hit| hit.2 == HitId::Thread(1)))
+                .collect();
+            assert_eq!(lines.len(), 1, "width {max}");
+            let row = lines[0];
+            assert!(row.line.width() <= max, "width {max}: {:?}", row.line);
+            assert_eq!(row.msg, Some(1));
+            let (start, end, _) = row.hits[0];
+            assert_eq!((start as usize, end as usize), (2, row.line.width()));
+        }
+        let rows = build_rows(&room, 80, &theme, None, &images);
+        let text: Vec<String> = rows.iter().map(|row| row.line.to_string()).collect();
+        assert!(
+            text.contains(
+                &"  💬 12 replies · new · carol: a long answer over two lines".to_owned()
+            ),
+            "{text:?}"
+        );
     }
 }

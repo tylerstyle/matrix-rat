@@ -42,7 +42,7 @@ pub fn convert(items: &Vector<Arc<TimelineItem>>, own: &UserId) -> Vec<Message> 
         .collect()
 }
 
-fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) -> String {
+pub(super) fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) -> String {
     match profile {
         TimelineDetails::Ready(Profile {
             display_name: Some(name),
@@ -98,6 +98,7 @@ fn event_message(
 
     match event.content() {
         TimelineItemContent::MsgLike(content) => {
+            message.thread = super::threads::summary(content);
             message.reactions = content
                 .reactions
                 .iter()

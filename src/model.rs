@@ -87,6 +87,34 @@ pub struct Message {
     pub image: Option<ImageInfo>,
     /// Set for file, audio and video messages.
     pub file: Option<Attachment>,
+    /// Set for a message that started a thread.
+    pub thread: Option<ThreadSummary>,
+}
+
+/// The one line under a message that started a thread.
+#[derive(Debug, Clone, Default)]
+pub struct ThreadSummary {
+    pub replies: u32,
+    /// Sender and start of the newest reply, when known.
+    pub latest: Option<(String, String)>,
+    /// There are replies the user has not read.
+    pub unread: bool,
+    /// The replies themselves, for the demo only; with an account they are loaded
+    /// when the thread is opened.
+    pub demo_replies: Vec<Message>,
+}
+
+impl ThreadSummary {
+    /// The summary of a thread whose replies are all at hand (the demo).
+    pub fn of(replies: Vec<Message>) -> Option<Self> {
+        let latest = replies.last()?;
+        Some(Self {
+            replies: replies.len() as u32,
+            latest: Some((latest.sender.clone(), latest.body.clone())),
+            unread: false,
+            demo_replies: replies,
+        })
+    }
 }
 
 /// Something that can be saved to disk: a file, or the original of a picture.
@@ -356,19 +384,30 @@ pub fn demo_rooms() -> Vec<Room> {
         size: None,
     });
 
+    let mut welcome = room(
+        "matrix-rat",
+        RoomKind::Favourite,
+        0,
+        vec![msg(
+            "alice",
+            "Today",
+            "10:30",
+            "Welcome to the demo. Click a room, type, press Enter.",
+        )],
+    );
+    welcome.messages[0].thread = ThreadSummary::of(vec![
+        msg("bob", "Today", "10:32", "Threads work too."),
+        msg(
+            "carol",
+            "Today",
+            "10:35",
+            "Press t on a message to open its thread, or click the line under it.",
+        ),
+    ]);
+
     vec![
         rust,
-        room(
-            "matrix-rat",
-            RoomKind::Favourite,
-            0,
-            vec![msg(
-                "alice",
-                "Today",
-                "10:30",
-                "Welcome to the demo. Click a room, type, press Enter.",
-            )],
-        ),
+        welcome,
         bob,
         room(
             "carol",

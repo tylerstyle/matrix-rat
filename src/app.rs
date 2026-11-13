@@ -2,6 +2,7 @@
 
 mod files;
 mod media;
+mod thread;
 mod verify;
 
 use std::path::PathBuf;
@@ -170,6 +171,8 @@ pub struct App {
     pub dirty: bool,
     /// Pictures: the cache and the viewer.
     pub images: crate::images::ImageStore,
+    /// The thread shown in place of the room's messages, and thread drafts.
+    pub threads: thread::Threads,
 }
 
 impl App {
@@ -259,6 +262,7 @@ impl App {
             suspend_requested: false,
             dirty: true,
             images: crate::images::ImageStore::new(crate::images::Graphics::halfblocks()),
+            threads: Default::default(),
         }
     }
 
@@ -498,6 +502,7 @@ impl App {
         self.compose_mode = ComposeMode::Normal;
         self.edit_stash = None;
         self.typing_sent = None;
+        self.threads = Default::default();
         self.user_id = None;
         self.recovery_prompted = false;
         self.verify = Default::default();
@@ -537,6 +542,8 @@ impl App {
             return;
         }
         self.auto_opened = false;
+        // A thread belongs to its room; picking a room (even the same one) leaves it.
+        self.leave_thread();
         if index != self.active {
             if self.typing_sent.take().is_some()
                 && let Some(room_id) = self.room_id()
@@ -1233,6 +1240,12 @@ impl App {
             }
             Action::StartVerification => self.start_verification(),
             Action::Verify(button) => self.verify_button(button),
+            Action::OpenThread => {
+                if let Some(i) = self.timeline.selected {
+                    self.open_thread(i);
+                }
+            }
+            Action::CloseThread => self.close_thread(),
         }
     }
 
@@ -1246,7 +1259,7 @@ impl App {
 
     fn send_matrix(&self, command: MatrixCmd) {
         if let Some(matrix) = &self.matrix {
-            matrix.send(command);
+            matrix.send(self.in_thread(command));
         }
     }
 
@@ -1514,6 +1527,7 @@ impl App {
                 reached_start,
             } => {
                 if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
+                    let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
                     self.timeline.reached_start |= reached_start;
                 }
@@ -1626,6 +1640,7 @@ impl App {
                 // that is a real conversation, with its own draft. A draft for the
                 // vanished room has nowhere to go.
                 self.auto_opened = true;
+                self.threads.open = None;
                 self.active = self
                     .rooms
                     .iter()
@@ -1666,6 +1681,8 @@ impl App {
             self.set_focus(Pane::Composer);
         } else if self.compose_mode != ComposeMode::Normal {
             self.cancel_compose();
+        } else {
+            self.close_thread();
         }
     }
 
@@ -1955,6 +1972,7 @@ impl App {
                     Some(HitId::Pane(pane)) => self.set_focus(pane),
                     Some(HitId::Overlay) | None => {}
                     Some(HitId::Image(index)) => self.click_image(index),
+                    Some(HitId::Thread(index)) => self.open_thread(index),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
