@@ -24,6 +24,12 @@ const QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\
 \x1b_Gi=32,s=1,v=1,a=q,t=d,f=24,o=z;eJxjYGAAAAADAAE=\x1b\\\
 \x1b[16t\x1b[?996n\x1b]11;?\x1b\\\x1b[c";
 
+/// Same graphics + cell probe without appearance queries, when the desktop portal
+/// already supplied an initial dark/light preference.
+const GRAPHICS_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\
+\x1b_Gi=32,s=1,v=1,a=q,t=d,f=24,o=z;eJxjYGAAAAADAAE=\x1b\\\
+\x1b[16t\x1b[c";
+
 /// Appearance-only probe when graphics detection is skipped (disabled, half blocks, or
 /// inside a multiplexer where kitty APC probes are not used).
 const APPEARANCE_QUERY: &[u8] = b"\x1b[?996n\x1b]11;?\x1b\\\x1b[c";
@@ -218,6 +224,12 @@ pub fn ask(timeout: Duration) -> Option<Reply> {
     ask_bytes(QUERY, timeout)
 }
 
+/// Asks only about kitty graphics and cell size (used when the portal already
+/// supplied the initial dark/light scheme). `None` if not a terminal.
+pub fn ask_graphics(timeout: Duration) -> Option<Reply> {
+    ask_bytes(GRAPHICS_QUERY, timeout)
+}
+
 /// Asks only for colour scheme / background (`CSI ? 996 n` + `OSC 11`). `None` if not a tty.
 pub fn ask_appearance(timeout: Duration) -> Option<Reply> {
     ask_bytes(APPEARANCE_QUERY, timeout)
@@ -238,7 +250,7 @@ pub fn query(input: RawFd, output: RawFd, timeout: Duration) -> Reply {
 }
 
 /// Writes only the appearance question (`CSI ?996n` + `OSC 11` + `CSI c`) and reads the answer.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn query_appearance(input: RawFd, output: RawFd, timeout: Duration) -> Reply {
     query_bytes(input, output, APPEARANCE_QUERY, timeout)
 }

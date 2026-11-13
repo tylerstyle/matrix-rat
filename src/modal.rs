@@ -179,15 +179,18 @@ pub enum Setting {
     Logout,
     /// Whether the messages say who has read them (shown next to `ReadReceipts`).
     ReadMarkers,
-    /// Theme used when the terminal is in dark mode.
+    /// Theme used when the terminal is dark.
     ThemeDark,
-    /// Theme used when the terminal is in light mode.
+    /// Theme used when the terminal is light.
     ThemeLight,
+    /// Whether separate dark and light theme slots are enabled and shown.
+    ThemePairing,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 14] = [
+    pub const ALL: [Setting; 15] = [
         Setting::Theme,
+        Setting::ThemePairing,
         Setting::ThemeDark,
         Setting::ThemeLight,
         Setting::SidebarWidth,
@@ -217,6 +220,7 @@ impl Setting {
     pub fn label(self) -> &'static str {
         match self {
             Setting::Theme => "Theme",
+            Setting::ThemePairing => "Follow dark/light",
             Setting::ThemeDark => "Dark theme",
             Setting::ThemeLight => "Light theme",
             Setting::SidebarWidth => "Room list width",
@@ -238,8 +242,9 @@ impl Setting {
             Setting::Theme => {
                 "F3 cycles this, or the active dark/light slot when paired; themes/ files reload live."
             }
-            Setting::ThemeDark => "Used when the terminal is dark; (unset) follows Theme.",
-            Setting::ThemeLight => "Used when the terminal is light; (unset) follows Theme.",
+            Setting::ThemePairing => "Use separate themes for dark and light desktop appearance.",
+            Setting::ThemeDark => "Used when dark mode is active; (unset) follows Theme.",
+            Setting::ThemeLight => "Used when light mode is active; (unset) follows Theme.",
             Setting::SidebarWidth => "You can also drag the line next to the room list.",
             Setting::RoomPreviews => {
                 "Show the latest message under each room (and larger room pictures)."
@@ -275,16 +280,52 @@ pub struct SettingsMenu {
     pub confirm_logout: bool,
     /// The download folder while it is being typed.
     pub editing: Option<String>,
+    /// Whether `ThemeDark` and `ThemeLight` slot rows are shown.
+    pub show_theme_pair: bool,
 }
 
 impl SettingsMenu {
+    pub fn for_pairing(paired: bool) -> Self {
+        Self {
+            show_theme_pair: paired,
+            ..Self::default()
+        }
+    }
+
+    pub fn select(setting: Setting, show_theme_pair: bool) -> Self {
+        let selected = Setting::ALL.iter().position(|s| *s == setting).unwrap_or(0);
+        Self {
+            selected,
+            show_theme_pair,
+            ..Self::default()
+        }
+    }
+
+    pub fn shows(&self, setting: Setting) -> bool {
+        self.show_theme_pair || !matches!(setting, Setting::ThemeDark | Setting::ThemeLight)
+    }
+
     pub fn current(&self) -> Setting {
-        Setting::ALL[self.selected.min(Setting::ALL.len() - 1)]
+        let current = Setting::ALL[self.selected.min(Setting::ALL.len() - 1)];
+        if self.shows(current) {
+            current
+        } else {
+            Setting::Theme
+        }
     }
 
     pub fn step(&mut self, delta: isize) {
-        let count = Setting::ALL.len() as isize;
-        self.selected = (self.selected as isize + delta).rem_euclid(count) as usize;
+        if delta != 0 {
+            let count = Setting::ALL.len() as isize;
+            let mut idx = self.selected.min(Setting::ALL.len() - 1) as isize;
+            for _ in 0..Setting::ALL.len() {
+                idx = (idx + delta).rem_euclid(count);
+                if self.shows(Setting::ALL[idx as usize]) {
+                    self.selected = idx as usize;
+                    break;
+                }
+            }
+        }
         self.confirm_logout = false;
         self.editing = None;
     }

@@ -306,10 +306,14 @@ mod tests {
     fn download_folder_is_typed_in_the_settings() {
         let (mut app, _commands) = app_with(Vec::new());
         app.perform(Action::OpenSettings);
-        let row = crate::modal::Setting::ALL
-            .iter()
-            .position(|s| *s == crate::modal::Setting::DownloadDir)
-            .unwrap();
+        let row = match &app.modal {
+            Some(Modal::Settings(m)) => crate::modal::Setting::ALL
+                .iter()
+                .filter(|s| m.shows(**s))
+                .position(|s| *s == crate::modal::Setting::DownloadDir)
+                .unwrap(),
+            _ => unreachable!(),
+        };
         for _ in 0..row {
             app.on_event(key(KeyCode::Down));
         }

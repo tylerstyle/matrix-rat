@@ -106,14 +106,18 @@ impl Graphics {
 
     /// Asks the terminal what it can do (see [`crate::termquery`] for when this may
     /// run). Takes at most [`QUERY_TIMEOUT`]; without an answer it falls back to
-    /// half blocks for graphics and probes colour-scheme / background support in the
-    /// same query round-trip when possible.
+    /// half blocks for graphics. When `probe_appearance` is true, colour-scheme and
+    /// background probes are batched into the same round-trip (or run alone when
+    /// graphics probing is disabled).
     ///
     /// Only kitty's protocol with Unicode placeholders is used for real graphics: its
     /// pictures live in ordinary cells, so they cannot be left behind or painted over
     /// popups. Terminals that only do sixel or the iTerm2 protocol get half blocks, and
     /// so does everything inside a multiplexer.
-    pub fn detect_with_term(mode: ImageMode) -> (Self, Option<termquery::Reply>) {
+    pub fn detect_with_term(
+        mode: ImageMode,
+        probe_appearance: bool,
+    ) -> (Self, Option<termquery::Reply>) {
         let probe_graphics =
             matches!(mode, ImageMode::Auto) && !in_multiplexer() && !placeholders_broken();
         if !probe_graphics {
@@ -131,13 +135,23 @@ impl Graphics {
                     Self::halfblocks()
                 }
             };
-            let reply = termquery::ask_appearance(QUERY_TIMEOUT);
-            if let Some(reply) = reply {
-                tracing::info!(?reply, "appearance: terminal queried");
-            }
+            let reply = if probe_appearance {
+                let reply = termquery::ask_appearance(QUERY_TIMEOUT);
+                if let Some(reply) = reply {
+                    tracing::info!(?reply, "appearance: terminal queried");
+                }
+                reply
+            } else {
+                None
+            };
             return (graphics, reply);
         }
-        let Some(reply) = termquery::ask(QUERY_TIMEOUT) else {
+        let reply = if probe_appearance {
+            termquery::ask(QUERY_TIMEOUT)
+        } else {
+            termquery::ask_graphics(QUERY_TIMEOUT)
+        };
+        let Some(reply) = reply else {
             return (Self::halfblocks(), None);
         };
         let graphics = Self::from_reply(reply, termquery::cell_from_window());

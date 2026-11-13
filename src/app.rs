@@ -18,8 +18,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
+use futures::StreamExt;
 use ratatui::layout::Rect;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::MissedTickBehavior;
@@ -39,7 +41,6 @@ use crate::model::{
 };
 use crate::paths::Paths;
 use crate::terminal::{self, TerminalGuard};
-use crate::terminput::{TermEvents, TermInput};
 use crate::theme::{ColorScheme, DEFAULT_THEME, Theme, truecolor_supported};
 use crate::ui::hit::{Button, HitId, HitMap};
 use crate::ui::{self, SIDEBAR_MIN, max_sidebar};
@@ -204,8 +205,8 @@ pub struct App {
     saved: std::collections::HashMap<String, PathBuf>,
     /// A large attachment the user was asked about once.
     confirm_large: Option<String>,
-    /// Current terminal colour scheme (`Dark` or `Light`), detected at startup and
-    /// updated live via DEC mode 2031 / OSC 11.
+    /// Current colour scheme (`Dark` or `Light`), resolved at startup (portal, terminal
+    /// query, `COLORFGBG`) and updated live via the desktop portal.
     pub color_scheme: ColorScheme,
     /// Base `theme` setting from config (used when unpaired, or as fallback for an
     /// unset slot).
@@ -509,6 +510,11 @@ impl App {
                 self.wanted_theme = self.desired_theme();
             }
         }
+        if self.has_theme_pair()
+            && let Some(Modal::Settings(menu)) = &mut self.modal
+        {
+            menu.show_theme_pair = true;
+        }
         let name = self.wanted_theme.clone();
         let exists = Theme::builtin(&name).is_some()
             || self.themes_dir.join(format!("{name}.toml")).exists();
@@ -629,6 +635,28 @@ impl App {
         }
     }
 
+    fn toggle_theme_pairing(&mut self) {
+        let on = self.has_theme_pair()
+            || matches!(self.modal, Some(Modal::Settings(ref menu)) if menu.show_theme_pair);
+        if on {
+            self.theme_dark = None;
+            self.theme_light = None;
+            self.config_theme_dark = None;
+            self.config_theme_light = None;
+            self.remove_setting("theme_dark");
+            self.remove_setting("theme_light");
+            let desired = self.desired_theme();
+            if desired != self.wanted_theme {
+                self.set_theme(&desired);
+            }
+            if let Some(Modal::Settings(menu)) = &mut self.modal {
+                menu.show_theme_pair = false;
+            }
+        } else if let Some(Modal::Settings(menu)) = &mut self.modal {
+            menu.show_theme_pair = true;
+        }
+    }
+
     /// Loads `name`, remembers it, and saves it to the configuration (to the active
     /// dark/light slot when paired, otherwise to `theme`).
     fn apply_theme(&mut self, name: String) {
@@ -680,6 +708,10 @@ impl App {
         let switch = |on: bool| if on { "on" } else { "off" }.to_owned();
         match setting {
             Setting::Theme => self.wanted_theme.clone(),
+            Setting::ThemePairing => switch(
+                self.has_theme_pair()
+                    || matches!(self.modal, Some(Modal::Settings(ref menu)) if menu.show_theme_pair),
+            ),
             Setting::ThemeDark => self.theme_dark.as_deref().unwrap_or("(unset)").to_owned(),
             Setting::ThemeLight => self.theme_light.as_deref().unwrap_or("(unset)").to_owned(),
             Setting::SidebarWidth => self.sidebar.width.to_string(),
@@ -701,6 +733,7 @@ impl App {
     fn change_setting(&mut self, setting: Setting, delta: i8) {
         match setting {
             Setting::Theme => self.step_theme(if delta < 0 { -1 } else { 1 }),
+            Setting::ThemePairing => self.toggle_theme_pairing(),
             Setting::ThemeDark => {
                 self.step_slot_theme(ColorScheme::Dark, if delta < 0 { -1 } else { 1 });
             }
@@ -1807,7 +1840,8 @@ impl App {
             Action::CloseModal => self.close_modal(),
             Action::OpenSettings => {
                 if self.modal.is_none() {
-                    self.open_modal(Modal::Settings(SettingsMenu::default()));
+                    let paired = self.has_theme_pair();
+                    self.open_modal(Modal::Settings(SettingsMenu::for_pairing(paired)));
                 }
             }
             Action::Search => self.open_search(),
@@ -2677,6 +2711,7 @@ impl App {
                     Some(HitId::Setting(index, delta)) => {
                         if let Some(Modal::Settings(menu)) = &mut self.modal
                             && let Some(setting) = Setting::ALL.get(index).copied()
+                            && menu.shows(setting)
                         {
                             if menu.selected != index {
                                 menu.selected = index;
@@ -2857,21 +2892,22 @@ fn open_in_browser(url: &str) {
 }
 
 pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
+    let (portal_scheme, mut scheme_watch) = crate::portal::SchemeWatch::start().await;
     let guard = TerminalGuard::enter(config.mouse)?;
     // Terminal queries (image protocol, background colour) go here: on the alternate
     // screen, where a terminal that prints a question instead of answering does no
     // harm, but before mouse and focus reports are on and before the event stream.
     guard.alternate_screen()?;
-    let (graphics, term_reply) = crate::images::Graphics::detect_with_term(config.images);
-    let initial_scheme = crate::termquery::resolve_color_scheme(term_reply);
+    let (graphics, term_reply) =
+        crate::images::Graphics::detect_with_term(config.images, portal_scheme.is_none());
+    let initial_scheme = crate::portal::resolve_initial_scheme(portal_scheme, term_reply);
     let mut terminal = guard.activate()?;
-    let mut events = TermEvents::spawn()?;
+    let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // Without these, a kill or a closed terminal window would skip all cleanup.
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sighup = signal(SignalKind::hangup())?;
-    let mut sigwinch = signal(SignalKind::window_change())?;
     let (matrix, mut matrix_events) = if demo {
         (None, None)
     } else {
@@ -2898,10 +2934,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
             // The terminal frees its copies of the pictures now, in case we are
             // never resumed; they are sent again when drawn.
             app.flush_images(true);
-            drop(events);
             terminal::suspend(&mut terminal)?;
-            events = TermEvents::spawn()?;
-            terminal::query_color_scheme();
             app.dirty = true;
         }
         terminal::set_mouse(app.mouse)?;
@@ -2932,8 +2965,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
         }
         tokio::select! {
             event = events.next() => match event {
-                Some(TermInput::Event(event)) => app.on_event(event),
-                Some(TermInput::ColorScheme(scheme)) => app.on_color_scheme(scheme),
+                Some(Ok(event)) => app.on_event(event),
+                Some(Err(err)) => return Err(err.into()),
                 None => break,
             },
             Some(event) = async {
@@ -2943,14 +2976,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
                 }
             } => app.on_matrix(event),
             _ = theme_watch.changed() => app.reload_theme(),
+            scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),
             _ = tick.tick() => app.on_tick(),
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
-            _ = sigwinch.recv() => {
-                if let Ok((cols, rows)) = crossterm::terminal::size() {
-                    app.on_event(Event::Resize(cols, rows));
-                }
-            }
             _ = sigterm.recv() => app.should_quit = true,
             _ = sighup.recv() => app.should_quit = true,
         }
@@ -4302,8 +4331,29 @@ mod tests {
         app.on_event(key(KeyCode::Left));
         assert_eq!(app.theme.name, before);
 
+        // Slot rows start hidden behind "Follow dark/light", so Down skips straight to width.
+        find(&terminal, "Follow dark/light");
+        assert!(!format!("{}", terminal.backend()).contains("Dark theme"));
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(app.setting_value(Setting::ThemePairing), "off");
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(
+            app.sidebar.width,
+            app.setting_value(Setting::SidebarWidth)
+                .parse::<u16>()
+                .unwrap()
+        );
+        app.on_event(key(KeyCode::Up));
+
+        // Enabling pairing reveals Dark theme and Light theme slots.
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.setting_value(Setting::ThemePairing), "on");
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "Dark theme");
+        find(&terminal, "Light theme");
+
         // Dark theme and Light theme slots cycle through (unset) + themes and clean
-        // up config keys when returned to (unset).
+        // up config keys when returned to (unset) or when Follow dark/light is turned off.
         app.on_event(key(KeyCode::Down));
         assert_eq!(app.setting_value(Setting::ThemeDark), "(unset)");
         app.on_event(key(KeyCode::Right));
@@ -4312,6 +4362,8 @@ mod tests {
         app.on_event(key(KeyCode::Left));
         assert_eq!(app.setting_value(Setting::ThemeDark), "(unset)");
         assert!(Config::load(&file).unwrap().theme_dark.is_none());
+        app.on_event(key(KeyCode::Right));
+        assert!(Config::load(&file).unwrap().theme_dark.is_some());
 
         app.on_event(key(KeyCode::Down));
         assert_eq!(app.setting_value(Setting::ThemeLight), "(unset)");
@@ -4321,6 +4373,17 @@ mod tests {
         app.on_event(key(KeyCode::Left));
         assert_eq!(app.setting_value(Setting::ThemeLight), "(unset)");
         assert!(Config::load(&file).unwrap().theme_light.is_none());
+
+        // Turning Follow dark/light off removes configured slot keys, restores base Theme,
+        // and hides the two slot rows again.
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Char(' ')));
+        assert_eq!(app.setting_value(Setting::ThemePairing), "off");
+        assert_eq!(app.theme.name, before);
+        assert!(Config::load(&file).unwrap().theme_dark.is_none());
+        redraw(&mut app, &mut terminal);
+        assert!(!format!("{}", terminal.backend()).contains("Dark theme"));
 
         // Width, then the switches.
         app.on_event(key(KeyCode::Down));

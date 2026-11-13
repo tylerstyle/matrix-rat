@@ -89,9 +89,6 @@ fn write_activation() -> Result<()> {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
     }
-    // Ask terminals that support DEC mode 2031 (kitty, contour, foot, ghostty) to
-    // report subsequent desktop dark/light colour-scheme changes live.
-    io::Write::write_all(&mut out, b"\x1b[?2031h")?;
     out.flush()?;
     Ok(())
 }
@@ -157,19 +154,10 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Asks the terminal for its current colour scheme (`CSI ? 996 n`), for instance
-/// after resuming from `Ctrl-Z` suspension.
-pub fn query_color_scheme() {
-    let mut out = io::stdout();
-    let _ = io::Write::write_all(&mut out, b"\x1b[?996n");
-    let _ = io::Write::flush(&mut out);
-}
-
 /// Idempotent; safe to call from the panic hook and from `Drop`.
 pub fn restore() {
     let mut out = io::stdout();
     if ACTIVE.swap(false, Ordering::SeqCst) {
-        let _ = io::Write::write_all(&mut out, b"\x1b[?2031l");
         if KEYBOARD_ENHANCED.load(Ordering::SeqCst) {
             let _ = execute!(out, PopKeyboardEnhancementFlags);
         }

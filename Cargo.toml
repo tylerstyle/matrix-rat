@@ -48,6 +48,8 @@ toml_edit = "0.25.19"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 notify-rust = { version = "4.19.0", default-features = false, features = ["z"] }
+# Same version & features notify-rust already pulls in, to watch XDG portal appearance.
+zbus = { version = "6.3.0", default-features = false, features = ["default-rt", "proxy"] }
 
 [dev-dependencies]
 insta = "1"
