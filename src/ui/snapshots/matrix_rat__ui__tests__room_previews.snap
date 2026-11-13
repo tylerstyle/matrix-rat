@@ -13,7 +13,7 @@ expression: "render(&mut app, 100, 30)"
 "│  B   bob          2  ││   👍 2   🎉 1                                                            │" Hidden by multi-width symbols: [(29, " "), (36, " ")]
 "│      bob: are you c… ││  Back-pagination also survives restarts, which is a big deal for large   │"
 "│  C   carol           ││  rooms like this one where scrolling up used to refetch everything from  │"
-"│      carol: See you… ││  the server every single time.                                           │"
+"│      See you tomorr… ││  the server every single time.                                           │"
 "│ Rooms                ││───────────────────────────────── Today ───────────────────────────────── │"
 "│  D   design       5  ││● carol  09:12                                                            │"
 "│      erin: @you can… ││  Morning! Is the sliding sync proxy still needed?                        │"

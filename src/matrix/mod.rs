@@ -111,6 +111,8 @@ pub enum MatrixCmd {
     },
     /// End the session on the server and go back to the login form.
     Logout,
+    /// Whether the room list shows latest messages; without, they are not worked out.
+    Previews(bool),
     Shutdown,
     /// Fetch and decode a picture; answered with [`MatrixEvent::Image`].
     FetchImage {
@@ -191,6 +193,7 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Join { room_id } => write!(f, "Join({room_id})"),
             Self::Leave { room_id } => write!(f, "Leave({room_id})"),
             Self::Logout => f.write_str("Logout"),
+            Self::Previews(wanted) => write!(f, "Previews({wanted})"),
             Self::Shutdown => f.write_str("Shutdown"),
             // The source of an encrypted file carries its key.
             Self::FetchImage { full, .. } => write!(f, "FetchImage(full: {full})"),
@@ -647,7 +650,7 @@ impl Worker {
         let mut rooms: Vector<RoomListItem> = Vector::new();
         let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
         let mut own_members = notify::OwnMembers::default();
-        let mut previewed = std::collections::HashSet::new();
+        let mut previews = Previews::default();
         let mut verifier = verify::Verifier::start(client, self.events.clone());
         // Kept alive for the session: it follows the space hierarchy by itself.
         let space_service = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
@@ -672,18 +675,9 @@ impl Worker {
                     own_members.ensure(&rooms).await;
                     // The SDK works out a room's latest message only for rooms it was
                     // asked to; ask once for each (it needs the event cache running).
-                    if client.event_cache().subscribe().is_ok() {
-                        let latest = client.latest_events().await;
-                        for room in rooms.iter().take(LATEST_ROOMS) {
-                            if previewed.insert(room.room_id().to_owned())
-                                && let Err(err) = latest.listen_to_room(room.room_id()).await
-                            {
-                                tracing::debug!(%err, "no latest message for a room");
-                            }
-                        }
-                    }
+                    previews.listen(client, &rooms);
                     _notices.arm();
-                    self.emit(MatrixEvent::Rooms(summarize(&rooms).await));
+                    self.emit(MatrixEvent::Rooms(summarize(&rooms, &mut previews).await));
                 }
                 () = own_members.finished() => own_members.ensure(&rooms).await,
                 Some(state) = sync_state.next() => {
@@ -715,6 +709,13 @@ impl Worker {
                     }
                     Some(MatrixCmd::Shutdown) | None => break SessionEnd::Shutdown,
                     Some(MatrixCmd::Logout) => break SessionEnd::LoggedOut,
+                    Some(MatrixCmd::Previews(wanted)) => {
+                        if previews.enabled != wanted {
+                            previews.enabled = wanted;
+                            previews.listen(client, &rooms);
+                            self.emit(MatrixEvent::Rooms(summarize(&rooms, &mut previews).await));
+                        }
+                    }
                     Some(MatrixCmd::Verification(command)) => verifier.handle(command).await,
                     Some(MatrixCmd::Manage(command)) => manager.handle(command),
                     Some(command) => timelines.handle(command).await,
@@ -789,7 +790,75 @@ fn recovery_status(state: RecoveryState) -> RecoveryStatus {
     }
 }
 
-async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
+/// The latest-message lines of the room list. Working one out means loading a profile
+/// and reading (maybe decrypting) an event, so each is kept until that room's latest
+/// message changes, and nothing is done at all while the list does not show them.
+#[derive(Default)]
+struct Previews {
+    enabled: bool,
+    /// By room id: the time of the message the line was made from, and the line.
+    lines: std::collections::HashMap<
+        String,
+        (
+            Option<matrix_sdk::ruma::MilliSecondsSinceUnixEpoch>,
+            Option<String>,
+        ),
+    >,
+    /// Rooms the SDK has been asked to keep a latest message for.
+    listening: std::collections::HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    tasks: tokio::task::JoinSet<()>,
+}
+
+impl Previews {
+    /// Asks the SDK, in the background, to track the latest message of the rooms at
+    /// the top of the list that it does not track yet.
+    fn listen(&mut self, client: &Client, rooms: &Vector<RoomListItem>) {
+        while self.tasks.try_join_next().is_some() {}
+        if !self.enabled {
+            return;
+        }
+        let new: Vec<_> = rooms
+            .iter()
+            .take(LATEST_ROOMS)
+            .map(|room| room.room_id().to_owned())
+            .filter(|id| self.listening.insert(id.clone()))
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        let client = client.clone();
+        self.tasks.spawn(async move {
+            // The latest messages come from the event cache, which must be running.
+            if client.event_cache().subscribe().is_err() {
+                return;
+            }
+            let latest = client.latest_events().await;
+            for id in new {
+                if let Err(err) = latest.listen_to_room(&id).await {
+                    tracing::debug!(%err, "no latest message for a room");
+                }
+            }
+        });
+    }
+
+    async fn line(&mut self, room: &RoomListItem, direct: bool) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        let stamp = room.latest_event_timestamp();
+        let id = room.room_id().as_str();
+        if let Some((seen, line)) = self.lines.get(id)
+            && *seen == stamp
+        {
+            return line.clone();
+        }
+        let line = latest_message(room, direct).await;
+        self.lines.insert(id.to_owned(), (stamp, line.clone()));
+        line
+    }
+}
+
+async fn summarize(rooms: &Vector<RoomListItem>, previews: &mut Previews) -> Vec<RoomSummary> {
     let mut summaries = Vec::with_capacity(rooms.len());
     for room in rooms {
         // Spaces get their own navigation later; they are not chats.
@@ -837,7 +906,7 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
             name: crate::text::sanitize_line(&name),
             category,
             notifications,
-            preview: latest_message(room, direct).await,
+            preview: previews.line(room, direct).await,
             server_notifications: room.unread_notification_counts().notification_count,
             mention: room.num_unread_mentions() > 0,
             unread: notifications > 0 || room.num_unread_messages() > 0 || room.is_marked_unread(),
@@ -897,6 +966,8 @@ mod tests {
                         if let Some(room) = joined {
                             if !sent {
                                 sent = true;
+                                // As the app does once it is logged in.
+                                handle.send(MatrixCmd::Previews(true));
                                 handle.send(MatrixCmd::Send {
                                     room_id: room.id.clone(),
                                     message: crate::format::parse(&text),

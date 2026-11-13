@@ -430,6 +430,7 @@ impl Timelines {
             | MatrixCmd::CancelLogin
             | MatrixCmd::Recover { .. }
             | MatrixCmd::Logout
+            | MatrixCmd::Previews(_)
             | MatrixCmd::Shutdown
             | MatrixCmd::Verification(_)
             | MatrixCmd::Manage(_) => {}

@@ -110,11 +110,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .position(|r| matches!(r, SideRow::Room(i) if Some(*i) == cursor_room))
         {
-            if at < app.sidebar.scroll + 1 {
-                // Also show the section header above the first room.
-                app.sidebar.scroll = at.saturating_sub(1);
+            if at <= app.sidebar.scroll {
+                // Also show the section header above the room, where there is room.
+                app.sidebar.scroll = if height > lines {
+                    at.saturating_sub(1)
+                } else {
+                    at
+                };
             } else if at + lines > app.sidebar.scroll + height {
-                app.sidebar.scroll = (at + lines).saturating_sub(height);
+                // Never so far that the room's own first line leaves the top.
+                app.sidebar.scroll = (at + lines).saturating_sub(height).min(at);
             }
         }
     }
@@ -251,27 +256,50 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 let text_width = rect.width.saturating_sub(3 + tile_cols) as usize;
                 // Until the worker has said what the latest message is (and in the
                 // demo), the newest loaded one stands in.
+                // For the open room the loaded messages are the freshest source too:
+                // the room list's own line follows a moment later.
                 let loaded = room
                     .messages
                     .iter()
                     .rev()
-                    .find(|m| !m.sender.is_empty() && !m.body.is_empty())
+                    .find(|m| !m.sender.is_empty() && !m.body.trim().is_empty())
                     .map(|m| {
-                        let line = m.body.lines().next().unwrap_or_default();
-                        format!("{}: {line}", m.sender)
+                        let line = m
+                            .body
+                            .lines()
+                            .map(str::trim)
+                            .find(|line| !line.is_empty() && !line.starts_with('>'))
+                            .unwrap_or_default();
+                        if m.own {
+                            format!("You: {line}")
+                        } else if room.kind == crate::model::RoomKind::Person {
+                            line.to_owned()
+                        } else {
+                            format!("{}: {line}", m.sender)
+                        }
                     });
-                let text = room
-                    .preview
-                    .as_deref()
-                    .or(loaded.as_deref())
-                    .unwrap_or_default();
+                let text = if *index == app.active {
+                    loaded.as_deref().or(room.preview.as_deref())
+                } else {
+                    room.preview.as_deref().or(loaded.as_deref())
+                }
+                .unwrap_or_default();
                 let muted = ratatui::style::Style {
                     fg: theme.style(Role::Muted).fg,
                     ..ratatui::style::Style::new()
                 };
                 let line = Line::from(vec![
                     marker,
-                    Span::styled(" ".repeat(tile_cols as usize), tile),
+                    // Normally the lower half of the tile; if the room's first line is
+                    // scrolled out, this line carries the initial instead of a blank.
+                    Span::styled(
+                        if n == 0 {
+                            format!(" {} ", initial(&room.name))
+                        } else {
+                            " ".repeat(tile_cols as usize)
+                        },
+                        tile.fg(theme.style(Role::UnreadBadge).fg.unwrap_or_default()),
+                    ),
                     Span::raw(" "),
                     Span::styled(truncate(text, text_width), muted),
                 ]);

@@ -564,6 +564,7 @@ impl App {
             }
             Setting::RoomPreviews => {
                 self.room_previews = !self.room_previews;
+                self.send_matrix(MatrixCmd::Previews(self.room_previews));
                 self.sidebar.reveal_cursor = true;
                 self.save_setting("room_previews", self.room_previews);
             }
@@ -1874,6 +1875,7 @@ impl App {
                     self.modal = None;
                 }
                 self.user_id = Some(user_id);
+                self.send_matrix(MatrixCmd::Previews(self.room_previews));
                 self.logged_out = false;
                 self.session_started = Some(Instant::now());
             }
@@ -2558,10 +2560,12 @@ impl App {
                         };
                     }
                     Some(Pane::Sidebar) => {
+                        // A room at a time, also when rooms take two lines.
+                        let step = if self.room_previews { 2 } else { 1 };
                         self.sidebar.scroll = if up {
-                            self.sidebar.scroll.saturating_sub(1)
+                            self.sidebar.scroll.saturating_sub(step)
                         } else {
-                            self.sidebar.scroll + 1
+                            self.sidebar.scroll + step
                         };
                     }
                     _ => {}
