@@ -179,11 +179,17 @@ pub enum Setting {
     Logout,
     /// Whether the messages say who has read them (shown next to `ReadReceipts`).
     ReadMarkers,
+    /// Theme used when the terminal is in dark mode.
+    ThemeDark,
+    /// Theme used when the terminal is in light mode.
+    ThemeLight,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 12] = [
+    pub const ALL: [Setting; 14] = [
         Setting::Theme,
+        Setting::ThemeDark,
+        Setting::ThemeLight,
         Setting::SidebarWidth,
         Setting::RoomPreviews,
         Setting::Mouse,
@@ -211,6 +217,8 @@ impl Setting {
     pub fn label(self) -> &'static str {
         match self {
             Setting::Theme => "Theme",
+            Setting::ThemeDark => "Dark theme",
+            Setting::ThemeLight => "Light theme",
             Setting::SidebarWidth => "Room list width",
             Setting::RoomPreviews => "Room previews",
             Setting::Mouse => "Mouse",
@@ -228,8 +236,10 @@ impl Setting {
     pub fn hint(self) -> &'static str {
         match self {
             Setting::Theme => {
-                "Themes in the themes folder are listed too and reload when they change."
+                "F3 cycles this, or the active dark/light slot when paired; themes/ files reload live."
             }
+            Setting::ThemeDark => "Used when the terminal is dark; (unset) follows Theme.",
+            Setting::ThemeLight => "Used when the terminal is light; (unset) follows Theme.",
             Setting::SidebarWidth => "You can also drag the line next to the room list.",
             Setting::RoomPreviews => {
                 "Show the latest message under each room (and larger room pictures)."

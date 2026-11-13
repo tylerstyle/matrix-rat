@@ -64,7 +64,10 @@ Apache-2.0. Parts are adapted from [iamb](https://github.com/ulyssa/iamb) (Apach
 ## Themes
 
 Eleven themes are built in (`F3` cycles them, the settings menu `F2` lists them); `theme = "terminal"` follows your terminal's
-own colours. Theme files in `~/.config/matrix-rat/themes/` are reloaded the moment they
+own colours. To pair themes with your terminal's dark and light modes, set `theme_dark` and `theme_light` in
+`~/.config/matrix-rat/config.toml` (or via `Dark theme` and `Light theme` in the settings menu): startup detects the mode via
+DEC mode 2031 (`CSI ?996n`) and `OSC 11` luminance (`COLORFGBG` fallback), live terminal mode changes switch themes automatically,
+and `F3` updates the active mode's slot. Theme files in `~/.config/matrix-rat/themes/` are reloaded the moment they
 change, so tools like Noctalia, matugen, wallust and pywal can recolour the app:
 see [contrib/themes/README.md](contrib/themes/README.md).
 

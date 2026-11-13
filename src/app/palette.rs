@@ -76,6 +76,8 @@ impl App {
             download_dir: crate::files::display(&self.download_dir()),
             verify_status: crate::verify::setting_text(self.verify.security),
             wanted_theme: self.wanted_theme.clone(),
+            theme_dark: self.theme_dark.clone(),
+            theme_light: self.theme_light.clone(),
             themes: self.theme_names.clone(),
             rooms,
             selection,
@@ -193,7 +195,9 @@ impl App {
                     editing: None,
                 }));
             }
-            Setting::Theme | Setting::SidebarWidth => self.change_setting(setting, 1),
+            Setting::Theme | Setting::ThemeDark | Setting::ThemeLight | Setting::SidebarWidth => {
+                self.change_setting(setting, 1)
+            }
         }
     }
 }

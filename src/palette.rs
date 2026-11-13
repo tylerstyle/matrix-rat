@@ -94,6 +94,8 @@ pub struct PaletteContext {
     pub download_dir: String,
     pub verify_status: &'static str,
     pub wanted_theme: String,
+    pub theme_dark: Option<String>,
+    pub theme_light: Option<String>,
     pub themes: Vec<String>,
     pub rooms: Vec<RoomItem>,
     pub selection: MessageCaps,
@@ -715,7 +717,18 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
 
 fn collect_themes(ctx: &PaletteContext, out: &mut Vec<Entry>) {
     for name in &ctx.themes {
-        let hint = (name == &ctx.wanted_theme).then(|| "active".to_owned());
+        let active = name == &ctx.wanted_theme;
+        let is_dark = ctx.theme_dark.as_deref() == Some(name.as_str());
+        let is_light = ctx.theme_light.as_deref() == Some(name.as_str());
+        let hint = match (active, is_dark, is_light) {
+            (true, true, false) => Some("active · dark".to_owned()),
+            (true, false, true) => Some("active · light".to_owned()),
+            (true, _, _) => Some("active".to_owned()),
+            (false, true, true) => Some("dark · light".to_owned()),
+            (false, true, false) => Some("dark".to_owned()),
+            (false, false, true) => Some("light".to_owned()),
+            (false, false, false) => None,
+        };
         push_entry(
             out,
             Target::Theme(name.clone()),
@@ -817,6 +830,8 @@ mod tests {
             verify_status: "unknown",
             target: Some(("rust".to_owned(), false)),
             wanted_theme: "rat-dark".to_owned(),
+            theme_dark: None,
+            theme_light: None,
             themes: vec![
                 "rat-dark".to_owned(),
                 "gruvbox-dark".to_owned(),

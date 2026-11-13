@@ -23,6 +23,7 @@ mod palette;
 mod paths;
 mod rich;
 mod terminal;
+mod terminput;
 mod termquery;
 mod text;
 mod theme;

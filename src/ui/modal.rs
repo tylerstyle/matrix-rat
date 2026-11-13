@@ -167,21 +167,44 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
         "Settings",
         "↑↓ select · ←→ change · Enter · Esc close",
     );
-    let theme = app.theme.clone();
-    let mut y = 0;
+    enum SettingLine {
+        Heading(&'static str),
+        Blank,
+        Row(usize, Setting),
+    }
+    let mut lines = Vec::with_capacity(rows as usize + headings as usize);
+    let mut selected_line = 0usize;
     for (index, setting) in Setting::ALL.into_iter().enumerate() {
         if let Some(heading) = setting.heading() {
             if airy && index > 0 {
-                y += 1;
+                lines.push(SettingLine::Blank);
             }
-            frame.render_widget(
-                Line::from(Span::styled(heading, theme.style(Role::Muted))),
-                row(inner, y),
-            );
-            y += 1;
+            lines.push(SettingLine::Heading(heading));
         }
+        if menu.selected == index {
+            selected_line = lines.len();
+        }
+        lines.push(SettingLine::Row(index, setting));
+    }
+
+    let theme = app.theme.clone();
+    let visible = inner.height as usize;
+    let scroll = (selected_line + 1).saturating_sub(visible);
+    let mut y = 0u16;
+    for line in lines.iter().skip(scroll).take(visible) {
         let rect = row(inner, y);
         y += 1;
+        let (index, setting) = match *line {
+            SettingLine::Blank => continue,
+            SettingLine::Heading(heading) => {
+                frame.render_widget(
+                    Line::from(Span::styled(heading, theme.style(Role::Muted))),
+                    rect,
+                );
+                continue;
+            }
+            SettingLine::Row(index, setting) => (index, setting),
+        };
         if rect.width <= LABEL + 6 {
             continue;
         }
@@ -204,7 +227,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
         let room = rect.right().saturating_sub(value_x) as usize;
         app.hits.add(rect, HitId::Setting(index, 0));
         match setting {
-            Setting::Theme | Setting::SidebarWidth => {
+            Setting::Theme | Setting::ThemeDark | Setting::ThemeLight | Setting::SidebarWidth => {
                 let shown = truncate(&value, room.saturating_sub(4));
                 let arrow = theme.style(Role::StatusKey);
                 let end = value_x + 2 + width(&shown) as u16;

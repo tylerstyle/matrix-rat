@@ -105,34 +105,44 @@ impl Graphics {
     }
 
     /// Asks the terminal what it can do (see [`crate::termquery`] for when this may
-    /// run). Takes at most [`QUERY_TIMEOUT`]; without an answer it is half blocks.
+    /// run). Takes at most [`QUERY_TIMEOUT`]; without an answer it falls back to
+    /// half blocks for graphics and probes colour-scheme / background support in the
+    /// same query round-trip when possible.
     ///
     /// Only kitty's protocol with Unicode placeholders is used for real graphics: its
     /// pictures live in ordinary cells, so they cannot be left behind or painted over
     /// popups. Terminals that only do sixel or the iTerm2 protocol get half blocks, and
     /// so does everything inside a multiplexer.
-    pub fn detect(mode: ImageMode) -> Self {
-        match mode {
-            ImageMode::Off => return Self::off(),
-            ImageMode::Halfblocks => return Self::halfblocks(),
-            ImageMode::Auto => {}
-        }
-        if in_multiplexer() {
-            tracing::info!("images: inside a terminal multiplexer, using half blocks");
-            return Self::halfblocks();
-        }
-        if placeholders_broken() {
-            tracing::info!(
-                "images: this terminal's kitty placeholders are unreliable, using half blocks"
-            );
-            return Self::halfblocks();
+    pub fn detect_with_term(mode: ImageMode) -> (Self, Option<termquery::Reply>) {
+        let probe_graphics =
+            matches!(mode, ImageMode::Auto) && !in_multiplexer() && !placeholders_broken();
+        if !probe_graphics {
+            let graphics = match mode {
+                ImageMode::Off => Self::off(),
+                ImageMode::Halfblocks => Self::halfblocks(),
+                ImageMode::Auto if in_multiplexer() => {
+                    tracing::info!("images: inside a terminal multiplexer, using half blocks");
+                    Self::halfblocks()
+                }
+                ImageMode::Auto => {
+                    tracing::info!(
+                        "images: this terminal's kitty placeholders are unreliable, using half blocks"
+                    );
+                    Self::halfblocks()
+                }
+            };
+            let reply = termquery::ask_appearance(QUERY_TIMEOUT);
+            if let Some(reply) = reply {
+                tracing::info!(?reply, "appearance: terminal queried");
+            }
+            return (graphics, reply);
         }
         let Some(reply) = termquery::ask(QUERY_TIMEOUT) else {
-            return Self::halfblocks();
+            return (Self::halfblocks(), None);
         };
         let graphics = Self::from_reply(reply, termquery::cell_from_window());
         tracing::info!(?reply, ?graphics, "images: terminal queried");
-        graphics
+        (graphics, Some(reply))
     }
 
     /// `window_cell`: the cell size the system reports, for terminals that do not
@@ -1414,6 +1424,7 @@ mod tests {
             compression: true,
             cell: Some((9, 18)),
             complete: true,
+            ..Reply::default()
         };
         assert_eq!(
             Graphics::from_reply(kitty, Some((7, 14))),

@@ -9,16 +9,24 @@
 use std::os::fd::RawFd;
 use std::time::{Duration, Instant};
 
-/// Three questions in one write:
+use crate::theme::ColorScheme;
+
+/// Five questions in one write:
 /// - the kitty graphics protocol, by asking it to check a one-pixel picture (`i=31`);
 /// - the same with a compressed pixel (`i=32`), for compressed transmissions;
-/// - the size of a cell in pixels (`CSI 16 t`).
+/// - the size of a cell in pixels (`CSI 16 t`);
+/// - the desktop colour-scheme report (`CSI ? 996 n`);
+/// - the terminal's background colour (`OSC 11`).
 ///
 /// The device attributes request (`CSI c`) comes last because every terminal answers
 /// it: its reply means the others have been answered or ignored.
 const QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\
 \x1b_Gi=32,s=1,v=1,a=q,t=d,f=24,o=z;eJxjYGAAAAADAAE=\x1b\\\
-\x1b[16t\x1b[c";
+\x1b[16t\x1b[?996n\x1b]11;?\x1b\\\x1b[c";
+
+/// Appearance-only probe when graphics detection is skipped (disabled, half blocks, or
+/// inside a multiplexer where kitty APC probes are not used).
+const APPEARANCE_QUERY: &[u8] = b"\x1b[?996n\x1b]11;?\x1b\\\x1b[c";
 
 /// More than any terminal sends in reply; reading stops there.
 const MAX_REPLY: usize = 4096;
@@ -31,8 +39,123 @@ pub struct Reply {
     pub compression: bool,
     /// Width and height of a cell in pixels.
     pub cell: Option<(u16, u16)>,
+    /// Colour scheme reported by `CSI ? 997 ; 1 n` (dark) or `2 n` (light).
+    pub reported_scheme: Option<ColorScheme>,
+    /// Colour scheme inferred from `OSC 11` background luminance.
+    pub background_scheme: Option<ColorScheme>,
     /// The terminal answered the last question, so nothing more is coming.
     pub complete: bool,
+}
+
+impl Reply {
+    /// Explicit colour-scheme report wins over perceived background luminance.
+    pub fn scheme(&self) -> Option<ColorScheme> {
+        self.reported_scheme.or(self.background_scheme)
+    }
+}
+
+/// Parses the parameter portion (without trailing `n`) of a private CSI `n` report,
+/// matching `CSI ? 997 ; 1 n` (dark) and `CSI ? 997 ; 2 n` (light).
+pub fn parse_color_scheme_csi(params: &str) -> Option<ColorScheme> {
+    let mode = params.strip_prefix("?997;")?.split(';').next()?;
+    match mode {
+        "1" => Some(ColorScheme::Dark),
+        "2" => Some(ColorScheme::Light),
+        _ => None,
+    }
+}
+
+/// Parses an OSC payload (between `ESC ]` and BEL/ST) for `11;<color>` background
+/// luminance, returning [`ColorScheme::Dark`] or [`ColorScheme::Light`].
+pub fn parse_osc11_payload(payload: &[u8]) -> Option<ColorScheme> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let color = text.strip_prefix("11;")?.trim();
+    let (r, g, b) = parse_osc_rgb(color)?;
+    Some(scheme_from_rgb(r, g, b))
+}
+
+fn parse_osc_rgb(color: &str) -> Option<(f64, f64, f64)> {
+    let lower = color.to_ascii_lowercase();
+    if let Some(rest) = lower
+        .strip_prefix("rgb:")
+        .or_else(|| lower.strip_prefix("rgba:"))
+    {
+        let mut parts = rest.split('/');
+        let r = parse_hex_channel(parts.next()?)?;
+        let g = parse_hex_channel(parts.next()?)?;
+        let b = parse_hex_channel(parts.next()?)?;
+        return Some((r, g, b));
+    }
+    if let Some(hex) = lower.strip_prefix('#')
+        && hex.len() == 6
+    {
+        let r = parse_hex_channel(&hex[0..2])?;
+        let g = parse_hex_channel(&hex[2..4])?;
+        let b = parse_hex_channel(&hex[4..6])?;
+        return Some((r, g, b));
+    }
+    None
+}
+
+fn parse_hex_channel(hex: &str) -> Option<f64> {
+    if !(1..=4).contains(&hex.len()) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let val = u32::from_str_radix(hex, 16).ok()? as f64;
+    let max = ((1u32 << (4 * hex.len())) - 1) as f64;
+    Some(val / max)
+}
+
+fn scheme_from_rgb(r: f64, g: f64, b: f64) -> ColorScheme {
+    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if luma >= 0.5 {
+        ColorScheme::Light
+    } else {
+        ColorScheme::Dark
+    }
+}
+
+/// Parses a `COLORFGBG` environment value (`fg;bg` or `fg;misc;bg`) into a colour scheme.
+pub fn scheme_from_colorfgbg(value: &str) -> Option<ColorScheme> {
+    let bg = value.rsplit(';').next()?.trim().parse::<u8>().ok()?;
+    match bg {
+        0..=6 | 8 => Some(ColorScheme::Dark),
+        7 | 9..=15 => Some(ColorScheme::Light),
+        16..=231 => {
+            const CUBE: [f64; 6] = [
+                0.0,
+                95.0 / 255.0,
+                135.0 / 255.0,
+                175.0 / 255.0,
+                215.0 / 255.0,
+                1.0,
+            ];
+            let idx = (bg - 16) as usize;
+            let r = CUBE[idx / 36];
+            let g = CUBE[(idx / 6) % 6];
+            let b = CUBE[idx % 6];
+            Some(scheme_from_rgb(r, g, b))
+        }
+        232..=255 => {
+            let level = (8.0 + 10.0 * f64::from(bg - 232)) / 255.0;
+            Some(scheme_from_rgb(level, level, level))
+        }
+    }
+}
+
+/// Fallback colour-scheme detection from environment variables (`COLORFGBG`).
+pub fn env_color_scheme() -> Option<ColorScheme> {
+    let val = std::env::var("COLORFGBG").ok()?;
+    scheme_from_colorfgbg(&val)
+}
+
+/// Resolves the initial colour scheme from a terminal reply, falling back to `COLORFGBG`
+/// and finally [`ColorScheme::Dark`].
+pub fn resolve_color_scheme(reply: Option<Reply>) -> ColorScheme {
+    reply
+        .and_then(|r| r.scheme())
+        .or_else(env_color_scheme)
+        .unwrap_or(ColorScheme::Dark)
 }
 
 /// What the bytes read so far say. Anything else in between (a key pressed during the
@@ -62,9 +185,29 @@ pub fn parse(bytes: &[u8]) -> Reply {
                     reply.cell = Some((width, height));
                 }
             }
+            // Colour scheme notification: CSI ? 997 ; 1/2 n
+            Some('n') if parameters.starts_with('?') => {
+                if let Some(scheme) = parse_color_scheme_csi(parameters) {
+                    reply.reported_scheme = Some(scheme);
+                }
+            }
             // Device attributes: CSI ? ... c
             Some('c') if parameters.starts_with('?') => reply.complete = true,
             _ => {}
+        }
+    }
+    for (at, _) in text.match_indices("\x1b]") {
+        let body = &text[at + 2..];
+        let st = body.find("\x1b\\");
+        let bel = body.find('\x07');
+        let end = match (st, bel) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if let Some(end) = end
+            && let Some(scheme) = parse_osc11_payload(&body.as_bytes()[..end])
+        {
+            reply.background_scheme = Some(scheme);
         }
     }
     reply
@@ -72,18 +215,38 @@ pub fn parse(bytes: &[u8]) -> Reply {
 
 /// Asks the terminal on stdin/stdout. `None` if they are not a terminal.
 pub fn ask(timeout: Duration) -> Option<Reply> {
+    ask_bytes(QUERY, timeout)
+}
+
+/// Asks only for colour scheme / background (`CSI ? 996 n` + `OSC 11`). `None` if not a tty.
+pub fn ask_appearance(timeout: Duration) -> Option<Reply> {
+    ask_bytes(APPEARANCE_QUERY, timeout)
+}
+
+fn ask_bytes(request: &[u8], timeout: Duration) -> Option<Reply> {
     // SAFETY: isatty only inspects the descriptor.
     let terminal =
         unsafe { libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 };
-    terminal.then(|| query(libc::STDIN_FILENO, libc::STDOUT_FILENO, timeout))
+    terminal.then(|| query_bytes(libc::STDIN_FILENO, libc::STDOUT_FILENO, request, timeout))
 }
 
-/// Writes the question to `output` and reads the answer from `input` until it is
+/// Writes the full question to `output` and reads the answer from `input` until it is
 /// complete or `timeout` has passed. Blocks for at most that long.
+#[cfg(test)]
 pub fn query(input: RawFd, output: RawFd, timeout: Duration) -> Reply {
+    query_bytes(input, output, QUERY, timeout)
+}
+
+/// Writes only the appearance question (`CSI ?996n` + `OSC 11` + `CSI c`) and reads the answer.
+#[allow(dead_code)]
+pub fn query_appearance(input: RawFd, output: RawFd, timeout: Duration) -> Reply {
+    query_bytes(input, output, APPEARANCE_QUERY, timeout)
+}
+
+fn query_bytes(input: RawFd, output: RawFd, request: &[u8], timeout: Duration) -> Reply {
     let mut written = 0;
-    while written < QUERY.len() {
-        let rest = &QUERY[written..];
+    while written < request.len() {
+        let rest = &request[written..];
         // SAFETY: the pointer and length describe `rest`.
         let n = unsafe { libc::write(output, rest.as_ptr().cast(), rest.len()) };
         if n > 0 {
@@ -163,7 +326,8 @@ mod tests {
                 kitty: true,
                 compression: true,
                 cell: Some((10, 20)),
-                complete: true
+                complete: true,
+                ..Reply::default()
             }
         );
         // A terminal without graphics, and a key typed while waiting.
@@ -174,7 +338,8 @@ mod tests {
                 kitty: false,
                 compression: false,
                 cell: Some((9, 18)),
-                complete: true
+                complete: true,
+                ..Reply::default()
             }
         );
         // An error reply is not support; half an answer is not complete.
@@ -279,7 +444,9 @@ mod tests {
                 kitty: true,
                 compression: false,
                 cell: Some((17, 34)),
-                complete: true
+                reported_scheme: None,
+                background_scheme: None,
+                complete: true,
             }
         );
         let theirs = terminal.join().unwrap();
@@ -288,5 +455,97 @@ mod tests {
             libc::close(ours);
             libc::close(theirs);
         }
+    }
+
+    #[test]
+    fn csi_996_and_osc_11_pty_replies_resolve_scheme() {
+        // Explicit CSI ?997;2n (light) wins even when OSC 11 arrived too, and finishes
+        // as soon as DA1 arrives.
+        let (ours, theirs) = pty();
+        let terminal = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            while !asked.ends_with(b"\x1b[c") {
+                let more = read_some(theirs, Duration::from_secs(5));
+                assert!(!more.is_empty(), "no question arrived");
+                asked.extend(more);
+            }
+            assert!(
+                asked
+                    .windows(b"\x1b[?996n".len())
+                    .any(|w| w == b"\x1b[?996n")
+            );
+            assert!(
+                asked
+                    .windows(b"\x1b]11;?\x1b\\".len())
+                    .any(|w| w == b"\x1b]11;?\x1b\\")
+            );
+            write_all(
+                theirs,
+                b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\\x1b[?997;2n\x1b[?62;c",
+            );
+            theirs
+        });
+        let reply = query_appearance(ours, ours, Duration::from_secs(5));
+        assert!(reply.complete);
+        assert_eq!(reply.reported_scheme, Some(ColorScheme::Light));
+        assert_eq!(reply.background_scheme, Some(ColorScheme::Dark));
+        assert_eq!(reply.scheme(), Some(ColorScheme::Light));
+        let theirs = terminal.join().unwrap();
+        // SAFETY: both were opened by `pty`.
+        unsafe {
+            libc::close(ours);
+            libc::close(theirs);
+        }
+    }
+
+    #[test]
+    fn osc_11_alone_detects_dark_and_light_backgrounds() {
+        let light = parse(b"\x1b]11;rgb:fbfb/f1f1/c7c7\x07\x1b[?62;c");
+        assert!(light.complete);
+        assert_eq!(light.reported_scheme, None);
+        assert_eq!(light.background_scheme, Some(ColorScheme::Light));
+        assert_eq!(light.scheme(), Some(ColorScheme::Light));
+
+        let dark = parse(b"\x1b]11;rgb:2828/2828/2828\x1b\\\x1b[?62;c");
+        assert!(dark.complete);
+        assert_eq!(dark.scheme(), Some(ColorScheme::Dark));
+
+        // 1-digit, 2-digit, and #rrggbb forms also parse.
+        assert_eq!(
+            parse_osc11_payload(b"11;rgb:f/f/f"),
+            Some(ColorScheme::Light)
+        );
+        assert_eq!(
+            parse_osc11_payload(b"11;rgb:10/10/18"),
+            Some(ColorScheme::Dark)
+        );
+        assert_eq!(parse_osc11_payload(b"11;#eff1f5"), Some(ColorScheme::Light));
+        assert_eq!(
+            parse_osc11_payload(b"11;rgba:1e/1e/2e/ff"),
+            Some(ColorScheme::Dark)
+        );
+        assert_eq!(parse_osc11_payload(b"11;garbage"), None);
+    }
+
+    #[test]
+    fn colorfgbg_fallback_maps_background_indices() {
+        assert_eq!(scheme_from_colorfgbg("15;0"), Some(ColorScheme::Dark));
+        assert_eq!(
+            scheme_from_colorfgbg("15;default;8"),
+            Some(ColorScheme::Dark)
+        );
+        assert_eq!(scheme_from_colorfgbg("0;15"), Some(ColorScheme::Light));
+        assert_eq!(scheme_from_colorfgbg("0;7"), Some(ColorScheme::Light));
+        assert_eq!(
+            scheme_from_colorfgbg("0;default;231"),
+            Some(ColorScheme::Light)
+        );
+        assert_eq!(scheme_from_colorfgbg("15;232"), Some(ColorScheme::Dark));
+        assert_eq!(scheme_from_colorfgbg("15;254"), Some(ColorScheme::Light));
+        assert_eq!(scheme_from_colorfgbg("default;default"), None);
+        assert_eq!(scheme_from_colorfgbg(""), None);
+
+        // Unanswered terminal falls back to Dark when no COLORFGBG matches.
+        assert_eq!(resolve_color_scheme(None), ColorScheme::Dark);
     }
 }
