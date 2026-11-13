@@ -5,14 +5,14 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
 use super::hit::{HitId, HitMap};
-use super::modal::{button, centered, popup, row};
+use super::modal::{button, centered, field, popup, row};
 use crate::action::Action;
 use crate::app::App;
 use crate::matrix::{SasEmoji, VerifyStage, VerifyUpdate};
 use crate::modal::Modal;
-use crate::text::{truncate, width, wrap};
+use crate::text::{width, wrap};
 use crate::theme::{Role, Theme};
-use crate::verify::{Button, Hint, PopupKind, VerifyPopup, VerifyState, describe};
+use crate::verify::{Button, Hint, PopupKind, VerifyPopup, VerifyState, describe, stuck};
 
 const WIDTH: u16 = 66;
 /// Space between two emoji columns.
@@ -26,10 +26,28 @@ enum Row {
     Emoji(Vec<SasEmoji>),
 }
 
+/// Lays the rows out for `room` columns. `false` if an emoji name had to be cut.
+fn layout(rows: Vec<Row>, theme: &Theme, room: usize) -> (Vec<Line<'static>>, bool) {
+    let mut lines = Vec::new();
+    let mut complete = true;
+    for row in rows {
+        match row {
+            Row::Blank => lines.push(Line::default()),
+            Row::Text(text, role) => {
+                for part in wrap(&text, room.max(1)) {
+                    lines.push(Line::from(Span::styled(part, theme.style(role))));
+                }
+            }
+            Row::Emoji(emoji) => complete &= emoji_grid(&mut lines, theme, &emoji, room),
+        }
+    }
+    (lines, complete)
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut VerifyPopup) {
     let state = &app.verify;
     let (title, footer, rows) = match popup_state.kind {
-        PopupKind::SetUp => set_up_body(state),
+        PopupKind::SetUp => set_up_body(state, popup_state),
         PopupKind::Status => status_body(state),
         PopupKind::Flow => match &state.flow {
             Some(flow) => flow_body(flow),
@@ -40,31 +58,48 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut Veri
             ),
         },
     };
-    let buttons = popup_state.buttons(state);
-    popup_state.focus = popup_state.focus.min(buttons.len().saturating_sub(1));
+    let comparing = popup_state.kind == PopupKind::Flow
+        && matches!(
+            state.flow.as_ref().map(|f| &f.stage),
+            Some(VerifyStage::Compare { .. })
+        );
+    let has_field = popup_state.has_field(state);
 
-    // Lay the body out for the inner width first, to know how tall the popup must be.
+    // Lay the body out for the inner width first, to know how tall the popup must be:
+    // border, top padding, body, (blank and password field), gap, buttons, padding.
     let inner_width = WIDTH.min(area.width.saturating_sub(2)).saturating_sub(4) as usize;
-    let mut lines: Vec<Line<'static>> = Vec::new();
     let theme = &app.theme;
-    for row in rows {
-        match row {
-            Row::Blank => lines.push(Line::default()),
-            Row::Text(text, role) => {
-                for part in wrap(&text, inner_width.max(1)) {
-                    lines.push(Line::from(Span::styled(part, theme.style(role))));
-                }
-            }
-            Row::Emoji(emoji) => emoji_grid(&mut lines, theme, &emoji, inner_width),
-        }
+    let (mut lines, complete) = layout(rows, theme, inner_width);
+    let height = |lines: &[Line]| lines.len() as u16 + 6 + if has_field { 2 } else { 0 };
+    let mut rect = centered(area, WIDTH, height(&lines));
+    // Everything there is to compare must be on screen before "They match" is offered.
+    let shown = comparing && complete && rect.is_some_and(|rect| rect.height == height(&lines));
+    if comparing && !shown {
+        (lines, _) = layout(
+            vec![Row::Text(
+                "The window is too small to show all seven emoji. Make it larger to \
+                 compare them, or cancel."
+                    .to_owned(),
+                Role::Error,
+            )],
+            theme,
+            inner_width,
+        );
+        rect = centered(area, WIDTH, height(&lines));
     }
-    // Border, top padding, body, gap, buttons, bottom padding.
-    let height = lines.len() as u16 + 6;
-    let Some(rect) = centered(area, WIDTH, height) else {
+    if shown && !popup_state.compare_shown {
+        // The buttons change from Cancel to the answers: a moment before they count.
+        popup_state.rearm();
+    }
+    popup_state.compare_shown = shown;
+    let Some(rect) = rect else {
         return;
     };
+    let buttons = popup_state.buttons(state);
+    let focused = popup_state.focused(state);
     let inner = popup(frame, app, area, rect, &title, footer);
     let theme = &app.theme;
+    let body_end = lines.len() as u16;
     for (n, line) in lines.into_iter().enumerate() {
         let at = row(inner, 1 + n as u16);
         // Keep the last rows for the buttons when space is short.
@@ -73,16 +108,37 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut Veri
         }
         frame.render_widget(line, at);
     }
+    if has_field {
+        let at = row(inner, 2 + body_end);
+        let masked = "•".repeat(
+            popup_state
+                .password
+                .as_ref()
+                .map_or(0, |p| p.chars().count()),
+        );
+        let cursor = field(
+            frame,
+            theme,
+            at,
+            "Password",
+            &masked,
+            popup_state.field_focused,
+        );
+        if let Some(cursor) = cursor {
+            frame.set_cursor_position(cursor);
+        }
+    }
 
     let buttons_row = row(inner, inner.height.saturating_sub(2));
     let mut x = buttons_row.x;
-    for (n, &choice) in buttons.iter().enumerate() {
+    for &choice in buttons {
         let label = choice.label();
         let w = (width(label) as u16).min(buttons_row.right().saturating_sub(x));
         let rect = Rect::new(x, buttons_row.y, w, buttons_row.height);
         let action = Action::Verify(choice);
-        button(frame, theme, rect, label, n == popup_state.focus);
-        if app.hover == Some(HitId::Do(action)) && n != popup_state.focus {
+        let has_focus = focused == Some(choice);
+        button(frame, theme, rect, label, has_focus);
+        if app.hover == Some(HitId::Do(action)) && !has_focus {
             frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
         }
         app.hits.add(rect, HitId::Do(action));
@@ -92,14 +148,25 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut Veri
 
 fn status_body(state: &VerifyState) -> (String, &'static str, Vec<Row>) {
     let security = state.security.unwrap_or_default();
-    let rows = describe(&security)
+    let mut rows: Vec<Row> = describe(&security)
         .into_iter()
         .map(|(label, value)| Row::Text(format!("{label:<15}{value}"), Role::Text))
         .collect();
+    if stuck(&security) {
+        rows.push(Row::Blank);
+        rows.push(Row::Text(
+            "No other device of yours can vouch for this one, and there is no recovery \
+             key to enter. Log in on a device that is still verified and verify from \
+             there, or reset your encryption identity in another app such as Element \
+             (matrix-rat cannot do that yet)."
+                .to_owned(),
+            Role::Muted,
+        ));
+    }
     ("Encryption".to_owned(), "Enter or Esc close", rows)
 }
 
-fn set_up_body(state: &VerifyState) -> (String, &'static str, Vec<Row>) {
+fn set_up_body(state: &VerifyState, popup: &VerifyPopup) -> (String, &'static str, Vec<Row>) {
     let mut rows = vec![
         Row::Text(
             "Your account has no cross-signing keys yet. Create them now, on this device?"
@@ -118,6 +185,15 @@ fn set_up_body(state: &VerifyState) -> (String, &'static str, Vec<Row>) {
     if state.setting_up {
         rows.push(Row::Blank);
         rows.push(Row::Text("Setting up…".to_owned(), Role::Muted));
+    } else if popup.password.is_some() {
+        rows.push(Row::Blank);
+        rows.push(Row::Text(
+            "Your server asks for your account password to do this.".to_owned(),
+            Role::Text,
+        ));
+        if let Some(error) = popup.password_error {
+            rows.push(Row::Text(error.to_owned(), Role::Error));
+        }
     }
     (
         "Set up encryption".to_owned(),
@@ -216,12 +292,26 @@ fn flow_body(flow: &VerifyUpdate) -> (String, &'static str, Vec<Row>) {
     (title, footer, rows)
 }
 
+/// The emoji without its variation selector (U+FE0F). Terminals disagree on how wide
+/// "☁️" and its kind are, which can shift or swallow what follows on the row; without
+/// the selector every terminal agrees (one column, drawn as a symbol). The names below
+/// say what each one is either way.
+fn plain_symbol(symbol: &str) -> String {
+    symbol.replace('\u{fe0f}', "")
+}
+
 /// Seven emoji with their names below, in as many rows as the width needs. Columns are
 /// as wide as the longest name; emoji are wide characters, so widths are measured.
-fn emoji_grid(lines: &mut Vec<Line<'static>>, theme: &Theme, emoji: &[SasEmoji], room: usize) {
+/// Returns `false` if even one column is wider than `room` (names would be cut).
+fn emoji_grid(
+    lines: &mut Vec<Line<'static>>,
+    theme: &Theme,
+    emoji: &[SasEmoji],
+    room: usize,
+) -> bool {
     let column = emoji
         .iter()
-        .map(|e| width(&e.name).max(width(&e.symbol)))
+        .map(|e| width(&e.name).max(width(&plain_symbol(&e.symbol))))
         .max()
         .unwrap_or(2)
         + GAP;
@@ -236,25 +326,21 @@ fn emoji_grid(lines: &mut Vec<Line<'static>>, theme: &Theme, emoji: &[SasEmoji],
         let used = chunk.len() * column - GAP;
         let indent = room.saturating_sub(used) / 2;
         let centred = |text: &str| {
-            let w = width(text).min(column);
+            let w = width(text);
             let left = (column - GAP).saturating_sub(w) / 2;
             let right = column.saturating_sub(left + w);
-            format!(
-                "{}{}{}",
-                " ".repeat(left),
-                truncate(text, column),
-                " ".repeat(right)
-            )
+            format!("{}{text}{}", " ".repeat(left), " ".repeat(right))
         };
         let mut symbols = vec![Span::raw(" ".repeat(indent))];
         let mut names = vec![Span::raw(" ".repeat(indent))];
         for e in chunk {
-            symbols.push(Span::raw(centred(&e.symbol)));
+            symbols.push(Span::raw(centred(&plain_symbol(&e.symbol))));
             names.push(Span::styled(centred(&e.name), theme.style(Role::Muted)));
         }
         lines.push(Line::from(symbols));
         lines.push(Line::from(names));
     }
+    column - GAP <= room
 }
 
 /// Adds the encryption hint to the status line, if there is one: a request waiting
@@ -368,6 +454,7 @@ mod tests {
     #[test]
     fn verification_popups() {
         let mut app = App::demo();
+        app.user_id = Some("@me:example.org".into());
         app.on_matrix(MatrixEvent::Security(Security {
             device: DeviceTrust::Unverified,
             identity: Identity::Present,
@@ -400,7 +487,29 @@ mod tests {
         }));
         insta::assert_snapshot!("verify_compare", render(&mut app, 100, 24));
         insta::assert_snapshot!("verify_compare_narrow", render(&mut app, 44, 24));
+        // Too short to show all seven: no answers offered, only Cancel.
+        insta::assert_snapshot!("verify_compare_too_small", render(&mut app, 100, 14));
         app.on_matrix(update(VerifyStage::Done));
         insta::assert_snapshot!("verify_done", render(&mut app, 100, 24));
+    }
+
+    #[test]
+    fn set_up_password_field() {
+        use crate::matrix::SetUpOutcome;
+        use crate::modal::Modal;
+        use crate::verify::VerifyPopup;
+        let mut app = App::demo();
+        app.user_id = Some("@me:example.org".into());
+        app.modal = Some(Modal::Verify(VerifyPopup::set_up()));
+        app.verify.setting_up = true;
+        app.on_matrix(MatrixEvent::CrossSigningSetUp(
+            SetUpOutcome::NeedsPassword { rejected: true },
+        ));
+        if let Some(Modal::Verify(popup)) = &mut app.modal {
+            popup.password = Some("secret".into());
+        }
+        let screen = render(&mut app, 100, 24);
+        assert!(!screen.contains("secret"));
+        insta::assert_snapshot!("verify_set_up_password", screen);
     }
 }

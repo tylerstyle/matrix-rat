@@ -93,7 +93,7 @@ pub(super) fn row(inner: Rect, n: u16) -> Rect {
 }
 
 /// A labelled one-line input. Returns where the cursor belongs when it has the focus.
-fn field(
+pub(super) fn field(
     frame: &mut Frame,
     theme: &Theme,
     rect: Rect,

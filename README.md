@@ -3,8 +3,10 @@
 A mouse-friendly, themeable Matrix client for the terminal, built with
 [ratatui](https://ratatui.rs) and [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk).
 
-**Status: early development.** It can log in, sync, and read and send messages (replies, edits,
-reactions, Markdown, formatted messages, spoilers). Images are not displayed yet. See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
+**Status: early development.** It can log in (password or browser), sync, read and send
+messages (replies, edits, reactions, Markdown, formatted messages, spoilers), show pictures
+inline (kitty graphics, coloured blocks elsewhere), save attachments, and verify devices by
+emoji comparison. See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
 
 ```sh
 cargo run             # log in to your account
@@ -13,6 +15,8 @@ cargo run -- --demo   # try the interface on built-in demo data
 
 `F1` shows all keys, `F2` opens the settings, `F3` cycles themes, `Alt-E` opens the emoji
 picker, `Ctrl-Q` quits.
+On a selected message: `Enter` replies, `e` edits, `r` reacts, `o` opens a link, picture or
+file, `s` saves a file or picture to the download folder (set it in the settings).
 
 ## Installing
 

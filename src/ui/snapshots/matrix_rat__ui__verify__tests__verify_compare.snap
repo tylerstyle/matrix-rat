@@ -11,10 +11,10 @@ expression: "render(&mut app, 100, 24)"
 "│ ● bob          │ Compare with what your device “Element Desktop (QWERTYUIOP)”   │───────────────┃│"
 "│ ○ carol        │ shows:                                                         │               ┃│"
 "│ Rooms          │                                                                │               ┃│"
-"│ # design       │             🐶          ☂️          🎧          🦋             │               ┃│" Hidden by multi-width symbols: [(32, " "), (44, " "), (56, " "), (68, " ")]
+"│ # design       │             🐶          ☂           🎧          🦋             │               ┃│" Hidden by multi-width symbols: [(32, " "), (56, " "), (68, " ")]
 "│ # nixos        │            Dog       Umbrella   Headphones  Butterfly          │               ┃│"
 "│ # off-topic    │                                                                │?              ┃│"
-"│                │                   ☎️          🔒          📌                   │               ┃│" Hidden by multi-width symbols: [(38, " "), (50, " "), (62, " ")]
+"│                │                   ☎           🔒          📌                   │               ┃│" Hidden by multi-width symbols: [(50, " "), (62, " ")]
 "│                │               Telephone      Lock        Pin                   │               ┃│"
 "│                │                                                                │               ┃│"
 "│                │ Do they match, in the same order?                              │               ┃│"

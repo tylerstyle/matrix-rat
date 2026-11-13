@@ -411,12 +411,7 @@ impl App {
             Setting::ReadReceipts => switch(self.read_receipts),
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::Keys => String::new(),
-            Setting::Encryption => match self.verify.security.map(|s| s.device) {
-                Some(crate::matrix::DeviceTrust::Verified) => "this device is verified",
-                Some(crate::matrix::DeviceTrust::Unverified) => "not verified, Enter to verify",
-                _ => "unknown",
-            }
-            .to_owned(),
+            Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
             Setting::Logout => self.user_id.clone().unwrap_or_default(),
         }
     }
@@ -1324,6 +1319,11 @@ impl App {
                         text.clear();
                     }
                 }
+                Some(Modal::Verify(popup)) => {
+                    if let Some(password) = &mut popup.password {
+                        password.clear();
+                    }
+                }
                 _ => {}
             }
             return;
@@ -1424,7 +1424,7 @@ impl App {
                     _ => {}
                 }
             }
-            Some(Modal::Verify(_)) => self.on_verify_key(code),
+            Some(Modal::Verify(_)) => self.on_verify_key(code, mods),
             None => {}
         }
     }
@@ -1672,6 +1672,7 @@ impl App {
 
     fn on_key(&mut self, key: KeyEvent) {
         self.dirty = true;
+        self.verify.last_key = Some(Instant::now());
         let (code, mods) = keymap::normalize(key);
 
         // Quit and suspend work everywhere, including behind popups (handy for fetching
@@ -1819,7 +1820,7 @@ impl App {
                 }
                 return;
             }
-            Some(Modal::Verify(_)) => return,
+            Some(Modal::Verify(_)) => return self.on_verify_paste(first_line),
             None => {}
         }
         match self.focus {
@@ -1985,6 +1986,7 @@ impl App {
     }
 
     fn on_tick(&mut self) {
+        self.verify_tick();
         if self
             .toast
             .as_ref()
