@@ -22,6 +22,13 @@ impl App {
         self.dirty = true;
     }
 
+    /// Hands any pending avatar fetch requests to the worker immediately.
+    pub(super) fn send_avatar_requests(&mut self) {
+        for url in self.images.take_avatar_requests() {
+            self.send_matrix(MatrixCmd::FetchAvatar { url });
+        }
+    }
+
     /// Hands the picture requests of the last frame to the worker.
     pub(super) fn send_image_requests(&mut self) {
         for request in self.images.take_requests() {
@@ -32,9 +39,7 @@ impl App {
                 full: request.full,
             });
         }
-        for url in self.images.take_avatar_requests() {
-            self.send_matrix(MatrixCmd::FetchAvatar { url });
-        }
+        self.send_avatar_requests();
     }
 
     /// Tells the terminal to free the pictures that are no longer shown (`all`: every
