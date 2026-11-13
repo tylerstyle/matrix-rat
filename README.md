@@ -49,6 +49,7 @@ nix-env -if .                 # or install into your profile
 # or on NixOS, in your configuration:
 #   environment.systemPackages = [ (pkgs.callPackage /path/to/matrix-rat { }) ];
 ```
+Hype it, like it, use it and when traction hits critical, we'll go to nixpkgs.
 
 **With Cargo** (Rust 1.96 or newer, plus a C compiler, `make`, `cmake` and `perl`):
 
