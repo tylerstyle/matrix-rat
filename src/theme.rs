@@ -460,6 +460,14 @@ fn to_256(color: Color) -> Color {
     Color::Indexed(16 + 36 * step(r) + 6 * step(g) + step(b))
 }
 
+/// Whether the terminal currently uses a dark or light colour scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorScheme {
+    #[default]
+    Dark,
+    Light,
+}
+
 /// True when the terminal advertises 24-bit colour.
 pub fn truecolor_supported() -> bool {
     std::env::var("COLORTERM").is_ok_and(|v| v.contains("truecolor") || v.contains("24bit"))

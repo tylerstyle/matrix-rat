@@ -148,11 +148,16 @@ pub(super) fn button(frame: &mut Frame, theme: &Theme, rect: Rect, label: &str, 
 
 fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
     const LABEL: u16 = 20;
-    let headings = Setting::ALL
+    let visible_settings: Vec<(usize, Setting)> = Setting::ALL
+        .into_iter()
+        .enumerate()
+        .filter(|(_, s)| menu.shows(*s))
+        .collect();
+    let headings = visible_settings
         .iter()
-        .filter(|s| s.heading().is_some())
+        .filter(|(_, s)| s.heading().is_some())
         .count() as u16;
-    let rows = Setting::ALL.len() as u16 + headings;
+    let rows = visible_settings.len() as u16 + headings;
     // Blank lines between the groups only where there is room for them.
     let airy = area.height >= rows + headings + 6;
     let height = rows + if airy { headings + 1 } else { 0 } + 4;
@@ -167,21 +172,44 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
         "Settings",
         "↑↓ select · ←→ change · Enter · Esc close",
     );
-    let theme = app.theme.clone();
-    let mut y = 0;
-    for (index, setting) in Setting::ALL.into_iter().enumerate() {
+    enum SettingLine {
+        Heading(&'static str),
+        Blank,
+        Row(usize, Setting),
+    }
+    let mut lines = Vec::with_capacity(rows as usize + headings as usize);
+    let mut selected_line = 0usize;
+    for (pos, &(index, setting)) in visible_settings.iter().enumerate() {
         if let Some(heading) = setting.heading() {
-            if airy && index > 0 {
-                y += 1;
+            if airy && pos > 0 {
+                lines.push(SettingLine::Blank);
             }
-            frame.render_widget(
-                Line::from(Span::styled(heading, theme.style(Role::Muted))),
-                row(inner, y),
-            );
-            y += 1;
+            lines.push(SettingLine::Heading(heading));
         }
+        if menu.selected == index {
+            selected_line = lines.len();
+        }
+        lines.push(SettingLine::Row(index, setting));
+    }
+
+    let theme = app.theme.clone();
+    let visible = inner.height as usize;
+    let scroll = (selected_line + 1).saturating_sub(visible);
+    let mut y = 0u16;
+    for line in lines.iter().skip(scroll).take(visible) {
         let rect = row(inner, y);
         y += 1;
+        let (index, setting) = match *line {
+            SettingLine::Blank => continue,
+            SettingLine::Heading(heading) => {
+                frame.render_widget(
+                    Line::from(Span::styled(heading, theme.style(Role::Muted))),
+                    rect,
+                );
+                continue;
+            }
+            SettingLine::Row(index, setting) => (index, setting),
+        };
         if rect.width <= LABEL + 6 {
             continue;
         }
@@ -204,7 +232,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
         let room = rect.right().saturating_sub(value_x) as usize;
         app.hits.add(rect, HitId::Setting(index, 0));
         match setting {
-            Setting::Theme | Setting::SidebarWidth => {
+            Setting::Theme | Setting::ThemeDark | Setting::ThemeLight | Setting::SidebarWidth => {
                 let shown = truncate(&value, room.saturating_sub(4));
                 let arrow = theme.style(Role::StatusKey);
                 let end = value_x + 2 + width(&shown) as u16;
@@ -216,7 +244,8 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
                 app.hits
                     .add(Rect::new(end, rect.y, 2, 1), HitId::Setting(index, 1));
             }
-            Setting::Mouse
+            Setting::ThemePairing
+            | Setting::Mouse
             | Setting::TypingNotices
             | Setting::ReadReceipts
             | Setting::ReadMarkers

@@ -41,7 +41,7 @@ use crate::model::{
 };
 use crate::paths::Paths;
 use crate::terminal::{self, TerminalGuard};
-use crate::theme::{DEFAULT_THEME, Theme, truecolor_supported};
+use crate::theme::{ColorScheme, DEFAULT_THEME, Theme, truecolor_supported};
 use crate::ui::hit::{Button, HitId, HitMap};
 use crate::ui::{self, SIDEBAR_MIN, max_sidebar};
 
@@ -205,13 +205,25 @@ pub struct App {
     saved: std::collections::HashMap<String, PathBuf>,
     /// A large attachment the user was asked about once.
     confirm_large: Option<String>,
+    /// Current colour scheme (`Dark` or `Light`), resolved at startup (portal, terminal
+    /// query, `COLORFGBG`) and updated live via the desktop portal.
+    pub color_scheme: ColorScheme,
+    /// Base `theme` setting from config (used when unpaired, or as fallback for an
+    /// unset slot).
+    base_theme: String,
+    /// Paired theme overrides for dark and light modes, if configured.
+    theme_dark: Option<String>,
+    theme_light: Option<String>,
     /// The theme the user asked for, which may not exist yet (a generator may still
     /// have to write it).
     wanted_theme: String,
     /// Where the configuration lives, to notice a changed `theme` setting.
     config_file: Option<PathBuf>,
-    /// The `theme` setting as last read from the configuration.
+    /// The `theme`, `theme_dark`, and `theme_light` settings as last read from the
+    /// configuration.
     config_theme: String,
+    config_theme_dark: Option<String>,
+    config_theme_light: Option<String>,
     /// Bumped whenever a theme is loaded.
     pub theme_rev: u64,
     /// Bumped whenever the open room's messages change, to invalidate `row_cache`.
@@ -247,7 +259,17 @@ pub struct App {
 
 impl App {
     /// With `matrix` the app shows the account's rooms; without, built-in demo data.
+    #[cfg(test)]
     pub fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
+        Self::new_in_scheme(config, themes_dir, matrix, ColorScheme::Dark)
+    }
+
+    pub(crate) fn new_in_scheme(
+        config: &Config,
+        themes_dir: PathBuf,
+        matrix: Option<MatrixHandle>,
+        color_scheme: ColorScheme,
+    ) -> Self {
         let truecolor = truecolor_supported();
         let mut app = Self::with_theme(Theme::builtin(DEFAULT_THEME).expect("default theme"));
         if matrix.is_some() {
@@ -270,8 +292,16 @@ impl App {
             app.notify_mode_on = config.notifications;
         }
         app.notification_preview = config.notification_preview;
+        app.color_scheme = color_scheme;
+        app.base_theme = config.theme.clone();
+        let (dark, light) = config.paired_themes();
+        app.theme_dark = dark.clone();
+        app.theme_light = light.clone();
         app.config_theme = config.theme.clone();
-        app.set_theme(&config.theme);
+        app.config_theme_dark = dark;
+        app.config_theme_light = light;
+        let initial = app.desired_theme();
+        app.set_theme(&initial);
         let (keymap, warnings) = Keymap::from_config(config);
         app.keymap = keymap;
         for warning in &warnings {
@@ -348,9 +378,15 @@ impl App {
             saving: Default::default(),
             saved: Default::default(),
             confirm_large: None,
+            color_scheme: ColorScheme::Dark,
+            base_theme: DEFAULT_THEME.to_owned(),
+            theme_dark: None,
+            theme_light: None,
             wanted_theme: DEFAULT_THEME.to_owned(),
             config_file: None,
             config_theme: String::new(),
+            config_theme_dark: None,
+            config_theme_light: None,
             theme_rev: 0,
             timeline_rev: 0,
             row_cache: None,
@@ -459,16 +495,59 @@ impl App {
         self.theme_names = Theme::available(&self.themes_dir);
         if let Some(file) = &self.config_file
             && let Ok(config) = Config::load(file)
-            && config.theme != self.config_theme
         {
-            self.config_theme = config.theme.clone();
-            self.wanted_theme = config.theme;
+            let (cfg_dark, cfg_light) = config.paired_themes();
+            if config.theme != self.config_theme
+                || cfg_dark != self.config_theme_dark
+                || cfg_light != self.config_theme_light
+            {
+                self.base_theme = config.theme.clone();
+                self.theme_dark = cfg_dark.clone();
+                self.theme_light = cfg_light.clone();
+                self.config_theme = config.theme;
+                self.config_theme_dark = cfg_dark;
+                self.config_theme_light = cfg_light;
+                self.wanted_theme = self.desired_theme();
+            }
+        }
+        if self.has_theme_pair()
+            && let Some(Modal::Settings(menu)) = &mut self.modal
+        {
+            menu.show_theme_pair = true;
         }
         let name = self.wanted_theme.clone();
         let exists = Theme::builtin(&name).is_some()
             || self.themes_dir.join(format!("{name}.toml")).exists();
         if exists {
             self.set_theme(&name);
+        }
+    }
+
+    fn has_theme_pair(&self) -> bool {
+        self.theme_dark.is_some() || self.theme_light.is_some()
+    }
+
+    fn desired_theme(&self) -> String {
+        let paired = match self.color_scheme {
+            ColorScheme::Dark => &self.theme_dark,
+            ColorScheme::Light => &self.theme_light,
+        };
+        paired
+            .as_deref()
+            .unwrap_or(self.base_theme.as_str())
+            .to_owned()
+    }
+
+    /// Switches to the theme paired with `scheme` if a dark/light pair is configured.
+    pub fn on_color_scheme(&mut self, scheme: ColorScheme) {
+        if self.color_scheme == scheme {
+            return;
+        }
+        self.color_scheme = scheme;
+        let next = self.desired_theme();
+        if next != self.wanted_theme {
+            self.set_theme(&next);
+            self.dirty = true;
         }
     }
 
@@ -512,11 +591,94 @@ impl App {
         self.apply_theme(name);
     }
 
-    /// Loads `name`, remembers it, and saves it to the configuration.
+    /// Cycles `theme_dark` or `theme_light` through `(unset)` and available themes.
+    fn step_slot_theme(&mut self, slot: ColorScheme, delta: isize) {
+        self.theme_names = Theme::available(&self.themes_dir);
+        let current = match slot {
+            ColorScheme::Dark => self.theme_dark.as_deref(),
+            ColorScheme::Light => self.theme_light.as_deref(),
+        };
+        let cur = match current {
+            None => 0usize,
+            Some(name) => self
+                .theme_names
+                .iter()
+                .position(|n| n == name)
+                .map_or(0, |i| i + 1),
+        };
+        let count = (self.theme_names.len() + 1) as isize;
+        let at = (cur as isize + delta).rem_euclid(count) as usize;
+        let next = if at == 0 {
+            None
+        } else {
+            Some(self.theme_names[at - 1].clone())
+        };
+        let key = match slot {
+            ColorScheme::Dark => {
+                self.theme_dark = next.clone();
+                self.config_theme_dark = next.clone();
+                "theme_dark"
+            }
+            ColorScheme::Light => {
+                self.theme_light = next.clone();
+                self.config_theme_light = next.clone();
+                "theme_light"
+            }
+        };
+        match next {
+            Some(name) => self.save_setting(key, name),
+            None => self.remove_setting(key),
+        }
+        let desired = self.desired_theme();
+        if desired != self.wanted_theme {
+            self.set_theme(&desired);
+        }
+    }
+
+    fn toggle_theme_pairing(&mut self) {
+        let on = self.has_theme_pair()
+            || matches!(self.modal, Some(Modal::Settings(ref menu)) if menu.show_theme_pair);
+        if on {
+            self.theme_dark = None;
+            self.theme_light = None;
+            self.config_theme_dark = None;
+            self.config_theme_light = None;
+            self.remove_setting("theme_dark");
+            self.remove_setting("theme_light");
+            let desired = self.desired_theme();
+            if desired != self.wanted_theme {
+                self.set_theme(&desired);
+            }
+            if let Some(Modal::Settings(menu)) = &mut self.modal {
+                menu.show_theme_pair = false;
+            }
+        } else if let Some(Modal::Settings(menu)) = &mut self.modal {
+            menu.show_theme_pair = true;
+        }
+    }
+
+    /// Loads `name`, remembers it, and saves it to the configuration (to the active
+    /// dark/light slot when paired, otherwise to `theme`).
     fn apply_theme(&mut self, name: String) {
         self.set_theme(&name);
-        self.config_theme = name.clone();
-        self.save_setting("theme", name);
+        if self.has_theme_pair() {
+            match self.color_scheme {
+                ColorScheme::Dark => {
+                    self.theme_dark = Some(name.clone());
+                    self.config_theme_dark = Some(name.clone());
+                    self.save_setting("theme_dark", name);
+                }
+                ColorScheme::Light => {
+                    self.theme_light = Some(name.clone());
+                    self.config_theme_light = Some(name.clone());
+                    self.save_setting("theme_light", name);
+                }
+            }
+        } else {
+            self.base_theme = name.clone();
+            self.config_theme = name.clone();
+            self.save_setting("theme", name);
+        }
     }
 
     /// Writes one setting to the configuration file (there is none in demo mode).
@@ -530,11 +692,28 @@ impl App {
         }
     }
 
+    /// Removes one setting from the configuration file (there is none in demo mode).
+    fn remove_setting(&mut self, key: &str) {
+        let Some(file) = &self.config_file else {
+            return;
+        };
+        if let Err(err) = crate::config::remove_setting(file, key) {
+            tracing::warn!(?err, key, "could not remove setting");
+            self.show_toast(format!("Could not save the setting: {err:#}"));
+        }
+    }
+
     /// What the settings menu shows next to a row.
     pub fn setting_value(&self, setting: Setting) -> String {
         let switch = |on: bool| if on { "on" } else { "off" }.to_owned();
         match setting {
             Setting::Theme => self.wanted_theme.clone(),
+            Setting::ThemePairing => switch(
+                self.has_theme_pair()
+                    || matches!(self.modal, Some(Modal::Settings(ref menu)) if menu.show_theme_pair),
+            ),
+            Setting::ThemeDark => self.theme_dark.as_deref().unwrap_or("(unset)").to_owned(),
+            Setting::ThemeLight => self.theme_light.as_deref().unwrap_or("(unset)").to_owned(),
             Setting::SidebarWidth => self.sidebar.width.to_string(),
             Setting::RoomPreviews => switch(self.room_previews),
             Setting::Mouse => switch(self.mouse),
@@ -554,6 +733,13 @@ impl App {
     fn change_setting(&mut self, setting: Setting, delta: i8) {
         match setting {
             Setting::Theme => self.step_theme(if delta < 0 { -1 } else { 1 }),
+            Setting::ThemePairing => self.toggle_theme_pairing(),
+            Setting::ThemeDark => {
+                self.step_slot_theme(ColorScheme::Dark, if delta < 0 { -1 } else { 1 });
+            }
+            Setting::ThemeLight => {
+                self.step_slot_theme(ColorScheme::Light, if delta < 0 { -1 } else { 1 });
+            }
             Setting::SidebarWidth => {
                 if delta != 0 {
                     let width = self.sidebar.width.saturating_add_signed(2 * delta as i16);
@@ -1654,7 +1840,8 @@ impl App {
             Action::CloseModal => self.close_modal(),
             Action::OpenSettings => {
                 if self.modal.is_none() {
-                    self.open_modal(Modal::Settings(SettingsMenu::default()));
+                    let paired = self.has_theme_pair();
+                    self.open_modal(Modal::Settings(SettingsMenu::for_pairing(paired)));
                 }
             }
             Action::Search => self.open_search(),
@@ -2524,6 +2711,7 @@ impl App {
                     Some(HitId::Setting(index, delta)) => {
                         if let Some(Modal::Settings(menu)) = &mut self.modal
                             && let Some(setting) = Setting::ALL.get(index).copied()
+                            && menu.shows(setting)
                         {
                             if menu.selected != index {
                                 menu.selected = index;
@@ -2704,12 +2892,15 @@ fn open_in_browser(url: &str) {
 }
 
 pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
+    let (portal_scheme, mut scheme_watch) = crate::portal::SchemeWatch::start().await;
     let guard = TerminalGuard::enter(config.mouse)?;
     // Terminal queries (image protocol, background colour) go here: on the alternate
     // screen, where a terminal that prints a question instead of answering does no
     // harm, but before mouse and focus reports are on and before the event stream.
     guard.alternate_screen()?;
-    let graphics = crate::images::Graphics::detect(config.images);
+    let (graphics, term_reply) =
+        crate::images::Graphics::detect_with_term(config.images, portal_scheme.is_none());
+    let initial_scheme = crate::portal::resolve_initial_scheme(portal_scheme, term_reply);
     let mut terminal = guard.activate()?;
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -2723,7 +2914,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
         let (handle, events) = matrix::spawn(paths.clone());
         (Some(handle), Some(events))
     };
-    let mut app = App::new(config, paths.themes_dir(), matrix.clone());
+    let mut app = App::new_in_scheme(config, paths.themes_dir(), matrix.clone(), initial_scheme);
     app.config_file = Some(paths.config_file());
     let notify_icons = Arc::new(crate::notify::IconCache::new(paths.notify_icons_dir()));
     struct NotifyCacheGuard(Arc<crate::notify::IconCache>);
@@ -2785,6 +2976,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
                 }
             } => app.on_matrix(event),
             _ = theme_watch.changed() => app.reload_theme(),
+            scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),
             _ = tick.tick() => app.on_tick(),
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
@@ -3955,6 +4147,114 @@ mod tests {
     }
 
     #[test]
+    fn paired_themes_follow_scheme_changes_and_f3_updates_active_slot() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "matrix-rat-theme-pair-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let themes_dir = dir.join("themes");
+        std::fs::create_dir_all(&themes_dir).unwrap();
+        let names = Theme::available(&themes_dir);
+        let dark_name = names
+            .iter()
+            .find(|n| *n != "terminal")
+            .cloned()
+            .expect("built-in non-terminal theme");
+        let light_name = names
+            .iter()
+            .find(|n| *n != "terminal" && *n != &dark_name)
+            .cloned()
+            .expect("second built-in theme");
+
+        let file = dir.join("config.toml");
+        std::fs::write(
+            &file,
+            format!("theme = \"terminal\"\ntheme_dark = \"{dark_name}\"\ntheme_light = \"{light_name}\"\n"),
+        )
+        .unwrap();
+        let cfg = Config::load(&file).unwrap();
+
+        let mut app = App::new_in_scheme(&cfg, themes_dir, None, ColorScheme::Dark);
+        app.config_file = Some(file.clone());
+        assert_eq!(app.color_scheme, ColorScheme::Dark);
+        assert_eq!(app.theme.name, dark_name);
+        assert_eq!(app.wanted_theme, dark_name);
+
+        // Live switch to Light picks the paired light theme.
+        app.dirty = false;
+        app.on_color_scheme(ColorScheme::Light);
+        assert_eq!(app.color_scheme, ColorScheme::Light);
+        assert_eq!(app.theme.name, light_name);
+        assert!(app.dirty);
+
+        // F3 / Setting::Theme updates only the active Light slot, preserving Dark and base.
+        app.step_theme(1);
+        let updated_light = app.theme.name.clone();
+        assert_ne!(updated_light, light_name);
+        let saved = Config::load(&file).unwrap();
+        assert_eq!(saved.theme, "terminal");
+        assert_eq!(saved.theme_dark.as_deref(), Some(dark_name.as_str()));
+        assert_eq!(saved.theme_light.as_deref(), Some(updated_light.as_str()));
+
+        // Live switches bounce cleanly between dark_name and updated_light.
+        app.on_color_scheme(ColorScheme::Dark);
+        assert_eq!(app.theme.name, dark_name);
+        app.on_color_scheme(ColorScheme::Light);
+        assert_eq!(app.theme.name, updated_light);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unpaired_theme_ignores_live_scheme_changes() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "matrix-rat-theme-unpaired-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let themes_dir = dir.join("themes");
+        std::fs::create_dir_all(&themes_dir).unwrap();
+        let file = dir.join("config.toml");
+
+        std::fs::write(&file, "theme = \"terminal\"\n").unwrap();
+        let cfg = Config::load(&file).unwrap();
+        let mut term_app = App::new_in_scheme(&cfg, themes_dir.clone(), None, ColorScheme::Dark);
+        term_app.config_file = Some(file.clone());
+        assert_eq!(term_app.theme.name, "terminal");
+        term_app.on_color_scheme(ColorScheme::Light);
+        assert_eq!(term_app.color_scheme, ColorScheme::Light);
+        assert_eq!(term_app.theme.name, "terminal");
+        assert_eq!(term_app.wanted_theme, "terminal");
+
+        // A generator theme name that has not been written yet keeps waiting across scheme switches
+        // and still writes to `theme` when cycled while unpaired.
+        let gen_file = dir.join("gen.toml");
+        std::fs::write(&gen_file, "theme = \"generated\"\n").unwrap();
+        let gen_cfg = Config::load(&gen_file).unwrap();
+        let mut gen_app = App::new_in_scheme(&gen_cfg, themes_dir, None, ColorScheme::Dark);
+        gen_app.config_file = Some(gen_file.clone());
+        assert_eq!(gen_app.wanted_theme, "generated");
+        gen_app.on_color_scheme(ColorScheme::Light);
+        assert_eq!(gen_app.wanted_theme, "generated");
+        gen_app.step_theme(1);
+        let reloaded = Config::load(&gen_file).unwrap();
+        assert_eq!(reloaded.theme, gen_app.wanted_theme);
+        assert!(reloaded.theme_dark.is_none());
+        assert!(reloaded.theme_light.is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn pane_jump_keys() {
         let (mut app, _) = drawn();
         app.on_event(key_mod(KeyCode::Left, KeyModifiers::ALT));
@@ -4030,6 +4330,60 @@ mod tests {
         assert_eq!(Config::load(&file).unwrap().theme, app.theme.name);
         app.on_event(key(KeyCode::Left));
         assert_eq!(app.theme.name, before);
+
+        // Slot rows start hidden behind "Follow dark/light", so Down skips straight to width.
+        find(&terminal, "Follow dark/light");
+        assert!(!format!("{}", terminal.backend()).contains("Dark theme"));
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(app.setting_value(Setting::ThemePairing), "off");
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(
+            app.sidebar.width,
+            app.setting_value(Setting::SidebarWidth)
+                .parse::<u16>()
+                .unwrap()
+        );
+        app.on_event(key(KeyCode::Up));
+
+        // Enabling pairing reveals Dark theme and Light theme slots.
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.setting_value(Setting::ThemePairing), "on");
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "Dark theme");
+        find(&terminal, "Light theme");
+
+        // Dark theme and Light theme slots cycle through (unset) + themes and clean
+        // up config keys when returned to (unset) or when Follow dark/light is turned off.
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(app.setting_value(Setting::ThemeDark), "(unset)");
+        app.on_event(key(KeyCode::Right));
+        assert_ne!(app.setting_value(Setting::ThemeDark), "(unset)");
+        assert!(Config::load(&file).unwrap().theme_dark.is_some());
+        app.on_event(key(KeyCode::Left));
+        assert_eq!(app.setting_value(Setting::ThemeDark), "(unset)");
+        assert!(Config::load(&file).unwrap().theme_dark.is_none());
+        app.on_event(key(KeyCode::Right));
+        assert!(Config::load(&file).unwrap().theme_dark.is_some());
+
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(app.setting_value(Setting::ThemeLight), "(unset)");
+        app.on_event(key(KeyCode::Right));
+        assert_ne!(app.setting_value(Setting::ThemeLight), "(unset)");
+        assert!(Config::load(&file).unwrap().theme_light.is_some());
+        app.on_event(key(KeyCode::Left));
+        assert_eq!(app.setting_value(Setting::ThemeLight), "(unset)");
+        assert!(Config::load(&file).unwrap().theme_light.is_none());
+
+        // Turning Follow dark/light off removes configured slot keys, restores base Theme,
+        // and hides the two slot rows again.
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Char(' ')));
+        assert_eq!(app.setting_value(Setting::ThemePairing), "off");
+        assert_eq!(app.theme.name, before);
+        assert!(Config::load(&file).unwrap().theme_dark.is_none());
+        redraw(&mut app, &mut terminal);
+        assert!(!format!("{}", terminal.backend()).contains("Dark theme"));
 
         // Width, then the switches.
         app.on_event(key(KeyCode::Down));

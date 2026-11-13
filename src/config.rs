@@ -12,6 +12,10 @@ use crate::theme::DEFAULT_THEME;
 pub struct Config {
     /// Name of a built-in theme or of a file in `themes/` (without `.toml`).
     pub theme: String,
+    /// Optional override for `theme` when the terminal is in dark mode.
+    pub theme_dark: Option<String>,
+    /// Optional override for `theme` when the terminal is in light mode.
+    pub theme_light: Option<String>,
     /// Width of the room list in columns.
     pub sidebar_width: u16,
     /// Capture the mouse. Turn off to use the terminal's own text selection.
@@ -85,6 +89,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: DEFAULT_THEME.to_owned(),
+            theme_dark: None,
+            theme_light: None,
             sidebar_width: 24,
             mouse: true,
             typing_notices: true,
@@ -341,12 +347,49 @@ fn encode_key_list(keys: &[String]) -> toml_edit::Value {
     }
 }
 
+impl Config {
+    /// Effective theme name for `scheme`: prefers the mode-specific slot (`theme_dark` /
+    /// `theme_light`) when set and non-empty, otherwise falls back to `theme`.
+    #[cfg(test)]
+    pub fn theme_for(&self, scheme: crate::theme::ColorScheme) -> &str {
+        let slot = match scheme {
+            crate::theme::ColorScheme::Dark => self.theme_dark.as_deref(),
+            crate::theme::ColorScheme::Light => self.theme_light.as_deref(),
+        };
+        slot.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.theme)
+    }
+
+    /// Normalized `(theme_dark, theme_light)` slots, treating blank strings as unset.
+    pub fn paired_themes(&self) -> (Option<String>, Option<String>) {
+        let norm = |s: &Option<String>| {
+            s.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        (norm(&self.theme_dark), norm(&self.theme_light))
+    }
+}
+
 /// Changes one setting in the configuration file, keeping everything else in it
 /// (comments included) as it is. The file is replaced in one step.
 pub fn save_setting(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> Result<()> {
     let value = value.into();
     edit_document(path, |document| {
         set_value_preserving_decor(document.as_table_mut(), key, value);
+    })
+}
+
+/// Removes one top-level setting from the configuration file if the file exists, keeping
+/// everything else (comments included) intact.
+pub fn remove_setting(path: &Path, key: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    edit_document(path, |document| {
+        document.as_table_mut().remove(key);
     })
 }
 
@@ -581,5 +624,50 @@ mod tests {
             assert_eq!(config.images, mode);
         }
         assert!(toml::from_str::<Config>("images = \"sixel\"").is_err());
+    }
+
+    #[test]
+    fn paired_themes_resolve_per_scheme_and_remove_cleanly() {
+        use crate::theme::ColorScheme;
+
+        let config: Config = toml::from_str(
+            "theme = \"terminal\"\ntheme_dark = \"gruvbox-dark\"\ntheme_light = \"catppuccin-latte\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.theme_for(ColorScheme::Dark), "gruvbox-dark");
+        assert_eq!(config.theme_for(ColorScheme::Light), "catppuccin-latte");
+
+        // Unset or whitespace-only slots fall back to `theme`.
+        let partial: Config = toml::from_str(
+            "theme = \"noctalia\"\ntheme_light = \"solarized-light\"\ntheme_dark = \" \"\n",
+        )
+        .unwrap();
+        assert_eq!(partial.theme_for(ColorScheme::Dark), "noctalia");
+        assert_eq!(partial.theme_for(ColorScheme::Light), "solarized-light");
+        assert_eq!(
+            partial.paired_themes(),
+            (None, Some("solarized-light".to_owned()))
+        );
+
+        let dir = std::env::temp_dir().join(format!("matrix-rat-theme-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        remove_setting(&path, "theme_dark").unwrap();
+        assert!(!path.exists());
+        std::fs::write(&path, "# keep\ntheme = \"rat-dark\"\n").unwrap();
+        save_setting(&path, "theme_dark", "nord").unwrap();
+        save_setting(&path, "theme_light", "gruvbox-light").unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.theme_for(ColorScheme::Dark), "nord");
+        assert_eq!(loaded.theme_for(ColorScheme::Light), "gruvbox-light");
+        remove_setting(&path, "theme_dark").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep"), "{text}");
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.theme_dark, None);
+        assert_eq!(loaded.theme_for(ColorScheme::Dark), "rat-dark");
+        assert_eq!(loaded.theme_for(ColorScheme::Light), "gruvbox-light");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

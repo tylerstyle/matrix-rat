@@ -78,6 +78,8 @@ impl App {
             download_dir: crate::files::display(&self.download_dir()),
             verify_status: crate::verify::setting_text(self.verify.security),
             wanted_theme: self.wanted_theme.clone(),
+            theme_dark: self.theme_dark.clone(),
+            theme_light: self.theme_light.clone(),
             themes: self.theme_names.clone(),
             rooms,
             selection,
@@ -165,15 +167,9 @@ impl App {
                 ));
             }
             Setting::DownloadDir => {
-                let selected = Setting::ALL
-                    .iter()
-                    .position(|s| *s == Setting::DownloadDir)
-                    .unwrap_or(0);
-                self.open_modal(Modal::Settings(SettingsMenu {
-                    selected,
-                    confirm_logout: false,
-                    editing: Some(self.download_dir.clone()),
-                }));
+                let mut menu = SettingsMenu::select(Setting::DownloadDir, self.has_theme_pair());
+                menu.editing = Some(self.download_dir.clone());
+                self.open_modal(Modal::Settings(menu));
             }
             Setting::Keys => self.change_setting(Setting::Keys, 0),
             Setting::Encryption => self.start_verification(),
@@ -185,17 +181,24 @@ impl App {
                 // Select Log out in Settings without arming confirm_logout yet so the
                 // existing two-step confirmation applies and a held/auto-repeated Enter
                 // cannot confirm logout immediately.
-                let selected = Setting::ALL
-                    .iter()
-                    .position(|s| *s == Setting::Logout)
-                    .unwrap_or(0);
-                self.open_modal(Modal::Settings(SettingsMenu {
-                    selected,
-                    confirm_logout: false,
-                    editing: None,
-                }));
+                self.open_modal(Modal::Settings(SettingsMenu::select(
+                    Setting::Logout,
+                    self.has_theme_pair(),
+                )));
             }
-            Setting::Theme | Setting::SidebarWidth => self.change_setting(setting, 1),
+            Setting::ThemePairing => {
+                if self.has_theme_pair() {
+                    self.change_setting(setting, 0);
+                } else {
+                    self.open_modal(Modal::Settings(SettingsMenu::select(
+                        Setting::ThemeDark,
+                        true,
+                    )));
+                }
+            }
+            Setting::Theme | Setting::ThemeDark | Setting::ThemeLight | Setting::SidebarWidth => {
+                self.change_setting(setting, 1)
+            }
         }
     }
 }
