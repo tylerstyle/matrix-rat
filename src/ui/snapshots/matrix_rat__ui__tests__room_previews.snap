@@ -1,0 +1,34 @@
+---
+source: src/ui/mod.rs
+expression: "render(&mut app, 100, 30)"
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
+"│ Filter rooms…        ││                                                                          │"
+"│ Favourites           ││─────────────────────────────── Yesterday ─────────────────────────────── │"
+"│▌ R   rust            ││● alice  21:40                                                            │"
+"│▌     dave: Shipping… ││  Has anyone tried the new event cache yet?                               │"
+"│  M   matrix-rat      ││                                                                          │"
+"│      alice: Welcome… ││● bob  21:44                                                              │"
+"│ People               ││  Yes — startup is instant now. Room previews come straight from disk.    │"
+"│  B   bob          2  ││   👍 2   🎉 1                                                            │" Hidden by multi-width symbols: [(29, " "), (36, " ")]
+"│      bob: are you c… ││  Back-pagination also survives restarts, which is a big deal for large   │"
+"│  C   carol           ││  rooms like this one where scrolling up used to refetch everything from  │"
+"│      carol: See you… ││  the server every single time.                                           │"
+"│ Rooms                ││───────────────────────────────── Today ───────────────────────────────── │"
+"│  D   design       5  ││● carol  09:12                                                            │"
+"│      erin: @you can… ││  Morning! Is the sliding sync proxy still needed?                        │"
+"│  N   nixos           ││                                                                          │"
+"│      frank: Unstabl… ││● alice  09:15                                                            │"
+"│  O   off-topic   12  ││  ┃ carol: Morning! Is the sliding sync proxy still needed?               │"
+"│      grace: Anyone … ││  No, it is native in the homeserver now.                                 │"
+"│                      ││                                                                          │"
+"│                      ││● you  09:20                                                              │"
+"│                      ││  Good to know, thanks. (edited)                                          │"
+"│                      ││                                                                          │"
+"│                      ││● dave  10:02                                                             │"
+"│                      ││  Shipping a TUI client on top of it this week 🐀                         │" Hidden by multi-width symbols: [(73, " ")]
+"│                      │╰ carol is typing… ────────────────────────────────────────────────────────╯"
+"│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
+"│                      ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
+" ● demo data  Enter send  Shift-Enter line break  Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

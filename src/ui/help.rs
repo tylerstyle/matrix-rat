@@ -5,22 +5,22 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use super::hit::HitId;
 use crate::app::App;
-use crate::keymap::{Context, DEFAULT};
+use crate::keymap::{Context, Keymap, Preset};
 use crate::theme::{Role, Theme};
 
 const MOUSE_HINT: &str =
     "Mouse: click to focus · right click for a menu · wheel scrolls · drag the room list's edge";
 
 /// The heading and the bindings of one context.
-fn section(theme: &Theme, context: Context) -> Vec<Line<'static>> {
+fn section(theme: &Theme, keymap: &Keymap, context: Context) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         context.title(),
         theme.style(Role::SidebarSection),
     ))];
-    for binding in DEFAULT.iter().filter(|b| b.context == context) {
+    for binding in keymap.bindings().iter().filter(|b| b.context == context) {
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" {:<12}", binding.label),
+                format!(" {:<11} ", binding.label),
                 theme.style(Role::StatusKey),
             ),
             Span::raw(binding.description),
@@ -78,21 +78,16 @@ fn flow(
     out
 }
 
-fn sections(theme: &Theme) -> Vec<(Context, Vec<Line<'static>>)> {
-    [
-        Context::Global,
-        Context::Sidebar,
-        Context::Timeline,
-        Context::Composer,
-    ]
-    .into_iter()
-    .map(|context| (context, section(theme, context)))
-    .collect()
+fn sections(theme: &Theme, keymap: &Keymap) -> Vec<(Context, Vec<Line<'static>>)> {
+    Context::ALL
+        .into_iter()
+        .map(|context| (context, section(theme, keymap, context)))
+        .collect()
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme.clone();
-    let sections = sections(&theme);
+    let sections = sections(&theme, &app.keymap);
 
     // Two columns when there is room, otherwise one long one. Every key has to be
     // reachable: the blank lines go first, then the mouse hint, and what still does
@@ -146,12 +141,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         ratatui::style::Style::new().add_modifier(ratatui::style::Modifier::DIM),
     );
     frame.render_widget(Clear, popup);
+    let title = match app.keymap.preset() {
+        Preset::Default => " Keys ".to_owned(),
+        preset => format!(" Keys ({}) ", preset.name()),
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(theme.style(Role::OverlayBorder))
         .style(theme.style(Role::Text))
         .title(Line::from(Span::styled(
-            " Keys ",
+            title,
             theme.style(Role::TitleFocused),
         )))
         .title_bottom(Line::from(Span::styled(footer, theme.style(Role::Muted))).right_aligned());
@@ -187,7 +186,8 @@ mod tests {
 
     fn sections_text(columns: usize, spaced: bool) -> Vec<Vec<String>> {
         let theme = Theme::builtin(crate::theme::DEFAULT_THEME).unwrap();
-        text(&flow(&theme, &sections(&theme), columns, spaced))
+        let keymap = Keymap::default();
+        text(&flow(&theme, &sections(&theme, &keymap), columns, spaced))
     }
 
     fn text(columns: &[Vec<Line<'static>>]) -> Vec<Vec<String>> {
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn columns_balance_and_keep_every_key() {
-        let bindings = DEFAULT.len();
+        let bindings = crate::keymap::DEFAULT.len();
         for spaced in [true, false] {
             for columns in [1, 2, 3] {
                 let flowed = sections_text(columns, spaced);

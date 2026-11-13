@@ -9,7 +9,7 @@
 use ratatui::layout::Rect;
 
 use crate::action::Action;
-use crate::keymap::{self, Context};
+use crate::keymap::{Context, Keymap};
 use crate::manage::Click;
 use crate::model::{ItemRef, Message, MsgKind, ReadBy, Room, RoomKind, SendState};
 use crate::text::{sanitize_line, truncate, width};
@@ -69,6 +69,8 @@ pub struct Item {
     pub hint: String,
     /// `None`: a line that only says something.
     pub run: Option<Run>,
+    /// Asks before it runs: the first Enter or click only arms it.
+    pub confirm: bool,
 }
 
 impl Item {
@@ -77,27 +79,34 @@ impl Item {
             label: label.to_owned(),
             hint: hint.to_owned(),
             run: Some(run),
+            confirm: false,
         }
     }
 
     /// An entry that performs `action`, with the key bound to it in `context`.
-    fn action(label: &str, context: Context, action: Action) -> Self {
-        Self::new(label, key_hint(context, action, false), Run::Do(action))
+    fn action(keys: &Keymap, label: &str, context: Context, action: Action) -> Self {
+        Self::new(
+            label,
+            key_hint(keys, context, action, false),
+            Run::Do(action),
+        )
+    }
+
+    fn asking(mut self) -> Self {
+        self.confirm = true;
+        self
     }
 }
 
-/// The key that performs `action` where the focus is in `context`, as the keymap
-/// spells it. With two keys for one action, `first` picks the one listed first.
-pub fn key_hint(context: Context, action: Action, first: bool) -> &'static str {
+/// The key that performs `action` where the focus is in `context`, as the keymap in
+/// effect spells it (presets and the user's own bindings included); empty when no
+/// key does. With two keys for one action, `first` picks the one listed first.
+pub fn key_hint(keys: &Keymap, context: Context, action: Action, first: bool) -> &str {
     let in_context = |wanted: Context| {
-        let mut labels = keymap::DEFAULT
-            .iter()
-            .filter(move |binding| binding.context == wanted && binding.action == action)
-            .map(|binding| binding.label);
         if first {
-            labels.next()
+            keys.label_in(wanted, action)
         } else {
-            labels.next_back()
+            keys.last_label_in(wanted, action)
         }
     };
     in_context(context)
@@ -113,6 +122,8 @@ pub struct Menu {
     pub items: Vec<Item>,
     pub selected: usize,
     pub anchor: Anchor,
+    /// The entry that was chosen once and asks to be chosen again.
+    pub armed: Option<usize>,
 }
 
 /// What the menu hangs from: the pointer, or the rows of the thing it is about. The
@@ -154,14 +165,44 @@ impl Menu {
             items,
             selected: 0,
             anchor,
+            armed: None,
         })
+    }
+
+    /// Selects an entry. Moving away from an armed one takes its question back.
+    pub fn select(&mut self, index: usize) {
+        if index < self.items.len() && index != self.selected {
+            self.selected = index;
+            self.armed = None;
+        }
+    }
+
+    /// What the entry at `index` shows: its label, or the question once armed.
+    pub fn label(&self, index: usize) -> &str {
+        match self.items.get(index) {
+            Some(_) if self.armed == Some(index) => "Again to delete",
+            Some(item) => &item.label,
+            None => "",
+        }
+    }
+
+    /// Choosing the entry at `index`: true if it may run now. An entry that asks
+    /// first is armed by the first choice and runs on the second.
+    pub fn confirmed(&mut self, index: usize) -> bool {
+        let asks = self.items.get(index).is_some_and(|item| item.confirm);
+        if asks && self.armed != Some(index) {
+            self.selected = index;
+            self.armed = Some(index);
+            return false;
+        }
+        true
     }
 
     /// Moves the selection, going round at the ends.
     pub fn step(&mut self, delta: isize) {
         let count = self.items.len() as isize;
         if count > 0 {
-            self.selected = (self.selected as isize + delta).rem_euclid(count) as usize;
+            self.select((self.selected as isize + delta).rem_euclid(count) as usize);
         }
     }
 
@@ -177,7 +218,7 @@ impl Menu {
                 first.is_some_and(|c| c.to_lowercase().collect::<Vec<_>>() == wanted)
             });
         if let Some(at) = found {
-            self.selected = at;
+            self.select(at);
         }
     }
 
@@ -238,7 +279,7 @@ pub struct MessageFacts {
 }
 
 /// The entries for a message. Empty for lines that are not messages.
-pub fn message_items(message: &Message, facts: MessageFacts) -> Vec<Item> {
+pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> Vec<Item> {
     use Context::Timeline;
     if matches!(message.kind, MsgKind::System | MsgKind::ReadMarker) {
         return Vec::new();
@@ -253,10 +294,15 @@ pub fn message_items(message: &Message, facts: MessageFacts) -> Vec<Item> {
 
     if facts.connected && message.state == SendState::Failed {
         // The reply key retries a message that was not sent.
-        items.push(Item::action("Try sending again", Timeline, Action::Reply));
+        items.push(Item::action(
+            keys,
+            "Try sending again",
+            Timeline,
+            Action::Reply,
+        ));
     }
     if sent && addressable && !deleted {
-        items.push(Item::action("Reply", Timeline, Action::Reply));
+        items.push(Item::action(keys, "Reply", Timeline, Action::Reply));
     }
     if sent && addressable && !facts.in_thread && (message.thread.is_some() || !deleted) {
         let label = if message.thread.is_some() {
@@ -264,10 +310,10 @@ pub fn message_items(message: &Message, facts: MessageFacts) -> Vec<Item> {
         } else {
             "Reply in thread"
         };
-        items.push(Item::action(label, Timeline, Action::OpenThread));
+        items.push(Item::action(keys, label, Timeline, Action::OpenThread));
     }
     if sent && addressable && readable {
-        items.push(Item::action("React…", Timeline, Action::React));
+        items.push(Item::action(keys, "React…", Timeline, Action::React));
     }
     if message.own
         && sent
@@ -276,10 +322,10 @@ pub fn message_items(message: &Message, facts: MessageFacts) -> Vec<Item> {
         && message.image.is_none()
         && message.file.is_none()
     {
-        items.push(Item::action("Edit", Timeline, Action::Edit));
+        items.push(Item::action(keys, "Edit", Timeline, Action::Edit));
     }
     if !deleted && !message.body.is_empty() {
-        items.push(Item::action("Copy text", Timeline, Action::Copy));
+        items.push(Item::action(keys, "Copy text", Timeline, Action::Copy));
     }
     if facts.permalink && on_server {
         items.push(Item::new("Copy link to message", "", Run::CopyPermalink));
@@ -302,7 +348,7 @@ pub fn message_items(message: &Message, facts: MessageFacts) -> Vec<Item> {
             None
         };
         if let Some((label, first)) = open {
-            let hint = key_hint(Timeline, Action::Open, first);
+            let hint = key_hint(keys, Timeline, Action::Open, first);
             items.push(Item::new(label, hint, Run::Do(Action::Open)));
         }
     }
@@ -312,16 +358,17 @@ pub fn message_items(message: &Message, facts: MessageFacts) -> Vec<Item> {
         } else {
             "Save file"
         };
-        items.push(Item::action(label, Timeline, Action::Save));
+        items.push(Item::action(keys, label, Timeline, Action::Save));
     }
     if !message.read_by.is_empty() {
         items.push(Item::new("Read by…", "", Run::ReadBy));
     }
     if message.own && !sent {
         // Deleting what has not been sent takes it out of the queue.
-        items.push(Item::action("Discard", Timeline, Action::Delete));
+        items.push(Item::action(keys, "Discard", Timeline, Action::Delete));
     } else if message.own && addressable && !deleted {
-        items.push(Item::action("Delete", Timeline, Action::Delete));
+        // A click lands on the wrong row more easily than a finger on Del.
+        items.push(Item::action(keys, "Delete", Timeline, Action::Delete).asking());
     }
     items
 }
@@ -335,6 +382,7 @@ pub fn read_by_items(read_by: &ReadBy) -> Vec<Item> {
             label: truncate(&sanitize_line(&reader.name), 30),
             hint: sanitize_line(&reader.time),
             run: None,
+            confirm: false,
         })
         .collect();
     let more = (read_by.total as usize).saturating_sub(items.len());
@@ -343,6 +391,7 @@ pub fn read_by_items(read_by: &ReadBy) -> Vec<Item> {
             label: format!("and {more} more"),
             hint: String::new(),
             run: None,
+            confirm: false,
         });
     }
     items
@@ -357,19 +406,20 @@ pub fn link_items() -> Vec<Item> {
 }
 
 /// The entries for a room in the room list.
-pub fn room_items(room: &Room) -> Vec<Item> {
+pub fn room_items(room: &Room, keys: &Keymap) -> Vec<Item> {
     use Context::Sidebar;
     let invite = room.kind == RoomKind::Invite;
     let mut items = vec![
         Item::new(
             "Open",
-            key_hint(Sidebar, Action::SidebarOpen, true),
+            key_hint(keys, Sidebar, Action::SidebarOpen, true),
             Run::OpenRoom,
         ),
-        Item::action("Room info", Sidebar, Action::RoomInfo),
+        Item::action(keys, "Room info", Sidebar, Action::RoomInfo),
     ];
     if invite {
         items.push(Item::action(
+            keys,
             "Decline invitation…",
             Sidebar,
             Action::LeaveRoom,
@@ -390,18 +440,18 @@ pub fn room_items(room: &Room) -> Vec<Item> {
         Run::Do(Action::Manage(Click::Favourite)),
     ));
     items.push(Item::new("Notification mode…", "", Run::Notifications));
-    items.push(Item::action("Leave…", Sidebar, Action::LeaveRoom));
+    items.push(Item::action(keys, "Leave…", Sidebar, Action::LeaveRoom));
     items
 }
 
 /// The entries for the composer. Pasting is the terminal's business.
-pub fn composer_items(can_attach: bool, has_draft: bool) -> Vec<Item> {
+pub fn composer_items(can_attach: bool, has_draft: bool, keys: &Keymap) -> Vec<Item> {
     use Context::Composer;
     let mut items = Vec::new();
     if can_attach {
-        items.push(Item::action("Attach file…", Composer, Action::Attach));
+        items.push(Item::action(keys, "Attach file…", Composer, Action::Attach));
     }
-    items.push(Item::action("Emoji…", Composer, Action::OpenEmoji));
+    items.push(Item::action(keys, "Emoji…", Composer, Action::OpenEmoji));
     if has_draft {
         items.push(Item::new("Clear draft", "", Run::ClearDraft));
     }
@@ -424,6 +474,10 @@ pub fn permalink(room_id: &str, event_id: &str, own_user: Option<&str>) -> Optio
 mod tests {
     use super::*;
     use crate::model::{Attachment, ImageInfo, ImageSource, Reader, ThreadSummary};
+
+    fn keys() -> Keymap {
+        Keymap::from_preset(crate::keymap::Preset::Default)
+    }
 
     fn labels(items: &[Item]) -> Vec<&str> {
         items.iter().map(|item| item.label.as_str()).collect()
@@ -461,7 +515,7 @@ mod tests {
 
     #[test]
     fn a_message_of_someone_else() {
-        let items = message_items(&text(false), CONNECTED);
+        let items = message_items(&text(false), CONNECTED, &keys());
         assert_eq!(
             labels(&items),
             [
@@ -478,7 +532,7 @@ mod tests {
 
     #[test]
     fn a_message_of_ours() {
-        let items = message_items(&text(true), CONNECTED);
+        let items = message_items(&text(true), CONNECTED, &keys());
         assert_eq!(
             labels(&items),
             [
@@ -497,28 +551,60 @@ mod tests {
 
     #[test]
     fn key_hints_come_from_the_keymap() {
-        let items = message_items(&text(true), CONNECTED);
+        let items = message_items(&text(true), CONNECTED, &keys());
         for item in &items {
             let Some(Run::Do(action)) = item.run else {
                 assert_eq!(item.hint, "", "{}", item.label);
                 continue;
             };
-            let bound = keymap::DEFAULT.iter().any(|binding| {
+            let keys = keys();
+            let bound = keys.bindings().iter().any(|binding| {
                 binding.action == action
                     && binding.label == item.hint
                     && matches!(binding.context, Context::Timeline | Context::Global)
             });
             assert!(bound, "{}: {:?}", item.label, item.hint);
         }
+        let keys = keys();
         // The context's own key wins over a global one, and a missing one is no hint.
-        assert_eq!(key_hint(Context::Timeline, Action::Reply, false), "Enter");
-        assert_eq!(key_hint(Context::Composer, Action::Reply, false), "");
-        assert_eq!(key_hint(Context::Timeline, Action::RoomInfo, false), "F4");
+        assert_eq!(
+            key_hint(&keys, Context::Timeline, Action::Reply, false),
+            "Enter"
+        );
+        assert_eq!(key_hint(&keys, Context::Composer, Action::Reply, false), "");
+        assert_eq!(
+            key_hint(&keys, Context::Timeline, Action::RoomInfo, false),
+            "F4"
+        );
         // Two keys open things: the first is the one for pictures.
-        let first = key_hint(Context::Timeline, Action::Open, true);
-        let last = key_hint(Context::Timeline, Action::Open, false);
+        let first = key_hint(&keys, Context::Timeline, Action::Open, true);
+        let last = key_hint(&keys, Context::Timeline, Action::Open, false);
         assert_ne!(first, last);
         assert!(!first.is_empty() && !last.is_empty());
+
+        // The keys in effect, not the built-in ones: rebound, and unbound.
+        let mut keys = keys;
+        let (code, mods) = crate::keymap::parse_key(Context::Timeline, "x").unwrap();
+        keys.apply_rebind(Context::Timeline, Action::Edit, code, mods);
+        keys.unbind_action(Context::Timeline, Action::Copy).unwrap();
+        let items = message_items(&text(true), CONNECTED, &keys);
+        let hint = |label: &str| {
+            let item = items.iter().find(|item| item.label == label).unwrap();
+            item.hint.clone()
+        };
+        assert_eq!(hint("Edit"), "x");
+        assert_eq!(hint("Copy text"), "");
+        assert_eq!(hint("Reply"), "Enter");
+        // The vim keys are added to the usual ones, and `m` stays the menu's.
+        let vim = Keymap::from_preset(crate::keymap::Preset::Vim);
+        assert_eq!(
+            key_hint(&vim, Context::Timeline, Action::ContextMenu, true),
+            "m"
+        );
+        assert_eq!(
+            key_hint(&vim, Context::Composer, Action::ContextMenu, true),
+            "Menu"
+        );
     }
 
     #[test]
@@ -526,7 +612,7 @@ mod tests {
         let mut message = text(false);
         message.thread = Some(ThreadSummary::default());
         message.body = "see https://example.org".into();
-        let items = message_items(&message, CONNECTED);
+        let items = message_items(&message, CONNECTED, &keys());
         assert!(labels(&items).contains(&"Open thread"));
         assert!(!labels(&items).contains(&"Reply in thread"));
         assert!(labels(&items).contains(&"Open link"));
@@ -537,7 +623,7 @@ mod tests {
             in_thread: true,
             ..CONNECTED
         };
-        let items = message_items(&message, in_thread);
+        let items = message_items(&message, in_thread, &keys());
         assert!(!labels(&items).iter().any(|label| label.contains("thread")));
 
         let mut picture = text(true);
@@ -549,7 +635,7 @@ mod tests {
             dimensions: None,
             size: None,
         });
-        let items = message_items(&picture, CONNECTED);
+        let items = message_items(&picture, CONNECTED, &keys());
         assert!(labels(&items).contains(&"View picture"));
         // Pictures are not edited; the demo picture has no file to save.
         assert!(!labels(&items).contains(&"Edit"));
@@ -557,7 +643,7 @@ mod tests {
 
         let mut with_file = text(false);
         with_file.file = Some(file());
-        let items = message_items(&with_file, CONNECTED);
+        let items = message_items(&with_file, CONNECTED, &keys());
         assert!(labels(&items).contains(&"Open file"));
         assert!(labels(&items).contains(&"Save file"));
         assert!(!labels(&items).contains(&"Open link"));
@@ -569,13 +655,13 @@ mod tests {
         failed.item = Some(ItemRef::Transaction("txn".into()));
         failed.state = SendState::Failed;
         assert_eq!(
-            labels(&message_items(&failed, CONNECTED)),
+            labels(&message_items(&failed, CONNECTED, &keys())),
             ["Try sending again", "Copy text", "Discard"]
         );
         let mut sending = failed.clone();
         sending.state = SendState::Sending;
         assert_eq!(
-            labels(&message_items(&sending, CONNECTED)),
+            labels(&message_items(&sending, CONNECTED, &keys())),
             ["Copy text", "Discard"]
         );
     }
@@ -586,24 +672,24 @@ mod tests {
         deleted.kind = MsgKind::Redacted;
         deleted.body = "Message deleted".into();
         assert_eq!(
-            labels(&message_items(&deleted, CONNECTED)),
+            labels(&message_items(&deleted, CONNECTED, &keys())),
             ["Copy link to message"]
         );
         let mut locked = text(false);
         locked.kind = MsgKind::Undecryptable;
-        let items = message_items(&locked, CONNECTED);
+        let items = message_items(&locked, CONNECTED, &keys());
         assert!(labels(&items).contains(&"Reply"));
         assert!(!labels(&items).contains(&"React…"));
         let mut system = text(false);
         system.kind = MsgKind::System;
-        assert!(message_items(&system, CONNECTED).is_empty());
+        assert!(message_items(&system, CONNECTED, &keys()).is_empty());
     }
 
     #[test]
     fn the_demo_has_no_links_to_messages_but_everything_else() {
         let mut message = text(true);
         message.item = None;
-        let items = message_items(&message, MessageFacts::default());
+        let items = message_items(&message, MessageFacts::default(), &keys());
         assert_eq!(
             labels(&items),
             [
@@ -620,7 +706,7 @@ mod tests {
     #[test]
     fn readers_are_listed_with_their_times() {
         let mut message = text(true);
-        assert!(!labels(&message_items(&message, CONNECTED)).contains(&"Read by…"));
+        assert!(!labels(&message_items(&message, CONNECTED, &keys())).contains(&"Read by…"));
         message.read_by = ReadBy {
             readers: vec![
                 Reader {
@@ -634,7 +720,7 @@ mod tests {
             ],
             total: 5,
         };
-        assert!(labels(&message_items(&message, CONNECTED)).contains(&"Read by…"));
+        assert!(labels(&message_items(&message, CONNECTED, &keys())).contains(&"Read by…"));
         let items = read_by_items(&message.read_by);
         assert_eq!(labels(&items), ["bob", "carol[2J", "and 3 more"]);
         assert_eq!(items[0].hint, "14:05");
@@ -645,7 +731,7 @@ mod tests {
     fn rooms_invitations_links_and_the_composer() {
         let mut room = Room::new("!a:example.org", "rust", RoomKind::Room);
         assert_eq!(
-            labels(&room_items(&room)),
+            labels(&room_items(&room, &keys())),
             [
                 "Open",
                 "Room info",
@@ -656,7 +742,7 @@ mod tests {
         );
         room.kind = RoomKind::Favourite;
         room.bold = true;
-        let items = room_items(&room);
+        let items = room_items(&room, &keys());
         assert_eq!(
             labels(&items),
             [
@@ -673,20 +759,20 @@ mod tests {
         assert_eq!(items[1].hint, "F4");
         room.kind = RoomKind::Invite;
         assert_eq!(
-            labels(&room_items(&room)),
+            labels(&room_items(&room, &keys())),
             ["Open", "Room info", "Decline invitation…"]
         );
 
         assert_eq!(labels(&link_items()), ["Open link", "Copy link"]);
 
         assert_eq!(
-            labels(&composer_items(true, true)),
+            labels(&composer_items(true, true, &keys())),
             ["Attach file…", "Emoji…", "Clear draft"]
         );
-        assert_eq!(labels(&composer_items(false, false)), ["Emoji…"]);
+        assert_eq!(labels(&composer_items(false, false, &keys())), ["Emoji…"]);
         // No word about pasting: that is the terminal's.
         assert!(
-            composer_items(true, true)
+            composer_items(true, true, &keys())
                 .iter()
                 .all(|item| !item.label.contains("Paste"))
         );
@@ -780,6 +866,37 @@ mod tests {
         assert_eq!(menu.selected, 2);
         assert_eq!(menu.run_at(2), Some(Run::Do(Action::Delete)));
         assert_eq!(menu.run_at(3), None);
+    }
+
+    #[test]
+    fn delete_asks_once_before_it_runs() {
+        let items = message_items(&text(true), CONNECTED, &keys());
+        let delete = items.len() - 1;
+        assert!(items[delete].confirm);
+        // Nothing else asks; discarding what was never sent does not either.
+        assert_eq!(items.iter().filter(|item| item.confirm).count(), 1);
+        let mut failed = text(true);
+        failed.state = SendState::Failed;
+        let unsent = message_items(&failed, CONNECTED, &keys());
+        assert!(unsent.iter().all(|item| !item.confirm));
+
+        let target = Target::Room { id: "r".into() };
+        let mut menu = Menu::new(target, "", items, Anchor::at(0, 0)).unwrap();
+        assert!(menu.confirmed(0));
+        assert!(!menu.confirmed(delete));
+        assert_eq!(menu.selected, delete);
+        assert_eq!(menu.label(delete), "Again to delete");
+        assert!(menu.confirmed(delete));
+        // Moving away takes the question back.
+        menu.armed = None;
+        assert!(!menu.confirmed(delete));
+        menu.step(-1);
+        assert_eq!(menu.armed, None);
+        assert_eq!(menu.label(delete), "Delete");
+        menu.step(1);
+        assert!(!menu.confirmed(delete));
+        menu.jump('r');
+        assert_eq!(menu.armed, None);
     }
 
     #[test]

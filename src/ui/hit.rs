@@ -53,6 +53,10 @@ pub enum HitId {
     Complete(usize),
     /// A row of the context menu.
     Menu(usize),
+    /// A row in the key-bindings editor (index into `editor.rows()`).
+    KeybindRow(usize),
+    /// A button in the key-bindings editor.
+    KeybindBtn(crate::keymap::EditorButton),
 }
 
 #[derive(Debug, Default)]

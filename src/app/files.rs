@@ -51,7 +51,23 @@ impl App {
         }
         // The whole file passes through memory, and the size is only the sender's
         // word: ask once for large files and for those that do not state a size.
-        let again = if open { "o" } else { "s" };
+        let again = if open {
+            self.keymap
+                .last_label_in(
+                    crate::keymap::Context::Timeline,
+                    crate::action::Action::Open,
+                )
+                .or_else(|| self.keymap.label_for(crate::action::Action::Open))
+                .unwrap_or("this action")
+        } else {
+            self.keymap
+                .label_in(
+                    crate::keymap::Context::Timeline,
+                    crate::action::Action::Save,
+                )
+                .or_else(|| self.keymap.label_for(crate::action::Action::Save))
+                .unwrap_or("this action")
+        };
         let question = match file.size {
             Some(size) if size > files::LARGE_FILE => Some(format!(
                 "{} is {}. Press {again} again to download it",

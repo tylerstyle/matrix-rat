@@ -733,6 +733,7 @@ mod tests {
             server_notifications: 0,
             mention: false,
             unread: false,
+            preview: None,
             avatar: None,
             alias: None,
         }]));

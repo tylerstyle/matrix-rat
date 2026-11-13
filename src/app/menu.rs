@@ -115,7 +115,7 @@ impl App {
                 menu::permalink(&target.room_id, event, self.user_id.as_deref()).is_some()
             }),
         };
-        let items = menu::message_items(message, facts);
+        let items = menu::message_items(message, facts, &self.keymap);
         self.show_menu(Target::Message(target), "", items, at);
     }
 
@@ -149,7 +149,7 @@ impl App {
             id: room.id.clone(),
         };
         let title = room.name.clone();
-        let items = menu::room_items(room);
+        let items = menu::room_items(room, &self.keymap);
         self.show_menu(target, &title, items, at);
     }
 
@@ -164,7 +164,7 @@ impl App {
             && !matches!(self.compose_mode, super::ComposeMode::Edit(_));
         let has_draft = !self.composer.is_empty() || !self.attachments().is_empty();
         self.set_focus(Pane::Composer);
-        let items = menu::composer_items(can_attach, has_draft);
+        let items = menu::composer_items(can_attach, has_draft, &self.keymap);
         self.show_menu(target, "", items, at);
     }
 
@@ -269,7 +269,7 @@ impl App {
                     && menu.selected != index
                     && index < menu.items.len()
                 {
-                    menu.selected = index;
+                    menu.select(index);
                     self.dirty = true;
                 }
                 // What lies around the menu does not light up while it is open.
@@ -291,8 +291,8 @@ impl App {
             KeyCode::Esc | KeyCode::Menu | KeyCode::Left => self.modal = None,
             KeyCode::Up | KeyCode::BackTab => menu.step(-1),
             KeyCode::Down | KeyCode::Tab => menu.step(1),
-            KeyCode::Home | KeyCode::PageUp => menu.selected = 0,
-            KeyCode::End | KeyCode::PageDown => menu.selected = menu.items.len() - 1,
+            KeyCode::Home | KeyCode::PageUp => menu.select(0),
+            KeyCode::End | KeyCode::PageDown => menu.select(menu.items.len() - 1),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 let selected = menu.selected;
                 self.run_menu_at(selected);
@@ -307,6 +307,13 @@ impl App {
     /// Runs the entry at `index` of the open menu. The menu closes first: what runs
     /// may open a popup of its own.
     pub(super) fn run_menu_at(&mut self, index: usize) {
+        // An entry that asks first is only armed by the first Enter or click.
+        if let Some(Modal::Menu(menu)) = &mut self.modal
+            && !menu.confirmed(index)
+        {
+            self.dirty = true;
+            return;
+        }
         let Some(Modal::Menu(menu)) = self.modal.take() else {
             return;
         };
@@ -552,6 +559,7 @@ mod tests {
             name: name.into(),
             category,
             notifications: 0,
+            preview: None,
             server_notifications: 0,
             unread: false,
             mention: false,
@@ -590,6 +598,8 @@ mod tests {
             summary("!b:example.org", "Beta", RoomCategory::Room),
         ]));
         timeline(&mut app, messages);
+        // Without previews, so that a message's text is on screen once.
+        app.room_previews = false;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         screen(&mut app, &mut terminal);
         (app, terminal, commands)
@@ -703,8 +713,40 @@ mod tests {
         app.on_event(key(KeyCode::Char('d')));
         assert_eq!(open_menu(&app).selected, 5);
         assert_eq!(app.messages().len(), count);
+        // Enter asks, moving away takes the question back, Enter twice deletes.
         app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.messages().len(), count);
+        let text = screen(&mut app, &mut terminal);
+        assert!(text.contains("│ Again to delete "), "{text}");
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Down));
+        assert!(!screen(&mut app, &mut terminal).contains("Again to delete"));
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.messages().len(), count);
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
         assert_eq!(app.messages().len(), count - 1);
+
+        // By mouse the same: the first click asks, the second on that row deletes.
+        // Esc after the first leaves everything as it was. The key itself asks nothing.
+        let (mut app, mut terminal) = demo();
+        let count = app.messages().len();
+        right_click(&mut app, &mut terminal, "Good to know, thanks.");
+        choose(&mut app, &mut terminal, "Delete");
+        assert!(app.modal.is_some());
+        assert_eq!(app.messages().len(), count);
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        right_click(&mut app, &mut terminal, "Good to know, thanks.");
+        choose(&mut app, &mut terminal, "Delete");
+        choose(&mut app, &mut terminal, "Again to delete");
+        assert!(app.modal.is_none());
+        assert_eq!(app.messages().len(), count - 1);
+        app.perform(Action::Focus(Pane::Timeline));
+        app.timeline.selected = Some(1);
+        app.rooms[0].messages[1].own = true;
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(app.messages().len(), count - 2);
     }
 
     #[test]
@@ -791,6 +833,8 @@ mod tests {
         app.on_event(key(KeyCode::End));
         assert_eq!(open_menu(&app).items.last().unwrap().label, "Delete");
         app.on_event(key(KeyCode::Enter));
+        assert!(sent(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Enter));
         assert_eq!(sent(&mut commands), [format!("Redact({ROOM})")]);
         assert_eq!(app.timeline.selected, Some(2));
 
@@ -822,6 +866,7 @@ mod tests {
         // Changed behind the menu's back, without the check that follows an update.
         app.rooms[app.active].messages.remove(1);
         app.on_event(key(KeyCode::End));
+        app.on_event(key(KeyCode::Enter));
         app.on_event(key(KeyCode::Enter));
         assert!(app.modal.is_none());
         assert!(sent(&mut commands).is_empty());
@@ -1002,6 +1047,17 @@ mod tests {
         assert_eq!(sent(&mut commands), ["MarkRead(!b:example.org)"]);
         assert_eq!(app.rooms[1].unread, 0);
         assert!(!app.rooms[1].bold);
+        // With previews a room takes two lines; the second belongs to it as well.
+        app.room_previews = true;
+        app.rooms[1].preview = Some("bob: the second line".into());
+        right_click(&mut app, &mut terminal, "bob: the");
+        assert_eq!(
+            open_menu(&app).target,
+            Target::Room {
+                id: "!b:example.org".into()
+            }
+        );
+        app.on_event(key(KeyCode::Esc));
         // Nothing left to mark.
         right_click(&mut app, &mut terminal, "Beta");
         assert!(!labels(&app).contains(&"Mark as read".to_owned()));

@@ -449,6 +449,7 @@ mod tests {
             mention: false,
             unread: false,
             avatar: None,
+            preview: None,
             alias: alias.map(str::to_owned),
         }
     }

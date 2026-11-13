@@ -80,6 +80,7 @@ impl App {
             rooms,
             selection,
             target: self.manage_target(),
+            keymap: self.keymap.clone(),
         };
         self.open_modal(Modal::Palette(Palette::open(ctx)));
     }
@@ -152,6 +153,7 @@ impl App {
             | Setting::TypingNotices
             | Setting::ReadReceipts
             | Setting::ReadMarkers
+            | Setting::RoomPreviews
             | Setting::Notifications => {
                 self.change_setting(setting, 0);
                 self.show_toast(format!(

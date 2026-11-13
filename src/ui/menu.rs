@@ -45,14 +45,19 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, menu: &Menu) {
                 .set_style(row, theme.style(Role::MessageSelected));
         }
         // The key gives way to the label where both do not fit.
-        let hint = if width(&item.label) + 2 + width(&item.hint) <= room {
+        let armed = menu.armed == Some(index);
+        let shown = menu.label(index);
+        let hint = if armed {
+            ""
+        } else if width(shown) + 2 + width(&item.hint) <= room {
             item.hint.as_str()
         } else {
             ""
         };
-        let label = truncate(&item.label, room.saturating_sub(width(hint)));
+        let label = truncate(shown, room.saturating_sub(width(hint)));
         let gap = room.saturating_sub(width(&label) + width(hint));
         let label_role = match (item.run.is_some(), selected) {
+            _ if armed => Role::Error,
             (true, true) => Role::TitleFocused,
             _ => Role::Text,
         };

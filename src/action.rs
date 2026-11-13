@@ -102,4 +102,10 @@ pub enum Action {
     /// Open the menu of what has the focus: the selected message, the room under the
     /// cursor, or the composer.
     ContextMenu,
+    /// Jump to the oldest loaded message in the timeline.
+    JumpToOldest,
+    /// Move the room-list cursor to the first visible room.
+    SidebarTop,
+    /// Move the room-list cursor to the last visible room.
+    SidebarBottom,
 }

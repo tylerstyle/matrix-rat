@@ -168,6 +168,7 @@ impl EmojiPicker {
 pub enum Setting {
     Theme,
     SidebarWidth,
+    RoomPreviews,
     Mouse,
     TypingNotices,
     ReadReceipts,
@@ -181,9 +182,10 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 11] = [
+    pub const ALL: [Setting; 12] = [
         Setting::Theme,
         Setting::SidebarWidth,
+        Setting::RoomPreviews,
         Setting::Mouse,
         Setting::TypingNotices,
         Setting::ReadReceipts,
@@ -210,6 +212,7 @@ impl Setting {
         match self {
             Setting::Theme => "Theme",
             Setting::SidebarWidth => "Room list width",
+            Setting::RoomPreviews => "Room previews",
             Setting::Mouse => "Mouse",
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
@@ -228,6 +231,9 @@ impl Setting {
                 "Themes in the themes folder are listed too and reload when they change."
             }
             Setting::SidebarWidth => "You can also drag the line next to the room list.",
+            Setting::RoomPreviews => {
+                "Show the latest message under each room (and larger room pictures)."
+            }
             Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",
@@ -238,7 +244,9 @@ impl Setting {
             Setting::DownloadDir => {
                 "Where s saves files and pictures. Enter to change; empty for the default."
             }
-            Setting::Keys => "Show all key bindings (F1).",
+            Setting::Keys => {
+                "Edit key bindings or switch presets (F1 still opens the key overview)."
+            }
             Setting::Encryption => {
                 "Verify this device with another of your devices, or see its status."
             }
@@ -286,6 +294,8 @@ pub enum Modal {
     RoomInfo(crate::manage::InfoPopup),
     /// The context menu of a message, a room, a link or the composer.
     Menu(crate::menu::Menu),
+    /// Configure key bindings and preset.
+    Keybinds(crate::keymap::Editor),
 }
 
 #[cfg(test)]

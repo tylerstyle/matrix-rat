@@ -41,6 +41,8 @@ use crate::paths::Paths;
 
 /// Rooms shown before the user scrolls for more. Paging arrives with the timeline work.
 const ROOM_PAGE: usize = 10_000;
+/// Rooms (from the top of the list) that get a latest-message preview.
+const LATEST_ROOMS: usize = 500;
 
 pub enum MatrixCmd {
     LoginPassword {
@@ -245,6 +247,8 @@ pub struct RoomSummary {
     pub category: RoomCategory,
     /// Notification count, shown as a badge.
     pub notifications: u64,
+    /// The latest message in one line ("ann: see you then"), if known.
+    pub preview: Option<String>,
     /// The count as the server reports it; unlike ours it needs nothing from us.
     pub server_notifications: u64,
     pub mention: bool,
@@ -644,6 +648,7 @@ impl Worker {
         let mut rooms: Vector<RoomListItem> = Vector::new();
         let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
         let mut own_members = notify::OwnMembers::default();
+        let mut previewed = std::collections::HashSet::new();
         let mut verifier = verify::Verifier::start(client, self.events.clone());
         // Kept alive for the session: it follows the space hierarchy by itself.
         let space_service = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
@@ -666,6 +671,18 @@ impl Worker {
                         diff.apply(&mut rooms);
                     }
                     own_members.ensure(&rooms).await;
+                    // The SDK works out a room's latest message only for rooms it was
+                    // asked to; ask once for each (it needs the event cache running).
+                    if client.event_cache().subscribe().is_ok() {
+                        let latest = client.latest_events().await;
+                        for room in rooms.iter().take(LATEST_ROOMS) {
+                            if previewed.insert(room.room_id().to_owned())
+                                && let Err(err) = latest.listen_to_room(room.room_id()).await
+                            {
+                                tracing::debug!(%err, "no latest message for a room");
+                            }
+                        }
+                    }
                     _notices.arm();
                     self.emit(MatrixEvent::Rooms(summarize(&rooms).await));
                 }
@@ -719,6 +736,39 @@ impl Worker {
         }
         Ok(end)
     }
+}
+
+/// What the room list shows under a room's name: who wrote last, and what.
+async fn latest_message(room: &RoomListItem, direct: bool) -> Option<String> {
+    use matrix_sdk_ui::timeline::{LatestEventValue, RoomExt};
+    let (own, sender, profile, content) = match room.latest_event().await {
+        LatestEventValue::Remote {
+            is_own,
+            sender,
+            profile,
+            content,
+            ..
+        } => (is_own, sender, profile, content),
+        LatestEventValue::Local {
+            sender,
+            profile,
+            content,
+            ..
+        } => (true, sender, profile, content),
+        LatestEventValue::RemoteInvite { .. } | LatestEventValue::None => return None,
+    };
+    let text = convert::preview(&content);
+    if text.is_empty() {
+        return None;
+    }
+    Some(if own {
+        format!("You: {text}")
+    } else if direct {
+        // In a chat with one person it is clear who wrote.
+        text
+    } else {
+        format!("{}: {text}", convert::display_name(&profile, &sender))
+    })
 }
 
 fn sync_status(state: &State) -> SyncStatus {
@@ -788,6 +838,7 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
             name: crate::text::sanitize_line(&name),
             category,
             notifications,
+            preview: latest_message(room, direct).await,
             server_notifications: room.unread_notification_counts().notification_count,
             mention: room.num_unread_mentions() > 0,
             unread: notifications > 0 || room.num_unread_messages() > 0 || room.is_marked_unread(),
@@ -810,6 +861,68 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The room list reports each room's latest message.
+    /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=... cargo test -- --ignored`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn rooms_come_with_their_latest_message() {
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let username = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let root = std::env::temp_dir().join(format!("matrix-rat-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password,
+        });
+        let text = format!("preview {}", std::process::id());
+        let mut sent = false;
+        let wait = async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) => {
+                        let joined = rooms.iter().find(|r| r.category != RoomCategory::Invite);
+                        if let Some(room) = joined {
+                            if !sent {
+                                sent = true;
+                                handle.send(MatrixCmd::Send {
+                                    room_id: room.id.clone(),
+                                    message: crate::format::parse(&text),
+                                    reply_to: None,
+                                });
+                            }
+                            if let Some(preview) = &room.preview
+                                && preview.contains(&text)
+                            {
+                                return preview.clone();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let preview = tokio::time::timeout(Duration::from_secs(45), wait)
+            .await
+            .expect("timed out waiting for the latest message of a room");
+        assert_eq!(preview, format!("You: {text}"));
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     /// End-to-end check against a local homeserver. Start one with
     /// `scripts/dev-homeserver.sh`, create the user, then run:

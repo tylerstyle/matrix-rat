@@ -127,13 +127,25 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if app.composer.is_empty() {
         let hint = if has_files && focused {
-            "Add a caption, or press Enter to send"
+            match app.keymap.label_in(
+                crate::keymap::Context::Composer,
+                crate::action::Action::Send,
+            ) {
+                Some(k) => format!("Add a caption, or press {k} to send"),
+                None => "Add a caption".to_owned(),
+            }
         } else if focused && in_thread {
-            "Reply in thread…"
+            "Reply in thread…".to_owned()
         } else if focused {
-            "Type a message…"
+            "Type a message…".to_owned()
         } else {
-            "Click here or press Alt-3 to write"
+            match app
+                .keymap
+                .label_for(crate::action::Action::Focus(crate::action::Pane::Composer))
+            {
+                Some(k) => format!("Click here or press {k} to write"),
+                None => "Click here to write".to_owned(),
+            }
         };
         frame.render_widget(
             Line::from(Span::styled(hint, theme.style(Role::Placeholder))),

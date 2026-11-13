@@ -3,6 +3,7 @@
 mod attach;
 mod complete;
 mod files;
+mod keybinds;
 mod media;
 mod menu;
 mod palette;
@@ -28,7 +29,7 @@ use crate::action::{Action, Dir, Pane};
 use crate::composer::Composer;
 use crate::config::Config;
 use crate::format::Outgoing;
-use crate::keymap::{self, Context};
+use crate::keymap::{self, Context, Keymap};
 use crate::matrix::{
     self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
     SyncStatus,
@@ -70,6 +71,8 @@ pub enum SideRow {
     Section(RoomKind),
     /// Index into `App::rooms`.
     Room(usize),
+    /// The second line of a room: its latest message.
+    Preview(usize),
 }
 
 #[derive(Debug, Default)]
@@ -165,6 +168,8 @@ pub struct App {
     /// detailed one arrives for the same room; and when each room last got one.
     count_notices: Vec<(Instant, crate::matrix::Notice)>,
     detailed_notices: std::collections::HashMap<String, Instant>,
+    /// Two lines per room in the room list, the second with the latest message.
+    pub room_previews: bool,
     /// The user's spaces, and the one the room list is narrowed to (by id).
     pub spaces: Vec<crate::matrix::SpaceSummary>,
     pub space: Option<String>,
@@ -226,6 +231,8 @@ pub struct App {
     pub complete: complete::CompleteState,
     /// Joining, creating and leaving rooms.
     manage: rooms::ManageState,
+    /// Active key bindings and preset.
+    pub keymap: Keymap,
 }
 
 impl App {
@@ -247,6 +254,7 @@ impl App {
         app.read_markers = config.read_markers;
         app.mouse = config.mouse;
         app.download_dir = config.download_dir.clone();
+        app.room_previews = config.room_previews;
         app.notify_mode = config.notifications;
         if config.notifications != crate::notify::NotifyMode::Off {
             app.notify_mode_on = config.notifications;
@@ -254,6 +262,17 @@ impl App {
         app.notification_preview = config.notification_preview;
         app.config_theme = config.theme.clone();
         app.set_theme(&config.theme);
+        let (keymap, warnings) = Keymap::from_config(config);
+        app.keymap = keymap;
+        for warning in &warnings {
+            tracing::warn!(%warning, "invalid key binding in config");
+        }
+        if !warnings.is_empty() {
+            app.show_toast(format!(
+                "Key bindings: {} problem(s), see the log",
+                warnings.len()
+            ));
+        }
         app
     }
 
@@ -304,6 +323,7 @@ impl App {
             notification_preview: true,
             count_notices: Vec::new(),
             detailed_notices: Default::default(),
+            room_previews: false,
             spaces: Vec::new(),
             space: None,
             space_at: None,
@@ -341,6 +361,7 @@ impl App {
             attach: Default::default(),
             complete: Default::default(),
             manage: Default::default(),
+            keymap: Keymap::default(),
         }
     }
 
@@ -379,6 +400,9 @@ impl App {
                 rows.push(SideRow::Section(kind));
             }
             rows.push(SideRow::Room(index));
+            if self.room_previews {
+                rows.push(SideRow::Preview(index));
+            }
         }
         rows
     }
@@ -501,13 +525,14 @@ impl App {
         match setting {
             Setting::Theme => self.wanted_theme.clone(),
             Setting::SidebarWidth => self.sidebar.width.to_string(),
+            Setting::RoomPreviews => switch(self.room_previews),
             Setting::Mouse => switch(self.mouse),
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
             Setting::ReadMarkers => switch(self.read_markers),
             Setting::Notifications => switch(self.notify_mode != crate::notify::NotifyMode::Off),
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
-            Setting::Keys => String::new(),
+            Setting::Keys => self.keymap.preset_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
             Setting::Logout => self.user_id.clone().unwrap_or_default(),
         }
@@ -549,6 +574,11 @@ impl App {
                 // The rows are laid out afresh.
                 self.timeline_rev += 1;
             }
+            Setting::RoomPreviews => {
+                self.room_previews = !self.room_previews;
+                self.sidebar.reveal_cursor = true;
+                self.save_setting("room_previews", self.room_previews);
+            }
             Setting::Notifications => {
                 use crate::notify::NotifyMode;
                 self.notify_mode = if self.notify_mode == NotifyMode::Off {
@@ -567,8 +597,7 @@ impl App {
             }
             Setting::Keys => {
                 if delta == 0 {
-                    self.modal = None;
-                    self.help_open = true;
+                    self.open_keybinds_editor();
                 }
             }
             Setting::Encryption => {
@@ -1368,9 +1397,30 @@ impl App {
                     self.timeline.selected = self.find_selectable(usize::MAX, false);
                 }
             }
+            Action::JumpToOldest => {
+                self.timeline.scroll = usize::MAX;
+                self.timeline.older_armed = true;
+                if self.focus == Pane::Timeline {
+                    self.timeline.selected = self.find_selectable(0, true);
+                    self.timeline.reveal_selected = true;
+                }
+            }
 
             Action::SidebarUp => self.move_sidebar_cursor(-1),
             Action::SidebarDown => self.move_sidebar_cursor(1),
+            Action::SidebarTop => {
+                if !self.visible_rooms().is_empty() {
+                    self.sidebar.cursor = 0;
+                    self.sidebar.reveal_cursor = true;
+                }
+            }
+            Action::SidebarBottom => {
+                let count = self.visible_rooms().len();
+                if count > 0 {
+                    self.sidebar.cursor = count - 1;
+                    self.sidebar.reveal_cursor = true;
+                }
+            }
             Action::SidebarOpen => {
                 if let Some(index) = self.cursor_room() {
                     self.open_room(index);
@@ -1645,7 +1695,9 @@ impl App {
                 self.modal = None;
                 self.show_toast("Encrypted history stays locked until you enter the key");
             }
-            Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_)) => self.modal = None,
+            Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_) | Modal::Keybinds(_)) => {
+                self.modal = None;
+            }
             Some(Modal::Search(_)) => self.close_search(),
             Some(Modal::Verify(_)) => self.verify_escape(),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_escape(),
@@ -1675,7 +1727,7 @@ impl App {
         }
     }
 
-    fn on_modal_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+    fn on_modal_key(&mut self, key: KeyEvent, code: KeyCode, mods: KeyModifiers) {
         let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         // Ctrl-U clears the input being typed into.
         if (code, mods) == (KeyCode::Char('u'), KeyModifiers::CONTROL) {
@@ -1805,6 +1857,7 @@ impl App {
             Some(Modal::Search(_)) => self.on_search_key(code, mods),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.on_manage_key(code, mods),
             Some(Modal::Menu(_)) => self.on_menu_key(code, mods),
+            Some(Modal::Keybinds(_)) => self.on_keybinds_key(key, code, mods),
             None => {}
         }
     }
@@ -2012,6 +2065,7 @@ impl App {
                 room.bold = summary.unread;
                 room.mention = summary.mention;
                 room.avatar = summary.avatar;
+                room.preview = summary.preview;
                 room.alias = summary.alias;
                 room
             })
@@ -2133,23 +2187,21 @@ impl App {
         self.verify.last_key = Some(Instant::now());
         let (code, mods) = keymap::normalize(key);
 
+        if self.is_keybinds_capturing() {
+            self.on_keybinds_key(key, code, mods);
+            return;
+        }
+
         // Quit and suspend work everywhere, including behind popups (handy for fetching
         // a password from another program).
-        if mods == KeyModifiers::CONTROL && (self.modal.is_some() || self.help_open) {
-            match code {
-                KeyCode::Char('q') => {
-                    self.should_quit = true;
-                    return;
-                }
-                KeyCode::Char('z') => {
-                    self.suspend_requested = true;
-                    return;
-                }
-                _ => {}
-            }
+        if (self.modal.is_some() || self.help_open)
+            && let Some(action) = self.keymap.lookup_popup_global(code, mods)
+        {
+            self.perform(action);
+            return;
         }
         if self.modal.is_some() {
-            self.on_modal_key(code, mods);
+            self.on_modal_key(key, code, mods);
             return;
         }
         if self.images.viewer_open() {
@@ -2157,7 +2209,16 @@ impl App {
             return;
         }
 
+        let context = match self.focus {
+            Pane::Sidebar => Context::Sidebar,
+            Pane::Timeline => Context::Timeline,
+            Pane::Composer => Context::Composer,
+        };
         if self.help_open {
+            if self.keymap.lookup(context, key) == Some(Action::ToggleHelp) {
+                self.help_open = false;
+                return;
+            }
             match (code, mods) {
                 (KeyCode::Esc | KeyCode::F(1) | KeyCode::Enter, _)
                 | (KeyCode::Char('?' | 'q'), KeyModifiers::NONE) => self.help_open = false,
@@ -2174,16 +2235,16 @@ impl App {
         // Ctrl-C never quits (too easy to hit); it clears the draft instead.
         if (code, mods) == (KeyCode::Char('c'), KeyModifiers::CONTROL) {
             if !self.clear_draft() {
-                self.show_toast("Press Ctrl-Q to quit");
+                let quit = self
+                    .keymap
+                    .label_in(Context::Global, Action::Quit)
+                    .or_else(|| self.keymap.label_for(Action::Quit))
+                    .unwrap_or("Ctrl-Q");
+                self.show_toast(format!("Press {quit} to quit"));
             }
             return;
         }
 
-        let context = match self.focus {
-            Pane::Sidebar => Context::Sidebar,
-            Pane::Timeline => Context::Timeline,
-            Pane::Composer => Context::Composer,
-        };
         if self.focus == Pane::Composer && self.complete_key(code, mods) {
             return;
         }
@@ -2199,7 +2260,7 @@ impl App {
         if self.focus == Pane::Composer && self.attach_key(code, mods) {
             return;
         }
-        if let Some(action) = keymap::lookup(context, key) {
+        if let Some(action) = self.keymap.lookup(context, key) {
             self.perform(action);
             return;
         }
@@ -2317,6 +2378,7 @@ impl App {
             Some(Modal::New(_) | Modal::RoomInfo(_)) => return self.on_manage_paste(first_line),
             // A paste is not an answer to a menu.
             Some(Modal::Menu(_)) => return,
+            Some(Modal::Keybinds(_)) => return,
             None => {}
         }
         // The picture viewer and the help cover the composer: nothing is pasted
@@ -2359,7 +2421,12 @@ impl App {
                         self.help_open = false;
                         if matches!(
                             self.modal,
-                            Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_))
+                            Some(
+                                Modal::Emoji(_)
+                                    | Modal::Settings(_)
+                                    | Modal::Palette(_)
+                                    | Modal::Keybinds(_)
+                            )
                         ) {
                             self.modal = None;
                         }
@@ -2452,6 +2519,8 @@ impl App {
                     }
                     // Handled by `menu_mouse` above.
                     Some(HitId::Menu(_)) => {}
+                    Some(HitId::KeybindRow(index)) => self.click_keybind_row(index),
+                    Some(HitId::KeybindBtn(button)) => self.click_keybind_button(button),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -2473,7 +2542,12 @@ impl App {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if matches!(
                     self.modal,
-                    Some(Modal::Emoji(_) | Modal::Palette(_) | Modal::RoomInfo(_))
+                    Some(
+                        Modal::Emoji(_)
+                            | Modal::Palette(_)
+                            | Modal::RoomInfo(_)
+                            | Modal::Keybinds(_)
+                    )
                 ) =>
             {
                 let delta = if mouse.kind == MouseEventKind::ScrollUp {
@@ -2485,6 +2559,7 @@ impl App {
                     Some(Modal::Emoji(picker)) => picker.scroll_by(delta),
                     Some(Modal::Palette(palette)) => palette.scroll_by(delta),
                     Some(Modal::RoomInfo(_)) => self.manage_scroll(delta),
+                    Some(Modal::Keybinds(editor)) => editor.scroll_by(delta),
                     _ => {}
                 }
                 self.dirty = true;
@@ -3012,6 +3087,7 @@ mod tests {
             name: name.into(),
             category,
             notifications,
+            preview: None,
             server_notifications: notifications,
             mention: false,
             unread: notifications > 0,
@@ -3875,6 +3951,14 @@ mod tests {
         assert_eq!(app.sidebar.width, width + 2);
         app.on_event(key(KeyCode::Enter));
         assert_eq!(app.sidebar.width, width + 2);
+        // Room previews: a second line per room in the list.
+        app.on_event(key(KeyCode::Down));
+        let rows = app.sidebar_rows().len();
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.room_previews);
+        assert!(app.sidebar_rows().len() > rows);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.sidebar_rows().len(), rows);
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Enter));
         assert!(!app.mouse);
@@ -3904,12 +3988,13 @@ mod tests {
         assert!(matches!(app.modal, Some(Modal::Settings(_))));
         assert!(app.toast.is_some());
 
-        // "Key bindings" leads to the help; the backdrop closes the menu.
+        // "Key bindings" opens the key-bindings editor; the backdrop closes popups.
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Enter));
-        assert!(app.modal.is_none() && app.help_open);
+        assert!(matches!(app.modal, Some(Modal::Keybinds(_))) && !app.help_open);
         app.on_event(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
         app.on_event(key(KeyCode::F(2)));
         redraw(&mut app, &mut terminal);
         app.on_event(click(0, 0));

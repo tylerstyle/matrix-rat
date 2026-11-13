@@ -43,6 +43,34 @@ pub fn convert(items: &Vector<Arc<TimelineItem>>, own: &UserId) -> Vec<Message> 
         .collect()
 }
 
+/// One line saying what a message is, for the room list.
+pub(super) fn preview(content: &TimelineItemContent) -> String {
+    let text = match content {
+        TimelineItemContent::MsgLike(content) => match &content.kind {
+            MsgLikeKind::Message(message) => match message.msgtype() {
+                MessageType::Image(_) => "sent a picture".to_owned(),
+                MessageType::Video(_) => "sent a video".to_owned(),
+                MessageType::Audio(_) => "sent an audio message".to_owned(),
+                MessageType::File(file) => format!("📎 {}", file.filename()),
+                other => other.body().to_owned(),
+            },
+            MsgLikeKind::Sticker(_) => "sent a sticker".to_owned(),
+            MsgLikeKind::Poll(_) => "started a poll".to_owned(),
+            MsgLikeKind::Redacted => "deleted a message".to_owned(),
+            MsgLikeKind::UnableToDecrypt(_) => "encrypted message".to_owned(),
+            _ => String::new(),
+        },
+        _ => String::new(),
+    };
+    // The first line with something on it, without a quoted reply above it.
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('>'))
+        .unwrap_or_default();
+    crate::text::truncate(&sanitize_line(line), 160)
+}
+
 pub(super) fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) -> String {
     match profile {
         TimelineDetails::Ready(Profile {
