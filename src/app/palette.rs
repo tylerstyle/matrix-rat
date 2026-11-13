@@ -79,6 +79,7 @@ impl App {
             themes: self.theme_names.clone(),
             rooms,
             selection,
+            target: self.manage_target(),
         };
         self.open_modal(Modal::Palette(Palette::open(ctx)));
     }

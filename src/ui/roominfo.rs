@@ -12,7 +12,7 @@ use super::modal::{button, centered, field, popup, row};
 use crate::action::Action;
 use crate::app::App;
 use crate::manage::{
-    Click, Confirm, InfoPopup, InfoRow, NewPopup, Stage, notify_label, role_label,
+    Click, Confirm, InfoPopup, InfoRow, NewPopup, Stage, confirm_keys, notify_label, role_label,
 };
 use crate::matrix::RoomMember;
 use crate::text::{truncate, width, wrap};
@@ -35,14 +35,31 @@ pub fn new_button(frame: &mut Frame, app: &mut App, area: Rect) {
     app.hits.add(rect, HitId::Do(action));
 }
 
-/// Makes the room's name in the title of the messages pane open the room info.
+/// Makes the room's name in the title of the messages pane open the room info: that
+/// room's, whichever pane has the focus.
 pub fn title_hit(hits: &mut super::hit::HitMap, area: Rect, title: &str) {
     // " 2 " before the name, one space after it, inside the corner.
     let shown = (width(title) as u16 + 4).min(area.width.saturating_sub(2));
     hits.add(
         Rect::new(area.x + 1, area.y, shown, 1),
-        HitId::Do(Action::RoomInfo),
+        hit(Click::OpenInfo),
     );
+}
+
+/// The end of `text` that fits into `columns`, cut between whole characters as they
+/// appear on screen: where typing happens.
+fn tail(text: &str, columns: usize) -> &str {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut used = 0;
+    let mut start = text.len();
+    for (at, grapheme) in text.grapheme_indices(true).rev() {
+        used += width(grapheme);
+        if used > columns {
+            break;
+        }
+        start = at;
+    }
+    &text[start..]
 }
 
 /// `text` cut or padded to exactly `columns` on screen.
@@ -363,7 +380,7 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
     let footer = if info.editing.is_some() {
         "Enter save · Esc cancel"
     } else if matches!(current, Some(InfoRow::Member(_))) {
-        "↑↓ select · type to filter · Esc close"
+        "Enter chat · type to filter · Esc close"
     } else {
         "↑↓ select · Enter · Esc close"
     };
@@ -374,6 +391,8 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
     }
     let room = inner.width as usize;
 
+    // Servers accept nearly anything as a room id; the screen does not.
+    let room_id = crate::text::sanitize_line(&info.room_id);
     // What scrolls: the room's description, what can be done, the members.
     let mut entries: Vec<Entry> = Vec::new();
     let name_style = theme.style(Role::TitleFocused).add_modifier(Modifier::BOLD);
@@ -388,7 +407,9 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
                 if topic.len() > TOPIC_LINES {
                     topic.truncate(TOPIC_LINES);
                     if let Some(last) = topic.last_mut() {
-                        *last = format!("{}…", truncate(last, room.saturating_sub(1)));
+                        // One sign that there is more, also where the line was full.
+                        let cut = truncate(last, room.saturating_sub(1));
+                        *last = format!("{}…", cut.trim_end_matches('…'));
                     }
                 }
                 entries.extend(topic.into_iter().map(|line| Entry::Text(Line::from(line))));
@@ -401,13 +422,7 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
                 };
                 entries.push(fact(&theme, "Address", alias, role, room));
             }
-            entries.push(fact(
-                &theme,
-                "Room ID",
-                info.room_id.clone(),
-                Role::Text,
-                room,
-            ));
+            entries.push(fact(&theme, "Room ID", room_id.clone(), Role::Text, room));
             if !info.invited() {
                 let (text, role) = match details.encrypted {
                     Some(true) => ("on", Role::StatusOk),
@@ -424,13 +439,7 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
         }
         None => {
             entries.push(Entry::Text(Line::default()));
-            entries.push(fact(
-                &theme,
-                "Room ID",
-                info.room_id.clone(),
-                Role::Text,
-                room,
-            ));
+            entries.push(fact(&theme, "Room ID", room_id.clone(), Role::Text, room));
             if info.error.is_none() {
                 entries.push(Entry::Text(Line::from(Span::styled(
                     "Loading…",
@@ -468,16 +477,30 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
     // The last row is kept for what is going on; the rest scrolls.
     let status = inner.height >= 4;
     let page = (inner.height - u16::from(status)) as usize;
+    // A question is only open while it can be read: without the line it stands on,
+    // or with its keys cut off, the second press must not count.
+    if let Some(prompt) = confirm_prompt(info)
+        && (!status || width(confirm_keys(&prompt)) > room)
+    {
+        info.confirm = None;
+    }
     // A view of another size (the window was resized) shows the selection again.
     info.reveal |= info.page != page;
     info.page = page;
-    let selected_line = entries
-        .iter()
-        .position(|entry| matches!(entry, Entry::Row(index, _) if *index == info.selected));
+    // What has to be in view: the selected row, or, while a filter is typed that
+    // nobody matches, the line it is typed on.
+    let typing_blind = !info.filter.is_empty()
+        && info.editing.is_none()
+        && !matches!(current, Some(InfoRow::Member(_)));
+    let selected_line = entries.iter().position(|entry| match entry {
+        Entry::Members => typing_blind,
+        Entry::Row(index, _) => !typing_blind && *index == info.selected,
+        Entry::Text(_) => false,
+    });
     if std::mem::take(&mut info.reveal)
         && let Some(line) = selected_line
     {
-        if info.selected == 0 && line < page {
+        if info.selected == 0 && line < page && !typing_blind {
             // The first row: show the description above it as well.
             info.scroll = 0;
         } else if line < info.scroll + 1 {
@@ -506,16 +529,25 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
                         theme.style(Role::Placeholder),
                     ));
                 } else {
-                    spans.push(Span::raw(truncate(&info.filter, room.saturating_sub(14))));
+                    // The end of a long filter, with the cursor right behind it.
+                    let shown = tail(&info.filter, room.saturating_sub(12));
                     if info.editing.is_none() {
-                        let x =
-                            rect.x + (11 + width(&info.filter)).min(room.saturating_sub(1)) as u16;
+                        let x = rect.x + (11 + width(shown)).min(room.saturating_sub(1)) as u16;
                         cursor = Some(Position::new(x, rect.y));
                     }
+                    spans.push(Span::raw(shown.to_owned()));
                 }
-                if info.details.as_ref().is_some_and(|d| d.members_loading) {
-                    spans.push(Span::styled("  loading…", theme.style(Role::Muted)));
-                }
+                let note = match &info.details {
+                    Some(details) if details.members_loading => "  loading…".to_owned(),
+                    Some(details) if details.members_partial => {
+                        format!("  only the {} known here", details.members.len())
+                    }
+                    Some(details) if details.members_error.is_some() => {
+                        "  may be out of date".to_owned()
+                    }
+                    _ => String::new(),
+                };
+                spans.push(Span::styled(note, theme.style(Role::Muted)));
                 frame.render_widget(Line::from(spans), rect);
             }
             Entry::Row(index, row) => {
@@ -548,30 +580,45 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
     }
 }
 
-/// The bottom line: what went wrong, what is under way, what is being asked, or what
+/// The question that is open, if any. The keys come first, up to the `·`: a narrow
+/// window may cut the explanation, never them (see `confirm_keys`).
+fn confirm_prompt(info: &InfoPopup) -> Option<String> {
+    let name = |user_id: &String| {
+        info.details
+            .iter()
+            .flat_map(|details| &details.members)
+            .find(|member| member.user_id == *user_id)
+            .map_or(user_id.clone(), |member| member.name.clone())
+    };
+    Some(match info.confirm.as_ref()? {
+        Confirm::Leave => info.leave_confirm().to_owned(),
+        Confirm::Remove(user_id) => format!(
+            "Del again to remove, Esc to keep · {} will be out of the room",
+            name(user_id)
+        ),
+        Confirm::NewChat(user_id) => format!(
+            "Enter again to start one, Esc to stay · no chat with {} yet; they get an invitation",
+            name(user_id)
+        ),
+    })
+}
+
+/// The bottom line: what is being asked, what is under way, what went wrong, or what
 /// the selected row is for.
 fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
-    if let Some(error) = &info.error {
-        return (crate::text::sanitize_line(error), Role::Error);
+    // First, always: a question that can be answered must be the thing on screen.
+    if let Some(prompt) = confirm_prompt(info) {
+        return (crate::text::sanitize_line(&prompt), Role::Error);
     }
     if let Some(busy) = info.busy {
         return (busy.to_owned(), Role::Muted);
     }
-    match &info.confirm {
-        Some(Confirm::Leave) => return (info.leave_confirm().to_owned(), Role::Error),
-        Some(Confirm::Remove(user_id)) => {
-            let name = info
-                .details
-                .iter()
-                .flat_map(|details| &details.members)
-                .find(|member| member.user_id == *user_id)
-                .map_or(user_id.as_str(), |member| member.name.as_str());
-            return (
-                format!("Remove {name} from the room? Del again to remove, Esc to keep"),
-                Role::Error,
-            );
-        }
-        None => {}
+    if let Some(error) = &info.error {
+        return (crate::text::sanitize_line(error), Role::Error);
+    }
+    let members_error = info.details.as_ref().and_then(|d| d.members_error.as_ref());
+    if let (Some(error), Some(InfoRow::Member(_))) = (members_error, current) {
+        return (crate::text::sanitize_line(error), Role::Error);
     }
     if info.editing.is_some() {
         return ("Enter to save, Esc to cancel".to_owned(), Role::Muted);
@@ -582,11 +629,13 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
         Some(InfoRow::Name | InfoRow::Topic) => "Enter to edit.",
         Some(InfoRow::Invite) => "Invite someone by user ID.",
         Some(InfoRow::Leave) if info.invited() => "",
-        Some(InfoRow::Leave) => "You need a new invitation or the address to come back.",
+        Some(InfoRow::Leave) => "Leaving also removes the room and its history from this device.",
         Some(row @ InfoRow::Member(_)) => match info.member(row) {
             Some(member) if member.own => "This is you.",
-            Some(member) if member.removable => "Enter: direct chat · Del: remove from the room",
-            Some(_) => "Enter: direct chat",
+            Some(member) if member.removable => {
+                "Enter: open your chat with them · Del: remove from the room"
+            }
+            Some(_) => "Enter: open your chat with them",
             None => "",
         },
         None => "",
@@ -659,10 +708,7 @@ fn info_row(
             "Topic"
         };
         let space = room.saturating_sub(ACTION_LABEL + 1);
-        let mut shown = text.clone();
-        while width(&shown) > space && !shown.is_empty() {
-            shown.remove(0);
-        }
+        let shown = tail(text, space).to_owned();
         let x = rect.x + (2 + ACTION_LABEL + width(&shown)).min(rect.width as usize - 1) as u16;
         let rest = "_".repeat(space.saturating_sub(width(&shown)));
         finish(
@@ -764,11 +810,15 @@ fn member_row(
     let tag_width = width(&tag) + usize::from(!tag.is_empty());
     // What does not fit gives way: first the tag next to the buttons, then the buttons.
     if buttons_width + tag_width + 12 > room {
-        if buttons_width + 12 > room {
+        if buttons_width > 0 && buttons_width + 12 <= room {
+            tag.clear();
+        } else {
             buttons.clear();
             buttons_width = 0;
-        } else {
-            tag.clear();
+            // Without buttons the tag may still be too much for a narrow row.
+            if tag_width + 12 > room {
+                tag.clear();
+            }
         }
     }
     let tag_width = width(&tag) + usize::from(!tag.is_empty());

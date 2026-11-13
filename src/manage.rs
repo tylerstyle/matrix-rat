@@ -10,7 +10,7 @@ use crate::model::RoomKind;
 // ----- addresses ---------------------------------------------------------------------
 
 /// What a typed or pasted address points at.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Address {
     Room {
         /// `#alias:server` or `!id:server`.
@@ -21,95 +21,232 @@ pub enum Address {
     User(String),
 }
 
+/// Hand-written: who or what someone wants to reach stays out of logs.
+impl std::fmt::Debug for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Room { via, .. } => write!(f, "Address::Room(via {} servers)", via.len()),
+            Self::User(_) => f.write_str("Address::User"),
+        }
+    }
+}
+
 const NOT_AN_ADDRESS: &str =
     "That is not a room address. Use #room:server, !id:server or a matrix.to link.";
+const NOT_A_USER: &str = "A user ID looks like @name:server.";
+const NOT_A_SERVER: &str = "What follows the address is not a server name.";
+const BAD_MATRIX_TO: &str = "That matrix.to link could not be read.";
+const BAD_MATRIX_URI: &str = "That matrix: link could not be read.";
+/// The longest address or link that is looked at.
+const INPUT_MAX: usize = 2048;
+/// What the Matrix specification allows for an identifier, in bytes.
+const ID_MAX: usize = 255;
+/// More servers than this only make the request longer.
+pub const VIA_MAX: usize = 5;
+/// The longest text any of the one-line inputs of the room popups takes.
+pub const FIELD_MAX: usize = 1024;
+
+/// Characters with no place in an identifier: whitespace, everything `text::sanitize`
+/// would take out, and the invisible ones that make two different ids look the same.
+fn bad_id_char(c: char) -> bool {
+    c.is_control()
+        || c.is_whitespace()
+        || matches!(
+            c,
+            '\u{00ad}' | '\u{034f}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}'
+        )
+}
+
+fn clean_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= ID_MAX && !id.chars().any(bad_id_char)
+}
+
+/// What can go into a one-line input: `text` without control characters and
+/// direction overrides, on one line.
+pub fn clean_input(text: &str) -> String {
+    crate::text::sanitize_line(text)
+}
+
+/// A room id or alias as the server wants it, or nothing. Checked after links were
+/// decoded, so nothing can hide behind percent signs.
+fn checked_room(id: &str) -> Option<String> {
+    if !clean_id(id) {
+        return None;
+    }
+    let body = &id[1..];
+    if id.starts_with('#') {
+        let (local, server) = body.split_once(':')?;
+        (!local.is_empty() && !server.is_empty()).then_some(())?;
+        return RoomAliasId::parse(id).ok().map(|alias| alias.to_string());
+    }
+    if !id.starts_with('!') || body.contains(['#', '?', '/', '!', '@', '$']) {
+        return None;
+    }
+    // Newer rooms have ids without a server part; where there is one, both parts count.
+    if let Some((opaque, server)) = body.split_once(':') {
+        (!opaque.is_empty() && ServerName::parse(server).is_ok()).then_some(())?;
+    } else if body.is_empty() {
+        return None;
+    }
+    RoomId::parse(id).ok().map(|id| id.to_string())
+}
+
+fn checked_user(id: &str) -> Option<String> {
+    if !clean_id(id) {
+        return None;
+    }
+    let (local, server) = id.strip_prefix('@')?.split_once(':')?;
+    (!local.is_empty() && !server.is_empty()).then_some(())?;
+    UserId::parse(id).ok().map(|user| user.to_string())
+}
+
+/// Adds a server to ask, once, up to `VIA_MAX`.
+fn push_via(via: &mut Vec<String>, name: &str) -> Result<(), String> {
+    if !clean_id(name) {
+        return Err(NOT_A_SERVER.to_owned());
+    }
+    let server = ServerName::parse(name).map_err(|_| NOT_A_SERVER.to_owned())?;
+    let server = server.to_string();
+    if via.len() < VIA_MAX && !via.contains(&server) {
+        via.push(server);
+    }
+    Ok(())
+}
+
+/// What follows `https://matrix.to/#/` if `link` is such a link (in any spelling of
+/// the scheme and host); `Some("")` for a matrix.to link of another shape.
+fn matrix_to_rest(link: &str) -> Option<&str> {
+    for base in ["https://matrix.to/#/", "http://matrix.to/#/"] {
+        if let Some(head) = link.get(..base.len())
+            && head.eq_ignore_ascii_case(base)
+        {
+            return Some(&link[base.len()..]);
+        }
+    }
+    let lower = link.to_ascii_lowercase();
+    (lower.starts_with("https://matrix.to") || lower.starts_with("http://matrix.to")).then_some("")
+}
+
+/// Checks the identifier parts of a link's path: as many as allowed, none empty. The
+/// library that reads the links looks at the first byte of each part without checking
+/// that there is one. Returns the path without slashes around it.
+fn path_parts<'a>(path: &'a str, allowed: &[usize]) -> Option<&'a str> {
+    let path = path.trim_matches('/');
+    let mut count = 0;
+    for part in path.split('/') {
+        if part.is_empty() {
+            return None;
+        }
+        count += 1;
+    }
+    allowed.contains(&count).then_some(path)
+}
 
 /// Understands `#alias:server`, `!id:server` (optionally followed by `?via=server` or
 /// by server names), `@user:server`, and `matrix.to` / `matrix:` links pasted as they
 /// are. The error is a sentence for the user.
 pub fn parse_address(input: &str) -> Result<Address, String> {
-    let input = input.trim().trim_start_matches('<').trim_end_matches('>');
+    let input = input.trim();
+    let input = input.strip_prefix('<').unwrap_or(input);
+    let input = input.strip_suffix('>').unwrap_or(input).trim();
     if input.is_empty() {
         return Err("Enter an address first.".to_owned());
     }
-    if input.chars().any(char::is_control) {
+    if input.len() > INPUT_MAX {
+        return Err("That is too long to be an address.".to_owned());
+    }
+    // The address itself, then perhaps the names of servers to ask.
+    let mut words = input.split_whitespace();
+    let first = words.next().unwrap_or_default().trim_end_matches(',');
+    let mut via: Vec<String> = Vec::new();
+    for word in words.flat_map(|word| word.split(',')) {
+        if !word.is_empty() {
+            push_via(&mut via, word.strip_prefix("via=").unwrap_or(word))?;
+        }
+    }
+    if first.chars().any(bad_id_char) {
         return Err(NOT_AN_ADDRESS.to_owned());
     }
-    let mut words = input
-        .split(|c: char| c.is_whitespace() || c == ',')
-        .filter(|w| !w.is_empty());
-    let first = words.next().unwrap_or_default();
-    // Server names after the address: where to ask for the room.
-    let mut via: Vec<String> = Vec::new();
-    for word in words {
-        let name = word.strip_prefix("via=").unwrap_or(word);
-        match ServerName::parse(name) {
-            Ok(server) => via.push(server.to_string()),
-            Err(_) => return Err(format!("“{name}” is not a server name.")),
-        }
-    }
 
-    let lower = first.to_ascii_lowercase();
-    let from_link = |id: &MatrixId, link_via: Vec<String>| match id {
-        MatrixId::Room(id) => Ok((id.to_string(), link_via, false)),
-        MatrixId::RoomAlias(alias) => Ok((alias.to_string(), link_via, false)),
-        // A link to a message: the room it is in.
-        MatrixId::Event(room, _) => Ok((room.to_string(), link_via, false)),
-        MatrixId::User(user) => Ok((user.to_string(), Vec::new(), true)),
-        _ => Err(NOT_AN_ADDRESS.to_owned()),
-    };
-    let names = |servers: &[matrix_sdk::ruma::OwnedServerName]| {
-        servers.iter().map(ToString::to_string).collect::<Vec<_>>()
-    };
-    let (target, link_via, user) =
-        if lower.starts_with("https://matrix.to/") || lower.starts_with("http://matrix.to/") {
-            let link = MatrixToUri::parse(first)
-                .map_err(|_| "That matrix.to link could not be read.".to_owned())?;
-            from_link(link.id(), names(link.via()))?
-        } else if lower.starts_with("matrix:") {
-            let link = MatrixUri::parse(first)
-                .map_err(|_| "That matrix: link could not be read.".to_owned())?;
-            from_link(link.id(), names(link.via()))?
-        } else if first.starts_with('@') {
-            let user = UserId::parse(first).map_err(|_| NOT_A_USER.to_owned())?;
-            (user.to_string(), Vec::new(), true)
-        } else if first.starts_with('#') {
-            let alias = RoomAliasId::parse(first).map_err(|_| NOT_AN_ADDRESS.to_owned())?;
-            (alias.to_string(), Vec::new(), false)
-        } else if first.starts_with('!') {
-            let (id, query) = first.split_once('?').unwrap_or((first, ""));
-            let id = RoomId::parse(id).map_err(|_| NOT_AN_ADDRESS.to_owned())?;
-            let mut servers = Vec::new();
-            for pair in query.split('&').filter(|p| !p.is_empty()) {
-                if let Some(name) = pair.strip_prefix("via=") {
-                    let server = ServerName::parse(name)
-                        .map_err(|_| format!("“{name}” is not a server name."))?;
-                    servers.push(server.to_string());
-                }
-            }
-            (id.to_string(), servers, false)
-        } else {
-            return Err(NOT_AN_ADDRESS.to_owned());
+    let (id, link_via) = if let Some(rest) = matrix_to_rest(first) {
+        let (path, query) = match rest.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (rest, None),
         };
-    if user {
-        return Ok(Address::User(target));
-    }
-    for server in link_via {
-        if !via.contains(&server) {
-            via.push(server);
+        let path = path_parts(path, &[1, 2]).ok_or_else(|| BAD_MATRIX_TO.to_owned())?;
+        let mut link = format!("https://matrix.to/#/{path}");
+        if let Some(query) = query {
+            link.push('?');
+            link.push_str(query);
         }
+        let link = MatrixToUri::parse(&link).map_err(|_| BAD_MATRIX_TO.to_owned())?;
+        (link.id().clone(), link.via().to_vec())
+    } else if first
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("matrix:"))
+    {
+        let rest = &first[7..];
+        // No server belongs in front of the path, and nothing behind the query.
+        if rest.starts_with("//") || rest.contains('#') {
+            return Err(BAD_MATRIX_URI.to_owned());
+        }
+        let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let path = path_parts(path, &[2, 4]).ok_or_else(|| BAD_MATRIX_URI.to_owned())?;
+        let link = MatrixUri::parse(&format!("matrix:{path}?{query}"))
+            .map_err(|_| BAD_MATRIX_URI.to_owned())?;
+        (link.id().clone(), link.via().to_vec())
+    } else if first.starts_with('@') {
+        return checked_user(first)
+            .map(Address::User)
+            .ok_or_else(|| NOT_A_USER.to_owned());
+    } else if first.starts_with('#') {
+        let target = checked_room(first).ok_or_else(|| NOT_AN_ADDRESS.to_owned())?;
+        return Ok(Address::Room { target, via });
+    } else if first.starts_with('!') {
+        let (id, query) = first.split_once('?').unwrap_or((first, ""));
+        let target = checked_room(id).ok_or_else(|| NOT_AN_ADDRESS.to_owned())?;
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            if let Some(name) = pair.strip_prefix("via=") {
+                push_via(&mut via, name)?;
+            }
+        }
+        return Ok(Address::Room { target, via });
+    } else {
+        return Err(NOT_AN_ADDRESS.to_owned());
+    };
+
+    // From a link: what it decodes to has to pass the same checks as what is typed.
+    let room = match &id {
+        MatrixId::Room(id) => id.to_string(),
+        MatrixId::RoomAlias(alias) => alias.to_string(),
+        // A link to a message: the room it is in.
+        MatrixId::Event(room, _) => room.to_string(),
+        MatrixId::User(user) => {
+            return checked_user(user.as_str())
+                .map(Address::User)
+                .ok_or_else(|| NOT_A_USER.to_owned());
+        }
+        _ => return Err(NOT_AN_ADDRESS.to_owned()),
+    };
+    let target = checked_room(&room).ok_or_else(|| NOT_AN_ADDRESS.to_owned())?;
+    for server in link_via {
+        push_via(&mut via, server.as_str())?;
     }
     Ok(Address::Room { target, via })
 }
-
-const NOT_A_USER: &str = "A user ID looks like @name:server.";
 
 /// A complete user id, from what was typed (`@name:server`, `name:server`, or a link
 /// to a user).
 pub fn parse_user(input: &str) -> Result<String, String> {
     let input = input.trim();
+    let input = input.strip_prefix('<').unwrap_or(input);
+    let input = input.strip_suffix('>').unwrap_or(input).trim();
     if input.is_empty() {
         return Err("Enter a user ID first.".to_owned());
+    }
+    if input.len() > INPUT_MAX {
+        return Err(NOT_A_USER.to_owned());
     }
     let lower = input.to_ascii_lowercase();
     if lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("matrix:")
@@ -127,36 +264,28 @@ pub fn parse_user(input: &str) -> Result<String, String> {
     } else {
         format!("@{input}")
     };
-    if with_sigil
-        .chars()
-        .any(|c| c.is_whitespace() || c.is_control())
-    {
-        return Err(NOT_A_USER.to_owned());
-    }
-    UserId::parse(&with_sigil)
-        .map(|user| user.to_string())
-        .map_err(|_| NOT_A_USER.to_owned())
+    checked_user(&with_sigil).ok_or_else(|| NOT_A_USER.to_owned())
 }
 
 /// The part of a new room's address before the colon, from what was typed.
 pub fn parse_alias_local(input: &str) -> Result<String, String> {
-    let local = input.trim().trim_start_matches('#');
+    let input = input.trim();
+    let local = input.strip_prefix('#').unwrap_or(input);
     if local.is_empty() {
         return Err("A public room needs an address.".to_owned());
     }
     if local.contains(':') {
         return Err("Only the part before the colon; your server adds its own name.".to_owned());
     }
-    if local
-        .chars()
-        .any(|c| c.is_whitespace() || c.is_control() || c == '#')
-    {
+    if local.chars().any(char::is_whitespace) {
         return Err("An address cannot contain spaces.".to_owned());
     }
-    // The same rules the complete address has to pass.
-    RoomAliasId::parse(format!("#{local}:example.org"))
-        .map(|_| local.to_owned())
-        .map_err(|_| "That address is not valid.".to_owned())
+    // The same rules the complete address has to pass. The server's name is not
+    // known here; the server has the last word on the length.
+    if local.contains('#') || checked_room(&format!("#{local}:example.org")).is_none() {
+        return Err("That address is not valid.".to_owned());
+    }
+    Ok(local.to_owned())
 }
 
 // ----- "New chat or room" ------------------------------------------------------------
@@ -219,6 +348,8 @@ pub enum Click {
     MemberRemove,
     /// Favourite on or off for the room in question, without a popup.
     Favourite,
+    /// Room info for the open room, whatever has the focus (its name was clicked).
+    OpenInfo,
 }
 
 /// The form behind Ctrl-N. One popup for all stages, so going back keeps what was typed.
@@ -243,6 +374,8 @@ pub struct NewPopup {
     pub error: Option<String>,
     /// Id and name of the room to invite to.
     pub room: Option<(String, String)>,
+    /// Number of the request whose answer is awaited; answers to others are not ours.
+    pub request: Option<u64>,
 }
 
 /// Hand-written: what is typed here (names, topics, who is being written to) is private.
@@ -279,6 +412,7 @@ impl NewPopup {
             busy: None,
             error: None,
             room: None,
+            request: None,
         }
     }
 
@@ -344,11 +478,33 @@ pub enum InfoRow {
 }
 
 /// What the user was asked to confirm by doing it a second time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Confirm {
     Leave,
     /// Remove the member with this user id.
     Remove(String),
+    /// There is no direct chat with this user yet: create one and invite them.
+    NewChat(String),
+}
+
+/// Hand-written: who it is about stays out of logs.
+impl std::fmt::Debug for Confirm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Leave => "Confirm::Leave",
+            Self::Remove(_) => "Confirm::Remove",
+            Self::NewChat(_) => "Confirm::NewChat",
+        })
+    }
+}
+
+/// The answer the room info view is waiting for. Any other answer leaves it alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pending {
+    /// A direct chat to open, by the number of the request.
+    Chat(u64),
+    Change(crate::matrix::Change),
+    Leave,
 }
 
 #[derive(Clone)]
@@ -373,6 +529,8 @@ pub struct InfoPopup {
     pub confirm: Option<Confirm>,
     /// A change is on its way to the server.
     pub busy: Option<&'static str>,
+    /// Which answer ends `busy`.
+    pub pending: Option<Pending>,
 }
 
 /// Hand-written: names and topics stay out of logs.
@@ -401,7 +559,24 @@ impl InfoPopup {
             editing: None,
             confirm: None,
             busy: None,
+            pending: None,
         }
+    }
+
+    /// Locks the view until the answer `pending` is there.
+    pub fn wait_for(&mut self, pending: Pending, label: &'static str) {
+        self.busy = Some(label);
+        self.pending = Some(pending);
+    }
+
+    /// Ends the wait if `answer` is the one waited for.
+    pub fn answered(&mut self, answer: Pending) -> bool {
+        if self.pending != Some(answer) {
+            return false;
+        }
+        self.pending = None;
+        self.busy = None;
+        true
     }
 
     pub fn invited(&self) -> bool {
@@ -474,15 +649,25 @@ impl InfoPopup {
     /// Selects `row` if it is shown.
     pub fn select(&mut self, row: InfoRow) {
         if let Some(at) = self.rows().iter().position(|r| *r == row) {
+            if at != self.selected {
+                self.confirm = None;
+            }
             self.selected = at;
             self.reveal = true;
         }
     }
 
     pub fn step(&mut self, delta: isize) {
+        self.confirm = None;
+        // Up from the first row: what stands above it (name, topic, facts) comes
+        // back into view; in a low window the rows alone can fill it.
+        if delta < 0 && self.selected == 0 {
+            self.scroll = self.scroll.saturating_sub(delta.unsigned_abs());
+            self.reveal = false;
+            return;
+        }
         let last = self.rows().len().saturating_sub(1) as isize;
         self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
-        self.confirm = None;
         self.reveal = true;
     }
 
@@ -511,6 +696,32 @@ impl InfoPopup {
             .map(|member| member.user_id.clone());
         self.name.clone_from(&details.name);
         self.details = Some(details);
+        // A question about someone who is gone, or whom we may no longer remove, is
+        // withdrawn; so is an edit we no longer have the right to make.
+        let details = self.details.as_ref().expect("just set");
+        let still = |user_id: &String, removable: bool| {
+            details
+                .members
+                .iter()
+                .any(|m| m.user_id == *user_id && (m.removable || !removable))
+        };
+        let keep = match &self.confirm {
+            Some(Confirm::Remove(user_id)) => still(user_id, true),
+            Some(Confirm::NewChat(user_id)) => still(user_id, false),
+            Some(Confirm::Leave) | None => true,
+        };
+        if !keep {
+            self.confirm = None;
+        }
+        let allowed = match self.editing.as_ref().map(|(row, _)| *row) {
+            Some(InfoRow::Name) => details.can_rename,
+            Some(InfoRow::Topic) => details.can_set_topic,
+            _ => true,
+        };
+        if !allowed {
+            self.editing = None;
+            self.error = Some("You are no longer allowed to change this.".to_owned());
+        }
         let rows = self.rows();
         let same = match (&member, row) {
             (Some(user_id), _) => rows.iter().position(
@@ -538,13 +749,35 @@ impl InfoPopup {
         }
     }
 
+    /// The question before leaving: the keys first, so that a narrow window cuts the
+    /// explanation and not them. `Self::confirm_keys` is the part that must fit.
     pub fn leave_confirm(&self) -> &'static str {
         if self.invited() {
             "Enter again to decline, Esc to keep it"
         } else {
-            "Enter again to leave, Esc to stay"
+            "Enter again to leave, Esc to stay · this device forgets the room"
         }
     }
+
+    /// The room list's view of the room changed (an invitation was accepted, say).
+    /// Returns whether the details have to be asked for again.
+    pub fn set_kind(&mut self, kind: RoomKind) -> bool {
+        let was_invite = self.invited();
+        self.kind = kind;
+        if was_invite != self.invited() {
+            self.confirm = None;
+            self.editing = None;
+            self.selected = 0;
+            self.reveal = true;
+            return true;
+        }
+        false
+    }
+}
+
+/// The part of a confirmation that names the keys: `prompt` up to its first `·`.
+pub fn confirm_keys(prompt: &str) -> &str {
+    prompt.split('·').next().unwrap_or(prompt).trim_end()
 }
 
 pub fn role_label(role: MemberRole) -> &'static str {
@@ -784,5 +1017,350 @@ mod tests {
         info.set_details(details(&[("alice", false)]));
         let text = format!("{info:?}");
         assert!(!text.contains("Secret") && !text.contains("alice"));
+    }
+
+    #[test]
+    fn links_with_empty_parts_are_refused_not_fatal() {
+        // The library behind the links indexes into each part of the path; these
+        // used to end the program.
+        for input in [
+            "https://matrix.to/#/!room:host///",
+            "https://matrix.to/#///!room:host",
+            "https://matrix.to/#////",
+            "https://matrix.to/#//",
+            "https://matrix.to/#/!room:host//$event",
+            "https://matrix.to/#/!room:host/",
+            "https://matrix.to/#/%",
+            "https://matrix.to/#/?via=example.org",
+            "matrix:r//",
+            "matrix:r/",
+            "matrix:roomid//e/",
+            "matrix:///",
+            "matrix:",
+        ] {
+            let _ = parse_address(input);
+            let _ = parse_user(input);
+        }
+        // Nothing but slashes, or an empty part in the middle: not a link to anything.
+        for input in [
+            "https://matrix.to/#////",
+            "https://matrix.to/#/!room:host//$event",
+            "matrix:r//",
+            "matrix:roomid//e/",
+        ] {
+            assert!(parse_address(input).is_err(), "{input}");
+        }
+        // Slashes too many around the address are only untidy.
+        for input in [
+            "https://matrix.to/#/!room:host/",
+            "https://matrix.to/#/!room:host///",
+            "https://matrix.to/#///!room:host",
+        ] {
+            assert_eq!(parse_address(input), room("!room:host", &[]), "{input}");
+        }
+    }
+
+    #[test]
+    fn no_link_can_panic() {
+        // Every arrangement of the characters that matter, behind each kind of link.
+        let pieces = [
+            "/", "%", "?", "#", "!", "@", "$", ":", "a", "%2F", "&via=", "=", "r", "u",
+        ];
+        let mut tried = 0;
+        for base in [
+            "https://matrix.to/#/",
+            "https://matrix.to/",
+            "matrix:",
+            "matrix:r/",
+            "!",
+            "#",
+            "@",
+        ] {
+            for a in pieces {
+                for b in pieces {
+                    for c in pieces {
+                        for d in pieces {
+                            let input = format!("{base}{a}{b}{c}{d}");
+                            let _ = parse_address(&input);
+                            let _ = parse_user(&input);
+                            tried += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(tried > 200_000);
+    }
+
+    #[test]
+    fn nothing_hides_behind_percent_signs() {
+        for input in [
+            // Escape, newline, tab and space, encoded.
+            "https://matrix.to/#/%23room%1b[31m:example.org",
+            "https://matrix.to/#/%23room%0a:example.org",
+            "https://matrix.to/#/%23ro%20om:example.org",
+            "https://matrix.to/#/!room%09:example.org",
+            "https://matrix.to/#/@bob%0a:example.org",
+            "matrix:u/bob%0a:example.org",
+            "matrix:r/room%1b:example.org",
+            "matrix:roomid/room%20x:example.org",
+            // Direction overrides and characters that cannot be seen, as they are
+            // and encoded.
+            "#room\u{202e}moor:example.org",
+            "#room\u{200b}:example.org",
+            "@bob\u{200b}:example.org",
+            "@bob\u{202e}evil:example.org",
+            "@bob\u{feff}:example.org",
+            "https://matrix.to/#/%40bob%E2%80%8B:example.org",
+            "https://matrix.to/#/%23room%E2%80%AE:example.org",
+            "!room:example.org?via=exa\u{200b}mple.org",
+            "https://matrix.to/#/!room:example.org?via=exa%E2%80%8Bmple.org",
+        ] {
+            assert!(parse_address(input).is_err(), "{input:?}");
+            assert!(parse_user(input).is_err(), "{input:?}");
+        }
+        // The complaint itself carries nothing of the kind to the screen.
+        let err = parse_address("!room:example.org exa\u{202e}mple").unwrap_err();
+        assert!(!err.contains('\u{202e}'));
+        assert!(parse_alias_local("ra\u{200b}ts").is_err());
+        assert!(parse_alias_local("ra\u{202e}ts").is_err());
+    }
+
+    #[test]
+    fn spellings_of_matrix_to() {
+        for input in [
+            "http://matrix.to/#/#rust:matrix.org",
+            "HTTPS://MATRIX.TO/#/#rust:matrix.org",
+            "Https://Matrix.To/#/%23rust:matrix.org",
+        ] {
+            assert_eq!(
+                parse_address(input),
+                room("#rust:matrix.org", &[]),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            parse_user("HTTP://matrix.to/#/@bob:example.org"),
+            Ok("@bob:example.org".into())
+        );
+        // matrix.to, but not a link to anything.
+        for input in [
+            "https://matrix.to",
+            "https://matrix.to/",
+            "https://matrix.to/docs",
+        ] {
+            assert_eq!(parse_address(input).unwrap_err(), BAD_MATRIX_TO, "{input}");
+        }
+    }
+
+    #[test]
+    fn empty_and_malformed_parts() {
+        for input in [
+            "#:matrix.org",
+            "#room:",
+            "@:example.org",
+            "@bob:",
+            "!",
+            "!:example.org",
+            "!r:host#extra",
+            "!r:host/extra",
+            "!r:not_a_host!",
+            "matrix:r/:example.org",
+            "matrix:u/:example.org",
+            "matrix://evil.example:999/r/rust:matrix.org",
+            "matrix:r/rust:matrix.org#frag",
+            "MATRIX://x/r/rust:matrix.org",
+        ] {
+            assert!(parse_address(input).is_err(), "{input:?}");
+        }
+        assert!(parse_user(":example.org").is_err());
+        assert!(parse_user("@:example.org").is_err());
+        // Rooms of the newest version have ids without a server part.
+        assert_eq!(
+            parse_address("!9xcIvO0s67btxlOiSEwIkDmmmso1C8694gNflknIm1k"),
+            room("!9xcIvO0s67btxlOiSEwIkDmmmso1C8694gNflknIm1k", &[])
+        );
+        // The scheme in capitals is still the scheme.
+        assert_eq!(
+            parse_address("MATRIX:r/rust:matrix.org"),
+            room("#rust:matrix.org", &[])
+        );
+        // Too long to be anything.
+        assert!(parse_address(&format!("#{}:example.org", "a".repeat(300))).is_err());
+        assert!(parse_address(&"#".repeat(5000)).is_err());
+        assert!(parse_user(&format!("@{}:example.org", "a".repeat(300))).is_err());
+    }
+
+    #[test]
+    fn servers_to_ask_once_each_and_not_too_many() {
+        // Repeats do not crowd out the others, wherever they come from.
+        assert_eq!(
+            parse_address("!r:a.org a.org a.org, a.org b.org"),
+            room("!r:a.org", &["a.org", "b.org"])
+        );
+        assert_eq!(
+            parse_address("!r:a.org?via=a.org&via=a.org&via=b.org a.org c.org"),
+            room("!r:a.org", &["a.org", "c.org", "b.org"])
+        );
+        assert_eq!(
+            parse_address("https://matrix.to/#/!r:a.org?via=a.org&via=b.org&via=a.org b.org"),
+            room("!r:a.org", &["b.org", "a.org"])
+        );
+        let many: Vec<String> = (0..40).map(|n| format!("s{n}.org")).collect();
+        let Ok(Address::Room { via, .. }) = parse_address(&format!("!r:a.org {}", many.join(" ")))
+        else {
+            panic!("not a room");
+        };
+        assert_eq!(via.len(), VIA_MAX);
+        assert_eq!(via[0], "s0.org");
+        // A comma belongs to the list, not to the address before it.
+        assert_eq!(
+            parse_address("#rust:matrix.org, matrix.org"),
+            room("#rust:matrix.org", &["matrix.org"])
+        );
+    }
+
+    #[test]
+    fn user_ids_in_brackets() {
+        assert_eq!(
+            parse_user("<@bob:example.org>"),
+            Ok("@bob:example.org".into())
+        );
+        assert_eq!(
+            parse_address("<@bob:example.org>"),
+            Ok(Address::User("@bob:example.org".into()))
+        );
+    }
+
+    #[test]
+    fn what_is_typed_into_a_field_is_text() {
+        assert_eq!(
+            clean_input("a\u{1b}[31mb\u{202e}c\td\ne\u{7}"),
+            "a[31mbc    d e"
+        );
+        // Names may hold characters that join others into one picture.
+        assert_eq!(
+            clean_input("👨\u{200d}👩\u{200d}👧"),
+            "👨\u{200d}👩\u{200d}👧"
+        );
+    }
+
+    #[test]
+    fn form_state() {
+        let mut form = NewPopup::new(Stage::Choose);
+        assert!(!form.single && form.field_mut().is_none());
+        form.step(-1);
+        assert_eq!(form.choice, 2);
+        form.go(Stage::CHOICES[form.choice]);
+        assert_eq!(form.stage, Stage::Create);
+        // Name, topic, a switch, the encryption switch, the button.
+        form.field_mut().unwrap().push('n');
+        form.step(2);
+        assert!(form.field_mut().is_none() && form.flip(NewPopup::ACCESS));
+        assert!(form.public);
+        form.step(1);
+        form.field_mut().unwrap().push('a');
+        assert_eq!((form.name.as_str(), form.alias.as_str()), ("n", "a"));
+        assert!(!form.flip(NewPopup::EXTRA) && form.encrypted);
+        form.flip(NewPopup::ACCESS);
+        assert!(form.field_mut().is_none() && form.flip(NewPopup::EXTRA) && !form.encrypted);
+        form.step(1);
+        form.step(1);
+        assert_eq!(form.focus, NewPopup::NAME);
+        // Going elsewhere drops the complaint, not what was typed.
+        form.error = Some("no".into());
+        form.go(Stage::Join);
+        assert!(form.error.is_none());
+        form.go(Stage::Create);
+        assert_eq!(form.name, "n");
+    }
+
+    #[test]
+    fn questions_and_edits_end_when_their_reason_does() {
+        let mut list = details(&[("alice", false), ("bob", false)]);
+        list.members[1].removable = true;
+        let mut popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Room);
+        popup.set_details(list.clone());
+        // The member is still there and still removable: the question stands.
+        popup.confirm = Some(Confirm::Remove("@bob:example.org".into()));
+        popup.set_details(list.clone());
+        assert!(popup.confirm.is_some());
+        // No longer removable, or gone.
+        let mut demoted = list.clone();
+        demoted.members[1].removable = false;
+        popup.set_details(demoted);
+        assert_eq!(popup.confirm, None);
+        popup.confirm = Some(Confirm::NewChat("@bob:example.org".into()));
+        popup.set_details(details(&[("alice", false)]));
+        assert_eq!(popup.confirm, None);
+        // Selecting something else withdraws a question; selecting the same does not.
+        popup.confirm = Some(Confirm::Leave);
+        popup.select(popup.current().unwrap());
+        assert!(popup.confirm.is_some());
+        popup.select(InfoRow::Leave);
+        popup.select(InfoRow::Favourite);
+        assert_eq!(popup.confirm, None);
+        // An edit we lost the right to make is over, and says why.
+        popup.editing = Some((InfoRow::Topic, "new".into()));
+        let mut plain = details(&[("alice", false)]);
+        plain.can_set_topic = false;
+        popup.set_details(plain);
+        assert!(popup.editing.is_none() && popup.error.is_some());
+    }
+
+    #[test]
+    fn an_accepted_invitation_becomes_a_room() {
+        let mut popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Invite);
+        popup.confirm = Some(Confirm::Leave);
+        assert!(!popup.set_kind(RoomKind::Invite));
+        assert!(popup.confirm.is_some());
+        assert!(popup.set_kind(RoomKind::Room));
+        assert_eq!(popup.confirm, None);
+        assert_eq!(popup.rows(), [InfoRow::Favourite, InfoRow::Leave]);
+        assert_eq!(popup.leave_label(), "Leave room");
+    }
+
+    #[test]
+    fn up_from_the_first_row_scrolls_to_the_top() {
+        let mut popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Room);
+        popup.set_details(details(&[("alice", false)]));
+        popup.scroll = 5;
+        popup.step(-1);
+        assert_eq!((popup.selected, popup.scroll), (0, 4));
+        popup.step(-10);
+        assert_eq!(popup.scroll, 0);
+        assert!(!popup.reveal);
+        popup.step(1);
+        assert!(popup.selected == 1 && popup.reveal);
+    }
+
+    #[test]
+    fn only_the_awaited_answer_ends_the_wait() {
+        use crate::matrix::Change;
+        let mut popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Room);
+        popup.wait_for(Pending::Change(Change::Kick), "Removing…");
+        assert!(!popup.answered(Pending::Change(Change::Name)));
+        assert!(!popup.answered(Pending::Chat(1)));
+        assert!(popup.busy.is_some());
+        assert!(popup.answered(Pending::Change(Change::Kick)));
+        assert!(popup.busy.is_none() && popup.pending.is_none());
+        assert!(!popup.answered(Pending::Change(Change::Kick)));
+    }
+
+    #[test]
+    fn debug_output_of_addresses_and_questions() {
+        let text = format!(
+            "{:?} {:?} {:?} {:?}",
+            parse_address("#secret:example.org").unwrap(),
+            parse_address("@bob:example.org").unwrap(),
+            Confirm::Remove("@bob:example.org".into()),
+            Confirm::NewChat("@bob:example.org".into()),
+        );
+        assert!(!text.contains("secret") && !text.contains("bob"), "{text}");
+        assert_eq!(
+            confirm_keys("Enter again, Esc to stay · and more"),
+            "Enter again, Esc to stay"
+        );
+        assert_eq!(confirm_keys("no more"), "no more");
     }
 }

@@ -528,4 +528,26 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn room_management_keys() {
+        for context in [Global, Sidebar, Timeline, Composer] {
+            assert_eq!(
+                lookup(context, key(Char('n'), CTRL)),
+                Some(Action::NewRoom),
+                "{context:?}"
+            );
+            assert_eq!(
+                lookup(context, key(KeyCode::F(4), NONE)),
+                Some(Action::RoomInfo),
+                "{context:?}"
+            );
+        }
+        assert_eq!(
+            lookup(Global, key(Char('N'), CTRL | SHIFT)),
+            Some(Action::NewRoom)
+        );
+        assert_eq!(lookup(Composer, key(Char('n'), NONE)), None);
+        assert_eq!(lookup(Global, key(KeyCode::F(4), CTRL)), None);
+    }
 }

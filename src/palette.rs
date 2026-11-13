@@ -97,6 +97,10 @@ pub struct PaletteContext {
     pub themes: Vec<String>,
     pub rooms: Vec<RoomItem>,
     pub selection: MessageCaps,
+    /// The room that room-level commands (room info, invite, favourite, leave) would
+    /// act on, by the rule they follow themselves: its name, and whether it is an
+    /// invitation. Not always the open room; `None` if there is none.
+    pub target: Option<(String, bool)>,
 }
 
 /// State for the command palette popup (`Ctrl-P`).
@@ -437,7 +441,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         }
         Action::JumpToNewest => ctx.has_room && ctx.has_messages,
         Action::AcceptInvite | Action::DeclineInvite => ctx.in_invite,
-        Action::RoomInfo => ctx.has_room,
+        Action::RoomInfo => ctx.target.is_some(),
         _ => true,
     }
 }
@@ -492,7 +496,20 @@ fn collect_rooms(ctx: &PaletteContext, out: &mut Vec<Entry>) {
 /// ("New chat or room…" and "Room info" come from the keymap.)
 fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
     use crate::manage::{Click, Stage};
-    let in_room = ctx.has_room && !ctx.in_invite;
+    // Named, so that it is plain which room is meant: with the room list focused it
+    // is the one under the cursor, not the open one.
+    let (name, invite) = match &ctx.target {
+        Some((name, invite)) => (crate::text::truncate(name, 30), *invite),
+        None => ("this room".to_owned(), false),
+    };
+    let in_room = ctx.target.is_some() && !invite;
+    let invite_title = format!("Invite someone to {name}…");
+    let favourite_title = format!("Favourite on/off for {name}");
+    let leave_title = if invite {
+        format!("Decline the invitation to {name}…")
+    } else {
+        format!("Leave {name}…")
+    };
     let entries: [(Action, &str, &[&str], bool); 6] = [
         (
             Action::Manage(Click::Stage(Stage::Join)),
@@ -514,25 +531,27 @@ fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         ),
         (
             Action::InviteUser,
-            "Invite someone to this room…",
-            &["add a person", "invite user"],
+            &invite_title,
+            &["add a person", "invite user", "invite to this room"],
             in_room,
         ),
         (
             Action::Manage(Click::Favourite),
-            "Favourite on/off for this room",
+            &favourite_title,
             &["favorite", "star", "pin room"],
             in_room,
         ),
         (
             Action::LeaveRoom,
-            if ctx.in_invite {
-                "Decline this invitation…"
-            } else {
-                "Leave this room…"
-            },
-            &["leave room", "leave chat", "part", "forget room"],
-            ctx.has_room,
+            &leave_title,
+            &[
+                "leave room",
+                "leave this room",
+                "leave chat",
+                "part",
+                "forget room",
+            ],
+            ctx.target.is_some(),
         ),
     ];
     for (action, title, aliases, enabled) in entries {
@@ -741,6 +760,7 @@ mod tests {
             notifications: true,
             download_dir: "~/Downloads".to_owned(),
             verify_status: "unknown",
+            target: Some(("rust".to_owned(), false)),
             wanted_theme: "rat-dark".to_owned(),
             themes: vec![
                 "rat-dark".to_owned(),
@@ -1000,5 +1020,58 @@ mod tests {
         assert!(!titles.contains(&"Go to rust"));
         assert!(!titles.contains(&"Room list"));
         assert!(!titles.contains(&"Emoji picker"));
+    }
+
+    #[test]
+    fn room_entries_name_their_room_and_follow_what_it_is() {
+        let title = |palette: &Palette, start: &str| {
+            let entry = palette
+                .entries
+                .iter()
+                .find(|e| e.title.starts_with(start))
+                .unwrap_or_else(|| panic!("no entry starts with {start:?}"));
+            (entry.title.clone(), entry.enabled)
+        };
+        // A room: everything is on, and says which room.
+        let palette = Palette::open(sample_context());
+        assert_eq!(title(&palette, "Leave"), ("Leave rust…".to_owned(), true));
+        assert_eq!(
+            title(&palette, "Invite someone"),
+            ("Invite someone to rust…".to_owned(), true)
+        );
+        assert!(title(&palette, "Favourite on/off for rust").1);
+        assert!(title(&palette, "Room info").1);
+        // An invitation can be looked at and declined, nothing else.
+        let mut ctx = sample_context();
+        ctx.target = Some(("Party".to_owned(), true));
+        let palette = Palette::open(ctx);
+        assert_eq!(
+            title(&palette, "Decline"),
+            ("Decline the invitation to Party…".to_owned(), true)
+        );
+        assert!(!title(&palette, "Invite someone to Party").1);
+        assert!(!title(&palette, "Favourite on/off for Party").1);
+        assert!(title(&palette, "Room info").1);
+        // No room to act on (even with one open behind a filtered list): all off.
+        let mut ctx = sample_context();
+        ctx.target = None;
+        let palette = Palette::open(ctx);
+        for start in ["Leave", "Invite someone", "Favourite on/off", "Room info"] {
+            assert!(!title(&palette, start).1, "{start}");
+        }
+        // The ways to a new chat or room need no room at all.
+        for start in [
+            "Join a room",
+            "Start a direct chat",
+            "Create a room",
+            "New chat or room",
+        ] {
+            assert!(title(&palette, start).1, "{start}");
+        }
+        // A long name does not push the rest of the row out.
+        let mut ctx = sample_context();
+        ctx.target = Some(("x".repeat(200), false));
+        let palette = Palette::open(ctx);
+        assert!(title(&palette, "Leave").0.chars().count() < 50);
     }
 }

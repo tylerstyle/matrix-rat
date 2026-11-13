@@ -29,6 +29,6 @@ expression: "screen(&mut app, &mut terminal)"
 "│            │                                                                        │            │"
 "│            │                                                                        │────────────╯"
 "│            │                                                                        │────────────╮"
-"│            │ Remove bob from the room? Del again to remove, Esc to keep             │      📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
-"╰────────────╰──────────────────────────────── ↑↓ select · type to filter · Esc close ╯────────────╯"
+"│            │ Del again to remove, Esc to keep · bob will be out of the room         │      📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"╰────────────╰─────────────────────────────── Enter chat · type to filter · Esc close ╯────────────╯"
 " ◌ connecting…  Enter send  Shift-Enter line break                F1 help  F2 settings  F3 rat-dark "
