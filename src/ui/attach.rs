@@ -64,10 +64,21 @@ pub fn draw(
     if listed < files.len() && available > 0 {
         let row = Rect::new(area.x, area.y + listed as u16, area.width, 1);
         let more = files.len() - listed;
-        let label = format!(
-            "📎 … and {more} more file{}",
-            if more == 1 { "" } else { "s" }
-        );
+        let label = match files.first() {
+            // A single row for several files: the first by name, the rest counted.
+            Some(first) if listed == 0 => {
+                let rest = format!("  +{} more", more - 1);
+                let name = truncate(
+                    &first.name,
+                    (row.width as usize).saturating_sub(3 + width(&rest)).max(1),
+                );
+                format!("📎 {name}{rest}")
+            }
+            _ => format!(
+                "📎 … and {more} more file{}",
+                if more == 1 { "" } else { "s" }
+            ),
+        };
         frame.render_widget(
             Line::from(Span::styled(
                 truncate(&label, row.width as usize),

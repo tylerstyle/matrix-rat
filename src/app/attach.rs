@@ -16,20 +16,37 @@ use crate::upload::{self, Chosen};
 /// Completions named in the status line when Tab leaves a choice.
 const OPTIONS_SHOWN: usize = 6;
 
+/// Where files wait: a room, or one thread of it (room id and what names the thread).
+/// Like drafts, they belong to the conversation they were attached in.
+pub type Scope = (String, Option<String>);
+
+/// What was last handed to the worker, to give it back if none of it could be sent.
+#[derive(Debug)]
+struct Handed {
+    scope: Scope,
+    files: Vec<Chosen>,
+    text: String,
+}
+
 #[derive(Debug, Default)]
 pub struct AttachState {
-    /// Files waiting to be sent, by room: they stay with the room like a draft.
-    pending: HashMap<String, Vec<Chosen>>,
-    /// The draft put aside while an `/upload` command is typed, by room.
-    stash: HashMap<String, String>,
+    /// Files waiting to be sent.
+    pending: HashMap<Scope, Vec<Chosen>>,
+    /// The draft put aside while an `/upload` command is typed.
+    stash: HashMap<Scope, String>,
+    handed: Option<Handed>,
     /// The largest file the server accepts, once it has said so.
     pub limit: Option<u64>,
+    /// The last draw had no room to show the waiting files.
+    pub hidden: bool,
 }
 
 impl AttachState {
-    /// The files waiting in `room`.
-    pub fn files(&self, room: &str) -> &[Chosen] {
-        self.pending.get(room).map_or(&[], Vec::as_slice)
+    /// The files waiting in `scope`.
+    pub fn files(&self, scope: Option<&Scope>) -> &[Chosen] {
+        scope
+            .and_then(|scope| self.pending.get(scope))
+            .map_or(&[], Vec::as_slice)
     }
 
     pub fn clear(&mut self) {
@@ -40,22 +57,41 @@ impl AttachState {
 impl App {
     /// The files waiting to be sent to the open room.
     pub fn attachments(&self) -> &[Chosen] {
-        match self.room() {
-            Some(room) => self.attach.files(&room.id),
-            None => &[],
+        self.attach.files(self.attach_scope().as_ref())
+    }
+
+    /// The conversation files are attached to right now: the open thread, else the room.
+    pub fn attach_scope(&self) -> Option<Scope> {
+        let room = self.room()?;
+        Some((room.id.clone(), self.thread_key().map(str::to_owned)))
+    }
+
+    /// Whether files can be attached here; says why not.
+    fn can_attach(&mut self) -> bool {
+        if matches!(self.compose_mode, ComposeMode::Edit(_)) {
+            self.show_toast("Finish editing before attaching a file");
+            false
+        } else if self
+            .room()
+            .is_some_and(|room| room.kind == RoomKind::Invite)
+        {
+            self.show_toast("Accept the invitation first");
+            false
+        } else {
+            self.room().is_some()
         }
     }
 
     /// Adds files to the open room's waiting ones and returns how many were taken.
     /// A refusal is explained.
     fn attach_files(&mut self, files: Vec<Chosen>) -> usize {
-        let Some(room_id) = self.room_id() else {
+        let Some(scope) = self.attach_scope() else {
             return 0;
         };
         let mut taken = 0;
         let mut refusal = None;
         for file in files {
-            let waiting = self.attach.pending.entry(room_id.clone()).or_default();
+            let waiting = self.attach.pending.entry(scope.clone()).or_default();
             if waiting.iter().any(|other| other.path == file.path) {
                 refusal = Some(format!("{} is already attached", file.name));
             } else if let Some(reason) = upload::too_large(&file.name, file.size, self.attach.limit)
@@ -78,7 +114,9 @@ impl App {
     /// A paste that is nothing but the paths of existing files (what a terminal types
     /// when files are dropped on it) attaches them. False: it is text.
     pub(super) fn attach_pasted(&mut self, text: &str) -> bool {
-        if self.room().is_none() || matches!(self.compose_mode, ComposeMode::Edit(_)) {
+        // Where no file can be attached (an edit, an invitation), a path is text.
+        let invited = self.room().is_none_or(|room| room.kind == RoomKind::Invite);
+        if invited || matches!(self.compose_mode, ComposeMode::Edit(_)) {
             return false;
         }
         let Some(paths) = upload::dropped_files(text) else {
@@ -92,42 +130,54 @@ impl App {
                 Err(reason) => self.show_toast(reason),
             }
         }
-        self.attach_files(files);
+        // A drop answers an `/upload` command that was being typed.
+        if self.attach_files(files) > 0 && upload::command_argument(self.composer.text()).is_some()
+        {
+            self.restore_draft();
+        }
         true
     }
 
     pub(super) fn remove_attachment(&mut self, index: usize) {
-        if let Some(room_id) = self.room_id()
-            && let Some(waiting) = self.attach.pending.get_mut(&room_id)
+        if let Some(scope) = self.attach_scope()
+            && let Some(waiting) = self.attach.pending.get_mut(&scope)
             && index < waiting.len()
         {
             waiting.remove(index);
         }
     }
 
-    /// Forgets the open room's waiting files. False if there were none.
+    /// Forgets the waiting files of the open conversation, and a draft put aside for
+    /// an `/upload` command there. False if there was neither.
     pub(super) fn clear_attachments(&mut self) -> bool {
-        self.room_id()
-            .and_then(|room_id| self.attach.pending.remove(&room_id))
-            .is_some_and(|waiting| !waiting.is_empty())
+        let Some(scope) = self.attach_scope() else {
+            return false;
+        };
+        let had_draft = self.attach.stash.remove(&scope).is_some();
+        let had_files = self
+            .attach
+            .pending
+            .remove(&scope)
+            .is_some_and(|waiting| !waiting.is_empty());
+        had_draft || had_files
     }
 
     /// Alt-A and the paperclip: starts an `/upload` command. A draft that is being
     /// written comes back when the file is chosen, as its caption.
     pub(super) fn begin_attach(&mut self) {
-        let Some(room_id) = self.room_id() else {
+        if !self.can_attach() {
+            return;
+        }
+        let Some(scope) = self.attach_scope() else {
             return;
         };
-        if matches!(self.compose_mode, ComposeMode::Edit(_)) {
-            return self.show_toast("Finish editing before attaching a file");
-        }
         self.set_focus(Pane::Composer);
         if upload::command_argument(self.composer.text()).is_some() {
             return;
         }
         let draft = self.composer.take();
         if !draft.trim().is_empty() {
-            self.attach.stash.insert(room_id, draft);
+            self.attach.stash.insert(scope, draft);
         }
         self.composer.set_text("/upload ");
     }
@@ -135,8 +185,8 @@ impl App {
     /// The draft that was put aside for an `/upload` command comes back.
     fn restore_draft(&mut self) {
         let draft = self
-            .room_id()
-            .and_then(|room_id| self.attach.stash.remove(&room_id))
+            .attach_scope()
+            .and_then(|scope| self.attach.stash.remove(&scope))
             .unwrap_or_default();
         self.composer.set_text(&draft);
     }
@@ -148,8 +198,7 @@ impl App {
         let Some(argument) = upload::command_argument(&text) else {
             return false;
         };
-        if matches!(self.compose_mode, ComposeMode::Edit(_)) {
-            self.show_toast("Finish editing before attaching a file");
+        if !self.can_attach() {
             return true;
         }
         match upload::command_files(argument) {
@@ -167,6 +216,10 @@ impl App {
 
     /// Keys that mean something else while files are being attached. True if used.
     pub(super) fn attach_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
+        // The text of a message being edited is never a command.
+        if matches!(self.compose_mode, ComposeMode::Edit(_)) {
+            return false;
+        }
         match (code, mods) {
             (KeyCode::Tab, KeyModifiers::NONE) => self.complete_upload_path(),
             // Backspace in an empty message takes the last file off again.
@@ -236,6 +289,14 @@ impl App {
             self.show_toast("Accept the invitation first");
             return true;
         }
+        // Never send what is not on the screen.
+        if self.attach.hidden {
+            self.show_toast("Make the window taller to see the attached files first");
+            return true;
+        }
+        let Some(scope) = self.attach_scope() else {
+            return false;
+        };
         let text = self.composer.text().trim().to_owned();
         let caption = if text.is_empty() {
             None
@@ -314,11 +375,35 @@ impl App {
                 });
             }
         }
-        self.attach.pending.remove(&room_id);
+        self.attach.pending.remove(&scope);
+        self.attach.handed = self.matrix.is_some().then(|| Handed {
+            scope,
+            files,
+            text: self.composer.text().to_owned(),
+        });
         self.composer.take();
         self.compose_mode = ComposeMode::Normal;
         self.timeline.scroll = 0;
         true
+    }
+
+    /// The worker could not send the first of the files last handed to it, the one the
+    /// caption (and a reply) belonged to, and so sent none: they wait again, and the
+    /// text is back if nothing was written in the meantime.
+    pub(super) fn on_files_not_sent(&mut self, reason: String) {
+        if let Some(handed) = self.attach.handed.take() {
+            let here = self.attach_scope().as_ref() == Some(&handed.scope);
+            let waiting = self.attach.pending.entry(handed.scope).or_default();
+            for file in handed.files {
+                if !waiting.iter().any(|other| other.path == file.path) {
+                    waiting.push(file);
+                }
+            }
+            if here && self.composer.is_empty() && self.compose_mode == ComposeMode::Normal {
+                self.composer.set_text(&handed.text);
+            }
+        }
+        self.show_toast(format!("{reason}. Nothing was sent"));
     }
 }
 
@@ -375,6 +460,11 @@ mod tests {
     fn sent(commands: &mut UnboundedReceiver<MatrixCmd>) -> Vec<Sent> {
         let mut seen = Vec::new();
         while let Ok(command) = commands.try_recv() {
+            // From a thread the command arrives wrapped; one test looks at that itself.
+            let command = match command {
+                MatrixCmd::InThread { command, .. } => *command,
+                command => command,
+            };
             if let MatrixCmd::SendFiles {
                 room_id,
                 files,
@@ -771,6 +861,7 @@ mod tests {
             name: name.to_owned(),
             size,
         };
+        let room = (room, None);
         app.attach.pending.insert(
             room.clone(),
             vec![
@@ -795,5 +886,257 @@ mod tests {
         for (width, height) in [(1, 1), (10, 4), (20, 6), (30, 3), (61, 5)] {
             screen(&mut app, width, height);
         }
+    }
+
+    #[test]
+    fn nothing_is_pasted_behind_the_help_or_the_picture_viewer() {
+        let scratch = Scratch::new("app-covered");
+        let notes = scratch.file("notes.txt", b"hello");
+        let mut app = App::demo();
+        app.perform(Action::ToggleHelp);
+        for paste in [notes.display().to_string(), "words".to_owned()] {
+            app.on_event(Event::Paste(paste));
+            assert!(app.attachments().is_empty());
+            assert!(app.composer.is_empty());
+        }
+        app.perform(Action::ToggleHelp);
+
+        // The demo's picture, opened in the viewer.
+        app.open_room(4);
+        assert!(app.open_image(1));
+        assert!(app.images.viewer_open());
+        let focus = app.focus;
+        for paste in [notes.display().to_string(), "words".to_owned()] {
+            app.on_event(Event::Paste(paste));
+            assert!(app.attachments().is_empty());
+            assert!(app.composer.is_empty());
+            assert_eq!(app.focus, focus);
+        }
+        // Closed again, a drop attaches as ever.
+        app.images.close_viewer();
+        app.on_event(Event::Paste(notes.display().to_string()));
+        assert_eq!(app.attachments().len(), 1);
+    }
+
+    #[test]
+    fn files_and_upload_drafts_stay_with_their_room_or_thread() {
+        let scratch = Scratch::new("app-thread");
+        let in_room = scratch.file("room.txt", b"r");
+        let in_thread = scratch.file("thread.txt", b"t");
+        let (mut app, mut commands) = connected();
+
+        // Attached in the room, with an `/upload` command begun over a draft.
+        app.on_event(Event::Paste(in_room.display().to_string()));
+        type_text(&mut app, "room draft");
+        app.perform(Action::Attach);
+        assert_eq!(app.composer.text(), "/upload ");
+
+        // The thread shows none of it, and Enter there sends no file.
+        app.open_thread(0);
+        assert!(app.thread_open());
+        assert!(app.attachments().is_empty());
+        assert!(!screen(&mut app, 80, 24).contains("room.txt"));
+        type_text(&mut app, "thread words");
+        app.on_event(key(KeyCode::Enter));
+        assert!(sent(&mut commands).is_empty());
+
+        // Attached in the thread; its own `/upload` draft is its own.
+        app.on_event(Event::Paste(in_thread.display().to_string()));
+        assert_eq!(paths(&app), std::slice::from_ref(&in_thread));
+        type_text(&mut app, "thread draft");
+        app.perform(Action::Attach);
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "thread draft");
+
+        // Back in the room: its file, its command, and its draft behind that.
+        app.close_thread();
+        assert_eq!(paths(&app), std::slice::from_ref(&in_room));
+        assert!(!screen(&mut app, 80, 24).contains("thread.txt"));
+        assert_eq!(app.composer.text(), "/upload ");
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "room draft");
+        while commands.try_recv().is_ok() {}
+        app.on_event(key(KeyCode::Enter));
+        // Not wrapped: it goes to the room.
+        let Ok(MatrixCmd::SendFiles { files, .. }) = commands.try_recv() else {
+            panic!("the room's file was not sent to the room");
+        };
+        assert_eq!(files, std::slice::from_ref(&in_room));
+        assert!(app.attachments().is_empty());
+
+        // The thread still has its file, and sends it into the thread.
+        app.open_thread(0);
+        assert_eq!(paths(&app), std::slice::from_ref(&in_thread));
+        while commands.try_recv().is_ok() {}
+        app.composer.take();
+        app.on_event(key(KeyCode::Enter));
+        let Ok(MatrixCmd::InThread { root, command }) = commands.try_recv() else {
+            panic!("the files were not sent into the thread");
+        };
+        assert_eq!(root, "$one");
+        let MatrixCmd::SendFiles { files, .. } = *command else {
+            panic!("not a file command");
+        };
+        assert_eq!(files, std::slice::from_ref(&in_thread));
+        app.close_thread();
+        assert!(app.attachments().is_empty());
+    }
+
+    #[test]
+    fn files_that_are_not_on_screen_are_not_sent() {
+        let scratch = Scratch::new("app-short");
+        let files: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt"]
+            .iter()
+            .map(|name| scratch.file(name, b"x"))
+            .collect();
+        let (mut app, mut commands) = connected();
+        for file in &files {
+            app.on_event(Event::Paste(file.display().to_string()));
+        }
+
+        // One row for three files: the first by name, the others counted.
+        let shown = screen(&mut app, 80, 5);
+        assert!(shown.contains("📎 a.txt  +2 more"), "{shown}");
+        assert!(!app.attach.hidden);
+
+        // No row at all: Enter refuses and says why.
+        let shown = screen(&mut app, 80, 4);
+        assert!(!shown.contains("a.txt"), "{shown}");
+        assert!(app.attach.hidden);
+        app.on_event(key(KeyCode::Enter));
+        assert!(sent(&mut commands).is_empty());
+        assert!(toast(&app).starts_with("Make the window taller"));
+        assert_eq!(app.attachments().len(), 3);
+
+        // Tall enough again, it goes.
+        screen(&mut app, 80, 24);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(sent(&mut commands).len(), 1);
+    }
+
+    #[test]
+    fn ctrl_c_drops_and_edits_around_the_upload_command() {
+        let scratch = Scratch::new("app-edges");
+        let notes = scratch.file("notes.txt", b"hello");
+        let (mut app, mut commands) = connected();
+        let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        // Ctrl-C on an `/upload` command forgets the draft that was put aside for it.
+        type_text(&mut app, "old draft");
+        app.perform(Action::Attach);
+        app.on_event(ctrl_c());
+        assert!(app.composer.is_empty());
+        app.perform(Action::Attach);
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "");
+
+        // A file dropped while the command is being typed answers it.
+        type_text(&mut app, "caption");
+        app.perform(Action::Attach);
+        type_text(&mut app, "/some/where");
+        app.on_event(Event::Paste(notes.display().to_string()));
+        assert_eq!(app.attachments().len(), 1);
+        assert_eq!(app.composer.text(), "caption");
+        app.composer.take();
+
+        // An edit is sent as an edit although a file is waiting, and Tab and Esc
+        // mean what they always mean while editing.
+        let mut own = remote("mine", "typo");
+        own.own = true;
+        app.rooms[0].messages.push(own);
+        app.timeline.selected = Some(2);
+        app.perform(Action::Edit);
+        app.composer.set_text("fixed");
+        while commands.try_recv().is_ok() {}
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(commands.try_recv(), Ok(MatrixCmd::Edit { .. })));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.attachments().len(), 1);
+        app.timeline.selected = Some(2);
+        app.perform(Action::Edit);
+        app.composer.set_text("/upload ");
+        app.on_event(key(KeyCode::Tab));
+        assert_eq!(app.composer.text(), "/upload ");
+        app.set_focus(Pane::Composer);
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(sent(&mut commands).is_empty());
+
+        // A message that is a file cannot be edited (its text is not the message).
+        let mut file = remote("file", "📎 report.pdf · 1 kB");
+        file.own = true;
+        file.file = Some(crate::model::Attachment {
+            key: "mxc://example.org/report".to_owned(),
+            name: "report.pdf".to_owned(),
+            size: Some(1000),
+            source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
+                matrix_sdk::ruma::OwnedMxcUri::from("mxc://example.org/report"),
+            )),
+        });
+        app.rooms[0].messages.push(file);
+        app.timeline.selected = Some(3);
+        app.perform(Action::Edit);
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(toast(&app), "This message cannot be edited");
+    }
+
+    #[test]
+    fn an_invitation_takes_no_files() {
+        let scratch = Scratch::new("app-invite");
+        let notes = scratch.file("notes.txt", b"hello");
+        let (mut app, mut commands) = connected();
+        app.rooms[0].kind = RoomKind::Invite;
+        // A path is text there, and the command and the key say why not.
+        app.on_event(Event::Paste(notes.display().to_string()));
+        assert!(app.attachments().is_empty());
+        assert_eq!(app.composer.text(), notes.display().to_string());
+        app.composer.take();
+        app.perform(Action::Attach);
+        assert!(app.composer.is_empty());
+        assert_eq!(toast(&app), "Accept the invitation first");
+        app.composer
+            .set_text(&format!("/upload {}", notes.display()));
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.attachments().is_empty());
+        assert!(sent(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn files_the_worker_could_not_send_come_back() {
+        let scratch = Scratch::new("app-back");
+        let notes = scratch.file("notes.txt", b"hello");
+        let other = scratch.file("other.txt", b"hello");
+        let (mut app, mut commands) = connected();
+        app.on_event(Event::Paste(format!(
+            "{}\n{}",
+            notes.display(),
+            other.display()
+        )));
+        type_text(&mut app, "the caption");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(sent(&mut commands).len(), 1);
+        assert!(app.attachments().is_empty() && app.composer.is_empty());
+
+        app.on_matrix(MatrixEvent::FilesNotSent(
+            "notes.txt does not exist".to_owned(),
+        ));
+        assert_eq!(toast(&app), "notes.txt does not exist. Nothing was sent");
+        assert_eq!(paths(&app), [notes.clone(), other.clone()]);
+        assert_eq!(app.composer.text(), "the caption");
+        // Only once, and never over something written since.
+        app.composer.set_text("new words");
+        app.on_matrix(MatrixEvent::FilesNotSent("again".to_owned()));
+        assert_eq!(app.composer.text(), "new words");
+        assert_eq!(app.attachments().len(), 2);
+
+        // Reported while another room is open: the files wait where they were.
+        app.composer.take();
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(sent(&mut commands).len(), 1);
+        app.open_room(1);
+        app.on_matrix(MatrixEvent::FilesNotSent("no".to_owned()));
+        assert!(app.attachments().is_empty() && app.composer.is_empty());
+        app.open_room(0);
+        assert_eq!(app.attachments().len(), 2);
     }
 }
