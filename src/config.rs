@@ -18,6 +18,9 @@ pub struct Config {
     pub mouse: bool,
     /// Let others see when you are typing.
     pub typing_notices: bool,
+    /// Let others see how far you have read. When off, the server still learns it
+    /// (so unread counts clear on your other devices) but tells nobody.
+    pub read_receipts: bool,
 }
 
 impl Default for Config {
@@ -27,6 +30,7 @@ impl Default for Config {
             sidebar_width: 24,
             mouse: true,
             typing_notices: true,
+            read_receipts: true,
         }
     }
 }
@@ -43,6 +47,32 @@ impl Config {
     }
 }
 
+/// Changes one setting in the configuration file, keeping everything else in it
+/// (comments included) as it is. The file is replaced in one step.
+pub fn save_setting(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> Result<()> {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("could not read {}", path.display())),
+    };
+    let mut document: toml_edit::DocumentMut = source
+        .parse()
+        .with_context(|| format!("invalid config {}", path.display()))?;
+    let mut value: toml_edit::Value = value.into();
+    // A comment after the old value stays where it is.
+    if let Some(old) = document.get(key).and_then(|item| item.as_value()) {
+        *value.decor_mut() = old.decor().clone();
+    }
+    document[key] = toml_edit::Item::Value(value);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let temporary = path.with_extension("toml.new");
+    std::fs::write(&temporary, document.to_string())
+        .and_then(|()| std::fs::rename(&temporary, path))
+        .with_context(|| format!("could not write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +83,35 @@ mod tests {
         assert_eq!(config.theme, "terminal");
         assert_eq!(config.sidebar_width, 24);
         assert!(config.mouse);
+        assert!(config.read_receipts);
+    }
+
+    #[test]
+    fn saving_a_setting_keeps_the_rest_of_the_file() {
+        let dir = std::env::temp_dir().join(format!("matrix-rat-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("config.toml");
+        // No file yet: one is created.
+        save_setting(&path, "mouse", false).unwrap();
+        assert!(!Config::load(&path).unwrap().mouse);
+        std::fs::write(
+            &path,
+            "# my colours\ntheme = \"terminal\" # follows kitty\nmouse = false\n",
+        )
+        .unwrap();
+        save_setting(&path, "sidebar_width", 30).unwrap();
+        save_setting(&path, "theme", "gruvbox-dark").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my colours"), "{text}");
+        assert!(text.contains("# follows kitty"), "{text}");
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.theme, "gruvbox-dark");
+        assert_eq!(config.sidebar_width, 30);
+        assert!(!config.mouse);
+        // A broken file is left alone.
+        std::fs::write(&path, "theme = [").unwrap();
+        assert!(save_setting(&path, "mouse", true).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = [");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

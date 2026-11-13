@@ -21,6 +21,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     // Right side: clickable buttons.
     let buttons = [
         (Button::Help, "F1".to_owned(), "help".to_owned()),
+        (Button::Settings, "F2".to_owned(), "settings".to_owned()),
         (Button::Theme, "F3".to_owned(), app.theme.name.clone()),
     ];
     let mut right = area.right();
@@ -93,6 +94,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         for (k, text, action) in hints {
             let label = format!(" {text}  ");
             let hint_width = (width(k) + width(&label)) as u16;
+            // A hint that does not fit whole is left out rather than cut off.
+            if col + hint_width.saturating_sub(2) > right {
+                break;
+            }
             if let Some(action) = action {
                 // Clickable area: the key and its label, without the trailing gap.
                 let end = (col + hint_width.saturating_sub(2)).min(right);

@@ -1,0 +1,19 @@
+name = "solarized-light"
+
+[palette]
+bg = "#fdf6e3"
+surface = "#eee8d5"
+surface_high = "#e4ddc8"
+fg = "#586e75"
+muted = "#93a1a1"
+outline = "#c9c2ad"
+primary = "#268bd2"
+on_primary = "#fdf6e3"
+secondary = "#2aa198"
+accent = "#b58900"
+error = "#dc322f"
+success = "#859900"
+warning = "#cb4b16"
+
+[users]
+colors = ["#268bd2", "#2aa198", "#859900", "#b58900", "#cb4b16", "#d33682", "#6c71c4", "#dc322f"]

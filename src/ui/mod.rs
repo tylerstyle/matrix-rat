@@ -157,6 +157,16 @@ mod tests {
     }
 
     #[test]
+    fn settings_menu() {
+        let mut app = App::demo();
+        render(&mut app, 100, 30);
+        app.perform(Action::OpenSettings);
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+        // A low window drops the blank lines but keeps every row.
+        insta::assert_snapshot!("settings_menu_low", render(&mut app, 70, 18));
+    }
+
+    #[test]
     fn emoji_picker() {
         let mut app = App::demo();
         render(&mut app, 100, 30);

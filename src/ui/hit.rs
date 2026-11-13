@@ -8,6 +8,7 @@ use crate::action::{Action, Pane};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
     Help,
+    Settings,
     Theme,
     CancelCompose,
     JumpToNewest,
@@ -30,6 +31,8 @@ pub enum HitId {
     Field(usize),
     /// Index into the emoji picker's results.
     Emoji(usize),
+    /// A row of the settings menu, and the step to change it by (0: just activate).
+    Setting(usize, i8),
     Splitter,
     Button(Button),
     /// A clickable hint that performs an action, like the ones in the status line.

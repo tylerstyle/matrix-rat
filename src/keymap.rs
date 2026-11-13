@@ -183,6 +183,22 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        Char('k'),
+        CTRL,
+        Action::FocusRoomFilter,
+        "Ctrl-K",
+        "Find a room",
+    ),
+    bind(
+        Global,
+        KeyCode::F(2),
+        NONE,
+        Action::OpenSettings,
+        "F2",
+        "Settings",
+    ),
+    bind(
+        Global,
         KeyCode::F(3),
         NONE,
         Action::CycleTheme,
@@ -268,7 +284,7 @@ pub const DEFAULT: &[Binding] = &[
         NONE,
         Action::React,
         "r",
-        "React with 👍",
+        "React with an emoji",
     ),
     bind(
         Timeline,

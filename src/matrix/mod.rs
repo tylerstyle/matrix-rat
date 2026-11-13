@@ -81,6 +81,8 @@ pub enum MatrixCmd {
     },
     MarkRead {
         room_id: String,
+        /// Whether other people may see the receipt.
+        public: bool,
     },
     Join {
         room_id: String,
@@ -88,6 +90,8 @@ pub enum MatrixCmd {
     Leave {
         room_id: String,
     },
+    /// End the session on the server and go back to the login form.
+    Logout,
     Shutdown,
 }
 
@@ -112,9 +116,10 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Redact { room_id, .. } => write!(f, "Redact({room_id})"),
             Self::Retry { room_id, .. } => write!(f, "Retry({room_id})"),
             Self::Typing { room_id, typing } => write!(f, "Typing({room_id}, {typing})"),
-            Self::MarkRead { room_id } => write!(f, "MarkRead({room_id})"),
+            Self::MarkRead { room_id, .. } => write!(f, "MarkRead({room_id})"),
             Self::Join { room_id } => write!(f, "Join({room_id})"),
             Self::Leave { room_id } => write!(f, "Leave({room_id})"),
+            Self::Logout => f.write_str("Logout"),
             Self::Shutdown => f.write_str("Shutdown"),
         }
     }
@@ -277,6 +282,8 @@ enum SessionEnd {
     Shutdown,
     /// The server no longer accepts our token.
     Expired,
+    /// The user asked to log out.
+    LoggedOut,
 }
 
 struct Worker {
@@ -320,6 +327,21 @@ impl Worker {
                 Ok(SessionEnd::Expired) => {
                     session::forget(&self.paths);
                     reason = Some("Your session has expired. Please log in again.".to_owned());
+                }
+                Ok(SessionEnd::LoggedOut) => {
+                    // Tell the server, but log out here even if it cannot be reached.
+                    match tokio::time::timeout(Duration::from_secs(10), client.logout()).await {
+                        Ok(Ok(())) => reason = Some("You are logged out.".to_owned()),
+                        outcome => {
+                            tracing::warn!(?outcome, "could not log out on the server");
+                            reason = Some(
+                                "Logged out here. The server could not be told, so the session \
+                                 may still be listed on your account."
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                    session::forget(&self.paths);
                 }
                 Err(err) => {
                     tracing::error!(?err, "session failed");
@@ -468,6 +490,7 @@ impl Worker {
                         });
                     }
                     Some(MatrixCmd::Shutdown) | None => break SessionEnd::Shutdown,
+                    Some(MatrixCmd::Logout) => break SessionEnd::LoggedOut,
                     Some(command) => timelines.handle(command).await,
                 },
             }

@@ -1,0 +1,22 @@
+---
+source: src/ui/mod.rs
+expression: "render(&mut app, 70, 18)"
+---
+"╭ 1 Rooms ─────────────╮╭ 2 #rust ───────────────────────────────────╮"
+"│ Fil╭ Settings ────────────────────────────────────────────────╮   ││"
+"│ Fav│ Appearance                                               │   ││"
+"│ # r│ › Theme               ◂ rat-dark ▸                       │   ││"
+"│ # m│   Room list width     ◂ 24 ▸                             │pr…││"
+"│ Peo│ Behaviour                                                │.  ││"
+"│ ● b│   Mouse               ● on                               │   ││"
+"│ ○ c│   Typing notices      ● on                               │   ││"
+"│ Roo│   Read receipts       ● on                               │   ┃│"
+"│ # d│ Help                                                     │   ┃│"
+"│ # n│   Key bindings        F1                                 │   ┃│"
+"│ # o│ Account                                                  │s  ┃│"
+"│    │   Log out                                                │   ┃│"
+"│    │ Themes in the themes folder are listed too and reload    │────╯"
+"│    │ when they change.                                        │────╮"
+"│    ╰─────────────── ↑↓ select · ←→ change · Enter · Esc close ╯ ☺  │"
+"╰──────────────────────╯╰────────────────────────────────────────────╯"
+" ● demo data  Enter send            F1 help  F2 settings  F3 rat-dark "

@@ -22,7 +22,7 @@ use crate::matrix::{
     self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
     SyncStatus,
 };
-use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm};
+use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, Setting, SettingsMenu};
 use crate::model::{
     ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, SendState, demo_rooms,
 };
@@ -34,7 +34,6 @@ use crate::ui::{self, SIDEBAR_MIN, max_sidebar};
 
 const TOAST_TIME: Duration = Duration::from_secs(3);
 const WHEEL_LINES: usize = 3;
-const THUMBS_UP: &str = "👍";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeMode {
@@ -126,7 +125,12 @@ pub struct App {
     edit_stash: Option<String>,
     /// When we last told the room we are typing, if we did.
     typing_sent: Option<Instant>,
-    typing_notices: bool,
+    pub typing_notices: bool,
+    pub read_receipts: bool,
+    /// Whether clicks go to the app; the event loop applies changes to the terminal.
+    pub mouse: bool,
+    /// Text on its way to the system clipboard; the event loop sends it.
+    pub pending_copy: Option<String>,
     /// The theme the user asked for, which may not exist yet (a generator may still
     /// have to write it).
     wanted_theme: String,
@@ -168,6 +172,8 @@ impl App {
         app.themes_dir = themes_dir;
         app.sidebar.width = config.sidebar_width;
         app.typing_notices = config.typing_notices;
+        app.read_receipts = config.read_receipts;
+        app.mouse = config.mouse;
         app.config_theme = config.theme.clone();
         app.set_theme(&config.theme);
         app
@@ -207,6 +213,9 @@ impl App {
             edit_stash: None,
             typing_sent: None,
             typing_notices: true,
+            read_receipts: true,
+            mouse: true,
+            pending_copy: None,
             wanted_theme: DEFAULT_THEME.to_owned(),
             config_file: None,
             config_theme: String::new(),
@@ -335,6 +344,100 @@ impl App {
             Err(err) => {
                 tracing::warn!(theme = name, ?err, "could not load theme");
                 self.show_toast(format!("Could not load theme {name}: {err:#}"));
+            }
+        }
+    }
+
+    /// Moves to the next or previous theme and remembers the choice.
+    fn step_theme(&mut self, delta: isize) {
+        // Look again: a generator may have written a new theme since.
+        self.theme_names = Theme::available(&self.themes_dir);
+        let count = self.theme_names.len() as isize;
+        let at = self
+            .theme_names
+            .iter()
+            .position(|n| *n == self.wanted_theme)
+            .map_or(0, |i| (i as isize + delta).rem_euclid(count) as usize);
+        let name = self.theme_names[at].clone();
+        self.set_theme(&name);
+        self.config_theme = name.clone();
+        self.save_setting("theme", name);
+    }
+
+    /// Writes one setting to the configuration file (there is none in demo mode).
+    fn save_setting(&mut self, key: &str, value: impl Into<toml_edit::Value>) {
+        let Some(file) = &self.config_file else {
+            return;
+        };
+        if let Err(err) = crate::config::save_setting(file, key, value) {
+            tracing::warn!(?err, key, "could not save setting");
+            self.show_toast(format!("Could not save the setting: {err:#}"));
+        }
+    }
+
+    /// What the settings menu shows next to a row.
+    pub fn setting_value(&self, setting: Setting) -> String {
+        let switch = |on: bool| if on { "on" } else { "off" }.to_owned();
+        match setting {
+            Setting::Theme => self.wanted_theme.clone(),
+            Setting::SidebarWidth => self.sidebar.width.to_string(),
+            Setting::Mouse => switch(self.mouse),
+            Setting::TypingNotices => switch(self.typing_notices),
+            Setting::ReadReceipts => switch(self.read_receipts),
+            Setting::Keys => String::new(),
+            Setting::Logout => self.user_id.clone().unwrap_or_default(),
+        }
+    }
+
+    /// Changes a setting from the menu: `delta` is -1 or 1 for ◂ ▸, 0 for Enter or a
+    /// click on the row.
+    fn change_setting(&mut self, setting: Setting, delta: i8) {
+        match setting {
+            Setting::Theme => self.step_theme(if delta < 0 { -1 } else { 1 }),
+            Setting::SidebarWidth => {
+                if delta != 0 {
+                    let width = self.sidebar.width.saturating_add_signed(2 * delta as i16);
+                    self.sidebar.width = width.clamp(SIDEBAR_MIN, max_sidebar(self.screen.width));
+                    self.save_setting("sidebar_width", self.sidebar.width as i64);
+                }
+            }
+            Setting::Mouse => {
+                self.mouse = !self.mouse;
+                self.save_setting("mouse", self.mouse);
+            }
+            Setting::TypingNotices => {
+                self.typing_notices = !self.typing_notices;
+                self.save_setting("typing_notices", self.typing_notices);
+                self.update_typing();
+            }
+            Setting::ReadReceipts => {
+                self.read_receipts = !self.read_receipts;
+                self.save_setting("read_receipts", self.read_receipts);
+            }
+            Setting::Keys => {
+                if delta == 0 {
+                    self.modal = None;
+                    self.help_open = true;
+                }
+            }
+            Setting::Logout => {
+                if delta != 0 {
+                    return;
+                }
+                if self.matrix.is_none() {
+                    self.show_toast("The demo has no account to log out of");
+                    return;
+                }
+                let Some(Modal::Settings(menu)) = &mut self.modal else {
+                    return;
+                };
+                if menu.confirm_logout {
+                    self.modal = None;
+                    self.show_toast("Logging out…");
+                    self.send_matrix(MatrixCmd::Logout);
+                } else {
+                    menu.confirm_logout = true;
+                }
             }
         }
     }
@@ -626,7 +729,10 @@ impl App {
         }
         self.timeline.marked_read = newest;
         if let Some(room_id) = self.room_id() {
-            self.send_matrix(MatrixCmd::MarkRead { room_id });
+            self.send_matrix(MatrixCmd::MarkRead {
+                room_id,
+                public: self.read_receipts,
+            });
         }
     }
 
@@ -839,15 +945,7 @@ impl App {
             }
             Action::ToggleHelp => self.help_open = !self.help_open,
             Action::CycleTheme => {
-                // Look again: a generator may have written a new theme since.
-                self.theme_names = Theme::available(&self.themes_dir);
-                let at = self
-                    .theme_names
-                    .iter()
-                    .position(|n| *n == self.wanted_theme)
-                    .map_or(0, |i| (i + 1) % self.theme_names.len());
-                let name = self.theme_names[at].clone();
-                self.set_theme(&name);
+                self.step_theme(1);
             }
             Action::Back => self.back(),
             Action::PageUp => {
@@ -960,8 +1058,12 @@ impl App {
                 }
             }
             Action::React => {
-                if let Some(i) = self.timeline.selected {
-                    self.toggle_reaction(i, THUMBS_UP);
+                if let Some(i) = self.timeline.selected
+                    && self.modal.is_none()
+                    && let Some(message) = self.messages().get(i)
+                {
+                    let picker = EmojiPicker::for_reaction(i, message.id.clone());
+                    self.open_modal(Modal::Emoji(picker));
                 }
             }
             Action::Delete => {
@@ -969,7 +1071,18 @@ impl App {
                     self.delete_message(i);
                 }
             }
-            Action::Copy => self.show_toast("Copying is not available yet"),
+            Action::Copy => {
+                let text = self
+                    .timeline
+                    .selected
+                    .and_then(|i| self.messages().get(i))
+                    .map(|message| message.body.clone())
+                    .filter(|body| !body.is_empty());
+                if let Some(text) = text {
+                    self.pending_copy = Some(text);
+                    self.show_toast("Copied");
+                }
+            }
             Action::Open => {
                 let opened = match self.timeline.selected {
                     Some(i) => self.open_link(i, 0),
@@ -1004,6 +1117,11 @@ impl App {
             Action::LoginBrowser => self.submit_login(true),
             Action::RecoverySubmit => self.submit_recovery(),
             Action::CloseModal => self.close_modal(),
+            Action::OpenSettings => {
+                if self.modal.is_none() {
+                    self.open_modal(Modal::Settings(SettingsMenu::default()));
+                }
+            }
         }
     }
 
@@ -1073,15 +1191,30 @@ impl App {
                 self.modal = None;
                 self.show_toast("Encrypted history stays locked until you enter the key");
             }
-            Some(Modal::Emoji(_)) => self.modal = None,
+            Some(Modal::Emoji(_) | Modal::Settings(_)) => self.modal = None,
             None => {}
         }
     }
 
-    fn insert_emoji(&mut self, emoji: &str) {
-        self.modal = None;
-        self.set_focus(Pane::Composer);
-        self.composer.insert(emoji);
+    /// An emoji was chosen in the picker: react with it, or put it in the draft.
+    fn pick_emoji(&mut self, emoji: &str) {
+        let Some(Modal::Emoji(picker)) = self.modal.take() else {
+            return;
+        };
+        let Some((index, id)) = picker.react_to else {
+            self.set_focus(Pane::Composer);
+            self.composer.insert(emoji);
+            return;
+        };
+        // The message may have moved while the picker was open.
+        let index = if id.is_empty() {
+            Some(index)
+        } else {
+            self.messages().iter().position(|m| m.id == id)
+        };
+        if let Some(index) = index {
+            self.toggle_reaction(index, emoji);
+        }
     }
 
     fn on_modal_key(&mut self, code: KeyCode, mods: KeyModifiers) {
@@ -1146,7 +1279,7 @@ impl App {
                     KeyCode::Esc => self.modal = None,
                     KeyCode::Enter => {
                         if let Some(emoji) = picker.selected() {
-                            self.insert_emoji(emoji.as_str());
+                            self.pick_emoji(emoji.as_str());
                         }
                     }
                     KeyCode::Left => picker.step(-1),
@@ -1165,6 +1298,18 @@ impl App {
                         query.push(c);
                         picker.set_query(query);
                     }
+                    _ => {}
+                }
+            }
+            Some(Modal::Settings(menu)) => {
+                let setting = menu.current();
+                match code {
+                    KeyCode::Esc | KeyCode::F(2) => self.modal = None,
+                    KeyCode::Up | KeyCode::BackTab => menu.step(-1),
+                    KeyCode::Down | KeyCode::Tab => menu.step(1),
+                    KeyCode::Left => self.change_setting(setting, -1),
+                    KeyCode::Right => self.change_setting(setting, 1),
+                    KeyCode::Enter | KeyCode::Char(' ') => self.change_setting(setting, 0),
                     _ => {}
                 }
             }
@@ -1551,6 +1696,7 @@ impl App {
                 picker.set_query(query);
                 return;
             }
+            Some(Modal::Settings(_)) => return,
             None => {}
         }
         match self.focus {
@@ -1577,7 +1723,7 @@ impl App {
                 match hit {
                     Some(HitId::Backdrop) => {
                         self.help_open = false;
-                        if matches!(self.modal, Some(Modal::Emoji(_))) {
+                        if matches!(self.modal, Some(Modal::Emoji(_) | Modal::Settings(_))) {
                             self.modal = None;
                         }
                     }
@@ -1594,7 +1740,18 @@ impl App {
                             _ => None,
                         };
                         if let Some(emoji) = emoji {
-                            self.insert_emoji(emoji.as_str());
+                            self.pick_emoji(emoji.as_str());
+                        }
+                    }
+                    Some(HitId::Setting(index, delta)) => {
+                        if let Some(Modal::Settings(menu)) = &mut self.modal
+                            && let Some(setting) = Setting::ALL.get(index).copied()
+                        {
+                            if menu.selected != index {
+                                menu.selected = index;
+                                menu.confirm_logout = false;
+                            }
+                            self.change_setting(setting, delta);
                         }
                     }
                     Some(HitId::Splitter) => self.dragging_splitter = true,
@@ -1632,6 +1789,7 @@ impl App {
                     }
                     Some(HitId::Button(button)) => self.perform(match button {
                         Button::Help => Action::ToggleHelp,
+                        Button::Settings => Action::OpenSettings,
                         Button::Theme => Action::CycleTheme,
                         Button::CancelCompose => Action::CancelCompose,
                         Button::JumpToNewest => Action::JumpToNewest,
@@ -1646,7 +1804,11 @@ impl App {
                 self.sidebar.width = width.clamp(SIDEBAR_MIN, max_sidebar(self.screen.width));
                 self.dirty = true;
             }
-            MouseEventKind::Up(MouseButton::Left) => self.dragging_splitter = false,
+            MouseEventKind::Up(MouseButton::Left) => {
+                if std::mem::take(&mut self.dragging_splitter) {
+                    self.save_setting("sidebar_width", self.sidebar.width as i64);
+                }
+            }
             MouseEventKind::Moved => {
                 if self.hover != hit {
                     self.hover = hit;
@@ -1742,6 +1904,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
             app.suspend_requested = false;
             terminal::suspend(&mut terminal)?;
             app.dirty = true;
+        }
+        terminal::set_mouse(app.mouse)?;
+        if let Some(text) = app.pending_copy.take() {
+            terminal::copy_to_clipboard(&text)?;
         }
         if app.dirty {
             app.dirty = false;
@@ -1939,9 +2105,31 @@ mod tests {
         // React, then un-react.
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Char('r')));
-        assert_eq!(app.rooms[0].messages.last().unwrap().reactions.len(), 1);
+        assert!(matches!(&app.modal, Some(Modal::Emoji(p)) if p.react_to.is_some()));
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.focus, Pane::Timeline);
+        let reactions = &app.rooms[0].messages.last().unwrap().reactions;
+        assert_eq!((reactions.len(), reactions[0].key.as_str()), (1, "👍"));
+        assert!(app.composer.is_empty());
         app.on_event(key(KeyCode::Char('r')));
+        app.on_event(key(KeyCode::Enter));
         assert!(app.rooms[0].messages.last().unwrap().reactions.is_empty());
+        // Any emoji can be searched for; Esc reacts with nothing.
+        app.on_event(key(KeyCode::Char('r')));
+        type_text(&mut app, "rat");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.rooms[0].messages.last().unwrap().reactions[0].key, "🐀");
+        app.on_event(key(KeyCode::Char('r')));
+        type_text(&mut app, "rat");
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Char('r')));
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.rooms[0].messages.last().unwrap().reactions.is_empty());
+
+        // Copying hands the text to the event loop.
+        app.on_event(key(KeyCode::Char('c')));
+        assert_eq!(app.pending_copy.as_deref(), Some("congrats!"));
 
         // Delete own, refuse to delete or edit someone else's.
         app.on_event(key(KeyCode::Delete));
@@ -2438,6 +2626,7 @@ mod tests {
         drain(&mut commands);
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Char('r')));
+        app.on_event(key(KeyCode::Enter));
         app.on_event(key(KeyCode::Delete));
         assert_eq!(drain(&mut commands), ["ToggleReaction(!a)", "Redact(!a)"]);
         // Nothing changes locally; the worker's next update shows the result.
@@ -2954,6 +3143,94 @@ mod tests {
         app.on_event(click(col, row));
         let reaction = &app.rooms[0].messages[1].reactions[0];
         assert_eq!((reaction.count, reaction.own), (3, true));
+    }
+
+    #[test]
+    fn settings_menu_by_keyboard_and_mouse() {
+        let dir = std::env::temp_dir().join(format!("matrix-rat-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "# mine\nsidebar_width = 30\n").unwrap();
+        let (mut app, mut terminal) = drawn();
+        app.config_file = Some(file.clone());
+
+        app.on_event(key(KeyCode::F(2)));
+        assert!(matches!(app.modal, Some(Modal::Settings(_))));
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "Appearance");
+        // Theme is selected first: → picks the next one and saves it.
+        let before = app.theme.name.clone();
+        app.on_event(key(KeyCode::Right));
+        assert_ne!(app.theme.name, before);
+        assert_eq!(Config::load(&file).unwrap().theme, app.theme.name);
+        app.on_event(key(KeyCode::Left));
+        assert_eq!(app.theme.name, before);
+
+        // Width, then the switches.
+        app.on_event(key(KeyCode::Down));
+        let width = app.sidebar.width;
+        app.on_event(key(KeyCode::Right));
+        assert_eq!(app.sidebar.width, width + 2);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.sidebar.width, width + 2);
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        assert!(!app.mouse);
+        app.on_event(key(KeyCode::Char(' ')));
+        assert!(app.mouse);
+
+        // By mouse: a click on a row flips its switch.
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "Read receipts");
+        app.on_event(click(col, row));
+        assert!(!app.read_receipts);
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "▸");
+        let theme = app.theme.name.clone();
+        app.on_event(click(col, row));
+        assert_ne!(app.theme.name, theme);
+
+        let saved = Config::load(&file).unwrap();
+        assert_eq!(saved.sidebar_width, width + 2);
+        assert!(saved.mouse && !saved.read_receipts);
+        assert!(std::fs::read_to_string(&file).unwrap().contains("# mine"));
+
+        // Logging out asks twice; the demo has no account, so it only says so.
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "Log out");
+        app.on_event(click(col, row));
+        assert!(matches!(app.modal, Some(Modal::Settings(_))));
+        assert!(app.toast.is_some());
+
+        // "Key bindings" leads to the help; the backdrop closes the menu.
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none() && app.help_open);
+        app.on_event(key(KeyCode::Esc));
+        app.on_event(key(KeyCode::F(2)));
+        redraw(&mut app, &mut terminal);
+        app.on_event(click(0, 0));
+        assert!(app.modal.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn logging_out_needs_a_second_enter() {
+        let (mut app, _terminal, mut commands) = connected();
+        drain(&mut commands);
+        app.on_event(key(KeyCode::F(2)));
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).is_empty());
+        // Moving away withdraws the question.
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(drain(&mut commands), ["Logout"]);
+        assert!(app.modal.is_none());
     }
 
     #[test]

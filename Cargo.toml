@@ -39,6 +39,7 @@ nucleo-matcher = "0.3.1"
 comrak = { version = "0.59.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 notify = "8"
+toml_edit = "0.25.19"
 
 [dev-dependencies]
 insta = "1"

@@ -1,0 +1,19 @@
+name = "tokyo-night"
+
+[palette]
+bg = "#1a1b26"
+surface = "#24283b"
+surface_high = "#414868"
+fg = "#c0caf5"
+muted = "#737aa2"
+outline = "#565f89"
+primary = "#7aa2f7"
+on_primary = "#1a1b26"
+secondary = "#bb9af7"
+accent = "#e0af68"
+error = "#f7768e"
+success = "#9ece6a"
+warning = "#ff9e64"
+
+[users]
+colors = ["#7aa2f7", "#bb9af7", "#9ece6a", "#e0af68", "#ff9e64", "#7dcfff", "#2ac3de", "#f7768e"]

@@ -259,10 +259,15 @@ impl Timelines {
                     });
                 }
             }
-            MatrixCmd::MarkRead { room_id } => {
+            MatrixCmd::MarkRead { room_id, public } => {
+                let receipt = if public {
+                    ReceiptType::Read
+                } else {
+                    ReceiptType::ReadPrivate
+                };
                 if let Ok(timeline) = self.timeline(&room_id).await {
                     tokio::spawn(async move {
-                        if let Err(err) = timeline.mark_as_read(ReceiptType::Read).await {
+                        if let Err(err) = timeline.mark_as_read(receipt).await {
                             tracing::debug!(?err, "could not send read receipt");
                         }
                     });
@@ -287,6 +292,7 @@ impl Timelines {
             | MatrixCmd::LoginBrowser { .. }
             | MatrixCmd::CancelLogin
             | MatrixCmd::Recover { .. }
+            | MatrixCmd::Logout
             | MatrixCmd::Shutdown => {}
         }
     }

@@ -7,6 +7,10 @@ recolour the app: let it write a theme file there and select that theme.
 Without any setup, `theme = "terminal"` already follows whatever colours your terminal
 uses.
 
+The commands below assume `matrix-rat` is installed (see the main README). From a
+checkout you can use `cargo run --quiet -- --print-template …` instead, and leave out the
+`post_hook` lines: they only speed up what the file watcher does anyway.
+
 The templates in this directory are also built into the program:
 
 ```sh

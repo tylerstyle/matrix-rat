@@ -1,0 +1,19 @@
+name = "nord"
+
+[palette]
+bg = "#2e3440"
+surface = "#3b4252"
+surface_high = "#434c5e"
+fg = "#eceff4"
+muted = "#8c95a8"
+outline = "#4c566a"
+primary = "#88c0d0"
+on_primary = "#2e3440"
+secondary = "#81a1c1"
+accent = "#ebcb8b"
+error = "#bf616a"
+success = "#a3be8c"
+warning = "#d08770"
+
+[users]
+colors = ["#88c0d0", "#81a1c1", "#a3be8c", "#ebcb8b", "#d08770", "#b48ead", "#8fbcbb", "#bf616a"]

@@ -77,8 +77,13 @@ impl std::fmt::Debug for RecoveryForm {
     }
 }
 
+/// What the reaction picker offers before anything is typed.
+const QUICK_REACTIONS: [&str; 10] = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🙏", "👀", "✅", "🔥"];
+
 #[derive(Debug, Clone)]
 pub struct EmojiPicker {
+    /// Index and id of the message to react to; `None` inserts into the draft.
+    pub react_to: Option<(usize, String)>,
     pub query: String,
     pub results: Vec<&'static Emoji>,
     pub selected: usize,
@@ -94,6 +99,7 @@ pub struct EmojiPicker {
 impl Default for EmojiPicker {
     fn default() -> Self {
         Self {
+            react_to: None,
             query: String::new(),
             results: emoji::search(""),
             selected: 0,
@@ -106,8 +112,25 @@ impl Default for EmojiPicker {
 }
 
 impl EmojiPicker {
+    pub fn for_reaction(index: usize, message_id: String) -> Self {
+        let mut picker = Self {
+            react_to: Some((index, message_id)),
+            ..Self::default()
+        };
+        picker.set_query(String::new());
+        picker
+    }
+
     pub fn set_query(&mut self, query: String) {
         self.results = emoji::search(&query);
+        if query.is_empty() && self.react_to.is_some() {
+            let quick: Vec<_> = QUICK_REACTIONS
+                .iter()
+                .filter_map(|e| emojis::get(e))
+                .collect();
+            self.results.retain(|e| !quick.contains(e));
+            self.results.splice(0..0, quick);
+        }
         self.query = query;
         self.selected = 0;
         self.scroll = 0;
@@ -140,11 +163,95 @@ impl EmojiPicker {
     }
 }
 
+/// The rows of the settings menu, in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    Theme,
+    SidebarWidth,
+    Mouse,
+    TypingNotices,
+    ReadReceipts,
+    Keys,
+    Logout,
+}
+
+impl Setting {
+    pub const ALL: [Setting; 7] = [
+        Setting::Theme,
+        Setting::SidebarWidth,
+        Setting::Mouse,
+        Setting::TypingNotices,
+        Setting::ReadReceipts,
+        Setting::Keys,
+        Setting::Logout,
+    ];
+
+    /// The heading shown above this row, if it starts a group.
+    pub fn heading(self) -> Option<&'static str> {
+        match self {
+            Setting::Theme => Some("Appearance"),
+            Setting::Mouse => Some("Behaviour"),
+            Setting::Keys => Some("Help"),
+            Setting::Logout => Some("Account"),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Setting::Theme => "Theme",
+            Setting::SidebarWidth => "Room list width",
+            Setting::Mouse => "Mouse",
+            Setting::TypingNotices => "Typing notices",
+            Setting::ReadReceipts => "Read receipts",
+            Setting::Keys => "Key bindings",
+            Setting::Logout => "Log out",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Setting::Theme => {
+                "Themes in the themes folder are listed too and reload when they change."
+            }
+            Setting::SidebarWidth => "You can also drag the line next to the room list.",
+            Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
+            Setting::TypingNotices => "Show others when you are typing.",
+            Setting::ReadReceipts => "Show others how far you have read.",
+            Setting::Keys => "Show all key bindings (F1).",
+            Setting::Logout => {
+                "Ends this session. Encrypted history needs your recovery key again."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SettingsMenu {
+    /// Index into `Setting::ALL`.
+    pub selected: usize,
+    /// Log out was chosen once; choosing it again does it.
+    pub confirm_logout: bool,
+}
+
+impl SettingsMenu {
+    pub fn current(&self) -> Setting {
+        Setting::ALL[self.selected.min(Setting::ALL.len() - 1)]
+    }
+
+    pub fn step(&mut self, delta: isize) {
+        let count = Setting::ALL.len() as isize;
+        self.selected = (self.selected as isize + delta).rem_euclid(count) as usize;
+        self.confirm_logout = false;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Modal {
     Login(LoginForm),
     Recovery(RecoveryForm),
     Emoji(EmojiPicker),
+    Settings(SettingsMenu),
 }
 
 #[cfg(test)]

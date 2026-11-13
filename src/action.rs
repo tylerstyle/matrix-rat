@@ -58,4 +58,5 @@ pub enum Action {
     RecoverySubmit,
     /// Esc on a popup.
     CloseModal,
+    OpenSettings,
 }

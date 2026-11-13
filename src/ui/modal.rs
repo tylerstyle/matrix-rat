@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use super::hit::HitId;
 use crate::action::Action;
 use crate::app::App;
-use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm};
+use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, Setting, SettingsMenu};
 use crate::text::{truncate, width};
 use crate::theme::{Role, Theme};
 
@@ -23,6 +23,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Login(form) => login(frame, app, area, form),
         Modal::Recovery(form) => recovery(frame, app, area, form),
         Modal::Emoji(picker) => emoji(frame, app, area, picker),
+        Modal::Settings(menu) => settings(frame, app, area, menu),
     }
     app.modal = Some(modal);
 }
@@ -135,6 +136,121 @@ fn button(frame: &mut Frame, theme: &Theme, rect: Rect, label: &str, focused: bo
         theme.style(Role::StatusKey)
     };
     frame.render_widget(Line::from(Span::styled(label.to_owned(), style)), rect);
+}
+
+fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
+    const LABEL: u16 = 20;
+    let headings = Setting::ALL
+        .iter()
+        .filter(|s| s.heading().is_some())
+        .count() as u16;
+    let rows = Setting::ALL.len() as u16 + headings;
+    // Blank lines between the groups only where there is room for them.
+    let airy = area.height >= rows + headings + 6;
+    let height = rows + if airy { headings + 1 } else { 0 } + 4;
+    let Some(rect) = centered(area, 60, height) else {
+        return;
+    };
+    let inner = popup(
+        frame,
+        app,
+        area,
+        rect,
+        "Settings",
+        "↑↓ select · ←→ change · Enter · Esc close",
+    );
+    let theme = app.theme.clone();
+    let mut y = 0;
+    for (index, setting) in Setting::ALL.into_iter().enumerate() {
+        if let Some(heading) = setting.heading() {
+            if airy && index > 0 {
+                y += 1;
+            }
+            frame.render_widget(
+                Line::from(Span::styled(heading, theme.style(Role::Muted))),
+                row(inner, y),
+            );
+            y += 1;
+        }
+        let rect = row(inner, y);
+        y += 1;
+        if rect.width <= LABEL + 6 {
+            continue;
+        }
+        let selected = menu.selected == index;
+        let value = app.setting_value(setting);
+        let label_style = if selected {
+            theme.style(Role::TitleFocused)
+        } else {
+            theme.style(Role::Text)
+        };
+        let marker = if selected { "› " } else { "  " };
+        let mut spans = vec![
+            Span::styled(marker, theme.style(Role::TitleFocused)),
+            Span::styled(
+                format!("{:<width$}", setting.label(), width = LABEL as usize),
+                label_style,
+            ),
+        ];
+        let value_x = rect.x + 2 + LABEL;
+        let room = (rect.right() - value_x) as usize;
+        app.hits.add(rect, HitId::Setting(index, 0));
+        match setting {
+            Setting::Theme | Setting::SidebarWidth => {
+                let shown = truncate(&value, room.saturating_sub(4));
+                let arrow = theme.style(Role::StatusKey);
+                let end = value_x + 2 + width(&shown) as u16;
+                spans.push(Span::styled("◂ ", arrow));
+                spans.push(Span::styled(shown, theme.style(Role::Text)));
+                spans.push(Span::styled(" ▸", arrow));
+                app.hits
+                    .add(Rect::new(value_x, rect.y, 2, 1), HitId::Setting(index, -1));
+                app.hits
+                    .add(Rect::new(end, rect.y, 2, 1), HitId::Setting(index, 1));
+            }
+            Setting::Mouse | Setting::TypingNotices | Setting::ReadReceipts => {
+                let on = value == "on";
+                let role = if on { Role::StatusOk } else { Role::Muted };
+                let dot = if on { "● " } else { "○ " };
+                spans.push(Span::styled(format!("{dot}{value}"), theme.style(role)));
+            }
+            Setting::Keys => spans.push(Span::styled("F1", theme.style(Role::StatusKey))),
+            Setting::Logout => {
+                if menu.confirm_logout {
+                    spans.push(Span::styled(
+                        truncate("Enter again to log out, Esc to stay", room),
+                        theme.style(Role::Error),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        truncate(&value, room),
+                        theme.style(Role::Muted),
+                    ));
+                }
+            }
+        }
+        frame.render_widget(Line::from(spans), rect);
+        let hovered = matches!(app.hover, Some(HitId::Setting(i, _)) if i == index);
+        if hovered && !selected {
+            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
+        }
+    }
+    // What the selected row does, at the bottom.
+    let hint_top = if airy { y + 1 } else { y };
+    if hint_top < inner.height {
+        let hint = Rect::new(
+            inner.x,
+            inner.y + hint_top,
+            inner.width,
+            (inner.height - hint_top).min(2),
+        );
+        frame.render_widget(
+            Paragraph::new(menu.current().hint())
+                .style(theme.style(Role::Muted))
+                .wrap(Wrap { trim: true }),
+            hint,
+        );
+    }
 }
 
 fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
@@ -321,8 +437,16 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
         app,
         area,
         rect,
-        "Emoji",
-        "↑↓←→ move · Enter insert · Esc close",
+        if picker.react_to.is_some() {
+            "React"
+        } else {
+            "Emoji"
+        },
+        if picker.react_to.is_some() {
+            "↑↓←→ move · Enter react · Esc close"
+        } else {
+            "↑↓←→ move · Enter insert · Esc close"
+        },
     );
     let theme = &app.theme;
     if inner.height < 3 || inner.width < CELL {

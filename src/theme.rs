@@ -22,6 +22,18 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../themes/catppuccin-latte.toml"),
     ),
     ("gruvbox-dark", include_str!("../themes/gruvbox-dark.toml")),
+    (
+        "gruvbox-light",
+        include_str!("../themes/gruvbox-light.toml"),
+    ),
+    ("tokyo-night", include_str!("../themes/tokyo-night.toml")),
+    ("nord", include_str!("../themes/nord.toml")),
+    ("dracula", include_str!("../themes/dracula.toml")),
+    ("rose-pine", include_str!("../themes/rose-pine.toml")),
+    (
+        "solarized-light",
+        include_str!("../themes/solarized-light.toml"),
+    ),
     ("terminal", include_str!("../themes/terminal.toml")),
 ];
 

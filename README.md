@@ -11,7 +11,27 @@ cargo run             # log in to your account
 cargo run -- --demo   # try the interface on built-in demo data
 ```
 
-`F1` shows all keys, `F3` cycles themes, `Alt-E` opens the emoji picker, `Ctrl-Q` quits.
+`F1` shows all keys, `F2` opens the settings, `F3` cycles themes, `Alt-E` opens the emoji
+picker, `Ctrl-Q` quits.
+
+## Installing
+
+To have `matrix-rat` on your `PATH` (theme generators that call `matrix-rat --reload-theme`
+need that):
+
+```sh
+cargo install --path .     # installs to ~/.cargo/bin
+nix-env -if .              # or with Nix
+```
+
+On NixOS, add it to your configuration instead:
+
+```nix
+environment.systemPackages = [ (pkgs.callPackage /path/to/matrix-rat { }) ];
+```
+
+Without installing, every `matrix-rat …` command in the documentation can be run from the
+repository as `cargo run -- …`.
 
 Planned:
 
@@ -27,7 +47,7 @@ Apache-2.0. Parts are adapted from [iamb](https://github.com/ulyssa/iamb) (Apach
 
 ## Themes
 
-Five themes are built in (`F3` cycles them); `theme = "terminal"` follows your terminal's
+Eleven themes are built in (`F3` cycles them, the settings menu `F2` lists them); `theme = "terminal"` follows your terminal's
 own colours. Theme files in `~/.config/matrix-rat/themes/` are reloaded the moment they
 change, so tools like Noctalia, matugen, wallust and pywal can recolour the app:
 see [contrib/themes/README.md](contrib/themes/README.md).

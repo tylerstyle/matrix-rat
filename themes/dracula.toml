@@ -1,0 +1,19 @@
+name = "dracula"
+
+[palette]
+bg = "#282a36"
+surface = "#343746"
+surface_high = "#44475a"
+fg = "#f8f8f2"
+muted = "#8891b8"
+outline = "#6272a4"
+primary = "#bd93f9"
+on_primary = "#282a36"
+secondary = "#8be9fd"
+accent = "#f1fa8c"
+error = "#ff5555"
+success = "#50fa7b"
+warning = "#ffb86c"
+
+[users]
+colors = ["#bd93f9", "#8be9fd", "#50fa7b", "#f1fa8c", "#ffb86c", "#ff79c6", "#9aedfe", "#ff5555"]
