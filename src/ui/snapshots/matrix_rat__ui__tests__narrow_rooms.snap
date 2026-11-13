@@ -2,7 +2,7 @@
 source: src/ui/mod.rs
 expression: "render(&mut app, 50, 20)"
 ---
-"╭ 1 Rooms ───────────────────────────────────────╮"
+"╭ 1 Rooms ──────────────────────────────────── + ╮"
 "│ type to filter…                                │"
 "│ Favourites                                     │"
 "│▌R  rust                                        │"

@@ -26,6 +26,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Settings(menu) => settings(frame, app, area, menu),
         Modal::Verify(popup) => super::verify::draw(frame, app, area, popup),
         Modal::Palette(palette) => super::palette::draw(frame, app, area, palette),
+        Modal::New(form) => super::roominfo::draw_new(frame, app, area, form),
+        Modal::RoomInfo(info) => super::roominfo::draw_info(frame, app, area, info),
     }
     app.modal = Some(modal);
 }

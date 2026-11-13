@@ -2,7 +2,7 @@
 source: src/ui/mod.rs
 expression: "render(&mut app, 100, 16)"
 ---
-"╭ 1 Rooms ─────────────╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
 "│ / ma                 ││                                                                         ││"
 "│ Favourites           ││● alice  09:15                                                           ││"
 "│ M  matrix-rat        ││  ┃ carol: Morning! Is the sliding sync proxy still needed?              ││"

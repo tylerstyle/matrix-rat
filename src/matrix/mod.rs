@@ -2,6 +2,7 @@
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
 mod convert;
+mod manage;
 mod media;
 mod notify;
 mod rooms;
@@ -11,6 +12,9 @@ mod threads;
 mod upload;
 mod verify;
 
+pub use manage::{
+    Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomMember,
+};
 pub use notify::Notice;
 pub use spaces::SpaceSummary;
 pub use verify::{
@@ -156,6 +160,8 @@ pub enum MatrixCmd {
     FetchMembers {
         room_id: String,
     },
+    /// Joining, creating, leaving and looking at rooms.
+    Manage(ManageCmd),
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -197,6 +203,7 @@ impl std::fmt::Debug for MatrixCmd {
                 write!(f, "SendFiles({room_id}, {} files)", files.len())
             }
             Self::FetchMembers { room_id } => write!(f, "FetchMembers({room_id})"),
+            Self::Manage(command) => write!(f, "Manage({command:?})"),
         }
     }
 }
@@ -324,6 +331,8 @@ pub enum MatrixEvent {
         members: Vec<crate::complete::Member>,
         can_mention_room: bool,
     },
+    /// An answer to a [`MatrixCmd::Manage`].
+    Manage(ManageEvent),
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -387,6 +396,7 @@ impl std::fmt::Debug for MatrixEvent {
                 "RoomMembers({room_id}, {} members, room_mention: {can_mention_room})",
                 members.len()
             ),
+            Self::Manage(event) => write!(f, "Manage({event:?})"),
         }
     }
 }
@@ -640,6 +650,7 @@ impl Worker {
         pin_mut!(space_changes);
         self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
 
+        let mut manager = manage::Manager::new(client.clone(), self.events.clone());
         let end = loop {
             tokio::select! {
                 Some(diffs) = space_changes.next() => {
@@ -688,11 +699,13 @@ impl Worker {
                     Some(MatrixCmd::Shutdown) | None => break SessionEnd::Shutdown,
                     Some(MatrixCmd::Logout) => break SessionEnd::LoggedOut,
                     Some(MatrixCmd::Verification(command)) => verifier.handle(command).await,
+                    Some(MatrixCmd::Manage(command)) => manager.handle(command),
                     Some(command) => timelines.handle(command).await,
                 },
             }
         };
         verifier.stop().await;
+        manager.stop();
         timelines.close();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;

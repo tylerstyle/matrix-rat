@@ -2,7 +2,7 @@
 source: src/app/attach.rs
 expression: "screen(&mut app, 70, 16)"
 ---
-"╭ 1 Rooms ─────────────╮╭ 2 #rust ───────────────────────────────────╮"
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ───────────────────────────────────╮"
 "│ Filter rooms…        ││  Good to know, thanks. (edited)           ││"
 "│ Favourites           ││                                           ││"
 "│▌R  rust              ││● dave  10:02                              ││"

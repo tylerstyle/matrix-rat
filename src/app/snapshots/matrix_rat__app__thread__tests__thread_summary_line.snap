@@ -2,7 +2,7 @@
 source: src/app/thread.rs
 expression: "screen(&mut app, &mut terminal)"
 ---
-"╭ 1 Rooms ─────────────╮╭ 2 #matrix-rat ───────────────────────────────────────────────────────────╮"
+"╭ 1 Rooms ────────── + ╮╭ 2 #matrix-rat ───────────────────────────────────────────────────────────╮"
 "│ Filter rooms…        ││                                                                          │"
 "│ Favourites           ││                                                                          │"
 "│ R  rust              ││                                                                          │"

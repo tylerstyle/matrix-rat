@@ -247,6 +247,22 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        Char('n'),
+        CTRL,
+        Action::NewRoom,
+        "Ctrl-N",
+        "New chat or room…",
+    ),
+    bind(
+        Global,
+        KeyCode::F(4),
+        NONE,
+        Action::RoomInfo,
+        "F4",
+        "Room info and members",
+    ),
+    bind(
+        Global,
         Char('z'),
         CTRL,
         Action::Suspend,

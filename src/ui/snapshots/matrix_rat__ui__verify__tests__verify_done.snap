@@ -2,7 +2,7 @@
 source: src/ui/verify.rs
 expression: "render(&mut app, 100, 24)"
 ---
-"╭ 1 Rooms ─────────────╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
 "│ Filter rooms…        ││  Yes — startup is instant now. Room previews come straight from disk.   ││"
 "│ Favourites           ││   👍 2   🎉 1                                                           ││" Hidden by multi-width symbols: [(29, " "), (36, " ")]
 "│▌R  rust              ││  Back-pagination also survives restarts, which is a big deal for large  ││"

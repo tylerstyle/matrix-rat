@@ -18,6 +18,8 @@ cargo run -- --demo   # try the interface on built-in demo data
 picker, `Ctrl-Q` quits.
 `Ctrl-P` opens the command palette (actions, rooms, themes, settings), `Ctrl-↑`/`Ctrl-↓` switch
 rooms, `Alt-A` attaches a file (or drop one into the terminal).
+`Ctrl-N` joins a room by its address, starts a direct chat or creates a room; `F4` shows the
+room's details and members, and is where you invite people, rename, mute, favourite or leave.
 On a selected message: `t` opens its thread, `Enter` replies, `e` edits, `r` reacts, `o` opens a link, picture or
 file, `s` saves a file or picture to the download folder (set it in the settings).
 

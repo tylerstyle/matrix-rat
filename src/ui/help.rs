@@ -90,7 +90,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         inner.width.saturating_sub(2),
         inner.height,
     );
-    let [keys, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    // The keys come first: the mouse hint only where it does not cost one of them.
+    let hint_rows = u16::from(inner.height as usize > rows);
+    let [keys, hint] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(hint_rows)]).areas(inner);
     if two_columns {
         let [a, b] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(keys);
         frame.render_widget(Paragraph::new(left), a);

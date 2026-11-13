@@ -2,7 +2,7 @@
 source: src/ui/verify.rs
 expression: "render(&mut app, 100, 8)"
 ---
-"╭ 1 Rooms ─────────────╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
 "│ Filter rooms…        ││● dave  10:02                                                            ││"
 "│ Favourites           ││  Shipping a TUI client on top of it this week 🐀                        ┃│" Hidden by multi-width symbols: [(73, " ")]
 "│▌R  rust              │╰ carol is typing… ────────────────────────────────────────────────────────╯"

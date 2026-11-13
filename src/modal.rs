@@ -275,6 +275,9 @@ pub enum Modal {
     Settings(SettingsMenu),
     Verify(crate::verify::VerifyPopup),
     Palette(crate::palette::Palette),
+    /// Join a room, start a direct chat, create a room, or invite someone.
+    New(crate::manage::NewPopup),
+    RoomInfo(crate::manage::InfoPopup),
 }
 
 #[cfg(test)]

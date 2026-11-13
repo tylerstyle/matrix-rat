@@ -877,20 +877,15 @@ mod tests {
         images::demo_picture(300, 200)
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
-        // The first room where the test user is allowed to.
-        let mut room_id = None;
-        for room in uploader.joined_rooms() {
-            if !room.encryption_state().is_encrypted()
-                && room
-                    .upload_avatar(&mime::IMAGE_PNG, png.clone(), None)
-                    .await
-                    .is_ok()
-            {
-                room_id = Some(room.room_id().to_string());
-                break;
-            }
-        }
-        let room_id = room_id.expect("an unencrypted room whose picture the test user may set");
+        // A room of its own, so the test user is certainly allowed to set the picture.
+        let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+        request.name = Some(format!("Avatar test {}", std::process::id()));
+        let own_room = uploader.create_room(request).await.unwrap();
+        own_room
+            .upload_avatar(&mime::IMAGE_PNG, png.clone(), None)
+            .await
+            .expect("the picture of an own room can be set");
+        let room_id = own_room.room_id().to_string();
 
         let root = std::env::temp_dir().join(format!("matrix-rat-avatar-{}", std::process::id()));
         let paths = Paths {
@@ -943,6 +938,7 @@ mod tests {
         assert!(width > 0 && width <= AVATAR_PIXELS.0, "{width}");
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
+        let _ = own_room.leave().await;
         let _ = std::fs::remove_dir_all(root);
     }
 }

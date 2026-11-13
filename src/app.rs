@@ -5,6 +5,7 @@ mod complete;
 mod files;
 mod media;
 mod palette;
+mod rooms;
 mod thread;
 mod verify;
 
@@ -215,6 +216,8 @@ pub struct App {
     pub attach: attach::AttachState,
     /// Composer completions and tracked mentions/room links.
     pub complete: complete::CompleteState,
+    /// Joining, creating and leaving rooms.
+    manage: rooms::ManageState,
 }
 
 impl App {
@@ -325,6 +328,7 @@ impl App {
             threads: Default::default(),
             attach: Default::default(),
             complete: Default::default(),
+            manage: Default::default(),
         }
     }
 
@@ -670,6 +674,7 @@ impl App {
         self.images.clear();
         self.attach.clear();
         self.complete.reset_session();
+        self.manage = Default::default();
         self.sync = Some(SyncStatus::Stopped);
     }
 
@@ -1526,6 +1531,11 @@ impl App {
                 }
             }
             Action::Setting(setting) => self.perform_setting(setting),
+            Action::NewRoom
+            | Action::RoomInfo
+            | Action::LeaveRoom
+            | Action::InviteUser
+            | Action::Manage(_) => self.perform_manage(action),
         }
     }
 
@@ -1597,6 +1607,7 @@ impl App {
             }
             Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_)) => self.modal = None,
             Some(Modal::Verify(_)) => self.verify_escape(),
+            Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_escape(),
             None => {}
         }
     }
@@ -1645,6 +1656,7 @@ impl App {
                         password.clear();
                     }
                 }
+                Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_clear_input(),
                 _ => {}
             }
             return;
@@ -1747,6 +1759,7 @@ impl App {
             }
             Some(Modal::Verify(_)) => self.on_verify_key(code, mods),
             Some(Modal::Palette(_)) => self.on_palette_key(code, mods),
+            Some(Modal::New(_) | Modal::RoomInfo(_)) => self.on_manage_key(code, mods),
             None => {}
         }
     }
@@ -1784,7 +1797,11 @@ impl App {
             MatrixEvent::Sync(status) => self.sync = Some(status),
             // News of a session that has ended must not bring its rooms back.
             MatrixEvent::Rooms(_) if self.logged_out => {}
-            MatrixEvent::Rooms(rooms) => self.apply_rooms(rooms),
+            MatrixEvent::Rooms(rooms) => {
+                self.apply_rooms(rooms);
+                // A room that was just joined or created is opened when it is listed.
+                self.open_pending_room();
+            }
             MatrixEvent::Recovery(status) => {
                 // Takes precedence over the emoji picker, never over the login form.
                 let free = matches!(self.modal, None | Some(Modal::Emoji(_)));
@@ -1868,6 +1885,7 @@ impl App {
                 members,
                 can_mention_room,
             } => self.on_room_members(room_id, members, can_mention_room),
+            MatrixEvent::Manage(event) => self.on_manage(event),
         }
     }
 
@@ -2228,6 +2246,7 @@ impl App {
                 palette.push_str(first_line);
                 return;
             }
+            Some(Modal::New(_) | Modal::RoomInfo(_)) => return self.on_manage_paste(first_line),
             None => {}
         }
         // The picture viewer and the help cover the composer: nothing is pasted
@@ -2271,6 +2290,7 @@ impl App {
                         ) {
                             self.modal = None;
                         }
+                        self.close_manage();
                     }
                     Some(HitId::Field(slot)) => {
                         if let Some(Modal::Login(form)) = &mut self.modal
@@ -2373,7 +2393,10 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                if matches!(self.modal, Some(Modal::Emoji(_) | Modal::Palette(_))) =>
+                if matches!(
+                    self.modal,
+                    Some(Modal::Emoji(_) | Modal::Palette(_) | Modal::RoomInfo(_))
+                ) =>
             {
                 let delta = if mouse.kind == MouseEventKind::ScrollUp {
                     -2
@@ -2383,6 +2406,7 @@ impl App {
                 match &mut self.modal {
                     Some(Modal::Emoji(picker)) => picker.scroll_by(delta),
                     Some(Modal::Palette(palette)) => palette.scroll_by(delta),
+                    Some(Modal::RoomInfo(_)) => self.manage_scroll(delta),
                     _ => {}
                 }
                 self.dirty = true;

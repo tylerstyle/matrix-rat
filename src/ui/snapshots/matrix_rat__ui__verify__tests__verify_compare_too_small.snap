@@ -2,7 +2,7 @@
 source: src/ui/verify.rs
 expression: "render(&mut app, 100, 14)"
 ---
-"╭ 1 Rooms ─────────────╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
 "│ Filter rooms…        ││  ┃ carol: Morning! Is the sliding sync proxy still needed?              ││"
 "│ Favourites           ││  No, it is native in the homeserver now.                                ││"
 "│▌R  rust        ╭ Verify this device ────────────────────────────────────────────╮               ││"
