@@ -37,6 +37,8 @@ pub struct Config {
     pub download_dir: String,
     /// How pictures are shown: "auto", "halfblocks" or "off".
     pub images: ImageMode,
+    /// Where the local store passphrase is kept: "auto", "keyring" or "file".
+    pub secret_store: crate::matrix::SecretStoreMode,
     /// Optional key-binding preset (`"default"` or `"vim"`). Validated by `keymap`.
     pub preset: Option<toml::Value>,
     /// Key-binding overrides (`[keys]` / `[keys.<context>]`). Validated by `keymap`.
@@ -101,6 +103,7 @@ impl Default for Config {
             room_previews: true,
             download_dir: String::new(),
             images: ImageMode::Auto,
+            secret_store: crate::matrix::SecretStoreMode::File,
             preset: None,
             keys: None,
             raw_keys: None,
@@ -624,6 +627,21 @@ mod tests {
             assert_eq!(config.images, mode);
         }
         assert!(toml::from_str::<Config>("images = \"sixel\"").is_err());
+    }
+
+    #[test]
+    fn secret_store_modes() {
+        use crate::matrix::SecretStoreMode;
+        assert_eq!(Config::default().secret_store, SecretStoreMode::File);
+        for (text, mode) in [
+            ("auto", SecretStoreMode::Auto),
+            ("keyring", SecretStoreMode::Keyring),
+            ("file", SecretStoreMode::File),
+        ] {
+            let config: Config = toml::from_str(&format!("secret_store = \"{text}\"")).unwrap();
+            assert_eq!(config.secret_store, mode);
+        }
+        assert!(toml::from_str::<Config>("secret_store = \"tpm\"").is_err());
     }
 
     #[test]

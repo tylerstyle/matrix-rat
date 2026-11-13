@@ -1906,9 +1906,25 @@ impl App {
         if form.busy.is_some() {
             return;
         }
+        if browser && !form.allows_browser() {
+            return;
+        }
+        if !browser && !form.allows_password() {
+            return;
+        }
         form.error = None;
         form.browser_url = None;
-        let command = if browser {
+        let command = if form.is_reauth() {
+            if browser {
+                form.busy = Some("Waiting for your browser…".to_owned());
+                MatrixCmd::ReauthBrowser
+            } else {
+                form.busy = Some("Re-authenticating…".to_owned());
+                MatrixCmd::ReauthPassword {
+                    password: std::mem::take(&mut form.password),
+                }
+            }
+        } else if browser {
             form.busy = Some("Waiting for your browser…".to_owned());
             MatrixCmd::LoginBrowser {
                 homeserver: form.homeserver.clone(),
@@ -2025,8 +2041,12 @@ impl App {
                     KeyCode::BackTab | KeyCode::Up => form.previous(),
                     KeyCode::Enter => match form.focus {
                         LoginForm::BROWSER_BUTTON => self.submit_login(true),
-                        focus if focus + 1 < LoginForm::FIELDS => form.next(),
-                        _ => self.submit_login(false),
+                        LoginForm::PASSWORD_BUTTON => self.submit_login(false),
+                        focus if !form.is_reauth() && focus + 1 < LoginForm::FIELDS => form.next(),
+                        _ => {
+                            let browser = !form.allows_password();
+                            self.submit_login(browser);
+                        }
                     },
                     KeyCode::Backspace => {
                         if let Some(field) = form.field_mut() {
@@ -2126,6 +2146,10 @@ impl App {
             MatrixEvent::NeedLogin { reason } => {
                 self.reset_session();
                 self.open_modal(Modal::Login(LoginForm::new(reason)));
+            }
+            MatrixEvent::NeedReauth { target, reason } => {
+                self.reset_session();
+                self.open_modal(Modal::Login(LoginForm::reauth(target, reason)));
             }
             MatrixEvent::LoginFailed(error) => {
                 if let Some(Modal::Login(form)) = &mut self.modal {
@@ -2696,7 +2720,7 @@ impl App {
                         if let Some(Modal::Login(form)) = &mut self.modal
                             && form.busy.is_none()
                         {
-                            form.focus = slot;
+                            form.focus_slot(slot);
                         }
                     }
                     Some(HitId::Emoji(index)) => {
@@ -2911,7 +2935,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     let (matrix, mut matrix_events) = if demo {
         (None, None)
     } else {
-        let (handle, events) = matrix::spawn(paths.clone());
+        let (handle, events) = matrix::spawn_with(paths.clone(), config.secret_store);
         (Some(handle), Some(events))
     };
     let mut app = App::new_in_scheme(config, paths.themes_dir(), matrix.clone(), initial_scheme);
@@ -3458,6 +3482,71 @@ mod tests {
         let (col, row) = find(&terminal, "Later");
         app.on_event(click(col, row));
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn reauth_flow_keeps_identity_fixed_and_submits_reauth() {
+        use crate::matrix::{MatrixEvent, ReauthKind, ReauthTarget};
+        let (mut app, _terminal, mut commands) = connected();
+        while commands.try_recv().is_ok() {}
+
+        let pw_target = ReauthTarget {
+            homeserver: "https://example.org".into(),
+            user_id: "@alice:example.org".into(),
+            device_id: "DEV1".into(),
+            kind: ReauthKind::Password,
+            client_id: None,
+        };
+        app.on_matrix(MatrixEvent::NeedReauth {
+            target: pw_target,
+            reason: "Your session expired.".into(),
+        });
+        assert!(matches!(app.modal, Some(Modal::Login(_))));
+
+        // Typing goes straight to password; fixed homeserver & account stay untouched even on Tab.
+        type_text(&mut app, "secretpw");
+        app.on_event(key(KeyCode::Tab));
+        {
+            let Some(Modal::Login(form)) = &app.modal else {
+                panic!("expected Login modal");
+            };
+            assert!(form.is_reauth());
+            assert_eq!(form.homeserver, "https://example.org");
+            assert_eq!(form.username, "@alice:example.org");
+            assert_eq!(form.password, "secretpw");
+            assert_eq!(form.focus, crate::modal::LoginForm::PASSWORD_BUTTON);
+        }
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            MatrixCmd::ReauthPassword { password } if password == "secretpw"
+        ));
+
+        // Failure keeps re-authenticate mode open so the user can retry.
+        app.on_matrix(MatrixEvent::LoginFailed("wrong password".into()));
+        let Some(Modal::Login(form)) = &app.modal else {
+            panic!("expected Login modal");
+        };
+        assert!(form.is_reauth());
+        assert_eq!(form.error.as_deref(), Some("wrong password"));
+
+        // Browser re-auth immediately focuses the browser button and dispatches ReauthBrowser.
+        app.on_matrix(MatrixEvent::NeedReauth {
+            target: ReauthTarget {
+                homeserver: "https://sso.example.org".into(),
+                user_id: "@alice:sso.example.org".into(),
+                device_id: "DEV2".into(),
+                kind: ReauthKind::Browser,
+                client_id: Some("cid-1".into()),
+            },
+            reason: "Your session expired.".into(),
+        });
+        type_text(&mut app, "ignored");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            MatrixCmd::ReauthBrowser
+        ));
     }
 
     #[test]

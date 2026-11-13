@@ -130,7 +130,7 @@ fn parse_setting_changed_message(msg: &Message) -> Option<ColorScheme> {
     variant_u32(&value).and_then(parse_portal_color_scheme)
 }
 
-fn in_ssh_session() -> bool {
+pub(crate) fn in_ssh_session() -> bool {
     is_ssh_env(|name| std::env::var_os(name))
 }
 
