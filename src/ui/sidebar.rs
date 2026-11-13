@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
 use super::hit::HitId;
@@ -41,6 +41,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Filter line.
     let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let mut filter_cursor = None;
     let filter = if app.sidebar.filter.is_empty() && !focused {
         Line::from(Span::styled(
             " Filter rooms…",
@@ -52,12 +53,22 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             theme.style(Role::Placeholder),
         ))
     } else {
-        Line::from(vec![
-            Span::styled(" / ", theme.style(Role::StatusKey)),
-            Span::raw(app.sidebar.filter.clone()),
-        ])
+        let key_style = theme.style(Role::StatusKey);
+        let max_cols = (filter_area.width as usize).saturating_sub(4);
+        let view = app.sidebar.filter.view(max_cols, false);
+        filter_cursor = (focused && !app.help_open && app.modal.is_none()).then(|| {
+            Position::new(
+                (filter_area.x + 3 + view.cursor_col as u16)
+                    .min(filter_area.right().saturating_sub(1)),
+                filter_area.y,
+            )
+        });
+        Line::from(vec![Span::styled(" / ", key_style), Span::raw(view.text)])
     };
     frame.render_widget(&filter, filter_area);
+    if let Some(pos) = filter_cursor {
+        frame.set_cursor_position(pos);
+    }
     app.hits.add(filter_area, HitId::RoomFilter);
 
     // With spaces: one line that says which one the list is narrowed to, with arrows

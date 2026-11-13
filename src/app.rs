@@ -31,6 +31,7 @@ use crate::composer::Composer;
 use crate::config::Config;
 use crate::format::Outgoing;
 use crate::keymap::{self, Context, Keymap};
+use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::{
     self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
     SyncStatus,
@@ -42,7 +43,7 @@ use crate::model::{
 use crate::paths::Paths;
 use crate::terminal::{self, TerminalGuard};
 use crate::theme::{ColorScheme, DEFAULT_THEME, Theme, truecolor_supported};
-use crate::ui::hit::{Button, HitId, HitMap};
+use crate::ui::hit::{Button, HitId, HitMap, InputTarget};
 use crate::ui::{self, SIDEBAR_MIN, max_sidebar};
 
 const TOAST_TIME: Duration = Duration::from_secs(3);
@@ -80,7 +81,7 @@ pub enum SideRow {
 pub struct SidebarState {
     /// Position of the keyboard cursor among the visible rooms.
     pub cursor: usize,
-    pub filter: String,
+    pub filter: LineEdit,
     pub width: u16,
     pub scroll: usize,
     pub reveal_cursor: bool,
@@ -790,7 +791,7 @@ impl App {
                 if delta == 0
                     && let Some(Modal::Settings(menu)) = &mut self.modal
                 {
-                    menu.editing = Some(self.download_dir.clone());
+                    menu.editing = Some(LineEdit::from(self.download_dir.as_str()));
                 }
             }
             Setting::Keys => {
@@ -1921,20 +1922,20 @@ impl App {
             } else {
                 form.busy = Some("Re-authenticating…".to_owned());
                 MatrixCmd::ReauthPassword {
-                    password: std::mem::take(&mut form.password),
+                    password: form.password.take_string(),
                 }
             }
         } else if browser {
             form.busy = Some("Waiting for your browser…".to_owned());
             MatrixCmd::LoginBrowser {
-                homeserver: form.homeserver.clone(),
+                homeserver: form.homeserver.as_str().to_owned(),
             }
         } else {
             form.busy = Some("Logging in…".to_owned());
             MatrixCmd::LoginPassword {
-                homeserver: form.homeserver.clone(),
-                username: form.username.clone(),
-                password: std::mem::take(&mut form.password),
+                homeserver: form.homeserver.as_str().to_owned(),
+                username: form.username.as_str().to_owned(),
+                password: form.password.take_string(),
             }
         };
         self.send_matrix(command);
@@ -1950,7 +1951,7 @@ impl App {
         form.busy = true;
         form.error = None;
         // Not kept in the form once it is on its way.
-        let key = std::mem::take(&mut form.key);
+        let key = form.key.take_string();
         self.send_matrix(MatrixCmd::Recover { key });
     }
 
@@ -2001,33 +2002,6 @@ impl App {
 
     fn on_modal_key(&mut self, key: KeyEvent, code: KeyCode, mods: KeyModifiers) {
         let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
-        // Ctrl-U clears the input being typed into.
-        if (code, mods) == (KeyCode::Char('u'), KeyModifiers::CONTROL) {
-            match self.modal.as_mut() {
-                Some(Modal::Login(form)) if form.busy.is_none() => {
-                    if let Some(field) = form.field_mut() {
-                        field.clear();
-                    }
-                }
-                Some(Modal::Recovery(form)) if !form.busy => form.key.clear(),
-                Some(Modal::Emoji(picker)) => picker.set_query(String::new()),
-                Some(Modal::Palette(palette)) => palette.set_query(String::new()),
-                Some(Modal::Search(_)) => self.search_clear(),
-                Some(Modal::Settings(menu)) => {
-                    if let Some(text) = &mut menu.editing {
-                        text.clear();
-                    }
-                }
-                Some(Modal::Verify(popup)) => {
-                    if let Some(password) = &mut popup.password {
-                        password.clear();
-                    }
-                }
-                Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_clear_input(),
-                _ => {}
-            }
-            return;
-        }
         match self.modal.as_mut() {
             Some(Modal::Login(form)) => {
                 if form.busy.is_some() {
@@ -2048,28 +2022,20 @@ impl App {
                             self.submit_login(browser);
                         }
                     },
-                    KeyCode::Backspace => {
+                    _ => {
                         if let Some(field) = form.field_mut() {
-                            field.pop();
+                            field.handle_key(code, mods, EditKeys::FULL);
                         }
                     }
-                    KeyCode::Char(c) if plain => {
-                        if let Some(field) = form.field_mut() {
-                            field.push(c);
-                        }
-                    }
-                    _ => {}
                 }
             }
             Some(Modal::Recovery(form)) => match code {
                 KeyCode::Esc => self.close_modal(),
                 _ if form.busy => {}
                 KeyCode::Enter => self.submit_recovery(),
-                KeyCode::Backspace => {
-                    form.key.pop();
+                _ => {
+                    form.key.handle_key(code, mods, EditKeys::FULL);
                 }
-                KeyCode::Char(c) if plain => form.key.push(c),
-                _ => {}
             },
             Some(Modal::Emoji(picker)) => {
                 let columns = picker.columns.max(1) as isize;
@@ -2081,23 +2047,23 @@ impl App {
                             self.pick_emoji(emoji.as_str());
                         }
                     }
-                    KeyCode::Left => picker.step(-1),
-                    KeyCode::Right => picker.step(1),
+                    KeyCode::Left if plain => picker.step(-1),
+                    KeyCode::Right if plain => picker.step(1),
                     KeyCode::Up => picker.step(-columns),
                     KeyCode::Down => picker.step(columns),
                     KeyCode::PageUp => picker.step(-page),
                     KeyCode::PageDown => picker.step(page),
-                    KeyCode::Backspace => {
-                        let mut query = std::mem::take(&mut picker.query);
-                        query.pop();
-                        picker.set_query(query);
+                    _ => {
+                        // Plain Left/Right step the emoji grid; word motion and
+                        // line-edit shortcuts still edit the search query.
+                        let keys = EditKeys {
+                            arrows: false,
+                            ..EditKeys::FULL
+                        };
+                        if picker.query.handle_key(code, mods, keys).changed() {
+                            picker.refilter();
+                        }
                     }
-                    KeyCode::Char(c) if plain => {
-                        let mut query = std::mem::take(&mut picker.query);
-                        query.push(c);
-                        picker.set_query(query);
-                    }
-                    _ => {}
                 }
             }
             Some(Modal::Settings(menu)) if menu.editing.is_some() => match code {
@@ -2106,15 +2072,11 @@ impl App {
                     let text = menu.editing.take().unwrap_or_default();
                     self.set_download_dir(&text);
                 }
-                KeyCode::Backspace => {
-                    menu.editing.as_mut().map(String::pop);
-                }
-                KeyCode::Char(c) if plain => {
+                _ => {
                     if let Some(text) = &mut menu.editing {
-                        text.push(c);
+                        text.handle_key(code, mods, EditKeys::FULL);
                     }
                 }
-                _ => {}
             },
             Some(Modal::Settings(menu)) => {
                 let setting = menu.current();
@@ -2547,15 +2509,17 @@ impl App {
         }
         match self.focus {
             Pane::Composer => self.edit_composer(code, mods),
-            Pane::Sidebar => match (code, mods) {
-                (KeyCode::Char(c), KeyModifiers::NONE) => self.type_char(c),
-                (KeyCode::Backspace, _) => {
-                    self.sidebar.filter.pop();
+            Pane::Sidebar => {
+                if self
+                    .sidebar
+                    .filter
+                    .handle_key(code, mods, EditKeys::FULL)
+                    .changed()
+                {
                     self.sidebar.cursor = 0;
                     self.sidebar.reveal_cursor = true;
                 }
-                _ => {}
-            },
+            }
             // Unbound keys do nothing here; they are never typed into the draft.
             Pane::Timeline => {}
         }
@@ -2578,9 +2542,16 @@ impl App {
     pub fn type_char(&mut self, c: char) {
         match self.focus {
             Pane::Sidebar => {
-                self.sidebar.filter.push(c);
-                self.sidebar.cursor = 0;
-                self.sidebar.reveal_cursor = true;
+                let mut buf = [0u8; 4];
+                if self
+                    .sidebar
+                    .filter
+                    .insert(c.encode_utf8(&mut buf))
+                    .changed()
+                {
+                    self.sidebar.cursor = 0;
+                    self.sidebar.reveal_cursor = true;
+                }
             }
             Pane::Composer => self.composer.insert(c.encode_utf8(&mut [0; 4])),
             Pane::Timeline => {}
@@ -2629,30 +2600,33 @@ impl App {
                 if form.busy.is_none()
                     && let Some(field) = form.field_mut()
                 {
-                    field.push_str(first_line);
+                    field.paste(first_line);
                 }
                 return;
             }
             Some(Modal::Recovery(form)) => {
                 if !form.busy {
-                    form.key.push_str(first_line);
+                    form.key.paste(first_line);
                 }
                 return;
             }
             Some(Modal::Emoji(picker)) => {
-                let query = format!("{}{first_line}", picker.query);
-                picker.set_query(query);
+                if picker.query.paste(first_line).changed() {
+                    picker.refilter();
+                }
                 return;
             }
             Some(Modal::Settings(menu)) => {
                 if let Some(typed) = &mut menu.editing {
-                    typed.push_str(first_line);
+                    typed.paste(first_line);
                 }
                 return;
             }
             Some(Modal::Verify(_)) => return self.on_verify_paste(first_line),
             Some(Modal::Palette(palette)) => {
-                palette.push_str(first_line);
+                if palette.query.paste(first_line).changed() {
+                    palette.on_query_changed();
+                }
                 return;
             }
             Some(Modal::Search(_)) => return self.search_paste(first_line),
@@ -2673,10 +2647,15 @@ impl App {
         }
         match self.focus {
             Pane::Sidebar => {
-                self.sidebar
+                if self
+                    .sidebar
                     .filter
-                    .push_str(text.lines().next().unwrap_or(""));
-                self.sidebar.cursor = 0;
+                    .paste(text.lines().next().unwrap_or(""))
+                    .changed()
+                {
+                    self.sidebar.cursor = 0;
+                    self.sidebar.reveal_cursor = true;
+                }
             }
             _ => {
                 self.set_focus(Pane::Composer);
@@ -2687,7 +2666,8 @@ impl App {
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent) {
-        let hit = self.hits.at(mouse.column, mouse.row);
+        let hit_rect = self.hits.at_rect(mouse.column, mouse.row);
+        let hit = hit_rect.map(|(_, id)| id);
         if self.menu_mouse(&mouse, hit) {
             return;
         }
@@ -2716,12 +2696,18 @@ impl App {
                         }
                         self.close_manage();
                     }
-                    Some(HitId::Field(slot)) => {
-                        if let Some(Modal::Login(form)) = &mut self.modal
-                            && form.busy.is_none()
-                        {
-                            form.focus_slot(slot);
+                    Some(HitId::Field(slot)) => match &mut self.modal {
+                        Some(Modal::Login(form)) if form.busy.is_none() => form.focus_slot(slot),
+                        Some(Modal::Verify(popup)) => {
+                            popup.field_focused = true;
+                            popup.focus = None;
                         }
+                        _ => {}
+                    },
+                    Some(HitId::Input(target)) => {
+                        let rel_col = hit_rect
+                            .map_or(0, |(rect, _)| mouse.column.saturating_sub(rect.x) as usize);
+                        self.click_input(target, rel_col);
                     }
                     Some(HitId::Emoji(index)) => {
                         let emoji = match &self.modal {
@@ -2749,7 +2735,14 @@ impl App {
                     }
                     Some(HitId::Splitter) => self.dragging_splitter = true,
                     Some(HitId::Room(index)) => self.open_room(index),
-                    Some(HitId::RoomFilter) => self.set_focus(Pane::Sidebar),
+                    Some(HitId::RoomFilter) => {
+                        self.set_focus(Pane::Sidebar);
+                        if let Some((rect, _)) = hit_rect {
+                            let rel_col =
+                                mouse.column.saturating_sub(rect.x.saturating_add(3)) as usize;
+                            self.sidebar.filter.place(rel_col, false);
+                        }
+                    }
                     Some(HitId::Message(index)) => {
                         self.set_focus(Pane::Timeline);
                         if self.selectable(index) {
@@ -2891,6 +2884,89 @@ impl App {
                 self.dirty = true;
             }
             _ => {}
+        }
+    }
+
+    fn click_input(&mut self, target: InputTarget, rel_col: usize) {
+        match target {
+            InputTarget::Login(slot) => {
+                if let Some(Modal::Login(form)) = &mut self.modal
+                    && form.busy.is_none()
+                {
+                    form.focus_slot(slot);
+                    if let Some(field) = form.field_at_mut(slot) {
+                        field.place(rel_col, slot == 2);
+                    }
+                }
+            }
+            InputTarget::Recovery => {
+                if let Some(Modal::Recovery(form)) = &mut self.modal
+                    && !form.busy
+                {
+                    form.key.place(rel_col, false);
+                }
+            }
+            InputTarget::DownloadDir => {
+                if let Some(Modal::Settings(menu)) = &mut self.modal
+                    && let Some(text) = &mut menu.editing
+                {
+                    text.place(rel_col, false);
+                }
+            }
+            InputTarget::EmojiQuery => {
+                if let Some(Modal::Emoji(picker)) = &mut self.modal {
+                    picker.query.place(rel_col, false);
+                }
+            }
+            InputTarget::PaletteQuery => {
+                if let Some(Modal::Palette(palette)) = &mut self.modal {
+                    palette.query.place(rel_col, false);
+                }
+            }
+            InputTarget::SearchQuery => {
+                if let Some(Modal::Search(bar)) = &mut self.modal {
+                    bar.query.place(rel_col, false);
+                }
+            }
+            InputTarget::NewField(slot) => {
+                if let Some(Modal::New(popup)) = &mut self.modal
+                    && popup.busy.is_none()
+                {
+                    if slot < popup.slots() {
+                        popup.focus = slot;
+                    }
+                    if let Some(field) = popup.field_at_mut(slot) {
+                        field.place(rel_col, false);
+                    }
+                }
+            }
+            InputTarget::InfoEdit(row) => {
+                if let Some(Modal::RoomInfo(popup)) = &mut self.modal
+                    && popup.busy.is_none()
+                    && let Some((editing_row, text)) = &mut popup.editing
+                    && *editing_row == row
+                {
+                    text.place(rel_col, false);
+                }
+            }
+            InputTarget::InfoFilter => {
+                if let Some(Modal::RoomInfo(popup)) = &mut self.modal
+                    && popup.busy.is_none()
+                    && popup.editing.is_none()
+                {
+                    popup.filter.place(rel_col, false);
+                }
+            }
+            InputTarget::VerifyPassword => {
+                if let Some(Modal::Verify(popup)) = &mut self.modal
+                    && popup.has_field(&self.verify)
+                    && let Some(password) = &mut popup.password
+                {
+                    popup.field_focused = true;
+                    popup.focus = None;
+                    password.place(rel_col, true);
+                }
+            }
         }
     }
 
@@ -4981,5 +5057,236 @@ mod tests {
         assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
         assert!(drain(&mut commands).is_empty());
         assert!(!temp_dir.exists());
+    }
+
+    #[test]
+    fn login_and_reauth_inputs_edit_mid_text_and_place_cursor_by_click() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let ctrl = |c: char| key_mod(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let ctrl_key = |code: KeyCode| key_mod(code, KeyModifiers::CONTROL);
+
+        app.open_modal(Modal::Login(LoginForm::new(None)));
+        // Clear default "matrix.org", type multi-word text + grapheme, move & edit mid-string.
+        app.on_event(ctrl('u'));
+        type_text(&mut app, "one two👍🏽 three");
+        app.on_event(ctrl_key(KeyCode::Left)); // before "three"
+        app.on_event(key(KeyCode::Left)); // after 👍🏽
+        app.on_event(key(KeyCode::Backspace)); // deletes whole 👍🏽
+        app.on_event(ctrl('k')); // kills " three"
+        app.on_event(key(KeyCode::Home));
+        app.on_event(key(KeyCode::Delete)); // deletes 'o'
+        app.on_event(key(KeyCode::Char('O')));
+        app.on_event(alt('f')); // after "One"
+        app.on_event(key(KeyCode::Char('!')));
+        match &app.modal {
+            Some(Modal::Login(form)) => assert_eq!(form.homeserver, "One! two"),
+            other => panic!("unexpected modal: {other:?}"),
+        }
+
+        // Render and click inside homeserver value rect and password value rect.
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "One! two");
+        app.on_event(click(col + 4, row));
+        app.on_event(key(KeyCode::Char('?')));
+        match &app.modal {
+            Some(Modal::Login(form)) => assert_eq!(form.homeserver, "One!? two"),
+            other => panic!("unexpected modal: {other:?}"),
+        }
+
+        // Click "Password" label (HitId::Field(2)) then type password with skin-tone emoji.
+        let (pw_label_col, pw_row) = find(&terminal, "Password");
+        app.on_event(click(pw_label_col, pw_row));
+        type_text(&mut app, "pa👍🏽ss");
+        redraw(&mut app, &mut terminal);
+        // Click third bullet (column 2 -> right before 👍🏽 in 1-col-per-grapheme masking).
+        let (dots_col, dots_row) = find(&terminal, "•••••");
+        app.on_event(click(dots_col + 2, dots_row));
+        app.on_event(key(KeyCode::Delete));
+        match &app.modal {
+            Some(Modal::Login(form)) => {
+                assert_eq!(form.password, "pass");
+                assert!(!format!("{form:?}").contains("pass"));
+            }
+            other => panic!("unexpected modal: {other:?}"),
+        }
+
+        // Reauth keeps fixed identity, edits password, and take_string() preserves secret redaction.
+        app.on_event(key(KeyCode::Esc));
+        app.open_modal(Modal::Login(LoginForm::reauth(
+            crate::matrix::ReauthTarget {
+                homeserver: "https://matrix.example.org".into(),
+                user_id: "@me:example.org".into(),
+                device_id: "DEV".into(),
+                kind: crate::matrix::ReauthKind::Password,
+                client_id: None,
+            },
+            "Session expired".into(),
+        )));
+        type_text(&mut app, "alpha beta");
+        app.on_event(ctrl('w')); // removes "beta"
+        app.on_event(key(KeyCode::Char('X')));
+        app.on_event(key(KeyCode::Enter));
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(sent.iter().any(|c| matches!(
+            c,
+            MatrixCmd::ReauthPassword { password } if password == "alpha X"
+        )));
+        match &mut app.modal {
+            Some(Modal::Login(form)) => {
+                assert_eq!(form.password, "");
+                form.busy = None;
+            }
+            other => panic!("unexpected modal: {other:?}"),
+        }
+        type_text(&mut app, "newsecret");
+        match &app.modal {
+            Some(Modal::Login(form)) => {
+                assert_eq!(form.password, "newsecret");
+                assert!(!format!("{form:?}").contains("newsecret"));
+            }
+            other => panic!("unexpected modal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recovery_settings_download_dir_and_emoji_inputs_edit_and_click_to_place() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let ctrl = |c: char| key_mod(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let ctrl_key = |code: KeyCode| key_mod(code, KeyModifiers::CONTROL);
+
+        // 1. RecoveryForm: mid-text edits, click-to-place, and secret kept after take_string().
+        app.on_matrix(MatrixEvent::Recovery(
+            crate::matrix::RecoveryStatus::NeedsKey,
+        ));
+        type_text(&mut app, "EsTj abcd");
+        app.on_event(ctrl_key(KeyCode::Left));
+        type_text(&mut app, "MID ");
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "EsTj MID abcd");
+        app.on_event(click(col + 6, row)); // right on 'I' in "MID"
+        app.on_event(key(KeyCode::Delete)); // removes 'I' -> "MD"
+        app.on_event(ctrl('e'));
+        app.on_event(ctrl('w')); // removes "abcd"
+        match &app.modal {
+            Some(Modal::Recovery(form)) => assert_eq!(form.key.as_str(), "EsTj MD "),
+            other => panic!("unexpected modal: {other:?}"),
+        }
+        app.on_event(key(KeyCode::Enter));
+        let _ = drain(&mut commands);
+        match &mut app.modal {
+            Some(Modal::Recovery(form)) => {
+                assert_eq!(form.key, "");
+                form.busy = false;
+            }
+            other => panic!("unexpected modal: {other:?}"),
+        }
+        type_text(&mut app, "retrykey");
+        match &app.modal {
+            Some(Modal::Recovery(form)) => {
+                assert_eq!(form.key, "retrykey");
+                assert!(!format!("{form:?}").contains("retrykey"));
+            }
+            other => panic!("unexpected modal: {other:?}"),
+        }
+        app.on_event(key(KeyCode::Esc));
+
+        // 2. SettingsMenu::DownloadDir: mid-text editing & click-to-place.
+        app.perform(Action::OpenSettings);
+        let row_idx = match &app.modal {
+            Some(Modal::Settings(m)) => crate::modal::Setting::ALL
+                .iter()
+                .filter(|s| m.shows(**s))
+                .position(|s| *s == crate::modal::Setting::DownloadDir)
+                .unwrap(),
+            other => panic!("unexpected modal: {other:?}"),
+        };
+        for _ in 0..row_idx {
+            app.on_event(key(KeyCode::Down));
+        }
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(ctrl('u'));
+        type_text(&mut app, "/tmp/inbox old");
+        app.on_event(ctrl('w')); // -> "/tmp/inbox "
+        app.on_event(alt('b'));
+        app.on_event(key(KeyCode::Char('2'))); // "/tmp/2inbox "
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "/tmp/2inbox");
+        app.on_event(click(col + 6, row)); // right after '2'
+        app.on_event(ctrl('k')); // -> "/tmp/2"
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.download_dir, "/tmp/2");
+        app.on_event(key(KeyCode::Esc));
+
+        // 3. EmojiPicker: plain Left/Right step grid; word motion & shortcuts edit query; click places.
+        app.on_event(alt('e'));
+        type_text(&mut app, "thumbsup extra");
+        app.on_event(ctrl('k')); // no-op at end
+        app.on_event(ctrl_key(KeyCode::Left)); // before "extra"
+        app.on_event(ctrl('k')); // deletes "extra" -> "thumbsup "
+        app.on_event(key(KeyCode::Backspace)); // "thumbsup"
+        let before_sel = match &app.modal {
+            Some(Modal::Emoji(p)) => {
+                assert_eq!(p.query, "thumbsup");
+                p.selected
+            }
+            other => panic!("unexpected modal: {other:?}"),
+        };
+        // Wait: "thumbsup" might only have 1-2 results, use empty or broader query to verify Right steps grid.
+        app.on_event(ctrl('u'));
+        type_text(&mut app, "smile cat");
+        redraw(&mut app, &mut terminal);
+        let sel0 = match &app.modal {
+            Some(Modal::Emoji(p)) => p.selected,
+            _ => unreachable!(),
+        };
+        app.on_event(ctrl('u'));
+        type_text(&mut app, "heart");
+        redraw(&mut app, &mut terminal);
+        app.on_event(key(KeyCode::Right));
+        let sel1 = match &app.modal {
+            Some(Modal::Emoji(p)) => p.selected,
+            _ => unreachable!(),
+        };
+        assert_eq!(sel1, sel0 + 1);
+        app.on_event(key(KeyCode::Left));
+        // Now use Alt-B / Delete / click-to-place on "heart".
+        let (col, row) = find(&terminal, "heart");
+        app.on_event(click(col + 2, row)); // he|art
+        app.on_event(key(KeyCode::Delete)); // he|rt
+        match &app.modal {
+            Some(Modal::Emoji(p)) => assert_eq!(p.query, "hert"),
+            other => panic!("unexpected modal: {other:?}"),
+        }
+        let _ = before_sel;
+    }
+
+    #[test]
+    fn sidebar_filter_edits_mid_text_handles_graphemes_and_clicks_to_place() {
+        let (mut app, mut terminal, _commands) = connected();
+        let ctrl = |c: char| key_mod(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let ctrl_key = |code: KeyCode| key_mod(code, KeyModifiers::CONTROL);
+
+        app.set_focus(Pane::Sidebar);
+        type_text(&mut app, "cafe");
+        app.on_event(key(KeyCode::Char('\u{0301}'))); // combining acute -> "cafe\u{0301}"
+        type_text(&mut app, " 👍🏽 alp");
+        app.on_event(ctrl_key(KeyCode::Left));
+        app.on_event(ctrl('a'));
+        app.on_event(key(KeyCode::Delete)); // drops 'c'
+        app.on_event(key(KeyCode::Char('C')));
+        app.on_event(ctrl('e'));
+        app.on_event(ctrl('w')); // drops "alp"
+        assert_eq!(app.sidebar.filter, "Cafe\u{0301} 👍🏽 ");
+        // One Backspace after space removes ' ', next single Backspace removes whole 👍🏽.
+        app.on_event(key(KeyCode::Backspace));
+        app.on_event(key(KeyCode::Backspace));
+        assert_eq!(app.sidebar.filter, "Cafe\u{0301} ");
+
+        // Redraw and click at column 2 of the filter text (between 'a' and 'f').
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, " / Cafe\u{0301}");
+        app.on_event(click(col + 3 + 2, row));
+        app.on_event(key(KeyCode::Char('X')));
+        assert_eq!(app.sidebar.filter, "CaXfe\u{0301} ");
     }
 }

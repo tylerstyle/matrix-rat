@@ -11,6 +11,7 @@ mod files;
 mod format;
 mod images;
 mod keymap;
+mod lineedit;
 mod lock;
 mod logging;
 mod manage;

@@ -3,6 +3,7 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::App;
+use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::{
     Answer, DeviceTrust, Identity, MatrixCmd, RecoveryStatus, Security, SetUpOutcome, VerifyCmd,
     VerifyStage, VerifyUpdate,
@@ -132,7 +133,7 @@ impl App {
         };
         let password = match &mut popup.password {
             Some(typed) if typed.is_empty() => return None,
-            Some(typed) => Some(std::mem::take(typed)),
+            Some(typed) => Some(typed.take_string()),
             None => None,
         };
         popup.password_error = None;
@@ -151,7 +152,6 @@ impl App {
             return;
         };
         let state = &self.verify;
-        let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         let typing = popup.field_focused && popup.has_field(state);
         let pressed = match code {
             KeyCode::Esc => {
@@ -177,15 +177,9 @@ impl App {
                 popup.step(state, -1);
                 None
             }
-            KeyCode::Backspace if typing => {
+            _ if typing => {
                 if let Some(password) = &mut popup.password {
-                    password.pop();
-                }
-                None
-            }
-            KeyCode::Char(c) if typing && plain => {
-                if let Some(password) = &mut popup.password {
-                    password.push(c);
+                    password.handle_key(code, mods, EditKeys::FULL);
                 }
                 None
             }
@@ -202,7 +196,7 @@ impl App {
             && popup.has_field(&self.verify)
             && let Some(password) = &mut popup.password
         {
-            password.push_str(text);
+            password.paste(text);
         }
     }
 
@@ -325,7 +319,7 @@ impl App {
             SetUpOutcome::NeedsPassword { rejected } => {
                 match &mut self.modal {
                     Some(Modal::Verify(popup)) if popup.kind == PopupKind::SetUp => {
-                        popup.password = Some(String::new());
+                        popup.password = Some(LineEdit::secret());
                         popup.field_focused = true;
                         popup.password_error =
                             rejected.then_some("That password was not accepted.");
@@ -873,5 +867,70 @@ mod tests {
             ..unverified()
         }));
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn verify_password_edits_mid_text_and_clicks_to_place() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let ctrl = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        let ctrl_key = |code: KeyCode| Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
+        let alt = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+
+        app.on_matrix(MatrixEvent::Security(Security {
+            identity: Identity::Missing,
+            ..unverified()
+        }));
+        app.perform(crate::action::Action::StartVerification);
+        wait_guard(&mut app);
+        app.on_event(key(KeyCode::Left));
+        app.on_event(key(KeyCode::Enter));
+        let _ = drain(&mut commands);
+
+        app.on_matrix(MatrixEvent::CrossSigningSetUp(
+            SetUpOutcome::NeedsPassword { rejected: false },
+        ));
+        for c in "pa👍🏽word".chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        let screen = redraw(&mut app, &mut terminal);
+        // 7 grapheme clusters render as 7 bullets.
+        let (col, row) = find(&screen, "•••••••");
+        // Click 3rd bullet (index 2 -> right before 👍🏽) and Delete once -> deletes whole 👍🏽.
+        app.on_event(click(col + 2, row));
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(set_up_popup(&app).password.as_deref(), Some("paword"));
+
+        // Home, End, Alt-B, Ctrl-K, Ctrl-W edit inside the password field.
+        app.on_event(key(KeyCode::Home));
+        app.on_event(key(KeyCode::Char('!')));
+        app.on_event(ctrl_key(KeyCode::Right));
+        app.on_event(key(KeyCode::Char('?')));
+        assert_eq!(set_up_popup(&app).password.as_deref(), Some("!paword?"));
+        app.on_event(alt('b'));
+        app.on_event(ctrl('k'));
+        assert_eq!(set_up_popup(&app).password.as_deref(), Some("!"));
+
+        // Tab to buttons: Left/Right step buttons without changing password; clicking label refocuses field.
+        app.on_event(key(KeyCode::Tab));
+        assert!(!set_up_popup(&app).field_focused);
+        app.on_event(key(KeyCode::Right));
+        assert_eq!(set_up_popup(&app).password.as_deref(), Some("!"));
+        let (lbl_col, lbl_row) = find(&screen, "Password");
+        app.on_event(click(lbl_col, lbl_row));
+        assert!(set_up_popup(&app).field_focused);
+
+        // Submit consumes secret via take_string(), then retrying stays redacted in Debug.
+        wait_guard(&mut app);
+        app.on_event(key(KeyCode::Enter));
+        let _ = drain(&mut commands);
+        assert_eq!(set_up_popup(&app).password.as_deref(), Some(""));
+        app.on_matrix(MatrixEvent::CrossSigningSetUp(
+            SetUpOutcome::NeedsPassword { rejected: true },
+        ));
+        for c in "hunter99".chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        assert_eq!(set_up_popup(&app).password.as_deref(), Some("hunter99"));
+        assert!(!format!("{:?}", app.modal).contains("hunter99"));
     }
 }

@@ -16,6 +16,20 @@ pub enum Button {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputTarget {
+    Login(usize),
+    Recovery,
+    DownloadDir,
+    EmojiQuery,
+    PaletteQuery,
+    SearchQuery,
+    NewField(usize),
+    InfoEdit(crate::manage::InfoRow),
+    InfoFilter,
+    VerifyPassword,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitId {
     Pane(Pane),
     /// Index into `App::rooms`.
@@ -30,6 +44,8 @@ pub enum HitId {
     ComposerText,
     /// A text field or button slot in a form.
     Field(usize),
+    /// Clickable value region of a one-line text input (`rect.x` is column 0 of the viewport).
+    Input(InputTarget),
     /// Index into the emoji picker's results.
     Emoji(usize),
     /// A row of the settings menu, and the step to change it by (0: just activate).
@@ -76,13 +92,18 @@ impl HitMap {
         }
     }
 
+    #[cfg(test)]
     pub fn at(&self, column: u16, row: u16) -> Option<HitId> {
+        self.at_rect(column, row).map(|(_, id)| id)
+    }
+
+    pub fn at_rect(&self, column: u16, row: u16) -> Option<(Rect, HitId)> {
         let position = Position::new(column, row);
         self.entries
             .iter()
             .rev()
             .find(|(rect, _)| rect.contains(position))
-            .map(|(_, id)| *id)
+            .copied()
     }
 
     /// Where something was drawn in the last frame: the smallest rectangle around
