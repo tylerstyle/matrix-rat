@@ -54,17 +54,19 @@ impl Row {
 const INDENT: &str = "  ";
 
 /// "(edited)", "sending" or "not sent", shown after a message's text.
-fn marker(message: &Message) -> Option<(String, Role)> {
+/// `repeated_shield`: the message before it, from the same sender, carries the same
+/// shield, which is then not said again (in a bridged room every line would say it).
+fn marker(message: &Message, repeated_shield: bool) -> Option<(String, Role)> {
+    let shield = message.shield.filter(|_| !repeated_shield);
     match (message.state, message.edited) {
         (SendState::Sending, _) => Some((message.sending_label(), Role::Muted)),
         (SendState::Failed, _) => Some((message.failed_label(), Role::Error)),
         (SendState::Sent, edited) => {
-            let role = match message.shield {
+            let role = match shield {
                 Some(shield) if shield.serious() => Role::Error,
                 _ => Role::Muted,
             };
-            let parts: Vec<&str> = message
-                .shield
+            let parts: Vec<&str> = shield
                 .map(|shield| shield.label())
                 .into_iter()
                 .chain(edited.then_some("(edited)"))
@@ -96,6 +98,12 @@ pub fn build_rows(
 
     for (i, message) in room.messages.iter().enumerate() {
         let start = rows.len();
+        let repeated_shield = i > 0 && message.shield.is_some() && {
+            let before = &room.messages[i - 1];
+            before.shield == message.shield
+                && before.sender == message.sender
+                && before.day == message.day
+        };
         'message: {
             match message.kind {
                 MsgKind::ReadMarker => {
@@ -252,7 +260,7 @@ pub fn build_rows(
                 rich::wrap(&rich, body_width)
             } else {
                 // A picture without a caption; a marker still gets its row.
-                if let Some((label, role)) = marker(message) {
+                if let Some((label, role)) = marker(message, repeated_shield) {
                     rows.push(Row::plain(
                         Line::from(vec![
                             Span::raw(INDENT),
@@ -287,7 +295,7 @@ pub fn build_rows(
                 }
                 // "(edited)", "sending" and "not sent" go after the text, or on a row of
                 // their own when there is no room left.
-                match marker(message) {
+                match marker(message, repeated_shield) {
                     Some((label, role)) if n == last => {
                         if col + 1 + width(&label) <= max_width {
                             spans.push(Span::raw(" "));
@@ -785,21 +793,26 @@ mod tests {
             body: "hello".into(),
             ..Message::default()
         };
-        assert_eq!(marker(&message), None);
+        assert_eq!(marker(&message, false), None);
         message.shield = Some(Shield::UnverifiedDevice);
         message.edited = true;
         assert_eq!(
-            marker(&message),
+            marker(&message, false),
             Some((
                 "⚠ from an unverified device (edited)".to_owned(),
                 Role::Error
             ))
         );
+        // Said once for a run of messages from the same sender, not on every line.
+        assert_eq!(
+            marker(&message, true),
+            Some(("(edited)".to_owned(), Role::Muted))
+        );
         // Not a warning, only a remark; and it shows up in the laid-out rows.
         message.shield = Some(Shield::NotEncrypted);
         message.edited = false;
         assert_eq!(
-            marker(&message),
+            marker(&message, false),
             Some(("not encrypted".to_owned(), Role::Muted))
         );
         let theme = Theme::builtin(DEFAULT_THEME).unwrap();

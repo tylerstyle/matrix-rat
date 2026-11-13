@@ -118,6 +118,7 @@ impl App {
         shown.extend(replies.unwrap_or_default());
 
         let room = &mut self.rooms[self.active];
+        self.repaint = true;
         self.threads.open = Some(ThreadView {
             root: root.clone(),
             key,
@@ -158,6 +159,7 @@ impl App {
         let Some(view) = self.threads.open.take() else {
             return false;
         };
+        self.repaint = true;
         self.cancel_compose();
         let draft = self.composer.take();
         if !draft.trim().is_empty()

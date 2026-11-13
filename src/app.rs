@@ -158,6 +158,9 @@ pub struct App {
     detailed_notices: std::collections::HashMap<String, Instant>,
     /// When and for which room notifications were shown lately, to limit bursts.
     shown_notices: Vec<(Instant, String)>,
+    /// Ask the event loop to draw the whole screen afresh instead of only what
+    /// changed, after the content of a pane was swapped wholesale.
+    pub repaint: bool,
     /// Between a logout (or expiry) and the next login.
     logged_out: bool,
     /// When this session's login was confirmed.
@@ -279,6 +282,7 @@ impl App {
             count_notices: Vec::new(),
             detailed_notices: Default::default(),
             shown_notices: Vec::new(),
+            repaint: false,
             logged_out: false,
             session_started: None,
             pending_notices: Vec::new(),
@@ -2324,6 +2328,12 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
             app.dirty = true;
         }
         terminal::set_mouse(app.mouse)?;
+        if std::mem::take(&mut app.repaint) {
+            // As after a resize: pictures are sent again with the fresh screen.
+            app.images.forget_encoded();
+            terminal.clear()?;
+            app.dirty = true;
+        }
         if let Some(text) = app.pending_copy.take() {
             terminal::copy_to_clipboard(&text)?;
         }

@@ -119,15 +119,17 @@ impl Shield {
         match self {
             Shield::UnverifiedDevice => "⚠ from an unverified device",
             Shield::IdentityChanged => "⚠ sender's identity has changed",
-            Shield::SenderMismatch => "⚠ sender could not be confirmed",
+            Shield::SenderMismatch => "sent on the sender's behalf (bridge or relay)",
             Shield::NotEncrypted => "not encrypted",
             Shield::Unconfirmed => "sender not confirmed",
         }
     }
 
-    /// A warning, as opposed to a remark.
+    /// A warning, as opposed to a remark. A sender mismatch is what every bridged
+    /// message looks like (the bridge encrypts on behalf of the people on the other
+    /// side), so it is stated but not painted as an alarm.
     pub fn serious(self) -> bool {
-        !matches!(self, Shield::NotEncrypted | Shield::Unconfirmed)
+        matches!(self, Shield::UnverifiedDevice | Shield::IdentityChanged)
     }
 }
 
