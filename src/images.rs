@@ -783,13 +783,7 @@ impl ImageStore {
         }
     }
 
-    pub fn avatar(&mut self, url: &str, covered: bool) -> Option<&mut Encoded> {
-        if !self.is_kitty() {
-            return None;
-        }
-        let graphics = self.graphics;
-        let frame = self.frame;
-        let cells = self.avatar_cells;
+    fn queue_avatar_if_needed(&mut self, url: &str) -> bool {
         let wanted = match self.avatars.get(url).map(|avatar| &avatar.state) {
             None => true,
             Some(AvatarState::Loading { since }) => since.elapsed() >= REQUEST_TIMEOUT,
@@ -799,10 +793,41 @@ impl ImageStore {
             let state = AvatarState::Loading {
                 since: Instant::now(),
             };
-            self.avatars
-                .insert(url.to_owned(), Avatar { state, used: frame });
+            self.avatars.insert(
+                url.to_owned(),
+                Avatar {
+                    state,
+                    used: self.frame,
+                },
+            );
             self.avatar_requests.push(url.to_owned());
             self.evict_avatars();
+        }
+        wanted
+    }
+
+    /// Ensures `url` is queued for download (even on non-kitty terminals) and returns its
+    /// decoded pixels immediately when already cached.
+    pub fn request_avatar(&mut self, url: &str) -> Option<Pixels> {
+        if self.queue_avatar_if_needed(url) {
+            return None;
+        }
+        let avatar = self.avatars.get_mut(url)?;
+        avatar.used = self.frame;
+        match &avatar.state {
+            AvatarState::Ready { pixels, .. } => Some(Arc::clone(pixels)),
+            _ => None,
+        }
+    }
+
+    pub fn avatar(&mut self, url: &str, covered: bool) -> Option<&mut Encoded> {
+        if !self.is_kitty() {
+            return None;
+        }
+        let graphics = self.graphics;
+        let frame = self.frame;
+        let cells = self.avatar_cells;
+        if self.queue_avatar_if_needed(url) {
             return None;
         }
         let missing = matches!(
@@ -1756,5 +1781,21 @@ mod tests {
         // Warm on the left, cool on the right.
         assert!(left[0] > left[2]);
         assert!(right[2] > right[0]);
+    }
+
+    #[test]
+    fn request_avatar_fetches_pixels_even_without_kitty() {
+        let mut store = ImageStore::new(Graphics::halfblocks());
+        let url = "mxc://example.org/room-avatar";
+        // First request queues a fetch and returns None immediately.
+        assert!(store.request_avatar(url).is_none());
+        assert_eq!(store.take_avatar_requests(), vec![url.to_owned()]);
+        // A duplicate request while Loading does not enqueue a second fetch.
+        assert!(store.request_avatar(url).is_none());
+        assert!(store.take_avatar_requests().is_empty());
+        // Once delivered, request_avatar returns the 96x96 pixels.
+        store.on_avatar(url, Ok(decoded(96, 96)));
+        assert_eq!(store.request_avatar(url).unwrap().width(), 96);
+        assert_eq!(store.request_avatar(url).unwrap().height(), 96);
     }
 }

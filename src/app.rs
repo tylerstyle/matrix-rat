@@ -13,6 +13,7 @@ mod thread;
 mod verify;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -122,6 +123,13 @@ pub struct ComposerView {
     pub cursor: Option<(u16, u16)>,
 }
 
+pub struct ReadyNotices {
+    pub items: Vec<(crate::matrix::Notice, crate::notify::NotifyIcon)>,
+    pub mode: crate::notify::NotifyMode,
+    pub preview: bool,
+    pub icon_cache: Option<(Arc<crate::notify::IconCache>, u64)>,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub rooms: Vec<Room>,
@@ -188,6 +196,8 @@ pub struct App {
     session_started: Option<Instant>,
     /// Notifications on their way out; the event loop shows them.
     pub pending_notices: Vec<crate::matrix::Notice>,
+    /// Ephemeral PNG cache for desktop notification avatars, wiped on logout/exit.
+    notify_icons: Option<Arc<crate::notify::IconCache>>,
     /// The `download_dir` setting; empty means the desktop's download folder.
     download_dir: String,
     /// Attachments being downloaded, and where finished ones went (by `mxc://` address).
@@ -333,6 +343,7 @@ impl App {
             logged_out: false,
             session_started: None,
             pending_notices: Vec::new(),
+            notify_icons: None,
             download_dir: String::new(),
             saving: Default::default(),
             saved: Default::default(),
@@ -685,7 +696,13 @@ impl App {
         }
     }
 
-    /// Hands the waiting notifications to the event loop.
+    /// Attaches the ephemeral desktop notification icon cache managed by the event loop.
+    pub fn set_notify_icons(&mut self, cache: Arc<crate::notify::IconCache>) {
+        self.notify_icons = Some(cache);
+    }
+
+    /// Hands the waiting notifications to the event loop (test helper).
+    #[cfg(test)]
     pub fn take_notices(
         &mut self,
     ) -> (Vec<crate::matrix::Notice>, crate::notify::NotifyMode, bool) {
@@ -694,6 +711,54 @@ impl App {
             self.notify_mode,
             self.notification_preview,
         )
+    }
+
+    fn resolve_notice_icon(&mut self, notice: &crate::matrix::Notice) -> crate::notify::NotifyIcon {
+        if !self.notification_preview
+            || self.notify_mode.resolved() != crate::notify::NotifyMode::Desktop
+        {
+            return crate::notify::NotifyIcon::Generic;
+        }
+        let room = self.rooms.iter().find(|r| r.id == notice.room_id);
+        // Never download media for unaccepted invitations.
+        let is_invite = room.is_some_and(|r| r.kind == RoomKind::Invite);
+        let avatar = if is_invite {
+            None
+        } else {
+            room.and_then(|r| r.avatar.clone())
+        };
+        if let Some(url) = avatar
+            && let Some(pixels) = self.images.request_avatar(&url)
+        {
+            return crate::notify::NotifyIcon::Picture { key: url, pixels };
+        }
+        let tile_name = room
+            .map(|r| r.name.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&notice.room);
+        crate::notify::tile_icon(&self.theme, tile_name)
+    }
+
+    /// Notifications ready for delivery together with their resolved desktop icons and
+    /// icon cache epoch.
+    pub fn take_notices_with_icons(&mut self) -> ReadyNotices {
+        let waiting = std::mem::take(&mut self.pending_notices);
+        let mut items = Vec::with_capacity(waiting.len());
+        for notice in waiting {
+            let icon = self.resolve_notice_icon(&notice);
+            items.push((notice, icon));
+        }
+        self.send_avatar_requests();
+        let icon_cache = self
+            .notify_icons
+            .as_ref()
+            .map(|c| (Arc::clone(c), c.epoch()));
+        ReadyNotices {
+            items,
+            mode: self.notify_mode,
+            preview: self.notification_preview,
+            icon_cache,
+        }
     }
 
     /// Nothing of a previous session may linger behind the login form.
@@ -716,6 +781,9 @@ impl App {
         self.space_rooms.clear();
         self.session_started = None;
         self.pending_notices.clear();
+        if let Some(cache) = &self.notify_icons {
+            cache.clear();
+        }
         self.count_notices.clear();
         self.detailed_notices.clear();
         self.shown_notices.clear();
@@ -2657,6 +2725,15 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     };
     let mut app = App::new(config, paths.themes_dir(), matrix.clone());
     app.config_file = Some(paths.config_file());
+    let notify_icons = Arc::new(crate::notify::IconCache::new(paths.notify_icons_dir()));
+    struct NotifyCacheGuard(Arc<crate::notify::IconCache>);
+    impl Drop for NotifyCacheGuard {
+        fn drop(&mut self) {
+            self.0.clear();
+        }
+    }
+    let _notify_cache_guard = NotifyCacheGuard(Arc::clone(&notify_icons));
+    app.set_notify_icons(notify_icons);
     let mut encoded_images = app.start_images(graphics);
     let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
 
@@ -2679,9 +2756,15 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
         if let Some(text) = app.pending_copy.take() {
             terminal::copy_to_clipboard(&text)?;
         }
-        let (notices, mode, preview) = app.take_notices();
-        for notice in &notices {
-            crate::notify::show(mode, notice, preview);
+        let ready = app.take_notices_with_icons();
+        for (notice, icon) in &ready.items {
+            crate::notify::show(
+                ready.mode,
+                notice,
+                ready.preview,
+                icon,
+                ready.icon_cache.clone(),
+            );
         }
         if app.dirty {
             app.dirty = false;
@@ -4301,5 +4384,148 @@ mod tests {
         assert!(app.composer.is_empty() && !app.should_quit);
         app.on_event(key_mod(KeyCode::Char('Q'), KeyModifiers::CONTROL));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn desktop_notification_icons_tile_fetch_upgrade_invite_and_logout_wipe() {
+        use crate::images::Decoded;
+        use crate::notify::{IconCache, NotifyIcon, NotifyMode};
+
+        let (mut app, _terminal, mut commands) = connected();
+        let _ = drain(&mut commands);
+        let temp_dir = std::env::temp_dir().join(format!(
+            "matrix-rat-app-notify-icons-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let cache = Arc::new(IconCache::new(temp_dir.clone()));
+        app.set_notify_icons(Arc::clone(&cache));
+        app.notify_mode = NotifyMode::Desktop;
+
+        let mut beta = summary("!b", "#beta", RoomCategory::Room, 0);
+        beta.avatar = Some("mxc://example.org/beta".into());
+        let mut invite = summary("!i", "InviteRoom", RoomCategory::Invite, 0);
+        invite.avatar = Some("mxc://example.org/invite".into());
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            beta,
+            invite,
+        ]));
+        let _ = drain(&mut commands);
+
+        let make_notice = |room_id: &str, room: &str| {
+            MatrixEvent::Notice(crate::matrix::Notice {
+                room_id: room_id.into(),
+                room: room.into(),
+                sender: "ann".into(),
+                body: "hello".into(),
+                highlight: false,
+                thread: None,
+            })
+        };
+
+        // 1. Joined room without cached avatar: immediate Tile + background FetchAvatar.
+        app.on_matrix(make_notice("!b", "#beta"));
+        let ready = app.take_notices_with_icons();
+        assert_eq!(
+            (ready.items.len(), ready.mode, ready.preview),
+            (1, NotifyMode::Desktop, true)
+        );
+        assert!(matches!(ready.items[0].1, NotifyIcon::Tile { ch: 'B', .. }));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(MatrixCmd::FetchAvatar { url }) if url == "mxc://example.org/beta"
+        ));
+        assert!(drain(&mut commands).is_empty());
+        let (icon_cache, epoch) = ready.icon_cache.unwrap();
+        let tile_path = icon_cache.ensure_file(&ready.items[0].1, epoch).unwrap();
+        assert!(tile_path.exists());
+
+        // 2. Deliver avatar -> next notice uses the real Picture and writes PNG to cache.
+        app.on_matrix(MatrixEvent::Avatar {
+            url: "mxc://example.org/beta".into(),
+            result: Ok(Decoded {
+                pixels: Arc::new(image::DynamicImage::new_rgba8(96, 96)),
+                original: (96, 96),
+            }),
+        });
+        app.shown_notices.clear();
+        app.on_matrix(make_notice("!b", "#beta"));
+        let ready = app.take_notices_with_icons();
+        assert_eq!(ready.items.len(), 1);
+        assert!(matches!(
+            &ready.items[0].1,
+            NotifyIcon::Picture { key, .. } if key == "mxc://example.org/beta"
+        ));
+        let pic_path = cache.ensure_file(&ready.items[0].1, cache.epoch()).unwrap();
+        assert!(pic_path.exists());
+
+        // 3. Invitation room: never fetches avatar, uses letter tile only.
+        app.shown_notices.clear();
+        app.on_matrix(make_notice("!i", "InviteRoom"));
+        let ready = app.take_notices_with_icons();
+        assert_eq!(ready.items.len(), 1);
+        assert!(matches!(ready.items[0].1, NotifyIcon::Tile { ch: 'I', .. }));
+        assert!(drain(&mut commands).is_empty());
+
+        // 4. Logout clears the cache directory and invalidates the old epoch.
+        let pre_logout_epoch = cache.epoch();
+        app.reset_session();
+        assert!(!temp_dir.exists());
+        assert_eq!(cache.ensure_file(&ready.items[0].1, pre_logout_epoch), None);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn hidden_preview_and_terminal_mode_skip_icon_fetch_and_cache() {
+        use crate::notify::{IconCache, NotifyIcon, NotifyMode};
+
+        let (mut app, _terminal, mut commands) = connected();
+        let _ = drain(&mut commands);
+        let temp_dir =
+            std::env::temp_dir().join(format!("matrix-rat-app-notify-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let cache = Arc::new(IconCache::new(temp_dir.clone()));
+        app.set_notify_icons(Arc::clone(&cache));
+
+        let mut beta = summary("!b", "Beta", RoomCategory::Room, 0);
+        beta.avatar = Some("mxc://example.org/never-fetch".into());
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            beta,
+        ]));
+        let _ = drain(&mut commands);
+
+        let make_notice = || {
+            MatrixEvent::Notice(crate::matrix::Notice {
+                room_id: "!b".into(),
+                room: "Beta".into(),
+                sender: "ann".into(),
+                body: "secret".into(),
+                highlight: false,
+                thread: None,
+            })
+        };
+
+        // Preview off in Desktop mode: Generic icon, no FetchAvatar, no cache files.
+        app.notify_mode = NotifyMode::Desktop;
+        app.notification_preview = false;
+        app.on_matrix(make_notice());
+        let ready = app.take_notices_with_icons();
+        assert_eq!(ready.items.len(), 1);
+        assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
+        assert!(drain(&mut commands).is_empty());
+        assert!(!temp_dir.exists());
+
+        // Terminal mode even with preview on: Generic icon, no FetchAvatar, no cache files.
+        app.shown_notices.clear();
+        app.notification_preview = true;
+        app.notify_mode = NotifyMode::Terminal;
+        app.on_matrix(make_notice());
+        let ready = app.take_notices_with_icons();
+        assert_eq!(ready.items.len(), 1);
+        assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
+        assert!(drain(&mut commands).is_empty());
+        assert!(!temp_dir.exists());
     }
 }

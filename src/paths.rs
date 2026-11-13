@@ -50,10 +50,12 @@ impl Paths {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("could not create {}", dir.display()))?;
         }
-        // Holds the session and the message stores: owner only.
+        // Holds the session, message stores, and runtime files: owner only.
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&self.data_dir, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("could not protect {}", self.data_dir.display()))?;
+        for dir in [&self.data_dir, &self.runtime_dir] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("could not protect {}", dir.display()))?;
+        }
         Ok(())
     }
 
@@ -79,6 +81,12 @@ impl Paths {
 
     pub fn pid_file(&self) -> PathBuf {
         self.runtime_dir.join(format!("{}.pid", self.profile))
+    }
+
+    /// Ephemeral PNG cache for desktop notification avatars of the current session.
+    pub fn notify_icons_dir(&self) -> PathBuf {
+        self.runtime_dir
+            .join(format!("{}-notify-icons", self.profile))
     }
 }
 
@@ -114,6 +122,7 @@ mod tests {
         let b = Paths::new("b").unwrap();
         assert_ne!(a.data_dir, b.data_dir);
         assert_ne!(a.pid_file(), b.pid_file());
+        assert_ne!(a.notify_icons_dir(), b.notify_icons_dir());
         assert_eq!(a.config_dir, b.config_dir);
     }
 }
