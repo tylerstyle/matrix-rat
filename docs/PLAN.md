@@ -463,6 +463,11 @@ differentiators and can be reviewed with fake data in days.
 
 ### Open requests
 
+- **For the 0.1.1 release (requested 2026-11-14):** add installing from the NUR to the
+  README's install section: the package `nur.repos.tylerstyle.matrix-rat`, the `tylerstyle`
+  Cachix cache with its public key so nothing is compiled, and that it needs Rust 1.96 or
+  newer (built for the unstable channels, not for `nixos-26.05`).
+
 - **Notification icon (requested 2026-11-13, done):** a desktop notification shows the picture
   of the chat it comes from; without one, a coloured tile with the capital first letter of
   the room name (the same tile the room list uses). Needs the picture as a file for the
