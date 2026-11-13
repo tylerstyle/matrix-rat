@@ -1,6 +1,7 @@
 //! Drawing. Each frame also rebuilds the hit map used for mouse handling.
 
 mod attach;
+mod complete;
 mod composer;
 mod help;
 pub mod hit;
@@ -72,6 +73,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .areas(area);
         timeline::draw(frame, app, timeline_area);
         composer::draw(frame, app, composer_area);
+        complete::draw(frame, app, area, composer_area.y);
     }
     status::draw(frame, app, status_area);
     image::draw_viewer(frame, app, area);
@@ -303,6 +305,20 @@ mod tests {
     }
 
     #[test]
+    fn composer_completions() {
+        let mut app = App::demo();
+        for c in "hey @".chars() {
+            app.on_event(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+        }
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+    }
+
+    #[test]
     fn tiny_sizes_do_not_panic() {
         use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, SettingsMenu};
         let mut with_palette = App::demo();
@@ -335,6 +351,28 @@ mod tests {
                     app.perform(Action::FocusNext);
                 }
             }
+        }
+        // Also exercise the completion popup across all tiny sizes.
+        let mut completed = App::demo();
+        for c in "@".chars() {
+            completed.on_event(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+        }
+        for (w, h) in [
+            (1, 1),
+            (3, 2),
+            (10, 4),
+            (20, 3),
+            (25, 7),
+            (61, 5),
+            (200, 2),
+            (80, 24),
+        ] {
+            render(&mut completed, w, h);
         }
     }
 }

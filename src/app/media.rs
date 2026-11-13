@@ -766,6 +766,7 @@ mod tests {
                 mention: false,
                 unread: false,
                 avatar: Some(format!("mxc://example.org/avatar{n}")),
+                alias: None,
             })
             .collect();
         app.on_matrix(MatrixEvent::Rooms(rooms));

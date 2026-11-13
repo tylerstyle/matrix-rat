@@ -49,6 +49,8 @@ pub enum HitId {
     Attachment(usize),
     /// A row in the command palette (index into its filtered entries).
     Palette(usize),
+    /// A row in the composer completion popup (index into `completion.items`).
+    Complete(usize),
 }
 
 #[derive(Debug, Default)]

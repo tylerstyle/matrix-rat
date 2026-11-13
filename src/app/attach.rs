@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::{App, ComposeMode};
 use crate::action::Pane;
-use crate::format::{self, Outgoing};
+use crate::format::Outgoing;
 use crate::images::human_size;
 use crate::matrix::MatrixCmd;
 use crate::model::{ItemRef, Message, OWN_NAME, RoomKind};
@@ -301,7 +301,7 @@ impl App {
         let caption = if text.is_empty() {
             None
         } else {
-            match format::parse(&text) {
+            match self.format_outgoing(&text) {
                 Outgoing::Rejected(reason) => {
                     self.show_toast(reason);
                     return true;
@@ -382,6 +382,7 @@ impl App {
             text: self.composer.text().to_owned(),
         });
         self.composer.take();
+        self.clear_completion_marks();
         self.compose_mode = ComposeMode::Normal;
         self.timeline.scroll = 0;
         true
@@ -552,6 +553,7 @@ mod tests {
             &Some(Outgoing::Text {
                 plain: "look at **this**".into(),
                 html: Some("look at <strong>this</strong>".into()),
+                mentions: None,
             })
         );
         assert_eq!(reply_to, &None);

@@ -102,6 +102,7 @@ impl App {
         // An edit belongs to the room's messages; the room's draft waits for the return.
         self.cancel_compose();
         let room_draft = self.composer.take();
+        self.save_room_marks(&room_id);
         let key = root.clone().unwrap_or_else(|| format!("demo:{index}"));
         let draft = self
             .threads
@@ -109,6 +110,7 @@ impl App {
             .remove(&(room_id.clone(), key.clone()))
             .unwrap_or_default();
         self.composer.set_text(&draft);
+        self.restore_thread_marks(&room_id, &key);
 
         // Shown at once: the first message, and in the demo the replies it carries.
         let mut first = root_message.clone();
@@ -165,9 +167,15 @@ impl App {
         if !draft.trim().is_empty()
             && let Some(room_id) = self.room_id()
         {
+            self.save_thread_marks(&room_id, &view.key);
             self.threads.drafts.insert((room_id, view.key), draft);
+        } else {
+            self.clear_completion_marks();
         }
         self.composer.set_text(&view.room_draft);
+        if let Some(room_id) = self.room_id() {
+            self.restore_room_marks(&room_id);
+        }
 
         let mut deleted = None;
         if let Some(room) = self.rooms.get_mut(self.active) {
@@ -722,6 +730,7 @@ mod tests {
             mention: false,
             unread: false,
             avatar: None,
+            alias: None,
         }]));
         assert!(!app.thread_open());
         assert_eq!(app.rooms[app.active].id, "!b");

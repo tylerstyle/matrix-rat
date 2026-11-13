@@ -95,6 +95,8 @@ pub struct Message {
     pub send_error: Option<String>,
     /// A doubt about who really sent this (encrypted rooms only).
     pub shield: Option<Shield>,
+    /// Mentions (`m.mentions`) carried by the message, used to preserve them on edit.
+    pub mentions: Option<matrix_sdk::ruma::events::Mentions>,
 }
 
 /// Why a message in an encrypted room cannot be fully trusted.
@@ -293,6 +295,8 @@ pub struct Room {
     pub avatar: Option<String>,
     /// The server's notification count as last seen, to notice when it rises.
     pub server_count: u64,
+    /// Canonical room alias (e.g. `#rust:matrix.org`), if any.
+    pub alias: Option<String>,
 }
 
 pub const OWN_NAME: &str = "you";
@@ -334,6 +338,7 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         draft: String::new(),
         avatar: None,
         server_count: 0,
+        alias: None,
     }
 }
 
