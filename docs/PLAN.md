@@ -419,6 +419,24 @@ then **review by `matrix-agy` before the next milestone starts**.
 | M7 | Theming integrations | Full bundled theme set, hot reload, dark/light follow, Noctalia/matugen/wallust templates, pywal reader, `theme install-template`. |
 | M8 | Spaces, threads, notifications, polish | Space navigation, thread panel, desktop notifications, animations, README with screenshots, packaging (`default.nix`). |
 
+### M5 part 2: files and saving attachments (requested 2026-11-13)
+
+- **Shown:** `m.file`, `m.audio` and `m.video` messages appear as one attachment line
+  (`📎 name · size · type`), selectable like any message; pictures keep their inline view.
+- **Save:** `s` on a selected picture or attachment (or a click on its line / a "save" hint
+  in the status line and in the picture viewer) downloads the original file into the
+  download folder, with a progress indication on the message and a toast naming the
+  saved path. An existing file is never overwritten (`name (1).ext`).
+- **Download folder:** one setting, `download_dir`, editable in the settings menu (F2).
+  Default: the XDG download directory (`xdg-user-dir DOWNLOAD`), else `~/Downloads`.
+- **Open:** `o` on an attachment saves it (if not saved yet) and opens it with the
+  desktop's default program.
+- **Safety:** the file name comes from the sender, so only its last path component is
+  used, control characters are removed, hidden-file dots and empty names are replaced,
+  and the write goes to a temporary file that is renamed when complete. Encrypted
+  attachments are decrypted by the SDK. A size limit asks before very large downloads.
+- **Later:** sending files (`/upload path`, drag-and-drop paste of a path).
+
 M1 before any networking is deliberate: the look, mouse model and theming are the product's
 differentiators and can be reviewed with fake data in days.
 

@@ -5,6 +5,12 @@ mod convert;
 mod media;
 mod rooms;
 mod session;
+mod verify;
+
+pub use verify::{
+    Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, VerifyCmd, VerifyStage,
+    VerifyUpdate,
+};
 
 use std::time::Duration;
 
@@ -103,6 +109,8 @@ pub enum MatrixCmd {
         /// The whole file, not a small version.
         full: bool,
     },
+    /// Device verification and cross-signing.
+    Verification(VerifyCmd),
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -133,6 +141,7 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Shutdown => f.write_str("Shutdown"),
             // The source of an encrypted file carries its key.
             Self::FetchImage { full, .. } => write!(f, "FetchImage(full: {full})"),
+            Self::Verification(command) => write!(f, "Verification({command:?})"),
         }
     }
 }
@@ -221,6 +230,12 @@ pub enum MatrixEvent {
         full: bool,
         result: Result<crate::images::Decoded, String>,
     },
+    /// The encryption status of this device changed.
+    Security(Security),
+    /// A device verification moved on.
+    Verification(VerifyUpdate),
+    /// Outcome of [`VerifyCmd::SetUp`].
+    CrossSigningSetUp(Result<(), String>),
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -259,6 +274,13 @@ impl std::fmt::Debug for MatrixEvent {
             Self::Error(error) => write!(f, "Error({error})"),
             Self::Image { full, result, .. } => {
                 write!(f, "Image(full: {full}, ok: {})", result.is_ok())
+            }
+            Self::Security(security) => write!(f, "Security({security:?})"),
+            Self::Verification(update) => {
+                write!(f, "Verification({}, {:?})", update.flow, update.stage)
+            }
+            Self::CrossSigningSetUp(result) => {
+                write!(f, "CrossSigningSetUp(ok: {})", result.is_ok())
             }
         }
     }
@@ -478,8 +500,10 @@ impl Worker {
 
         let mut rooms: Vector<RoomListItem> = Vector::new();
         let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
+        let mut verifier = verify::Verifier::start(client, self.events.clone());
         let end = loop {
             tokio::select! {
+                incoming = verifier.next_incoming() => verifier.on_incoming(incoming).await,
                 Some(diffs) = entries.next() => {
                     for diff in diffs {
                         diff.apply(&mut rooms);
@@ -516,10 +540,12 @@ impl Worker {
                     }
                     Some(MatrixCmd::Shutdown) | None => break SessionEnd::Shutdown,
                     Some(MatrixCmd::Logout) => break SessionEnd::LoggedOut,
+                    Some(MatrixCmd::Verification(command)) => verifier.handle(command).await,
                     Some(command) => timelines.handle(command).await,
                 },
             }
         };
+        verifier.stop();
         timelines.close();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;

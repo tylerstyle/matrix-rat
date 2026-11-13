@@ -20,6 +20,7 @@ mod terminal;
 mod text;
 mod theme;
 mod ui;
+mod verify;
 mod watch;
 
 use anyhow::Result;

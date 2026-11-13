@@ -1,0 +1,28 @@
+---
+source: src/ui/verify.rs
+expression: "render(&mut app, 44, 24)"
+---
+"╭ 2 #rust ─────────────────────────────────╮"
+"│  like this one where scrolling up used  ││"
+"│╭ Verify this device ────────────────────╮│"
+"││                                        ││"
+"││ Compare with what your device “Element ││"
+"││ Desktop (QWERTYUIOP)” shows:           ││"
+"││                                        ││"
+"││       🐶          ☂️          🎧       ││" Hidden by multi-width symbols: [(10, " "), (22, " "), (34, " ")]
+"││      Dog       Umbrella   Headphones   ││"
+"││                                        ││"
+"││       🦋          ☎️          🔒       ││" Hidden by multi-width symbols: [(10, " "), (22, " "), (34, " ")]
+"││   Butterfly   Telephone      Lock      ││"
+"││                                        ││"
+"││                   📌                   ││" Hidden by multi-width symbols: [(22, " ")]
+"││                  Pin                   ││"
+"││                                        ││"
+"││ Do they match, in the same order?      ││"
+"││                                        ││"
+"││  They match    They don't match        ││"
+"╰│                                        │╯"
+"╭╰── Tab move · Enter choose · Esc cancel ╯╮"
+"│ Type a message…                       ☺  │"
+"╰──────────────────────────────────────────╯"
+" ● demo data  ⚠ verify device   F3 rat-dark "

@@ -1,6 +1,7 @@
 //! Application state, input handling and the event loop.
 
 mod media;
+mod verify;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -145,6 +146,8 @@ pub struct App {
     /// Bumped whenever the open room's messages change, to invalidate `row_cache`.
     pub timeline_rev: u64,
     pub row_cache: Option<crate::ui::RowCache>,
+    /// Encryption status and device verification.
+    pub verify: crate::verify::VerifyState,
     pub theme: Theme,
     theme_names: Vec<String>,
     themes_dir: PathBuf,
@@ -226,6 +229,7 @@ impl App {
             theme_rev: 0,
             timeline_rev: 0,
             row_cache: None,
+            verify: Default::default(),
             theme,
             theme_names: Theme::builtin_names(),
             themes_dir: PathBuf::new(),
@@ -390,6 +394,12 @@ impl App {
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
             Setting::Keys => String::new(),
+            Setting::Encryption => match self.verify.security.map(|s| s.device) {
+                Some(crate::matrix::DeviceTrust::Verified) => "this device is verified",
+                Some(crate::matrix::DeviceTrust::Unverified) => "not verified, Enter to verify",
+                _ => "unknown",
+            }
+            .to_owned(),
             Setting::Logout => self.user_id.clone().unwrap_or_default(),
         }
     }
@@ -430,6 +440,12 @@ impl App {
                     self.help_open = true;
                 }
             }
+            Setting::Encryption => {
+                if delta == 0 {
+                    self.modal = None;
+                    self.start_verification();
+                }
+            }
             Setting::Logout => {
                 if delta != 0 {
                     return;
@@ -465,6 +481,7 @@ impl App {
         self.typing_sent = None;
         self.user_id = None;
         self.recovery_prompted = false;
+        self.verify = Default::default();
         self.sync = Some(SyncStatus::Stopped);
     }
 
@@ -1153,6 +1170,8 @@ impl App {
                     self.open_modal(Modal::Settings(SettingsMenu::default()));
                 }
             }
+            Action::StartVerification => self.start_verification(),
+            Action::Verify(button) => self.verify_button(button),
         }
     }
 
@@ -1223,6 +1242,7 @@ impl App {
                 self.show_toast("Encrypted history stays locked until you enter the key");
             }
             Some(Modal::Emoji(_) | Modal::Settings(_)) => self.modal = None,
+            Some(Modal::Verify(_)) => self.verify_escape(),
             None => {}
         }
     }
@@ -1344,6 +1364,7 @@ impl App {
                     _ => {}
                 }
             }
+            Some(Modal::Verify(_)) => self.on_verify_key(code),
             None => {}
         }
     }
@@ -1439,6 +1460,9 @@ impl App {
             MatrixEvent::Image { key, full, result } => {
                 self.images.on_loaded(&key, full, result);
             }
+            MatrixEvent::Security(security) => self.on_security(security),
+            MatrixEvent::Verification(update) => self.on_verification(update),
+            MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
         }
     }
 
@@ -1729,6 +1753,7 @@ impl App {
                 return;
             }
             Some(Modal::Settings(_)) => return,
+            Some(Modal::Verify(_)) => return,
             None => {}
         }
         match self.focus {
@@ -3251,6 +3276,7 @@ mod tests {
         assert!(app.toast.is_some());
 
         // "Key bindings" leads to the help; the backdrop closes the menu.
+        app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Enter));
         assert!(app.modal.is_none() && app.help_open);

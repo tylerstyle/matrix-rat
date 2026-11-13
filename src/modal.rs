@@ -172,17 +172,19 @@ pub enum Setting {
     TypingNotices,
     ReadReceipts,
     Keys,
+    Encryption,
     Logout,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 7] = [
+    pub const ALL: [Setting; 8] = [
         Setting::Theme,
         Setting::SidebarWidth,
         Setting::Mouse,
         Setting::TypingNotices,
         Setting::ReadReceipts,
         Setting::Keys,
+        Setting::Encryption,
         Setting::Logout,
     ];
 
@@ -192,7 +194,7 @@ impl Setting {
             Setting::Theme => Some("Appearance"),
             Setting::Mouse => Some("Behaviour"),
             Setting::Keys => Some("Help"),
-            Setting::Logout => Some("Account"),
+            Setting::Encryption => Some("Account"),
             _ => None,
         }
     }
@@ -205,6 +207,7 @@ impl Setting {
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
             Setting::Keys => "Key bindings",
+            Setting::Encryption => "Encryption",
             Setting::Logout => "Log out",
         }
     }
@@ -219,6 +222,9 @@ impl Setting {
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",
             Setting::Keys => "Show all key bindings (F1).",
+            Setting::Encryption => {
+                "Verify this device with another of your devices, or see its status."
+            }
             Setting::Logout => {
                 "Ends this session. Encrypted history needs your recovery key again."
             }
@@ -252,6 +258,7 @@ pub enum Modal {
     Recovery(RecoveryForm),
     Emoji(EmojiPicker),
     Settings(SettingsMenu),
+    Verify(crate::verify::VerifyPopup),
 }
 
 #[cfg(test)]
