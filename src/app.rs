@@ -1,5 +1,6 @@
 //! Application state, input handling and the event loop.
 
+mod attach;
 mod files;
 mod media;
 mod verify;
@@ -170,6 +171,8 @@ pub struct App {
     pub dirty: bool,
     /// Pictures: the cache and the viewer.
     pub images: crate::images::ImageStore,
+    /// Files waiting in the composer to be sent.
+    pub attach: attach::AttachState,
 }
 
 impl App {
@@ -259,6 +262,7 @@ impl App {
             suspend_requested: false,
             dirty: true,
             images: crate::images::ImageStore::new(crate::images::Graphics::halfblocks()),
+            attach: Default::default(),
         }
     }
 
@@ -505,6 +509,7 @@ impl App {
         self.saved.clear();
         self.confirm_large = None;
         self.images.clear();
+        self.attach.clear();
         self.sync = Some(SyncStatus::Stopped);
     }
 
@@ -601,6 +606,10 @@ impl App {
     }
 
     fn send(&mut self) {
+        // An `/upload` command attaches; with files waiting, Enter sends those.
+        if self.upload_command() || self.send_attachments() {
+            return;
+        }
         let text = self.composer.text().trim().to_owned();
         let Some(room_id) = self.room().map(|room| room.id.clone()) else {
             return;
@@ -1233,6 +1242,11 @@ impl App {
             }
             Action::StartVerification => self.start_verification(),
             Action::Verify(button) => self.verify_button(button),
+            Action::Attach => {
+                if self.modal.is_none() {
+                    self.begin_attach();
+                }
+            }
         }
     }
 
@@ -1552,6 +1566,7 @@ impl App {
             MatrixEvent::Security(security) => self.on_security(security),
             MatrixEvent::Verification(update) => self.on_verification(update),
             MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
+            MatrixEvent::UploadLimit(bytes) => self.attach.limit = Some(bytes),
         }
     }
 
@@ -1739,11 +1754,13 @@ impl App {
 
         // Ctrl-C never quits (too easy to hit); it clears the draft instead.
         if (code, mods) == (KeyCode::Char('c'), KeyModifiers::CONTROL) {
-            if self.composer.is_empty() {
-                self.show_toast("Press Ctrl-Q to quit");
-            } else {
+            // What is attached goes with the draft.
+            let had_files = self.clear_attachments();
+            if !self.composer.is_empty() {
                 self.composer.take();
                 self.cancel_compose();
+            } else if !had_files {
+                self.show_toast("Press Ctrl-Q to quit");
             }
             return;
         }
@@ -1759,6 +1776,9 @@ impl App {
             && !self.composer.on_first_row(width)
         {
             self.composer.up(width);
+            return;
+        }
+        if self.focus == Pane::Composer && self.attach_key(code, mods) {
             return;
         }
         if let Some(action) = keymap::lookup(context, key) {
@@ -1851,6 +1871,10 @@ impl App {
             }
             Some(Modal::Verify(_)) => return self.on_verify_paste(first_line),
             None => {}
+        }
+        // Files dropped on the terminal arrive as a paste of their paths.
+        if self.attach_pasted(&text) {
+            return;
         }
         match self.focus {
             Pane::Sidebar => {
@@ -1955,6 +1979,7 @@ impl App {
                     Some(HitId::Pane(pane)) => self.set_focus(pane),
                     Some(HitId::Overlay) | None => {}
                     Some(HitId::Image(index)) => self.click_image(index),
+                    Some(HitId::Attachment(index)) => self.remove_attachment(index),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {

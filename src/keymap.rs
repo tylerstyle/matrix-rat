@@ -175,6 +175,14 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        Char('a'),
+        ALT,
+        Action::Attach,
+        "Alt-A",
+        "Attach a file",
+    ),
+    bind(
+        Global,
         KeyCode::F(1),
         NONE,
         Action::ToggleHelp,

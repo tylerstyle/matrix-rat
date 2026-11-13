@@ -42,6 +42,8 @@ pub enum HitId {
     Overlay,
     /// The picture of the message at this index.
     Image(usize),
+    /// The ✕ of the waiting file at this index in the composer.
+    Attachment(usize),
 }
 
 #[derive(Debug, Default)]

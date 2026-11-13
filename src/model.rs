@@ -87,6 +87,10 @@ pub struct Message {
     pub image: Option<ImageInfo>,
     /// Set for file, audio and video messages.
     pub file: Option<Attachment>,
+    /// Bytes sent and bytes in all, while a file of ours is on its way to the server.
+    pub upload: Option<(u64, u64)>,
+    /// Why sending failed, in a few words.
+    pub send_error: Option<String>,
 }
 
 /// Something that can be saved to disk: a file, or the original of a picture.
@@ -165,6 +169,25 @@ impl ImageInfo {
 }
 
 impl Message {
+    /// What is shown after a message of ours that is on its way.
+    pub fn sending_label(&self) -> String {
+        match self.upload {
+            Some((sent, total)) if total > 0 => {
+                format!("◌ uploading {}%", sent.min(total) * 100 / total)
+            }
+            _ if self.file.is_some() || self.image.is_some() => "◌ uploading…".to_owned(),
+            _ => "◌ sending".to_owned(),
+        }
+    }
+
+    /// What is shown after a message of ours that could not be sent.
+    pub fn failed_label(&self) -> String {
+        match &self.send_error {
+            Some(reason) => format!("✕ not sent: {reason}"),
+            None => "✕ not sent".to_owned(),
+        }
+    }
+
     /// What saving this message would write to disk, if anything.
     pub fn attachment(&self) -> Option<Attachment> {
         if let Some(file) = &self.file {

@@ -23,6 +23,6 @@ expression: "render(&mut app, 44, 24)"
 "││  They match    They don't match        ││"
 "╰│                                        │╯"
 "╭╰── Tab move · Enter choose · Esc cancel ╯╮"
-"│ Type a message…                       ☺  │"
+"│ Type a message…                    📎 ☺  │" Hidden by multi-width symbols: [(38, " ")]
 "╰──────────────────────────────────────────╯"
 " ● demo data  ⚠ verify device   F3 rat-dark "

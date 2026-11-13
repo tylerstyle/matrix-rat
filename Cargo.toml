@@ -39,6 +39,8 @@ url = "2"
 unicode-width = "0.2"
 emojis = "0.9.1"
 nucleo-matcher = "0.3.1"
+# The type the SDK wants for an attachment; same version as the SDK uses.
+mime = "0.3"
 comrak = { version = "0.59.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 notify = "8"
@@ -48,7 +50,6 @@ ratatui-image = { version = "11.1.0", default-features = false, features = ["cro
 
 [dev-dependencies]
 insta = "1"
-mime = "0.3"
 
 [profile.dev.package."*"]
 opt-level = 1

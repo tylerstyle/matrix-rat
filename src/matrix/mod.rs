@@ -5,6 +5,7 @@ mod convert;
 mod media;
 mod rooms;
 mod session;
+mod upload;
 mod verify;
 
 pub use verify::{
@@ -123,6 +124,16 @@ pub enum MatrixCmd {
         /// Its `mxc://` address.
         url: String,
     },
+    /// Send files from disk, in order. They show up in the timeline at once and upload
+    /// in the background.
+    SendFiles {
+        room_id: String,
+        files: Vec<std::path::PathBuf>,
+        /// Text that goes with the first file.
+        caption: Option<Outgoing>,
+        /// Event id of the message being replied to (by the first file).
+        reply_to: Option<String>,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -156,6 +167,10 @@ impl std::fmt::Debug for MatrixCmd {
             Self::FetchAvatar { .. } => f.write_str("FetchAvatar"),
             Self::Verification(command) => write!(f, "Verification({command:?})"),
             Self::SaveFile { open, .. } => write!(f, "SaveFile(open: {open})"),
+            // Paths can say a lot about the user; the caption is message text.
+            Self::SendFiles { room_id, files, .. } => {
+                write!(f, "SendFiles({room_id}, {} files)", files.len())
+            }
         }
     }
 }
@@ -264,6 +279,8 @@ pub enum MatrixEvent {
         url: String,
         result: Result<crate::images::Decoded, String>,
     },
+    /// The largest file the server accepts, in bytes.
+    UploadLimit(u64),
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -312,6 +329,7 @@ impl std::fmt::Debug for MatrixEvent {
                 write!(f, "CrossSigningSetUp({result:?})")
             }
             Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
+            Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
         }
     }
 }

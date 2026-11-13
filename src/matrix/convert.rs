@@ -95,6 +95,18 @@ fn event_message(
         sender: sender.clone(),
         ..Message::default()
     };
+    match event.send_state() {
+        Some(EventSendState::NotSentYet {
+            progress: Some(upload),
+        }) => {
+            let progress = upload.progress;
+            message.upload = Some((progress.current as u64, progress.total as u64));
+        }
+        Some(EventSendState::SendingFailed { error, .. }) => {
+            message.send_error = Some(super::upload::failure_reason(error));
+        }
+        _ => {}
+    }
 
     match event.content() {
         TimelineItemContent::MsgLike(content) => {

@@ -54,11 +54,11 @@ impl Row {
 const INDENT: &str = "  ";
 
 /// "(edited)", "sending" or "not sent", shown after a message's text.
-fn marker(message: &Message) -> Option<(&'static str, Role)> {
+fn marker(message: &Message) -> Option<(String, Role)> {
     match (message.state, message.edited) {
-        (SendState::Sending, _) => Some(("◌ sending", Role::Muted)),
-        (SendState::Failed, _) => Some(("✕ not sent", Role::Error)),
-        (SendState::Sent, true) => Some(("(edited)", Role::Muted)),
+        (SendState::Sending, _) => Some((message.sending_label(), Role::Muted)),
+        (SendState::Failed, _) => Some((message.failed_label(), Role::Error)),
+        (SendState::Sent, true) => Some(("(edited)".to_owned(), Role::Muted)),
         (SendState::Sent, false) => None,
     }
 }
@@ -245,7 +245,7 @@ pub fn build_rows(
                     rows.push(Row::plain(
                         Line::from(vec![
                             Span::raw(INDENT),
-                            Span::styled(truncate(label, body_width), theme.style(role)),
+                            Span::styled(truncate(&label, body_width), theme.style(role)),
                         ]),
                         Some(i),
                     ));
@@ -278,7 +278,7 @@ pub fn build_rows(
                 // their own when there is no room left.
                 match marker(message) {
                     Some((label, role)) if n == last => {
-                        if col + 1 + width(label) <= max_width {
+                        if col + 1 + width(&label) <= max_width {
                             spans.push(Span::raw(" "));
                             spans.push(Span::styled(label, theme.style(role)));
                             rows.push(Row {
@@ -299,7 +299,7 @@ pub fn build_rows(
                             rows.push(Row::plain(
                                 Line::from(vec![
                                     Span::raw(INDENT),
-                                    Span::styled(truncate(label, body_width), theme.style(role)),
+                                    Span::styled(truncate(&label, body_width), theme.style(role)),
                                 ]),
                                 Some(i),
                             ));

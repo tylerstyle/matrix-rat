@@ -69,4 +69,6 @@ pub enum Action {
     Save,
     /// A control of the device verification popup.
     Verify(crate::verify::Button),
+    /// Start attaching a file: puts `/upload ` into the composer.
+    Attach,
 }
