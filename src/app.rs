@@ -401,7 +401,9 @@ impl App {
     // ----- state changes -------------------------------------------------------------
 
     pub fn show_toast(&mut self, text: impl Into<String>) {
-        self.toast = Some((text.into(), Instant::now()));
+        // Toasts often quote what a server or another person said.
+        let text = crate::text::sanitize_line(&text.into());
+        self.toast = Some((text, Instant::now()));
     }
 
     /// Called when something in the config or themes directory changed (or on
@@ -1902,6 +1904,8 @@ impl App {
                 members,
                 can_mention_room,
             } => self.on_room_members(room_id, members, can_mention_room),
+            // Answers to requests of a session that has ended.
+            MatrixEvent::Manage(_) if self.logged_out => {}
             MatrixEvent::Manage(event) => self.on_manage(event),
         }
     }
