@@ -138,6 +138,9 @@ impl App {
         if older {
             self.search_dig(MAX_DIG);
         } else if let Some(Modal::Search(bar)) = &mut self.modal {
+            // Turning round also calls off a look into older history: the page on
+            // its way may still arrive, but the search no longer follows it.
+            bar.digging = 0;
             bar.note = Some("no newer matches");
         }
     }
@@ -157,7 +160,14 @@ impl App {
             None
         };
         if let Some(Modal::Search(bar)) = &mut self.modal {
-            bar.digging = if note.is_some() { 0 } else { rounds };
+            // Asking again while a page is on its way (a spinning wheel) does not
+            // refill the rounds.
+            let waiting = self.timeline.loading_older && bar.digging > 0;
+            bar.digging = match (&note, waiting) {
+                (Some(_), _) => 0,
+                (None, true) => bar.digging.min(rounds),
+                (None, false) => rounds,
+            };
             bar.note = note.or(Some("looking in older messages…"));
         }
         if note.is_some() || self.timeline.loading_older {
@@ -542,6 +552,56 @@ mod tests {
         app.on_event(wheel(MouseEventKind::ScrollDown));
         assert_eq!(app.timeline.selected, Some(2));
         assert!(matches!(app.modal, Some(Modal::Search(_))));
+    }
+
+    #[test]
+    fn turning_round_calls_off_the_look_into_older_history() {
+        let (mut app, mut commands) = app_with(&["rat one", "x"]);
+        app.perform(Action::Search);
+        type_text(&mut app, "rat");
+        while commands.try_recv().is_ok() {}
+        // Past the oldest match: a page is asked for, once, however often.
+        app.search_step(true);
+        let Some(Modal::Search(bar)) = &mut app.modal else {
+            panic!("no find bar");
+        };
+        assert_eq!(bar.digging, MAX_DIG);
+        bar.digging = 3;
+        app.search_step(true);
+        app.search_step(true);
+        let mut asked = 0;
+        while let Ok(cmd) = commands.try_recv() {
+            asked += usize::from(matches!(cmd, MatrixCmd::Paginate { .. }));
+        }
+        assert_eq!(asked, 1);
+        let Some(Modal::Search(bar)) = &app.modal else {
+            panic!("no find bar");
+        };
+        assert_eq!(bar.digging, 3, "asking again does not refill the rounds");
+        // Turn round before the page is there.
+        app.search_step(false);
+        let mut messages = vec![message("old", "an older rat")];
+        messages.extend(app.rooms[0].messages.iter().cloned());
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: app.generation,
+            messages,
+            reached_start: false,
+        });
+        app.on_matrix(MatrixEvent::Paginated {
+            generation: app.generation,
+            reached_start: false,
+        });
+        let Some(Modal::Search(bar)) = &app.modal else {
+            panic!("no find bar");
+        };
+        assert_eq!(bar.digging, 0);
+        assert_eq!(bar.note, Some("no newer matches"));
+        assert_eq!(
+            app.messages()[app.timeline.selected.unwrap()].body,
+            "rat one"
+        );
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]

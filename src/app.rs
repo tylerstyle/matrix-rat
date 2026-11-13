@@ -2839,7 +2839,8 @@ impl App {
                 }
                 self.dirty = true;
             }
-            // In the find bar the wheel goes from match to match.
+            // In the find bar the wheel goes from match to match, wherever the pointer
+            // is: the bar owns the keyboard in the same way.
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if matches!(self.modal, Some(Modal::Search(_))) =>
             {
