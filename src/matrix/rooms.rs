@@ -408,7 +408,8 @@ impl Timelines {
             | MatrixCmd::Recover { .. }
             | MatrixCmd::Logout
             | MatrixCmd::Shutdown
-            | MatrixCmd::Verification(_) => {}
+            | MatrixCmd::Verification(_)
+            | MatrixCmd::Manage(_) => {}
         }
     }
 }

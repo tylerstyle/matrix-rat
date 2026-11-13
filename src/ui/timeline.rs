@@ -521,6 +521,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.hits.add(area, HitId::Pane(Pane::Timeline));
+    super::roominfo::title_hit(&mut app.hits, area, &title);
     // The mouse's way out of a thread, at the right end of the title row.
     let back = " ← back ";
     let back_width = width(back) as u16;

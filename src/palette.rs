@@ -119,6 +119,7 @@ impl Palette {
     pub fn open(ctx: PaletteContext) -> Self {
         let mut entries = Vec::new();
         collect_actions(&ctx, &mut entries);
+        collect_room_management(&ctx, &mut entries);
         collect_rooms(&ctx, &mut entries);
         collect_settings(&ctx, &mut entries);
         collect_themes(&ctx, &mut entries);
@@ -436,6 +437,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         }
         Action::JumpToNewest => ctx.has_room && ctx.has_messages,
         Action::AcceptInvite | Action::DeclineInvite => ctx.in_invite,
+        Action::RoomInfo => ctx.has_room,
         _ => true,
     }
 }
@@ -482,6 +484,68 @@ fn collect_rooms(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             &[&room_alias],
             true,
             2,
+        );
+    }
+}
+
+/// Joining, creating, inviting and leaving: the ways in that have no key of their own.
+/// ("New chat or room…" and "Room info" come from the keymap.)
+fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
+    use crate::manage::{Click, Stage};
+    let in_room = ctx.has_room && !ctx.in_invite;
+    let entries: [(Action, &str, &[&str], bool); 6] = [
+        (
+            Action::Manage(Click::Stage(Stage::Join)),
+            "Join a room…",
+            &["join by address", "matrix.to link", "alias"],
+            true,
+        ),
+        (
+            Action::Manage(Click::Stage(Stage::Direct)),
+            "Start a direct chat…",
+            &["message a person", "dm", "private message", "user"],
+            true,
+        ),
+        (
+            Action::Manage(Click::Stage(Stage::Create)),
+            "Create a room…",
+            &["new room", "make a room"],
+            true,
+        ),
+        (
+            Action::InviteUser,
+            "Invite someone to this room…",
+            &["add a person", "invite user"],
+            in_room,
+        ),
+        (
+            Action::Manage(Click::Favourite),
+            "Favourite on/off for this room",
+            &["favorite", "star", "pin room"],
+            in_room,
+        ),
+        (
+            Action::LeaveRoom,
+            if ctx.in_invite {
+                "Decline this invitation…"
+            } else {
+                "Leave this room…"
+            },
+            &["leave room", "leave chat", "part", "forget room"],
+            ctx.has_room,
+        ),
+    ];
+    for (action, title, aliases, enabled) in entries {
+        push_entry(
+            out,
+            Target::Action(action),
+            Category::Action,
+            title,
+            None,
+            title,
+            aliases,
+            enabled,
+            1,
         );
     }
 }

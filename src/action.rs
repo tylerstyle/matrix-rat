@@ -83,4 +83,15 @@ pub enum Action {
     SelectTheme(usize),
     /// Trigger a setting toggle or action from outside the settings popup.
     Setting(crate::modal::Setting),
+    /// Open the chooser: join a room, start a direct chat, or create a room.
+    NewRoom,
+    /// Show the details and members of the open room (in the room list: the one
+    /// under the cursor).
+    RoomInfo,
+    /// Ask whether to leave that room (shown in its room info).
+    LeaveRoom,
+    /// Invite someone to that room.
+    InviteUser,
+    /// A control of the room popups.
+    Manage(crate::manage::Click),
 }

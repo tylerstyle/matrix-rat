@@ -32,6 +32,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.hits.add(area, HitId::Pane(Pane::Sidebar));
+    super::roominfo::new_button(frame, app, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }

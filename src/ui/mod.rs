@@ -7,6 +7,7 @@ pub mod hit;
 mod image;
 mod modal;
 mod palette;
+mod roominfo;
 mod sidebar;
 mod status;
 mod timeline;
@@ -308,6 +309,16 @@ mod tests {
         let mut with_palette = App::demo();
         with_palette.perform(Action::OpenPalette);
         let palette_modal = with_palette.modal.take();
+        use crate::manage::{InfoPopup, NewPopup, Stage};
+        let mut create = NewPopup::new(Stage::Create);
+        create.error = Some("an error".into());
+        let mut with_info = App::demo();
+        with_info.perform(Action::RoomInfo);
+        let Some(Modal::RoomInfo(mut info)) = with_info.modal.take() else {
+            panic!("room info did not open");
+        };
+        info.editing = Some((crate::manage::InfoRow::Topic, "a topic".into()));
+        let _: &InfoPopup = &info;
         let modals = [
             None,
             Some(Modal::Emoji(EmojiPicker::default())),
@@ -315,6 +326,10 @@ mod tests {
             Some(Modal::Login(LoginForm::new(Some("an error".into())))),
             Some(Modal::Recovery(RecoveryForm::default())),
             palette_modal,
+            Some(Modal::New(NewPopup::new(Stage::Choose))),
+            Some(Modal::New(NewPopup::new(Stage::Join))),
+            Some(Modal::New(create)),
+            Some(Modal::RoomInfo(info)),
         ];
         for modal in modals {
             let mut app = App::demo();

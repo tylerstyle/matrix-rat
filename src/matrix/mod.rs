@@ -2,6 +2,7 @@
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
 mod convert;
+mod manage;
 mod media;
 mod notify;
 mod rooms;
@@ -10,6 +11,9 @@ mod threads;
 mod upload;
 mod verify;
 
+pub use manage::{
+    Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomMember,
+};
 pub use notify::Notice;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
@@ -150,6 +154,8 @@ pub enum MatrixCmd {
         /// Event id of the message being replied to (by the first file).
         reply_to: Option<String>,
     },
+    /// Joining, creating, leaving and looking at rooms.
+    Manage(ManageCmd),
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -190,6 +196,7 @@ impl std::fmt::Debug for MatrixCmd {
             Self::SendFiles { room_id, files, .. } => {
                 write!(f, "SendFiles({room_id}, {} files)", files.len())
             }
+            Self::Manage(command) => write!(f, "Manage({command:?})"),
         }
     }
 }
@@ -307,6 +314,8 @@ pub enum MatrixEvent {
     /// The first file of a [`MatrixCmd::SendFiles`] could not be sent, so none was:
     /// the caption and the reply belong to that one. Carries the reason.
     FilesNotSent(String),
+    /// An answer to a [`MatrixCmd::Manage`].
+    Manage(ManageEvent),
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -359,6 +368,7 @@ impl std::fmt::Debug for MatrixEvent {
             Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
             // The reason names a file.
             Self::FilesNotSent(_) => f.write_str("FilesNotSent"),
+            Self::Manage(event) => write!(f, "Manage({event:?})"),
         }
     }
 }
@@ -606,6 +616,7 @@ impl Worker {
         let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
         let mut own_members = notify::OwnMembers::default();
         let mut verifier = verify::Verifier::start(client, self.events.clone());
+        let mut manager = manage::Manager::new(client.clone(), self.events.clone());
         let end = loop {
             tokio::select! {
                 incoming = verifier.next_incoming() => verifier.on_incoming(incoming).await,
@@ -648,11 +659,13 @@ impl Worker {
                     Some(MatrixCmd::Shutdown) | None => break SessionEnd::Shutdown,
                     Some(MatrixCmd::Logout) => break SessionEnd::LoggedOut,
                     Some(MatrixCmd::Verification(command)) => verifier.handle(command).await,
+                    Some(MatrixCmd::Manage(command)) => manager.handle(command),
                     Some(command) => timelines.handle(command).await,
                 },
             }
         };
         verifier.stop().await;
+        manager.stop();
         timelines.close();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;

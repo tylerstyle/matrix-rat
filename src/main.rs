@@ -12,6 +12,7 @@ mod images;
 mod keymap;
 mod lock;
 mod logging;
+mod manage;
 mod matrix;
 mod modal;
 mod model;
