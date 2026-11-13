@@ -4,11 +4,12 @@
 //! The menu remembers what it is about by id. The thing is looked up again when an
 //! entry is run, and a menu whose thing is gone closes (`menu_follow`).
 
-use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use super::App;
 use crate::action::{Action, Pane};
-use crate::manage::InfoRow;
+use crate::keymap::Context;
+use crate::manage::{Click, InfoRow};
 use crate::matrix::MatrixCmd;
 use crate::menu::{self, Anchor, Menu, MessageFacts, MessageRef, Run, Target};
 use crate::modal::Modal;
@@ -29,11 +30,21 @@ impl App {
             thread: self.thread_key().map(str::to_owned),
             id: message.id.clone(),
             index,
+            state: message.state,
+            kind: message.kind,
+            on_server: matches!(message.item, Some(ItemRef::Event(_))),
         })
     }
 
-    /// Where that message is now, if it is still among the messages shown.
+    /// Where that message is now, if it is still among the messages shown and still
+    /// what the menu was made for: one that was sent, failed or deleted meanwhile
+    /// would need other entries (discarding is not deleting).
     fn find_message(&self, wanted: &MessageRef) -> Option<usize> {
+        let index = self.locate_message(wanted)?;
+        wanted.fits(self.messages().get(index)?).then_some(index)
+    }
+
+    fn locate_message(&self, wanted: &MessageRef) -> Option<usize> {
         if self.room_id().as_deref() != Some(wanted.room_id.as_str())
             || self.thread_key() != wanted.thread.as_deref()
         {
@@ -61,13 +72,26 @@ impl App {
             Target::Link { message, url } => self
                 .find_message(message)
                 .is_some_and(|index| self.find_link(index, url).is_some()),
-            Target::Room { id } => self.rooms.iter().any(|room| room.id == *id),
+            Target::Room { id, kind } => self.find_room(id, *kind).is_some(),
             Target::Composer { room_id } => self.room_id().as_deref() == Some(room_id.as_str()),
         }
     }
 
-    /// Closes a menu about something that is no longer there: another room is shown,
-    /// the message was removed, the room left the list.
+    /// The room a menu is about: its index in `rooms` and its place among the rooms
+    /// the list shows. `None` once it has left the list (or what the list is narrowed
+    /// to), or has moved to another section, whose menu would be another one.
+    fn find_room(&self, id: &str, kind: RoomKind) -> Option<(usize, usize)> {
+        let index = self.rooms.iter().position(|room| room.id == id)?;
+        if self.rooms[index].kind != kind {
+            return None;
+        }
+        let at = self.visible_rooms().iter().position(|i| *i == index)?;
+        Some((index, at))
+    }
+
+    /// Closes a menu about something that is no longer there or no longer what the
+    /// menu was made for: another room is shown, the message was removed, sent or
+    /// deleted, the room left the list or changed its section.
     pub(super) fn menu_follow(&mut self) {
         if let Some(Modal::Menu(menu)) = &self.modal
             && !self.menu_target_alive(&menu.target)
@@ -111,6 +135,7 @@ impl App {
         let facts = MessageFacts {
             connected: self.matrix.is_some(),
             in_thread: self.thread_open(),
+            read_markers: self.read_markers,
             permalink: event.is_some_and(|event| {
                 menu::permalink(&target.room_id, event, self.user_id.as_deref()).is_some()
             }),
@@ -147,6 +172,7 @@ impl App {
         };
         let target = Target::Room {
             id: room.id.clone(),
+            kind: room.kind,
         };
         let title = room.name.clone();
         let items = menu::room_items(room, &self.keymap);
@@ -264,6 +290,20 @@ impl App {
                 self.open_menu_at(hit, Anchor::at(mouse.column, mouse.row));
                 true
             }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if open => {
+                // A menu taller than the window scrolls with its selection.
+                if let Some(Modal::Menu(menu)) = &mut self.modal {
+                    let last = menu.items.len() - 1;
+                    let to = if mouse.kind == MouseEventKind::ScrollUp {
+                        menu.selected.saturating_sub(1)
+                    } else {
+                        (menu.selected + 1).min(last)
+                    };
+                    menu.select(to);
+                    self.dirty = true;
+                }
+                true
+            }
             MouseEventKind::Moved if open => {
                 if let (Some(HitId::Menu(index)), Some(Modal::Menu(menu))) = (hit, &mut self.modal)
                     && menu.selected != index
@@ -282,13 +322,23 @@ impl App {
         }
     }
 
-    pub(super) fn on_menu_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+    pub(super) fn on_menu_key(&mut self, key: KeyEvent, code: KeyCode, mods: KeyModifiers) {
         let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        // The key that opened it (whatever it is bound to) closes it again.
+        let context = match self.focus {
+            Pane::Sidebar => Context::Sidebar,
+            Pane::Timeline => Context::Timeline,
+            Pane::Composer => Context::Composer,
+        };
+        if self.keymap.lookup(context, key) == Some(Action::ContextMenu) {
+            self.modal = None;
+            return;
+        }
         let Some(Modal::Menu(menu)) = &mut self.modal else {
             return;
         };
         match code {
-            KeyCode::Esc | KeyCode::Menu | KeyCode::Left => self.modal = None,
+            KeyCode::Esc | KeyCode::Left => self.modal = None,
             KeyCode::Up | KeyCode::BackTab => menu.step(-1),
             KeyCode::Down | KeyCode::Tab => menu.step(1),
             KeyCode::Home | KeyCode::PageUp => menu.select(0),
@@ -324,7 +374,7 @@ impl App {
         match menu.target {
             Target::Message(wanted) => {
                 let Some(index) = self.find_message(&wanted) else {
-                    self.show_toast("That message is no longer there");
+                    self.show_toast("That message has changed or is gone");
                     return;
                 };
                 if !self.select_for_menu(index) {
@@ -364,16 +414,16 @@ impl App {
                     _ => {}
                 }
             }
-            Target::Room { id } => {
-                let Some(index) = self.rooms.iter().position(|room| room.id == id) else {
-                    self.show_toast("That room is no longer available");
+            Target::Room { id, kind } => {
+                let Some((index, at)) = self.find_room(&id, kind) else {
+                    self.show_toast("That room has changed or is no longer listed");
                     return;
                 };
                 match run {
                     Run::OpenRoom => self.perform(Action::OpenRoom(index)),
                     Run::MarkRead => self.mark_room_read(index),
                     Run::Notifications => self.open_info(Some(index), Some(InfoRow::Notify)),
-                    Run::Do(action) => self.perform_for_room(index, action),
+                    Run::Do(action) => self.perform_for_room(at, action),
                     _ => {}
                 }
             }
@@ -393,18 +443,26 @@ impl App {
         }
     }
 
-    /// Performs a room-level action for the room at `index`. Those actions are about
-    /// the room under the room list's cursor, so that is where the room is put for
-    /// the moment; focus and cursor are as before afterwards.
-    fn perform_for_room(&mut self, index: usize, action: Action) {
-        let Some(at) = self.visible_rooms().iter().position(|i| *i == index) else {
-            self.show_toast("That room is no longer listed");
+    /// Performs a room-level action for the room at place `at` of the room list.
+    /// Those actions are about the room under the list's cursor, so the cursor is
+    /// put there for the moment; focus and cursor are as before afterwards.
+    ///
+    /// Only for the actions named here. They open a popup or send a command and
+    /// touch neither focus nor cursor; one that did (opening a room, say) would have
+    /// its effect undone by the restoring below, so nothing else gets through.
+    fn perform_for_room(&mut self, at: usize, action: Action) {
+        if !matches!(
+            action,
+            Action::RoomInfo | Action::LeaveRoom | Action::Manage(Click::Favourite)
+        ) {
+            debug_assert!(false, "not a room action of the menu: {action:?}");
             return;
-        };
+        }
         let before = (self.focus, self.sidebar.cursor);
         self.focus = Pane::Sidebar;
         self.sidebar.cursor = at;
         self.perform(action);
+        debug_assert_eq!((self.focus, self.sidebar.cursor), (Pane::Sidebar, at));
         (self.focus, self.sidebar.cursor) = before;
     }
 
@@ -447,7 +505,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyEvent};
+    use crossterm::event::Event;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -1054,7 +1112,8 @@ mod tests {
         assert_eq!(
             open_menu(&app).target,
             Target::Room {
-                id: "!b:example.org".into()
+                id: "!b:example.org".into(),
+                kind: RoomKind::Room,
             }
         );
         app.on_event(key(KeyCode::Esc));
@@ -1070,6 +1129,341 @@ mod tests {
         assert!(app.modal.is_none());
     }
 
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn a_message_that_was_sent_meanwhile_is_not_discarded_or_replied_to() {
+        // On its way: "Discard" takes it out of the queue, without a question.
+        let mut sending = remote("2", "me", "on its way");
+        sending.item = Some(ItemRef::Transaction("txn".into()));
+        sending.state = SendState::Sending;
+        let first = remote("1", "bob", "first");
+        let (mut app, mut terminal, mut commands) = connected(vec![first.clone(), sending]);
+        sent(&mut commands);
+        right_click(&mut app, &mut terminal, "on its way");
+        assert_eq!(labels(&app), ["Copy text", "Discard"]);
+        // The server confirms it while the menu is open: same id, now an event.
+        // The menu, made for something unsent, closes.
+        timeline(
+            &mut app,
+            vec![first.clone(), remote("2", "me", "on its way")],
+        );
+        assert!(app.modal.is_none());
+        assert!(sent(&mut commands).is_empty());
+        // Its menu now asks before deleting.
+        right_click(&mut app, &mut terminal, "on its way");
+        assert_eq!(labels(&app).last().unwrap(), "Delete");
+        app.on_event(key(KeyCode::End));
+        app.on_event(key(KeyCode::Enter));
+        assert!(sent(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Esc));
+
+        // The same change behind the menu's back (no update came through the usual
+        // way): the entry is checked again when it is run, and does nothing.
+        let mut failed = remote("3", "me", "did not make it");
+        failed.item = Some(ItemRef::Transaction("txn3".into()));
+        failed.state = SendState::Failed;
+        timeline(&mut app, vec![first.clone(), failed]);
+        right_click(&mut app, &mut terminal, "did not make it");
+        assert_eq!(labels(&app), ["Try sending again", "Copy text", "Discard"]);
+        let active = app.active;
+        app.rooms[active].messages[1] = remote("3", "me", "did not make it");
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        // Neither retried nor turned into a reply.
+        assert!(sent(&mut commands).is_empty());
+        assert_eq!(app.compose_mode, super::super::ComposeMode::Normal);
+        right_click(&mut app, &mut terminal, "did not make it");
+        app.rooms[active].messages[1].state = SendState::Sending;
+        app.on_event(key(KeyCode::End));
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Enter));
+        assert!(sent(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn a_message_deleted_by_someone_meanwhile_closes_its_menu() {
+        let message = remote("1", "me", "soon gone");
+        let (mut app, mut terminal, mut commands) = connected(vec![message.clone()]);
+        sent(&mut commands);
+        right_click(&mut app, &mut terminal, "soon gone");
+        // Armed, even.
+        app.on_event(key(KeyCode::End));
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(open_menu(&app).armed, Some(open_menu(&app).items.len() - 1));
+        let mut deleted = message;
+        deleted.kind = crate::model::MsgKind::Redacted;
+        deleted.body = "Message deleted".into();
+        timeline(&mut app, vec![deleted]);
+        assert!(app.modal.is_none());
+        app.on_event(key(KeyCode::Enter));
+        let seen = sent(&mut commands);
+        assert!(
+            seen.iter().all(|command| !command.contains("Redact")),
+            "{seen:?}"
+        );
+        assert!(app.pending_copy.is_none());
+    }
+
+    #[test]
+    fn a_room_that_changed_or_left_the_list_closes_its_menu() {
+        let (mut app, mut terminal, mut commands) = connected(vec![remote("1", "bob", "hello")]);
+        let rooms = |beta: RoomCategory| {
+            MatrixEvent::Rooms(vec![
+                summary(ROOM, "Alpha", RoomCategory::Room),
+                summary("!b:example.org", "Beta", beta),
+            ])
+        };
+        // A favourite stops being one elsewhere while "Remove from favourites" is
+        // on offer: the menu closes instead of adding it again.
+        app.on_matrix(rooms(RoomCategory::Favourite));
+        right_click(&mut app, &mut terminal, "Beta");
+        assert!(labels(&app).contains(&"Remove from favourites".to_owned()));
+        sent(&mut commands);
+        app.on_matrix(rooms(RoomCategory::Room));
+        assert!(app.modal.is_none());
+        // Behind the menu's back: checked again when run.
+        app.on_matrix(rooms(RoomCategory::Favourite));
+        right_click(&mut app, &mut terminal, "Beta");
+        app.rooms[1].kind = RoomKind::Room;
+        choose(&mut app, &mut terminal, "Remove from favourites");
+        assert!(app.modal.is_none());
+        assert!(sent(&mut commands).is_empty());
+
+        // The list is narrowed to something the room is not part of (here by the
+        // filter; a space does the same): the menu closes with the next update,
+        // and an entry run before that does nothing rather than half of its work.
+        right_click(&mut app, &mut terminal, "Beta");
+        app.sidebar.filter = "alp".into();
+        app.on_matrix(rooms(RoomCategory::Room));
+        assert!(app.modal.is_none());
+        app.sidebar.filter.clear();
+        right_click(&mut app, &mut terminal, "Beta");
+        app.sidebar.filter = "alp".into();
+        let before = (app.focus, app.sidebar.cursor, app.active);
+        for entry in ["Room info", "Open"] {
+            if app.modal.is_none() {
+                app.sidebar.filter.clear();
+                right_click(&mut app, &mut terminal, "Beta");
+                app.sidebar.filter = "alp".into();
+            }
+            let at = labels(&app)
+                .iter()
+                .position(|label| label == entry)
+                .unwrap();
+            app.run_menu_at(at);
+            assert!(app.modal.is_none(), "{entry}");
+            assert_eq!(
+                (app.focus, app.sidebar.cursor, app.active),
+                before,
+                "{entry}"
+            );
+        }
+        assert!(sent(&mut commands).is_empty());
+
+        // Listed: focus and cursor are where they were after a room action.
+        app.sidebar.filter.clear();
+        screen(&mut app, &mut terminal);
+        let before = (app.focus, app.sidebar.cursor);
+        right_click(&mut app, &mut terminal, "Beta");
+        choose(&mut app, &mut terminal, "Room info");
+        assert!(matches!(app.modal, Some(Modal::RoomInfo(_))));
+        assert_eq!((app.focus, app.sidebar.cursor), before);
+    }
+
+    #[test]
+    fn the_bound_key_closes_it_the_wheel_scrolls_it_and_moving_selects() {
+        // Rebound: the new key opens and closes; the old one is just a letter.
+        let (mut app, mut terminal) = demo();
+        let (code, mods) = crate::keymap::parse_key(Context::Timeline, "x").unwrap();
+        app.keymap
+            .apply_rebind(Context::Timeline, Action::ContextMenu, code, mods);
+        app.on_event(key(KeyCode::Up));
+        screen(&mut app, &mut terminal);
+        app.on_event(key(KeyCode::Char('m')));
+        assert!(app.modal.is_none());
+        app.on_event(key(KeyCode::Char('x')));
+        assert!(app.modal.is_some());
+        app.on_event(key(KeyCode::Char('m')));
+        assert!(app.modal.is_some());
+        app.on_event(key(KeyCode::Char('x')));
+        assert!(app.modal.is_none());
+
+        // A menu taller than the window: the wheel walks through it, without
+        // going round and without scrolling the messages behind it.
+        let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        screen(&mut app, &mut terminal);
+        app.on_event(key(KeyCode::Up));
+        screen(&mut app, &mut terminal);
+        app.on_event(key(KeyCode::Char('x')));
+        let count = open_menu(&app).items.len();
+        let (rect, first) = open_menu(&app).place(app.screen).unwrap();
+        assert!((rect.height as usize) < count + 2 && first == 0);
+        let scroll = app.timeline.scroll;
+        app.on_event(mouse_event(MouseEventKind::ScrollUp, 5, 2));
+        assert_eq!(open_menu(&app).selected, 0);
+        for _ in 0..count + 3 {
+            app.on_event(mouse_event(MouseEventKind::ScrollDown, 5, 2));
+        }
+        assert_eq!(open_menu(&app).selected, count - 1);
+        assert_eq!(app.timeline.scroll, scroll);
+        let text = screen(&mut app, &mut terminal);
+        let (rect, first) = open_menu(&app).place(app.screen).unwrap();
+        assert!(first > 0);
+        // What is shown now can be clicked: the last entry, Delete, gets armed.
+        let last = labels(&app).pop().unwrap();
+        assert_eq!(last, "Delete");
+        assert!(text.contains("│ Delete "), "{text}");
+        app.on_event(left(rect.x + 2, rect.bottom() - 2));
+        assert_eq!(open_menu(&app).armed, Some(count - 1));
+        // Moving the pointer to another entry selects it and takes the question
+        // back; what lies around the menu does not light up.
+        app.on_event(mouse_event(MouseEventKind::Moved, rect.x + 2, rect.y + 1));
+        assert_eq!(open_menu(&app).selected, first);
+        assert_eq!(open_menu(&app).armed, None);
+        app.on_event(mouse_event(MouseEventKind::Moved, 0, 0));
+        assert_eq!(app.hover, None);
+        // A right click on the menu itself only closes it.
+        app.on_event(right(rect.x + 2, rect.y + 1));
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn who_has_read_is_not_offered_when_read_markers_are_off() {
+        let mut read = remote("1", "me", "seen");
+        read.read_by = ReadBy {
+            readers: vec![Reader {
+                name: "bob".into(),
+                time: "14:05".into(),
+            }],
+            total: 1,
+        };
+        let (mut app, mut terminal, _commands) = connected(vec![read]);
+        right_click(&mut app, &mut terminal, "seen");
+        assert!(labels(&app).contains(&"Read by…".to_owned()));
+        app.on_event(key(KeyCode::Esc));
+        app.perform(Action::Setting(crate::modal::Setting::ReadMarkers));
+        right_click(&mut app, &mut terminal, "seen");
+        assert!(!labels(&app).contains(&"Read by…".to_owned()));
+        app.on_event(key(KeyCode::Esc));
+
+        // Both display settings can be reached from the command palette.
+        for (typed, was) in [("read markers", false), ("room previews", false)] {
+            app.perform(Action::OpenPalette);
+            for c in typed.chars() {
+                app.on_event(key(KeyCode::Char(c)));
+            }
+            let text = screen(&mut app, &mut terminal);
+            assert!(text.to_lowercase().contains(typed), "{text}");
+            app.on_event(key(KeyCode::Enter));
+            assert!(app.modal.is_none());
+            let now = if typed == "read markers" {
+                app.read_markers
+            } else {
+                app.room_previews
+            };
+            assert_eq!(now, !was, "{typed}");
+        }
+    }
+
+    #[test]
+    fn menus_in_threads_on_invitations_and_on_other_parts_of_a_message() {
+        // In a thread: no thread entry; the menu goes when the thread is left.
+        let (mut app, mut terminal) = demo();
+        app.perform(Action::OpenRoom(1));
+        screen(&mut app, &mut terminal);
+        app.on_event(key(KeyCode::Up));
+        app.perform(Action::OpenThread);
+        assert!(app.thread_open());
+        screen(&mut app, &mut terminal);
+        app.on_event(key(KeyCode::Up));
+        screen(&mut app, &mut terminal);
+        app.on_event(key(KeyCode::Char('m')));
+        assert!(labels(&app).iter().all(|label| !label.contains("thread")));
+        let Some(Modal::Menu(menu)) = app.modal.clone() else {
+            panic!("no menu");
+        };
+        app.modal = None;
+        app.perform(Action::CloseThread);
+        assert!(!app.menu_target_alive(&menu.target));
+
+        // A reaction and a thread line belong to their message.
+        let (mut app, mut terminal) = demo();
+        let text = screen(&mut app, &mut terminal);
+        let (column, row) = find(&text, "👍");
+        app.on_event(right(column, row));
+        assert_eq!(app.timeline.selected, Some(1));
+        assert!(labels(&app).contains(&"React…".to_owned()));
+        // The reaction itself was not toggled.
+        assert_eq!(app.rooms[0].messages[1].reactions[0].count, 2);
+        app.on_event(key(KeyCode::Esc));
+        // A section heading of the room list has no menu.
+        let (column, row) = find(&text, "People");
+        app.on_event(right(column, row));
+        assert!(app.modal.is_none());
+
+        // An invitation: little to do with it, and declining asks in its room info.
+        let (mut app, mut terminal, mut commands) = connected(Vec::new());
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Alpha", RoomCategory::Room),
+            summary("!i:example.org", "Party", RoomCategory::Invite),
+        ]));
+        sent(&mut commands);
+        right_click(&mut app, &mut terminal, "Party");
+        assert_eq!(labels(&app), ["Open", "Room info", "Decline invitation…"]);
+        choose(&mut app, &mut terminal, "Decline invitation…");
+        assert!(
+            matches!(&app.modal, Some(Modal::RoomInfo(info)) if info.room_id == "!i:example.org")
+        );
+        let seen = sent(&mut commands);
+        assert!(
+            seen.iter().all(|command| !command.contains("Leave")),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn the_rooms_receipts_do_not_follow_a_message_into_its_thread_and_the_setting_is_saved() {
+        let (mut app, mut terminal) = demo();
+        app.perform(Action::OpenRoom(1));
+        app.rooms[1].messages[0].read_by = ReadBy {
+            readers: vec![Reader {
+                name: "bob".into(),
+                time: String::new(),
+            }],
+            total: 1,
+        };
+        app.timeline_rev += 1;
+        assert!(screen(&mut app, &mut terminal).contains("✓"));
+        app.on_event(key(KeyCode::Up));
+        app.perform(Action::OpenThread);
+        assert!(app.thread_open());
+        assert!(app.messages()[0].read_by.is_empty());
+        assert!(!screen(&mut app, &mut terminal).contains("✓"));
+        // Back in the room they are there again.
+        app.perform(Action::CloseThread);
+        assert!(screen(&mut app, &mut terminal).contains("✓"));
+
+        // The settings row writes `read_markers` to the configuration.
+        let dir = std::env::temp_dir().join(format!("matrix-rat-markers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("config.toml");
+        app.config_file = Some(file.clone());
+        app.perform(Action::Setting(crate::modal::Setting::ReadMarkers));
+        assert!(!crate::config::Config::load(&file).unwrap().read_markers);
+        assert!(!screen(&mut app, &mut terminal).contains("✓"));
+        app.perform(Action::Setting(crate::modal::Setting::ReadMarkers));
+        assert!(crate::config::Config::load(&file).unwrap().read_markers);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_room_list_by_key() {
         let (mut app, mut terminal) = demo();
@@ -1081,7 +1475,8 @@ mod tests {
         assert_eq!(
             open_menu(&app).target,
             Target::Room {
-                id: app.rooms[room].id.clone()
+                id: app.rooms[room].id.clone(),
+                kind: app.rooms[room].kind,
             }
         );
         // Room info, as F4 would show it for the room under the cursor.

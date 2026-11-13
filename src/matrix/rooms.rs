@@ -552,9 +552,7 @@ async fn forward(
     let mut readers = super::receipts::Names::default();
     let snapshot = |items: &Vector<Arc<TimelineItem>>,
                     unread: HashSet<String>,
-                    readers: &super::receipts::Names| {
-        let mut messages = convert(items, &own);
-        readers.annotate(&mut messages, items, &own);
+                    mut messages: Vec<crate::model::Message>| {
         threads::annotate(&mut messages, in_thread, &unread);
         MatrixEvent::Timeline {
             room_id: room_id.clone(),
@@ -604,8 +602,9 @@ async fn forward(
     };
     fetch_replies(&items);
     let marks = unread(&items).await;
-    readers.learn(&room, &items, &own).await;
-    if events.send(snapshot(&items, marks, &readers)).is_err() {
+    let mut messages = convert(&items, &own);
+    readers.annotate(&room, &mut messages, &items, &own).await;
+    if events.send(snapshot(&items, marks, messages)).is_err() {
         return;
     }
     loop {
@@ -617,8 +616,9 @@ async fn forward(
                 }
                 fetch_replies(&items);
                 let marks = unread(&items).await;
-                readers.learn(&room, &items, &own).await;
-                if events.send(snapshot(&items, marks, &readers)).is_err() {
+                let mut messages = convert(&items, &own);
+                readers.annotate(&room, &mut messages, &items, &own).await;
+                if events.send(snapshot(&items, marks, messages)).is_err() {
                     return;
                 }
             }

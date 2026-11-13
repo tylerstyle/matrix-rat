@@ -5,7 +5,8 @@
 //! (everyone has "read" what they wrote) are left out. A room's timeline carries the
 //! receipts of the room, a thread's those of the thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use chrono::{DateTime, Local, TimeZone};
@@ -16,103 +17,204 @@ use matrix_sdk_ui::timeline::{EventTimelineItem, TimelineItem};
 
 use super::convert::{day_label, display_name};
 use crate::model::{Message, ReadBy, Reader};
-use crate::text::{sanitize_line, truncate};
+use crate::text::{is_blank, sanitize_line, truncate};
 
-/// Names looked up in the member list are remembered up to this many.
+/// Names looked up in the member list are remembered up to this many; beyond that
+/// the ones looked up longest ago go first.
 const NAMES_MAX: usize = 2000;
+/// Lookups in one go. What is left over is named by its id for now and looked up
+/// with the next change.
+const LOOKUPS_MAX: usize = 300;
 /// Longest name shown, in columns.
 const NAME_WIDTH: usize = 40;
 
 type Stamp = Option<MilliSecondsSinceUnixEpoch>;
 
-/// Display names of readers who have not written anything that is loaded (those who
-/// have are named by their messages). Lives as long as the room stays open.
+/// The receipts shown on one timeline item.
+struct Picked<'a> {
+    /// The item's unique id, which is the message's id.
+    id: &'a str,
+    readers: Vec<(&'a UserId, Stamp)>,
+    total: u32,
+}
+
+/// A name from the member list. `found` is false for a stand-in (the id's first
+/// part) used because the list did not have the person.
+struct Known {
+    name: String,
+    found: bool,
+}
+
+/// Turns receipts into names, and remembers both between the timeline's changes:
+/// most changes move no receipt, and then nothing is worked out again.
 #[derive(Default)]
 pub struct Names {
-    known: HashMap<OwnedUserId, String>,
+    /// Readers who have not written anything that is loaded (those who have are
+    /// named by their messages), and the order they were looked up in.
+    known: HashMap<OwnedUserId, Known>,
+    order: VecDeque<OwnedUserId>,
+    /// What the last pass made, by message id, and a digest of the receipts it was
+    /// made from.
+    made: HashMap<String, ReadBy>,
+    digest: Option<u64>,
+    /// The member list was complete at the last pass.
+    synced: bool,
+    /// The last pass left names to look up.
+    unfinished: bool,
 }
 
 impl Names {
-    /// Looks up the names that `annotate` is going to need and does not have yet.
-    pub async fn learn(&mut self, room: &Room, items: &Vector<Arc<TimelineItem>>, own: &UserId) {
-        let speakers = speakers(items);
-        let mut wanted: Vec<OwnedUserId> = Vec::new();
-        for event in items.iter().filter_map(|item| item.as_event()) {
-            for (user, _) in pick(receipts(event), own, event.sender()).0 {
-                if !speakers.contains_key(user)
-                    && !self.known.contains_key(user)
-                    && !wanted.iter().any(|known| known == user)
-                {
-                    wanted.push(user.to_owned());
-                }
-            }
-        }
-        if wanted.is_empty() {
-            return;
-        }
-        if self.known.len() + wanted.len() > NAMES_MAX {
-            self.known.clear();
-        }
-        for user in wanted.into_iter().take(NAMES_MAX) {
-            // From the local store only: a receipt is not worth a request.
-            let name = match room.get_member_no_sync(&user).await {
-                Ok(Some(member)) => member.display_name().map(str::to_owned),
-                _ => None,
-            };
-            let name = clean_name(name.as_deref(), &user);
-            self.known.insert(user, name);
-        }
-    }
-
     /// Fills in `read_by` on the messages made from `items` (matched by their id).
-    pub fn annotate(
-        &self,
+    /// Names come from the local store only: a receipt is not worth a request.
+    pub async fn annotate(
+        &mut self,
+        room: &Room,
         messages: &mut [Message],
         items: &Vector<Arc<TimelineItem>>,
         own: &UserId,
     ) {
-        let now = Local::now();
-        let speakers = speakers(items);
-        let mut read: HashMap<&str, ReadBy> = HashMap::new();
-        for item in items {
-            let Some(event) = item.as_event() else {
-                continue;
-            };
-            let (picked, total) = pick(receipts(event), own, event.sender());
-            if total == 0 {
-                continue;
-            }
-            let readers = picked
-                .into_iter()
-                .map(|(user, stamp)| Reader {
-                    name: match speakers.get(user).or_else(|| self.known.get(user)) {
-                        Some(name) => name.clone(),
-                        None => clean_name(None, user),
-                    },
-                    time: stamp
-                        .and_then(local_time)
-                        .map(|when| time_label(&when, &now))
-                        .unwrap_or_default(),
+        // One pass over the items for the receipts; names only if they changed.
+        let picked: Vec<Picked> = items
+            .iter()
+            .filter_map(|item| {
+                let event = item.as_event()?;
+                let (readers, total) = pick(receipts(event), own, event.sender());
+                (total > 0).then_some(Picked {
+                    id: item.unique_id().0.as_str(),
+                    readers,
+                    total,
                 })
-                .collect();
-            read.insert(item.unique_id().0.as_str(), ReadBy { readers, total });
+            })
+            .collect();
+        if let Some(needed) = self.plan(&picked, room.are_members_synced()) {
+            // Whoever wrote something loaded is named by it, the newest first.
+            let mut speakers: HashMap<&UserId, String> = HashMap::new();
+            for event in items.iter().rev().filter_map(|item| item.as_event()) {
+                let sender = event.sender();
+                if needed.contains(sender) && !speakers.contains_key(sender) {
+                    let name = display_name(event.sender_profile(), sender);
+                    speakers.insert(sender, clean_name(Some(&name), sender));
+                }
+            }
+            for user in self.wanted(&needed, &speakers) {
+                let name = match room.get_member_no_sync(user).await {
+                    Ok(Some(member)) => member.display_name().map(str::to_owned),
+                    _ => None,
+                };
+                self.learn(user, name.as_deref());
+            }
+            self.make(&picked, &speakers, &Local::now());
         }
         for message in messages {
-            message.read_by = read.remove(message.id.as_str()).unwrap_or_default();
+            message.read_by = self
+                .made
+                .get(message.id.as_str())
+                .cloned()
+                .unwrap_or_default();
         }
     }
-}
 
-/// The names people go by in what they wrote, which is the freshest we have.
-fn speakers(items: &Vector<Arc<TimelineItem>>) -> HashMap<&UserId, String> {
-    items
-        .iter()
-        .filter_map(|item| item.as_event())
-        .map(|event| {
-            let name = display_name(event.sender_profile(), event.sender());
-            (event.sender(), clean_name(Some(&name), event.sender()))
-        })
-        .collect()
+    /// Decides whether names have to be worked out: `None` if the receipts are the
+    /// ones of the last pass and nothing was left open; otherwise everyone to name.
+    fn plan<'a>(&mut self, picked: &[Picked<'a>], synced: bool) -> Option<HashSet<&'a UserId>> {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for item in picked {
+            item.id.hash(&mut hasher);
+            item.total.hash(&mut hasher);
+            for (user, stamp) in &item.readers {
+                user.hash(&mut hasher);
+                stamp.hash(&mut hasher);
+            }
+        }
+        let digest = hasher.finish();
+        // The member list has arrived since: stand-ins from before get their names.
+        let members_arrived = synced && !self.synced;
+        self.synced = synced;
+        if members_arrived {
+            self.known.retain(|_, known| known.found);
+            self.order.retain(|user| self.known.contains_key(user));
+        }
+        if self.digest == Some(digest) && !members_arrived && !self.unfinished {
+            return None;
+        }
+        self.digest = Some(digest);
+        Some(
+            picked
+                .iter()
+                .flat_map(|item| item.readers.iter().map(|(user, _)| *user))
+                .collect(),
+        )
+    }
+
+    /// Whom to look up in the member list now: readers named neither by a message
+    /// nor from an earlier lookup. No more than `LOOKUPS_MAX` at a time.
+    fn wanted<'a>(
+        &mut self,
+        needed: &HashSet<&'a UserId>,
+        speakers: &HashMap<&UserId, String>,
+    ) -> Vec<&'a UserId> {
+        let mut wanted: Vec<&UserId> = needed
+            .iter()
+            .copied()
+            .filter(|user| !speakers.contains_key(user) && !self.known.contains_key(*user))
+            .collect();
+        // A fixed order, so that what is left over is not the same people each time.
+        wanted.sort_unstable();
+        self.unfinished = wanted.len() > LOOKUPS_MAX;
+        wanted.truncate(LOOKUPS_MAX);
+        wanted
+    }
+
+    /// Remembers what the member list says about `user` (`None`: nothing).
+    fn learn(&mut self, user: &UserId, name: Option<&str>) {
+        let known = Known {
+            name: clean_name(name, user),
+            found: name.is_some(),
+        };
+        if self.known.insert(user.to_owned(), known).is_none() {
+            self.order.push_back(user.to_owned());
+        }
+        // The oldest make room, one at a time: never everything at once.
+        while self.known.len() > NAMES_MAX {
+            match self.order.pop_front() {
+                Some(oldest) => self.known.remove(&oldest),
+                None => break,
+            };
+        }
+    }
+
+    fn make(
+        &mut self,
+        picked: &[Picked],
+        speakers: &HashMap<&UserId, String>,
+        now: &DateTime<Local>,
+    ) {
+        self.made = picked
+            .iter()
+            .map(|item| {
+                let readers = item
+                    .readers
+                    .iter()
+                    .map(|(user, stamp)| Reader {
+                        name: match (speakers.get(user), self.known.get(*user)) {
+                            (Some(name), _) => name.clone(),
+                            (None, Some(known)) => known.name.clone(),
+                            (None, None) => clean_name(None, user),
+                        },
+                        time: stamp
+                            .and_then(local_time)
+                            .map(|when| time_label(&when, now))
+                            .unwrap_or_default(),
+                    })
+                    .collect();
+                let read_by = ReadBy {
+                    readers,
+                    total: item.total,
+                };
+                (item.id.to_owned(), read_by)
+            })
+            .collect();
+    }
 }
 
 fn receipts(event: &EventTimelineItem) -> impl Iterator<Item = (&UserId, Stamp)> {
@@ -143,11 +245,10 @@ fn pick<'a>(
 /// where there is none.
 fn clean_name(name: Option<&str>, user: &UserId) -> String {
     let name = name.map(sanitize_line).unwrap_or_default();
-    let name = name.trim();
-    let name = if name.is_empty() {
+    let name = if is_blank(&name) {
         sanitize_line(user.localpart())
     } else {
-        name.to_owned()
+        name.trim().to_owned()
     };
     truncate(&name, NAME_WIDTH)
 }
@@ -233,6 +334,150 @@ mod tests {
         assert!(crate::text::width(&long) <= NAME_WIDTH, "{long}");
         // Nothing that reorders the line either.
         assert!(!clean_name(Some("a\u{202e}b"), user).contains('\u{202e}'));
+    }
+
+    #[test]
+    fn a_name_that_shows_nothing_gets_the_id_part() {
+        let user = user_id!("@bob:example.org");
+        for hidden in [
+            "\u{200b}",
+            "\u{200d}\u{feff} ",
+            "\u{3164}",
+            "\u{200b}\u{202e}",
+        ] {
+            assert_eq!(clean_name(Some(hidden), user), "bob", "{hidden:?}");
+        }
+        assert_eq!(clean_name(Some(" b\u{200b}ob "), user), "b\u{200b}ob");
+    }
+
+    fn picked<'a>(id: &'a str, readers: &[&'a UserId]) -> Picked<'a> {
+        Picked {
+            id,
+            readers: readers.iter().map(|user| (*user, stamp(5))).collect(),
+            total: readers.len() as u32,
+        }
+    }
+
+    /// A pass as `annotate` does it, with `members` standing in for the store.
+    /// Returns how many lookups were made; `None` if nothing was worked out.
+    fn pass(
+        names: &mut Names,
+        items: &[Picked],
+        speakers: &HashMap<&UserId, String>,
+        members: &HashMap<&UserId, &str>,
+        synced: bool,
+    ) -> Option<usize> {
+        let needed = names.plan(items, synced)?;
+        let wanted = names.wanted(&needed, speakers);
+        for user in &wanted {
+            names.learn(user, members.get(user).copied());
+        }
+        names.make(items, speakers, &Local::now());
+        Some(wanted.len())
+    }
+
+    fn named(names: &Names, id: &str) -> Vec<String> {
+        let read_by = names.made.get(id).cloned().unwrap_or_default();
+        read_by.readers.into_iter().map(|r| r.name).collect()
+    }
+
+    #[test]
+    fn names_come_from_messages_first_and_are_worked_out_once() {
+        let bob = user_id!("@bob:example.org");
+        let carol = user_id!("@carol:example.org");
+        let speakers = HashMap::from([(bob, "Bob the Speaker".to_owned())]);
+        let members = HashMap::from([(bob, "Bobby"), (carol, "Carol")]);
+        let mut names = Names::default();
+        let items = [picked("m1", &[bob, carol])];
+        // Only carol has to be looked up; bob is named by what he wrote.
+        assert_eq!(pass(&mut names, &items, &speakers, &members, true), Some(1));
+        assert_eq!(named(&names, "m1"), ["Bob the Speaker", "Carol"]);
+        // The same receipts again (a new message, an edit): nothing is redone.
+        assert_eq!(pass(&mut names, &items, &speakers, &members, true), None);
+        assert_eq!(named(&names, "m1"), ["Bob the Speaker", "Carol"]);
+        // A receipt moves: worked out again, without a second lookup.
+        let moved = [picked("m1", &[bob]), picked("m2", &[carol])];
+        assert_eq!(pass(&mut names, &moved, &speakers, &members, true), Some(0));
+        assert_eq!(named(&names, "m1"), ["Bob the Speaker"]);
+        assert_eq!(named(&names, "m2"), ["Carol"]);
+        // Nobody reads anything any more.
+        assert_eq!(pass(&mut names, &[], &speakers, &members, true), Some(0));
+        assert!(names.made.is_empty());
+    }
+
+    #[test]
+    fn stand_ins_are_replaced_once_the_member_list_is_there() {
+        let bob = user_id!("@bob:example.org");
+        let carol = user_id!("@carol:example.org");
+        let nobody = HashMap::new();
+        let mut names = Names::default();
+        let items = [picked("m1", &[bob, carol])];
+        // Before the list is complete only carol is in the store.
+        let early = HashMap::from([(carol, "Carol")]);
+        assert_eq!(pass(&mut names, &items, &nobody, &early, false), Some(2));
+        assert_eq!(named(&names, "m1"), ["bob", "Carol"]);
+        assert_eq!(pass(&mut names, &items, &nobody, &early, false), None);
+        // The list arrives, the receipts are the same: bob is asked about again,
+        // carol is not.
+        let full = HashMap::from([(bob, "Bobby Tables"), (carol, "Carol")]);
+        assert_eq!(pass(&mut names, &items, &nobody, &full, true), Some(1));
+        assert_eq!(named(&names, "m1"), ["Bobby Tables", "Carol"]);
+        // Someone the complete list does not have keeps the stand-in, for good.
+        let dave = user_id!("@dave:example.org");
+        let items = [picked("m1", &[bob, carol, dave])];
+        assert_eq!(pass(&mut names, &items, &nobody, &full, true), Some(1));
+        assert_eq!(named(&names, "m1"), ["Bobby Tables", "Carol", "dave"]);
+        let items = [picked("m2", &[bob, carol, dave])];
+        assert_eq!(pass(&mut names, &items, &nobody, &full, true), Some(0));
+    }
+
+    #[test]
+    fn many_readers_are_looked_up_in_portions_and_the_oldest_names_make_room() {
+        let users: Vec<OwnedUserId> = (0..NAMES_MAX + LOOKUPS_MAX + 50)
+            .map(|n| UserId::parse(format!("@user{n:05}:example.org")).unwrap())
+            .collect();
+        let nobody = HashMap::new();
+        let members = HashMap::new();
+        let mut names = Names::default();
+        // More unknown readers at once than one pass looks up.
+        let crowd: Vec<&UserId> = users[..LOOKUPS_MAX + 50]
+            .iter()
+            .map(|u| u.as_ref())
+            .collect();
+        let items = [picked("m1", &crowd)];
+        assert_eq!(
+            pass(&mut names, &items, &nobody, &members, true),
+            Some(LOOKUPS_MAX)
+        );
+        // Everyone has a name meanwhile, and the rest follows with the next change,
+        // even though the receipts are the same.
+        assert_eq!(named(&names, "m1").len(), LOOKUPS_MAX + 50);
+        assert_eq!(pass(&mut names, &items, &nobody, &members, true), Some(50));
+        assert_eq!(pass(&mut names, &items, &nobody, &members, true), None);
+
+        // Past the limit only as many go as come: the newest stay known.
+        for chunk in users[LOOKUPS_MAX + 50..].chunks(LOOKUPS_MAX) {
+            let readers: Vec<&UserId> = chunk.iter().map(|u| u.as_ref()).collect();
+            let items = [picked("m1", &readers)];
+            assert_eq!(
+                pass(&mut names, &items, &nobody, &members, true),
+                Some(chunk.len())
+            );
+            assert!(names.known.len() <= NAMES_MAX);
+            assert_eq!(names.known.len(), names.order.len());
+        }
+        assert_eq!(names.known.len(), NAMES_MAX);
+        assert!(names.known.contains_key(users.last().unwrap()));
+        assert!(!names.known.contains_key(&users[0]));
+        // The last readers again: all still known, nothing looked up.
+        let last: Vec<&UserId> = users[users.len() - 100..]
+            .iter()
+            .map(|u| u.as_ref())
+            .collect();
+        assert_eq!(
+            pass(&mut names, &[picked("m2", &last)], &nobody, &members, true),
+            Some(0)
+        );
     }
 
     #[test]

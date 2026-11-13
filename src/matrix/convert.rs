@@ -76,7 +76,7 @@ pub(super) fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) ->
         TimelineDetails::Ready(Profile {
             display_name: Some(name),
             ..
-        }) if !sanitize_line(name).trim().is_empty() => sanitize_line(name),
+        }) if !crate::text::is_blank(&sanitize_line(name)) => sanitize_line(name),
         _ => user.localpart().to_owned(),
     }
 }

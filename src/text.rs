@@ -30,6 +30,21 @@ pub fn sanitize_line(text: &str) -> String {
     sanitize(text).replace('\n', " ")
 }
 
+/// Whether text shows nothing at all: empty, or only spaces and characters that take
+/// no room or draw nothing (zero-width spaces and joiners, fillers, the blank Braille
+/// cell). A name like that needs a stand-in.
+pub fn is_blank(text: &str) -> bool {
+    use unicode_width::UnicodeWidthChar;
+    text.chars().all(|c| {
+        c.is_whitespace()
+            || c.width().unwrap_or(0) == 0
+            || matches!(
+                c,
+                '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}' | '\u{2800}' | '\u{00ad}'
+            )
+    })
+}
+
 /// Control characters, and the invisible direction overrides that can reorder the rest
 /// of a terminal row.
 fn unsafe_char(c: char) -> bool {
@@ -109,6 +124,25 @@ pub fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_that_shows_nothing_is_blank() {
+        for blank in [
+            "",
+            "  \t",
+            "\u{200b}",
+            "\u{200c}\u{200d}\u{feff}",
+            " \u{2060} ",
+            "\u{3164}",
+            "\u{2800}\u{00ad}",
+            "\u{fe0f}",
+        ] {
+            assert!(is_blank(blank), "{blank:?}");
+        }
+        for shown in ["a", " . ", "日", "🐀", "a\u{200b}", "e\u{301}"] {
+            assert!(!is_blank(shown), "{shown:?}");
+        }
+    }
 
     #[test]
     fn wraps_on_words() {
