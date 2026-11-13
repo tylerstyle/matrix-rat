@@ -5,6 +5,7 @@ mod help;
 pub mod hit;
 mod image;
 mod modal;
+mod palette;
 mod sidebar;
 mod status;
 mod timeline;
@@ -284,14 +285,35 @@ mod tests {
     }
 
     #[test]
+    fn command_palette() {
+        let mut app = App::demo();
+        app.perform(Action::OpenPalette);
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+        insta::assert_snapshot!("command_palette_narrow", render(&mut app, 46, 16));
+        for c in "rat".chars() {
+            app.on_event(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+        }
+        insta::assert_snapshot!("command_palette_filtered", render(&mut app, 100, 30));
+    }
+
+    #[test]
     fn tiny_sizes_do_not_panic() {
         use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, SettingsMenu};
+        let mut with_palette = App::demo();
+        with_palette.perform(Action::OpenPalette);
+        let palette_modal = with_palette.modal.take();
         let modals = [
             None,
             Some(Modal::Emoji(EmojiPicker::default())),
             Some(Modal::Settings(SettingsMenu::default())),
             Some(Modal::Login(LoginForm::new(Some("an error".into())))),
             Some(Modal::Recovery(RecoveryForm::default())),
+            palette_modal,
         ];
         for modal in modals {
             let mut app = App::demo();

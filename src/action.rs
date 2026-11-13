@@ -69,4 +69,12 @@ pub enum Action {
     Save,
     /// A control of the device verification popup.
     Verify(crate::verify::Button),
+    /// Open the command palette.
+    OpenPalette,
+    /// Open a room by its index in `App::rooms`.
+    OpenRoom(usize),
+    /// Select a theme by its index in `App::theme_names`.
+    SelectTheme(usize),
+    /// Trigger a setting toggle or action from outside the settings popup.
+    Setting(crate::modal::Setting),
 }

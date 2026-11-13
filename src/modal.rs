@@ -268,6 +268,7 @@ pub enum Modal {
     Emoji(EmojiPicker),
     Settings(SettingsMenu),
     Verify(crate::verify::VerifyPopup),
+    Palette(crate::palette::Palette),
 }
 
 #[cfg(test)]

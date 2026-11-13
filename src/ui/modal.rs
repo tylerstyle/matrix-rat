@@ -25,6 +25,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Emoji(picker) => emoji(frame, app, area, picker),
         Modal::Settings(menu) => settings(frame, app, area, menu),
         Modal::Verify(popup) => super::verify::draw(frame, app, area, popup),
+        Modal::Palette(palette) => super::palette::draw(frame, app, area, palette),
     }
     app.modal = Some(modal);
 }

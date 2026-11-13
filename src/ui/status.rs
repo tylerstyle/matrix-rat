@@ -18,7 +18,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let status = theme.style(Role::Status);
     let key = theme.style(Role::StatusKey);
 
-    // Right side: clickable buttons.
+    // Right side: essential clickable buttons. Palette is placed only into leftover slack
+    // below so it never crowds toasts, security alerts, or context hints.
     let buttons = [
         (Button::Help, "F1".to_owned(), "help".to_owned()),
         (Button::Settings, "F2".to_owned(), "settings".to_owned()),
@@ -26,21 +27,19 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     ];
     let mut right = area.right();
     for (button, label, text) in buttons.iter().rev() {
-        let w = (width(label) + width(text) + 3) as u16;
+        let w = button_width(label, text);
         if right < area.x + w + 20 {
             break;
         }
         right -= w;
-        let rect = Rect::new(right, area.y, w, 1);
-        let line = Line::from(vec![
-            Span::styled(format!(" {label}"), key),
-            Span::styled(format!(" {text} "), status),
-        ]);
-        frame.render_widget(&line, rect);
-        if app.hover == Some(HitId::Button(*button)) {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-        }
-        app.hits.add(rect, HitId::Button(*button));
+        draw_button(
+            frame,
+            &app.theme,
+            app.hover,
+            &mut app.hits,
+            Rect::new(right, area.y, w, 1),
+            (*button, label, text),
+        );
     }
 
     // Left side: connection state, then a toast, or hints for the focused pane.
@@ -111,6 +110,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             .is_some_and(|message| message.image.is_some());
         hints.retain(|(_, text, _)| *text != "view" || picture);
         let mut col = area.x + spans.iter().map(|s| width(&s.content) as u16).sum::<u16>();
+        let mut drew_hint = false;
         for (k, text, action) in hints {
             let label = format!(" {text}  ");
             let hint_width = (width(k) + width(&label)) as u16;
@@ -127,10 +127,50 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
             col += hint_width;
+            drew_hint = true;
             spans.push(Span::styled(k.to_owned(), key));
             spans.push(Span::styled(label, status));
+        }
+
+        // Fit the command palette button into unused space; the button starts with a space,
+        // so subtracting the trailing 2-col hint gap still leaves at least one blank column.
+        let used = col.saturating_sub(if drew_hint { 2 } else { 0 });
+        let palette_w = button_width("Ctrl-P", "palette");
+        if used + palette_w <= right {
+            right -= palette_w;
+            draw_button(
+                frame,
+                theme,
+                app.hover,
+                &mut app.hits,
+                Rect::new(right, area.y, palette_w, 1),
+                (Button::Palette, "Ctrl-P", "palette"),
+            );
         }
     }
     let left = Rect::new(area.x, area.y, right - area.x, 1);
     frame.render_widget(Line::from(spans), left);
+}
+
+fn button_width(label: &str, text: &str) -> u16 {
+    (width(label) + width(text) + 3) as u16
+}
+
+fn draw_button(
+    frame: &mut Frame,
+    theme: &crate::theme::Theme,
+    hover: Option<HitId>,
+    hits: &mut super::hit::HitMap,
+    rect: Rect,
+    (button, label, text): (Button, &str, &str),
+) {
+    let line = Line::from(vec![
+        Span::styled(format!(" {label}"), theme.style(Role::StatusKey)),
+        Span::styled(format!(" {text} "), theme.style(Role::Status)),
+    ]);
+    frame.render_widget(&line, rect);
+    if hover == Some(HitId::Button(button)) {
+        frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
+    }
+    hits.add(rect, HitId::Button(button));
 }
