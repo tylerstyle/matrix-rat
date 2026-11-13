@@ -2,7 +2,7 @@
 
 # 🐀 matrix-rat
 
-**A Matrix client for the terminal that is as comfortable with a mouse as with a keyboard.**
+**A Matrix client for the terminal that is as comfortable with a rat, ehm, I mean mouse, as with a keyboard.**
 
 [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
 [![Matrix](https://img.shields.io/badge/chat-Matrix-0dbd8b?logo=matrix&logoColor=white)](https://matrix.org)
