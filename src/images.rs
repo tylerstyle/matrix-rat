@@ -14,8 +14,6 @@ use std::time::{Duration, Instant};
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits, Rgba, RgbaImage};
 use ratatui::layout::Size;
-use ratatui_image::picker::cap_parser::QueryStdioOptions;
-use ratatui_image::picker::{Capability, Picker, ProtocolType};
 use ratatui_image::protocol::halfblocks::Halfblocks;
 use ratatui_image::protocol::kitty::Kitty;
 use ratatui_image::sliced::SlicedProtocol;
@@ -24,6 +22,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::ImageMode;
 use crate::model::{DEMO_IMAGE, ImageInfo, ImageSource, MediaRef};
+use crate::termquery;
 
 /// The largest picture drawn between messages, in cells.
 pub const MAX_COLS: u16 = 40;
@@ -42,6 +41,8 @@ const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 /// Memory the cache may hold before the pictures unused for longest are dropped.
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 256;
+/// Sizes remembered for pictures whose message did not state one.
+const LEARNED_ENTRIES: usize = 4096;
 /// A request the worker never answered (it restarted) may be made again after this.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the terminal gets to answer the question about what it can draw.
@@ -96,8 +97,8 @@ impl Graphics {
         }
     }
 
-    /// Asks the terminal what it can do. Writes to stdout and reads the answer from
-    /// stdin, so this must run in raw mode and before anything else reads stdin.
+    /// Asks the terminal what it can do (see [`crate::termquery`] for when this may
+    /// run). Takes at most [`QUERY_TIMEOUT`]; without an answer it is half blocks.
     ///
     /// Only kitty's protocol with Unicode placeholders is used for real graphics: its
     /// pictures live in ordinary cells, so they cannot be left behind or painted over
@@ -113,35 +114,41 @@ impl Graphics {
             tracing::info!("images: inside a terminal multiplexer, using half blocks");
             return Self::halfblocks();
         }
-        let options = QueryStdioOptions {
-            timeout: QUERY_TIMEOUT,
-            kitty_compression: true,
-            ..QueryStdioOptions::default()
+        if placeholders_broken() {
+            tracing::info!(
+                "images: this terminal's kitty placeholders are unreliable, using half blocks"
+            );
+            return Self::halfblocks();
+        }
+        let Some(reply) = termquery::ask(QUERY_TIMEOUT) else {
+            return Self::halfblocks();
         };
-        let picker = match Picker::from_query_stdio_with_options(options) {
-            Ok(picker) => picker,
-            Err(err) => {
-                tracing::info!(%err, "images: terminal did not answer, using half blocks");
-                return Self::halfblocks();
-            }
-        };
-        let font = picker.font_size();
-        let graphics =
-            if picker.protocol_type() == ProtocolType::Kitty && font.width > 0 && font.height > 0 {
-                Self {
-                    protocol: Some(Protocol::Kitty {
-                        compress: picker
-                            .capabilities()
-                            .contains(&Capability::KittyCompression),
-                    }),
-                    font: (font.width, font.height),
-                }
-            } else {
-                Self::halfblocks()
-            };
-        tracing::info!(?graphics, "images: terminal queried");
+        let graphics = Self::from_reply(reply, termquery::cell_from_window());
+        tracing::info!(?reply, ?graphics, "images: terminal queried");
         graphics
     }
+
+    /// `window_cell`: the cell size the system reports, for terminals that do not
+    /// answer that part.
+    fn from_reply(reply: termquery::Reply, window_cell: Option<(u16, u16)>) -> Self {
+        match (reply.kitty, reply.cell.or(window_cell)) {
+            (true, Some(font)) => Self {
+                protocol: Some(Protocol::Kitty {
+                    compress: reply.compression,
+                }),
+                font,
+            },
+            // No graphics, no answer in time, or no way to size a picture.
+            _ => Self::halfblocks(),
+        }
+    }
+}
+
+/// WezTerm and Konsole answer the kitty graphics check but do not place pictures
+/// through Unicode placeholders correctly.
+fn placeholders_broken() -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    set("WEZTERM_EXECUTABLE") || set("KONSOLE_VERSION")
 }
 
 fn in_multiplexer() -> bool {
@@ -204,7 +211,11 @@ pub fn decode(bytes: &[u8], max: (u32, u32)) -> Result<Decoded, String> {
     // The decoder is taken apart from the reader to get at the orientation a camera
     // noted; the reader's own check of the memory needed has to be repeated then.
     let mut decoder = reader.into_decoder().map_err(reason)?;
-    if decoder.total_bytes() > MAX_DECODE_ALLOC {
+    // Whatever the file's own format, the pixels may end up as four bytes each
+    // (turning the picture, scaling it), so that is what has to fit.
+    let (width, height) = decoder.dimensions();
+    let as_rgba = u64::from(width) * u64::from(height) * 4;
+    if decoder.total_bytes().max(as_rgba) > MAX_DECODE_ALLOC {
         return Err("too large to show".to_owned());
     }
     let orientation = decoder
@@ -374,6 +385,8 @@ pub struct Viewer {
     encoded: Option<Encoded>,
     /// The size an encoding is under way for on another thread.
     encoding: Option<(u16, u16)>,
+    /// That encoding is to be thrown away when it arrives.
+    encoding_stale: bool,
 }
 
 /// What the viewer has to show right now.
@@ -608,14 +621,37 @@ impl ImageStore {
                 .min_by_key(|(_, entry)| entry.used)
                 .map(|(key, _)| key.clone());
             let Some(key) = oldest else { return };
-            if let Some(Entry {
-                state: State::Ready { encoded, .. },
-                ..
-            }) = self.entries.remove(&key)
-            {
-                Self::discard(&mut self.garbage, encoded);
+            match self.entries.remove(&key).map(|entry| entry.state) {
+                Some(State::Ready { encoded, .. }) => Self::discard(&mut self.garbage, encoded),
+                // Its one line becomes space for a picture again: lay out anew.
+                Some(State::Failed(_)) => self.layout_rev += 1,
+                _ => {}
             }
         }
+    }
+
+    /// Remembers the size found by decoding. Bounded: when full, only the sizes of
+    /// pictures still in the cache are kept.
+    fn learn(&mut self, key: &str, size: (u32, u32)) {
+        if self.learned.len() >= LEARNED_ENTRIES && !self.learned.contains_key(key) {
+            let entries = &self.entries;
+            self.learned.retain(|key, _| entries.contains_key(key));
+            self.layout_rev += 1;
+        }
+        self.learned.insert(key.to_owned(), size);
+    }
+
+    /// Forgets everything, for another account: the cache, the viewer, what was asked
+    /// for. Results still on their way are then ignored. The terminal is told to free
+    /// its copies with the next [`ImageStore::cleanup_sequence`].
+    pub fn clear(&mut self) {
+        self.close_viewer();
+        self.forget_encoded();
+        self.entries.clear();
+        self.learned.clear();
+        self.requests.clear();
+        self.unverified.clear();
+        self.layout_rev += 1;
     }
 
     /// The worker fetched (or failed to fetch) a picture.
@@ -637,7 +673,7 @@ impl ImageStore {
         self.layout_rev += 1;
         match result {
             Ok(decoded) => {
-                self.learned.insert(key.to_owned(), decoded.original);
+                self.learn(key, decoded.original);
                 self.insert(
                     key,
                     State::Ready {
@@ -668,7 +704,7 @@ impl ImageStore {
                 ) {
                     let (width, height) = THUMBNAIL_PIXELS;
                     let small = Arc::new(decoded.pixels.thumbnail(width, height));
-                    self.learned.insert(key.to_owned(), decoded.original);
+                    self.learn(key, decoded.original);
                     self.layout_rev += 1;
                     self.insert(
                         key,
@@ -716,17 +752,24 @@ impl ImageStore {
         let id = if stale && !hold { self.fresh_id() } else { 0 };
         let entry = self.entries.get_mut(key)?;
         entry.used = frame;
-        let State::Ready { pixels, encoded } = &mut entry.state else {
-            return None;
-        };
         if stale {
             if hold {
                 return None;
             }
-            Self::discard(&mut self.garbage, encoded.take());
-            *encoded = encode(pixels, size, graphics, id);
+            if let State::Ready { pixels, encoded } = &mut entry.state {
+                Self::discard(&mut self.garbage, encoded.take());
+                *encoded = encode(pixels, size, graphics, id);
+            }
+            // The encoding counts towards the cache's size. This picture stays: it
+            // was used in this frame.
+            self.evict();
         }
-        encoded.as_mut().filter(|encoded| encoded.shown || !hold)
+        match &mut self.entries.get_mut(key)?.state {
+            State::Ready { encoded, .. } => {
+                encoded.as_mut().filter(|encoded| encoded.shown || !hold)
+            }
+            _ => None,
+        }
     }
 
     /// Remembers that an untransmitted picture was put into the frame at this cell.
@@ -741,6 +784,11 @@ impl ImageStore {
     /// Called with the finished frame: checks that every transmission is still in the
     /// cell it was put into. One that was painted over never reaches the terminal, so
     /// that picture is encoded again for the next frame.
+    ///
+    /// Only that one cell matters: the transmission is the whole picture, and the
+    /// other cells are plain placeholders that may be covered freely. Whatever is drawn
+    /// over the timeline later in a frame either sets `covered` (popups, the viewer),
+    /// which holds new transmissions back, or is caught here.
     pub fn verify(&mut self, intact: impl Fn(u16, u16) -> bool) {
         for (target, x, y) in std::mem::take(&mut self.unverified) {
             let slot = match &target {
@@ -776,7 +824,8 @@ impl ImageStore {
         }
         if let Some(viewer) = &mut self.viewer {
             Self::discard(&mut self.garbage, viewer.encoded.take());
-            viewer.encoding = None;
+            // An encoding still under way is not to be used when it arrives.
+            viewer.encoding_stale = viewer.encoding.is_some();
         }
     }
 
@@ -815,6 +864,7 @@ impl ImageStore {
             original: info.dimensions,
             encoded: None,
             encoding: None,
+            encoding_stale: false,
         };
         match &info.source {
             ImageSource::Demo => {
@@ -860,7 +910,9 @@ impl ImageStore {
                 encoding,
                 ..
             }) => {
-                encoded.as_ref().is_none_or(|e| e.size != size) && *encoding != Some(size) && !hold
+                // One encoding at a time: while a window is dragged through many
+                // sizes, the next starts when the running one is done.
+                encoded.as_ref().is_none_or(|e| e.size != size) && encoding.is_none() && !hold
             }
             _ => false,
         };
@@ -901,13 +953,19 @@ impl ImageStore {
         match self.viewer.as_mut() {
             Some(viewer) if viewer.info.key == done.key && viewer.encoding == Some(done.size) => {
                 viewer.encoding = None;
+                if std::mem::take(&mut viewer.encoding_stale) {
+                    // Made before the terminal forgot its pictures; the next draw
+                    // starts over.
+                    Self::discard(&mut self.garbage, done.encoded);
+                    return;
+                }
                 Self::discard(&mut self.garbage, viewer.encoded.take());
                 viewer.encoded = done.encoded;
                 if viewer.encoded.is_none() {
                     viewer.state = ViewerState::Failed("could not be prepared".to_owned());
                 }
             }
-            // For a viewer that is closed or has another size by now.
+            // For a viewer that is closed by now.
             _ => Self::discard(&mut self.garbage, done.encoded),
         }
     }
@@ -1041,6 +1099,31 @@ mod tests {
         assert_eq!(decode(&jpeg, FULL_PIXELS).unwrap().original, (40, 20));
         assert_eq!(decode(&turned, FULL_PIXELS).unwrap().original, (20, 40));
 
+        // A grey picture needs one byte per pixel in the file's own format but four
+        // once it is turned or scaled: 16384x4100 passes as 67 MB of grey and must
+        // still be refused. (Only the header is real; nothing is read beyond it.)
+        let mut grey = Vec::new();
+        DynamicImage::new_luma8(4, 4)
+            .write_to(&mut Cursor::new(&mut grey), image::ImageFormat::Png)
+            .unwrap();
+        grey[16..20].copy_from_slice(&16_384u32.to_be_bytes());
+        grey[20..24].copy_from_slice(&4_100u32.to_be_bytes());
+        let crc = crc32(&grey[12..29]);
+        grey[29..33].copy_from_slice(&crc.to_be_bytes());
+        assert_eq!(
+            decode(&grey, THUMBNAIL_PIXELS).err().as_deref(),
+            Some("too large to show")
+        );
+        // The same header with a size that is allowed gets past that check (and then
+        // fails on the missing pixels), so it is the size that was refused above.
+        grey[16..20].copy_from_slice(&1_000u32.to_be_bytes());
+        let crc = crc32(&grey[12..29]);
+        grey[29..33].copy_from_slice(&crc.to_be_bytes());
+        assert_eq!(
+            decode(&grey, THUMBNAIL_PIXELS).err().as_deref(),
+            Some("the file is damaged")
+        );
+
         // A small file that unpacks into something enormous is refused.
         let mut bomb = Vec::new();
         DynamicImage::new_luma8(MAX_DECODE_SIDE + 1, 1)
@@ -1051,6 +1134,121 @@ mod tests {
             decode(&bomb, THUMBNAIL_PIXELS).err().as_deref(),
             Some("too large to show")
         );
+    }
+
+    /// The checksum PNG uses for its chunks.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xEDB8_8320 & (!(crc & 1)).wrapping_add(1));
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn terminal_answers_decide_how_pictures_are_drawn() {
+        use crate::termquery::Reply;
+        let kitty = Reply {
+            kitty: true,
+            compression: true,
+            cell: Some((9, 18)),
+            complete: true,
+        };
+        assert_eq!(
+            Graphics::from_reply(kitty, Some((7, 14))),
+            Graphics {
+                protocol: Some(Protocol::Kitty { compress: true }),
+                font: (9, 18)
+            }
+        );
+        // The cell size may come from the system instead.
+        let no_cell = Reply {
+            cell: None,
+            ..kitty
+        };
+        assert_eq!(Graphics::from_reply(no_cell, Some((7, 14))).font, (7, 14));
+        // Without any size a picture cannot be laid out; without kitty or without an
+        // answer (the timeout) it is half blocks.
+        assert_eq!(Graphics::from_reply(no_cell, None), Graphics::halfblocks());
+        let plain = Reply {
+            kitty: false,
+            ..kitty
+        };
+        assert_eq!(Graphics::from_reply(plain, None), Graphics::halfblocks());
+        assert_eq!(
+            Graphics::from_reply(Reply::default(), Some((7, 14))),
+            Graphics::halfblocks()
+        );
+    }
+
+    #[test]
+    fn remembered_sizes_are_bounded() {
+        let mut store = ImageStore::new(Graphics::halfblocks());
+        let kept = remote_image("mxc://x/kept", None);
+        store.begin_frame();
+        store.request(&kept);
+        store.on_loaded(&kept.key, false, Ok(decoded(20, 10)));
+        for n in 0..LEARNED_ENTRIES + 10 {
+            store.learn(&format!("mxc://x/{n}"), (1, 1));
+        }
+        assert!(store.learned.len() <= LEARNED_ENTRIES);
+        // What is still in the cache keeps its size.
+        assert_eq!(store.learned.get(&kept.key), Some(&(20, 10)));
+    }
+
+    #[test]
+    fn a_dragged_window_starts_one_viewer_encoding_at_a_time() {
+        let mut store = ImageStore::new(Graphics::halfblocks());
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        store.set_encoder(sender);
+        let image = remote_image("mxc://x/a", Some((2000, 1000)));
+        store.open_viewer(&image);
+        store.on_loaded(&image.key, true, Ok(decoded(400, 200)));
+        // Many sizes in a row while the first encoding is still running.
+        for cols in 20..40 {
+            assert!(matches!(
+                store.viewer_content((cols, 10), false),
+                ViewerContent::Preparing
+            ));
+        }
+        let first = receiver.blocking_recv().unwrap();
+        assert_eq!(first.size, (20, 10));
+        // Nothing else was started.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(receiver.try_recv().is_err());
+        store.on_encoded(first);
+        // The window ended up at another size: now that one is made.
+        assert!(matches!(
+            store.viewer_content((39, 10), false),
+            ViewerContent::Preparing
+        ));
+        let second = receiver.blocking_recv().unwrap();
+        assert_eq!(second.size, (39, 10));
+        store.on_encoded(second);
+        assert!(matches!(
+            store.viewer_content((39, 10), false),
+            ViewerContent::Ready(_)
+        ));
+
+        // One that was under way when the terminal forgot its pictures is not used.
+        assert!(matches!(
+            store.viewer_content((30, 10), false),
+            ViewerContent::Preparing
+        ));
+        store.forget_encoded();
+        store.on_encoded(receiver.blocking_recv().unwrap());
+        assert!(matches!(
+            store.viewer_content((30, 10), false),
+            ViewerContent::Preparing
+        ));
+        store.on_encoded(receiver.blocking_recv().unwrap());
+        assert!(matches!(
+            store.viewer_content((30, 10), false),
+            ViewerContent::Ready(_)
+        ));
     }
 
     #[test]

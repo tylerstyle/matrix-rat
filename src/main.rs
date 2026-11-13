@@ -18,6 +18,7 @@ mod model;
 mod paths;
 mod rich;
 mod terminal;
+mod termquery;
 mod text;
 mod theme;
 mod ui;
