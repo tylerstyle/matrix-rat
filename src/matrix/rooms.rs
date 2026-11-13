@@ -427,6 +427,8 @@ impl Timelines {
             // Handled by the session loop.
             MatrixCmd::LoginPassword { .. }
             | MatrixCmd::LoginBrowser { .. }
+            | MatrixCmd::ReauthPassword { .. }
+            | MatrixCmd::ReauthBrowser
             | MatrixCmd::CancelLogin
             | MatrixCmd::Recover { .. }
             | MatrixCmd::Logout

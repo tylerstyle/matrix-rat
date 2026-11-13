@@ -10,8 +10,9 @@ use super::hit::HitId;
 use crate::action::Action;
 use crate::app::App;
 use crate::keymap::Context;
+use crate::matrix::ReauthKind;
 use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, Setting, SettingsMenu};
-use crate::text::{truncate, width};
+use crate::text::{sanitize, sanitize_line, truncate, width};
 use crate::theme::{Role, Theme};
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -324,6 +325,39 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
     }
 }
 
+fn fixed_field(frame: &mut Frame, theme: &Theme, rect: Rect, label: &str, value: &str) {
+    if rect.width == 0 {
+        return;
+    }
+    const LABEL: usize = 13;
+    let room = (rect.width as usize).saturating_sub(LABEL + 1);
+    let shown = truncate(&sanitize_line(value), room);
+    let line = Line::from(vec![
+        Span::styled(format!("{label:<LABEL$}"), theme.style(Role::Muted)),
+        Span::raw(shown),
+    ]);
+    frame.render_widget(line, rect);
+}
+
+fn login_button(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    label: &str,
+    slot: usize,
+    action: Action,
+    form: &LoginForm,
+) -> u16 {
+    let busy = form.busy.is_some();
+    let w = (width(label) as u16).min(area.width);
+    let rect = Rect::new(area.x, area.y, w, area.height);
+    button(frame, &app.theme, rect, label, !busy && form.focus == slot);
+    if !busy {
+        app.hits.add(rect, HitId::Do(action));
+    }
+    area.x + w + 2
+}
+
 fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
     let Some(rect) = centered(area, 64, 15) else {
         return;
@@ -338,49 +372,114 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
     } else {
         format!("Tab next · Enter continue · {quit} quit")
     };
-    let inner = popup(frame, app, area, rect, "Log in to Matrix", &footer);
-    let theme = &app.theme;
+    let title = if form.is_reauth() {
+        "Re-authenticate session"
+    } else {
+        "Log in to Matrix"
+    };
+    let inner = popup(frame, app, area, rect, title, &footer);
     let busy = form.busy.is_some();
 
-    let masked = "•".repeat(form.password.chars().count());
-    let fields = [
-        ("Homeserver", form.homeserver.as_str()),
-        ("Username", form.username.as_str()),
-        ("Password", masked.as_str()),
-    ];
     let mut cursor = None;
-    for (n, (label, value)) in fields.into_iter().enumerate() {
-        let rect = row(inner, 1 + n as u16 * 2);
-        let at = field(frame, theme, rect, label, value, !busy && form.focus == n);
-        cursor = cursor.or(at);
-        app.hits.add(rect, HitId::Field(n));
-    }
+    let msg_start = if let Some(reauth) = &form.reauth {
+        fixed_field(
+            frame,
+            &app.theme,
+            row(inner, 1),
+            "Homeserver",
+            &form.homeserver,
+        );
+        fixed_field(frame, &app.theme, row(inner, 3), "Account", &reauth.user_id);
+        match reauth.kind {
+            ReauthKind::Password => {
+                let masked = "•".repeat(form.password.chars().count());
+                let pw_rect = row(inner, 5);
+                cursor = field(
+                    frame,
+                    &app.theme,
+                    pw_rect,
+                    "Password",
+                    masked.as_str(),
+                    !busy && form.focus == 2,
+                );
+                app.hits.add(pw_rect, HitId::Field(2));
 
-    let buttons = row(inner, 7);
-    let labels = [
-        (" Log in ", LoginForm::PASSWORD_BUTTON, Action::LoginSubmit),
-        (
-            " Log in with browser ",
-            LoginForm::BROWSER_BUTTON,
-            Action::LoginBrowser,
-        ),
-    ];
-    let mut x = buttons.x;
-    for (label, slot, action) in labels {
-        let w = (width(label) as u16).min(buttons.right().saturating_sub(x));
-        let rect = Rect::new(x, buttons.y, w, buttons.height);
-        button(frame, theme, rect, label, !busy && form.focus == slot);
-        if !busy {
-            app.hits.add(rect, HitId::Do(action));
+                let buttons = row(inner, 7);
+                login_button(
+                    frame,
+                    app,
+                    buttons,
+                    " Log in ",
+                    LoginForm::PASSWORD_BUTTON,
+                    Action::LoginSubmit,
+                    form,
+                );
+                9
+            }
+            ReauthKind::Browser => {
+                let buttons = row(inner, 5);
+                login_button(
+                    frame,
+                    app,
+                    buttons,
+                    " Log in with browser ",
+                    LoginForm::BROWSER_BUTTON,
+                    Action::LoginBrowser,
+                    form,
+                );
+                7
+            }
         }
-        x += w + 2;
-    }
+    } else {
+        let masked = "•".repeat(form.password.chars().count());
+        let fields = [
+            ("Homeserver", form.homeserver.as_str()),
+            ("Username", form.username.as_str()),
+            ("Password", masked.as_str()),
+        ];
+        for (n, (label, value)) in fields.into_iter().enumerate() {
+            let rect = row(inner, 1 + n as u16 * 2);
+            let at = field(
+                frame,
+                &app.theme,
+                rect,
+                label,
+                value,
+                !busy && form.focus == n,
+            );
+            cursor = cursor.or(at);
+            app.hits.add(rect, HitId::Field(n));
+        }
+
+        let buttons = row(inner, 7);
+        let labels = [
+            (" Log in ", LoginForm::PASSWORD_BUTTON, Action::LoginSubmit),
+            (
+                " Log in with browser ",
+                LoginForm::BROWSER_BUTTON,
+                Action::LoginBrowser,
+            ),
+        ];
+        let mut x = buttons.x;
+        for (label, slot, action) in labels {
+            let slice = Rect::new(
+                x,
+                buttons.y,
+                buttons.right().saturating_sub(x),
+                buttons.height,
+            );
+            x = login_button(frame, app, slice, label, slot, action, form);
+        }
+        9
+    };
+
+    let theme = &app.theme;
 
     let message_area = Rect::new(
         inner.x,
-        inner.y + 9.min(inner.height),
+        inner.y + msg_start.min(inner.height),
         inner.width,
-        inner.height.saturating_sub(9),
+        inner.height.saturating_sub(msg_start),
     );
     let message = if let Some(url) = &form.browser_url {
         Some((
@@ -388,9 +487,11 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
             Role::Muted,
         ))
     } else if let Some(busy) = &form.busy {
-        Some((busy.clone(), Role::Muted))
+        Some((sanitize(busy), Role::Muted))
     } else if let Some(error) = &form.error {
-        Some((error.clone(), Role::Error))
+        Some((sanitize(error), Role::Error))
+    } else if let Some(note) = &form.note {
+        Some((sanitize(note), Role::Muted))
     } else {
         Some((
             "Use the browser login for matrix.org and other servers with single sign-on."

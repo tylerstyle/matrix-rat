@@ -357,6 +357,47 @@ mod tests {
     }
 
     #[test]
+    fn reauth_login_modes_render_fixed_identity() {
+        use crate::matrix::{MatrixEvent, ReauthKind, ReauthTarget};
+        let mut app = App::demo();
+        app.rooms.clear();
+
+        app.on_matrix(MatrixEvent::NeedReauth {
+            target: ReauthTarget {
+                homeserver: "https://example.org".into(),
+                user_id: "@alice:example.org".into(),
+                device_id: "DEV1".into(),
+                kind: ReauthKind::Password,
+                client_id: None,
+            },
+            reason: "Session expired; log in again to keep this device.".into(),
+        });
+        let rendered_pw = render(&mut app, 100, 30);
+        assert!(rendered_pw.contains("Re-authenticate session"));
+        assert!(rendered_pw.contains("https://example.org"));
+        assert!(rendered_pw.contains("@alice:example.org"));
+        assert!(rendered_pw.contains("Password"));
+        assert!(rendered_pw.contains("Log in"));
+        assert!(!rendered_pw.contains("Log in with browser"));
+
+        app.on_matrix(MatrixEvent::NeedReauth {
+            target: ReauthTarget {
+                homeserver: "https://sso.example.org".into(),
+                user_id: "@alice:sso.example.org".into(),
+                device_id: "DEV2".into(),
+                kind: ReauthKind::Browser,
+                client_id: Some("cid".into()),
+            },
+            reason: "Session expired; approve in browser to keep this device.".into(),
+        });
+        let rendered_br = render(&mut app, 100, 30);
+        assert!(rendered_br.contains("Re-authenticate session"));
+        assert!(rendered_br.contains("@alice:sso.example.org"));
+        assert!(rendered_br.contains("Log in with browser"));
+        assert!(!rendered_br.contains("Password"));
+    }
+
+    #[test]
     fn command_palette() {
         let mut app = App::demo();
         app.perform(Action::OpenPalette);
@@ -487,6 +528,26 @@ mod tests {
             Some(Modal::Emoji(EmojiPicker::default())),
             Some(Modal::Settings(SettingsMenu::default())),
             Some(Modal::Login(LoginForm::new(Some("an error".into())))),
+            Some(Modal::Login(LoginForm::reauth(
+                crate::matrix::ReauthTarget {
+                    homeserver: "https://example.org".into(),
+                    user_id: "@alice:example.org".into(),
+                    device_id: "DEV1".into(),
+                    kind: crate::matrix::ReauthKind::Password,
+                    client_id: None,
+                },
+                "Session expired.".into(),
+            ))),
+            Some(Modal::Login(LoginForm::reauth(
+                crate::matrix::ReauthTarget {
+                    homeserver: "https://sso.example.org".into(),
+                    user_id: "@alice:sso.example.org".into(),
+                    device_id: "DEV2".into(),
+                    kind: crate::matrix::ReauthKind::Browser,
+                    client_id: Some("cid".into()),
+                },
+                "Session expired.".into(),
+            ))),
             Some(Modal::Recovery(RecoveryForm::default())),
             palette_modal,
             with_keybinds,

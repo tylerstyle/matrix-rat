@@ -3,6 +3,14 @@
 use emojis::Emoji;
 
 use crate::emoji;
+use crate::matrix::{ReauthKind, ReauthTarget};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReauthInfo {
+    pub user_id: String,
+    pub device_id: String,
+    pub kind: ReauthKind,
+}
 
 #[derive(Clone, Default)]
 pub struct LoginForm {
@@ -14,8 +22,13 @@ pub struct LoginForm {
     /// A progress message while a login is running; input is locked meanwhile.
     pub busy: Option<String>,
     pub error: Option<String>,
+    /// Non-error informational notice shown when entering re-authenticate mode.
+    pub note: Option<String>,
     /// Shown during a browser login, in case the browser did not open by itself.
     pub browser_url: Option<String>,
+    /// Present after a soft logout: homeserver and user are fixed so logging in again
+    /// preserves the device and local encrypted store.
+    pub reauth: Option<ReauthInfo>,
 }
 
 impl LoginForm {
@@ -32,7 +45,72 @@ impl LoginForm {
         }
     }
 
+    pub fn reauth(target: ReauthTarget, note: String) -> Self {
+        let focus = match target.kind {
+            ReauthKind::Password => 2,
+            ReauthKind::Browser => Self::BROWSER_BUTTON,
+        };
+        Self {
+            homeserver: target.homeserver,
+            username: target.user_id.clone(),
+            password: String::new(),
+            focus,
+            busy: None,
+            error: None,
+            note: Some(note),
+            browser_url: None,
+            reauth: Some(ReauthInfo {
+                user_id: target.user_id,
+                device_id: target.device_id,
+                kind: target.kind,
+            }),
+        }
+    }
+
+    pub fn is_reauth(&self) -> bool {
+        self.reauth.is_some()
+    }
+
+    pub fn allows_password(&self) -> bool {
+        matches!(
+            &self.reauth,
+            None | Some(ReauthInfo {
+                kind: ReauthKind::Password,
+                ..
+            })
+        )
+    }
+
+    pub fn allows_browser(&self) -> bool {
+        matches!(
+            &self.reauth,
+            None | Some(ReauthInfo {
+                kind: ReauthKind::Browser,
+                ..
+            })
+        )
+    }
+
+    pub fn can_focus(&self, slot: usize) -> bool {
+        match &self.reauth {
+            None => slot < Self::SLOTS,
+            Some(info) => match info.kind {
+                ReauthKind::Password => slot == 2 || slot == Self::PASSWORD_BUTTON,
+                ReauthKind::Browser => slot == Self::BROWSER_BUTTON,
+            },
+        }
+    }
+
+    pub fn focus_slot(&mut self, slot: usize) {
+        if self.can_focus(slot) {
+            self.focus = slot;
+        }
+    }
+
     pub fn field_mut(&mut self) -> Option<&mut String> {
+        if !self.can_focus(self.focus) {
+            return None;
+        }
         match self.focus {
             0 => Some(&mut self.homeserver),
             1 => Some(&mut self.username),
@@ -42,11 +120,21 @@ impl LoginForm {
     }
 
     pub fn next(&mut self) {
-        self.focus = (self.focus + 1) % Self::SLOTS;
+        for _ in 0..Self::SLOTS {
+            self.focus = (self.focus + 1) % Self::SLOTS;
+            if self.can_focus(self.focus) {
+                break;
+            }
+        }
     }
 
     pub fn previous(&mut self) {
-        self.focus = (self.focus + Self::SLOTS - 1) % Self::SLOTS;
+        for _ in 0..Self::SLOTS {
+            self.focus = (self.focus + Self::SLOTS - 1) % Self::SLOTS;
+            if self.can_focus(self.focus) {
+                break;
+            }
+        }
     }
 }
 
@@ -65,6 +153,7 @@ impl std::fmt::Debug for LoginForm {
             .field("username", &self.username)
             .field("focus", &self.focus)
             .field("busy", &self.busy)
+            .field("reauth", &self.reauth.as_ref().map(|r| r.kind))
             .finish_non_exhaustive()
     }
 }
@@ -364,6 +453,58 @@ mod tests {
         form.next();
         form.field_mut().unwrap().push('a');
         assert_eq!(form.username, "a");
+    }
+
+    #[test]
+    fn reauth_form_keeps_identity_fixed_and_redacts_secrets() {
+        let pw_target = ReauthTarget {
+            homeserver: "https://example.org".into(),
+            user_id: "@alice:example.org".into(),
+            device_id: "DEV1".into(),
+            kind: ReauthKind::Password,
+            client_id: None,
+        };
+        let mut pw = LoginForm::reauth(pw_target, "Session expired".into());
+        assert!(pw.is_reauth());
+        assert!(pw.allows_password());
+        assert!(!pw.allows_browser());
+        assert_eq!(pw.focus, 2);
+        // Fixed slots (Homeserver = 0, Account = 1) and Browser button = 4 cannot be focused.
+        pw.focus_slot(0);
+        assert_eq!(pw.focus, 2);
+        pw.focus_slot(1);
+        assert_eq!(pw.focus, 2);
+        pw.focus_slot(LoginForm::BROWSER_BUTTON);
+        assert_eq!(pw.focus, 2);
+        // Typing edits only password, Tab cycles only Password <-> Log in button.
+        pw.field_mut().unwrap().push_str("secret_pw");
+        assert!(!format!("{pw:?}").contains("secret_pw"));
+        pw.next();
+        assert_eq!(pw.focus, LoginForm::PASSWORD_BUTTON);
+        assert!(pw.field_mut().is_none());
+        pw.previous();
+        assert_eq!(pw.focus, 2);
+        assert_eq!(pw.homeserver, "https://example.org");
+        assert_eq!(pw.username, "@alice:example.org");
+
+        let browser_target = ReauthTarget {
+            homeserver: "https://sso.example.org".into(),
+            user_id: "@alice:sso.example.org".into(),
+            device_id: "DEV2".into(),
+            kind: ReauthKind::Browser,
+            client_id: Some("cid-1".into()),
+        };
+        let mut br = LoginForm::reauth(browser_target, "Session expired".into());
+        assert!(br.is_reauth());
+        assert!(br.allows_browser());
+        assert!(!br.allows_password());
+        assert_eq!(br.focus, LoginForm::BROWSER_BUTTON);
+        assert!(br.field_mut().is_none());
+        br.focus_slot(2);
+        br.next();
+        assert_eq!(br.focus, LoginForm::BROWSER_BUTTON);
+        br.previous();
+        assert_eq!(br.focus, LoginForm::BROWSER_BUTTON);
     }
 
     #[test]

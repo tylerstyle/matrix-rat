@@ -2,6 +2,7 @@
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
 mod convert;
+mod keyring;
 mod manage;
 mod media;
 mod notify;
@@ -13,10 +14,12 @@ mod threads;
 mod upload;
 mod verify;
 
+pub use keyring::SecretStoreMode;
 pub use manage::{
     Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomMember,
 };
 pub use notify::Notice;
+pub use session::{ReauthKind, ReauthTarget};
 pub use spaces::SpaceSummary;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
@@ -167,6 +170,12 @@ pub enum MatrixCmd {
     },
     /// Joining, creating, leaving and looking at rooms.
     Manage(ManageCmd),
+    /// Re-authenticate a soft-logged-out session with a password, keeping the existing device id.
+    ReauthPassword {
+        password: String,
+    },
+    /// Re-authenticate a soft-logged-out session via browser, keeping the existing device id.
+    ReauthBrowser,
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -210,6 +219,8 @@ impl std::fmt::Debug for MatrixCmd {
             }
             Self::FetchMembers { room_id } => write!(f, "FetchMembers({room_id})"),
             Self::Manage(command) => write!(f, "Manage({command:?})"),
+            Self::ReauthPassword { .. } => f.write_str("ReauthPassword"),
+            Self::ReauthBrowser => f.write_str("ReauthBrowser"),
         }
     }
 }
@@ -341,6 +352,12 @@ pub enum MatrixEvent {
     },
     /// An answer to a [`MatrixCmd::Manage`].
     Manage(ManageEvent),
+    /// The current session suffered a soft logout; ask the user to re-authenticate to keep
+    /// the existing device and local encrypted store.
+    NeedReauth {
+        target: ReauthTarget,
+        reason: String,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -405,6 +422,9 @@ impl std::fmt::Debug for MatrixEvent {
                 members.len()
             ),
             Self::Manage(event) => write!(f, "Manage({event:?})"),
+            Self::NeedReauth { target, .. } => {
+                write!(f, "NeedReauth({} dev={})", target.user_id, target.device_id)
+            }
         }
     }
 }
@@ -428,13 +448,23 @@ impl MatrixHandle {
     }
 }
 
-/// Starts the worker on the current tokio runtime.
+/// Starts the worker on the current tokio runtime using `SecretStoreMode::Auto`.
+#[allow(dead_code)]
 pub fn spawn(paths: Paths) -> (MatrixHandle, UnboundedReceiver<MatrixEvent>) {
+    spawn_with(paths, SecretStoreMode::Auto)
+}
+
+/// Starts the worker on the current tokio runtime with the configured `secret_store` policy.
+pub fn spawn_with(
+    paths: Paths,
+    secret_store: SecretStoreMode,
+) -> (MatrixHandle, UnboundedReceiver<MatrixEvent>) {
     let (commands, command_rx) = unbounded_channel();
     let (events, event_rx) = unbounded_channel();
     tokio::spawn(async move {
         Worker {
             paths,
+            secret_store,
             commands: command_rx,
             events,
         }
@@ -448,12 +478,27 @@ enum SessionEnd {
     Shutdown,
     /// The server no longer accepts our token.
     Expired,
+    /// The server rejected the token with `soft_logout = true`; keep device & store.
+    SoftLogout,
     /// The user asked to log out.
     LoggedOut,
 }
 
+enum PendingAuth {
+    Fresh {
+        reason: Option<String>,
+    },
+    Reauth {
+        target: ReauthTarget,
+        passphrase: String,
+        in_keyring: bool,
+        reason: String,
+    },
+}
+
 struct Worker {
     paths: Paths,
+    secret_store: SecretStoreMode,
     commands: UnboundedReceiver<MatrixCmd>,
     events: UnboundedSender<MatrixEvent>,
 }
@@ -464,86 +509,166 @@ impl Worker {
     }
 
     async fn run(mut self) {
-        let mut reason = None;
+        let mut pending: Option<PendingAuth> = None;
         loop {
-            let restored = match session::restore(&self.paths).await {
-                Ok(found) => found,
-                Err(err) => {
-                    // Restoring needs no network, so this is a local problem (damaged
-                    // session file or stores) that waiting will not fix.
-                    tracing::warn!(?err, "could not restore session");
-                    reason = Some(format!("Could not restore your session: {err:#}"));
-                    None
-                }
+            let auth = match pending.take() {
+                Some(step) => Some(step),
+                None => match session::restore(&self.paths, self.secret_store).await {
+                    session::RestoreOutcome::Restored(active) => {
+                        let res = self.run_active_session(active, None, &mut pending).await;
+                        if !res {
+                            return;
+                        }
+                        continue;
+                    }
+                    session::RestoreOutcome::NoSession => Some(PendingAuth::Fresh { reason: None }),
+                    session::RestoreOutcome::NeedReauth {
+                        target,
+                        passphrase,
+                        in_keyring,
+                    } => Some(PendingAuth::Reauth {
+                        target,
+                        passphrase,
+                        in_keyring,
+                        reason: "Your previous session expired. Log in again to keep this device and its verification.".to_owned(),
+                    }),
+                    session::RestoreOutcome::Blocked(reason) => {
+                        Some(PendingAuth::Fresh { reason: Some(reason) })
+                    }
+                },
             };
-            let (client, passphrase) = match restored {
-                Some(pair) => pair,
-                None => {
-                    self.emit(MatrixEvent::NeedLogin {
-                        reason: reason.take(),
+
+            let (active, post_notice) = match auth {
+                Some(PendingAuth::Fresh { reason }) => {
+                    self.emit(MatrixEvent::NeedLogin { reason });
+                    let Some(pair) = self.wait_for_login(None).await else {
+                        return;
+                    };
+                    pair
+                }
+                Some(PendingAuth::Reauth {
+                    target,
+                    passphrase,
+                    in_keyring,
+                    reason,
+                }) => {
+                    self.emit(MatrixEvent::NeedReauth {
+                        target: target.clone(),
+                        reason,
                     });
-                    match self.wait_for_login().await {
-                        Some(pair) => pair,
-                        None => return,
-                    }
+                    let Some(pair) = self
+                        .wait_for_login(Some((target, passphrase, in_keyring)))
+                        .await
+                    else {
+                        return;
+                    };
+                    pair
                 }
+                None => unreachable!(),
             };
-            match self.run_session(&client, &passphrase).await {
-                Ok(SessionEnd::Shutdown) => return,
-                Ok(SessionEnd::Expired) => {
-                    session::forget(&self.paths);
-                    reason = Some("Your session has expired. Please log in again.".to_owned());
-                }
-                Ok(SessionEnd::LoggedOut) => {
-                    // Tell the server, but log out here even if it cannot be reached.
-                    match tokio::time::timeout(Duration::from_secs(10), client.logout()).await {
-                        Ok(Ok(())) => {}
-                        outcome => {
-                            tracing::warn!(?outcome, "could not log out on the server");
-                            reason = Some(
-                                "Logged out here. The server could not be told, so the session \
-                                 may still be listed on your account."
-                                    .to_owned(),
-                            );
-                        }
-                    }
-                    drop(client);
-                    session::clear(&self.paths);
-                }
-                Err(err) => {
-                    tracing::error!(?err, "session failed");
-                    self.emit(MatrixEvent::Error(format!("{err:#}")));
-                    // Keep the session on disk: this may be a temporary problem.
-                    // Try again shortly, unless told to stop first.
-                    let retry = tokio::time::sleep(Duration::from_secs(5));
-                    tokio::pin!(retry);
-                    loop {
-                        tokio::select! {
-                            _ = &mut retry => break,
-                            command = self.commands.recv() => match command {
-                                Some(MatrixCmd::Shutdown) | None => return,
-                                Some(_) => {}
-                            },
-                        }
-                    }
-                }
+            if !self
+                .run_active_session(active, post_notice, &mut pending)
+                .await
+            {
+                return;
             }
         }
     }
 
-    /// Handles login commands until one succeeds. `None` means shut down.
-    async fn wait_for_login(&mut self) -> Option<(Client, String)> {
+    /// Runs one authenticated session to completion. Returns `false` if the worker should stop.
+    async fn run_active_session(
+        &mut self,
+        active: session::ActiveSession,
+        post_notice: Option<String>,
+        pending: &mut Option<PendingAuth>,
+    ) -> bool {
+        let outcome = self.run_session(&active, post_notice).await;
+        match outcome {
+            Ok(SessionEnd::Shutdown) => return false,
+            Ok(SessionEnd::SoftLogout) => {
+                let target = active.target.clone();
+                let passphrase = active.passphrase.clone();
+                let in_keyring = active.in_keyring;
+                if let Err(err) = session::mark_soft_logout(&self.paths, &active) {
+                    tracing::warn!(?err, "could not record soft logout state");
+                }
+                drop(active);
+                *pending = Some(PendingAuth::Reauth {
+                    target,
+                    passphrase,
+                    in_keyring,
+                    reason: "Your session expired (soft logout). Log in again to keep this device and its verification.".to_owned(),
+                });
+            }
+            Ok(SessionEnd::Expired) => {
+                let target = active.target.clone();
+                drop(active);
+                session::forget(&self.paths, Some(&target)).await;
+                *pending = Some(PendingAuth::Fresh {
+                    reason: Some("Your session has expired. Please log in again.".to_owned()),
+                });
+            }
+            Ok(SessionEnd::LoggedOut) => {
+                let target = active.target.clone();
+                let mut reason = None;
+                // Tell the server, but log out here even if it cannot be reached.
+                match tokio::time::timeout(Duration::from_secs(10), active.client.logout()).await {
+                    Ok(Ok(())) => {}
+                    outcome => {
+                        tracing::warn!(?outcome, "could not log out on the server");
+                        reason = Some(
+                            "Logged out here. The server could not be told, so the session \
+                             may still be listed on your account."
+                                .to_owned(),
+                        );
+                    }
+                }
+                drop(active);
+                session::clear(&self.paths, Some(&target)).await;
+                *pending = Some(PendingAuth::Fresh { reason });
+            }
+            Err(err) => {
+                drop(active);
+                tracing::error!(?err, "session failed");
+                self.emit(MatrixEvent::Error(format!("{err:#}")));
+                // Keep the session on disk: this may be a temporary problem.
+                // Try again shortly, unless told to stop first.
+                let retry = tokio::time::sleep(Duration::from_secs(5));
+                tokio::pin!(retry);
+                loop {
+                    tokio::select! {
+                        _ = &mut retry => break,
+                        command = self.commands.recv() => match command {
+                            Some(MatrixCmd::Shutdown) | None => return false,
+                            Some(_) => {}
+                        },
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Handles login (and soft-logout re-authentication) commands until one succeeds.
+    /// Returns the active session and any non-fatal warning notice (`None` means shut down).
+    async fn wait_for_login(
+        &mut self,
+        reauth: Option<(ReauthTarget, String, bool)>,
+    ) -> Option<(session::ActiveSession, Option<String>)> {
         let Worker {
             paths,
+            secret_store,
             commands,
             events,
         } = self;
+        let secret_store = *secret_store;
         loop {
             let request = match commands.recv().await? {
                 MatrixCmd::Shutdown => return None,
-                request @ (MatrixCmd::LoginPassword { .. } | MatrixCmd::LoginBrowser { .. }) => {
-                    request
-                }
+                request @ (MatrixCmd::LoginPassword { .. }
+                | MatrixCmd::LoginBrowser { .. }
+                | MatrixCmd::ReauthPassword { .. }
+                | MatrixCmd::ReauthBrowser) => request,
                 // Anything else was meant for a session that has ended.
                 _ => continue,
             };
@@ -553,9 +678,61 @@ impl Worker {
                         homeserver,
                         username,
                         password,
-                    } => session::login_password(paths, homeserver, username, password).await,
+                    } => {
+                        let s = session::login_password(
+                            paths,
+                            homeserver,
+                            username,
+                            password,
+                            secret_store,
+                        )
+                        .await?;
+                        Ok((s, None))
+                    }
                     MatrixCmd::LoginBrowser { homeserver } => {
-                        session::login_browser(paths, homeserver, events).await
+                        let s =
+                            session::login_browser(paths, homeserver, events, secret_store).await?;
+                        Ok((s, None))
+                    }
+                    MatrixCmd::ReauthPassword { password } => {
+                        let Some((target, passphrase, in_keyring)) = reauth.as_ref() else {
+                            anyhow::bail!(
+                                "session is not awaiting re-authentication; please log in again"
+                            );
+                        };
+                        let outcome = session::reauth_password(
+                            paths,
+                            target,
+                            password,
+                            passphrase,
+                            *in_keyring,
+                            secret_store,
+                        )
+                        .await?;
+                        let notice = (!outcome.kept_device).then(|| {
+                            "Server issued a new device ID; started a fresh local store.".to_owned()
+                        });
+                        Ok((outcome.session, notice))
+                    }
+                    MatrixCmd::ReauthBrowser => {
+                        let Some((target, passphrase, in_keyring)) = reauth.as_ref() else {
+                            anyhow::bail!(
+                                "session is not awaiting re-authentication; please log in again"
+                            );
+                        };
+                        let outcome = session::reauth_browser(
+                            paths,
+                            target,
+                            events,
+                            passphrase,
+                            *in_keyring,
+                            secret_store,
+                        )
+                        .await?;
+                        let notice = (!outcome.kept_device).then(|| {
+                            "Server issued a new device ID; started a fresh local store.".to_owned()
+                        });
+                        Ok((outcome.session, notice))
                     }
                     _ => unreachable!("filtered above"),
                 }
@@ -574,7 +751,7 @@ impl Worker {
                 }
             };
             match result {
-                Some(Ok(pair)) => return Some(pair),
+                Some(Ok(ok)) => return Some(ok),
                 Some(Err(err)) => {
                     tracing::warn!(?err, "login failed");
                     let _ = events.send(MatrixEvent::LoginFailed(format!("{err:#}")));
@@ -585,12 +762,22 @@ impl Worker {
         }
     }
 
-    async fn run_session(&mut self, client: &Client, passphrase: &str) -> Result<SessionEnd> {
+    async fn run_session(
+        &mut self,
+        active: &session::ActiveSession,
+        post_notice: Option<String>,
+    ) -> Result<SessionEnd> {
+        let client = &active.client;
+        let passphrase = active.passphrase.as_str();
+        let in_keyring = active.in_keyring;
         let user_id = client
             .user_id()
             .ok_or_else(|| anyhow!("logged in without a user id"))?
             .to_string();
         self.emit(MatrixEvent::LoggedIn { user_id });
+        if let Some(notice) = post_notice {
+            self.emit(MatrixEvent::ActionFailed(notice));
+        }
         self.emit(MatrixEvent::Sync(SyncStatus::Connecting));
 
         // Refreshed tokens replace the old ones on the server at once, so they must
@@ -610,7 +797,9 @@ impl Worker {
                     match changes.recv().await {
                         // Having missed news means tokens may have changed: save.
                         Ok(SessionChange::TokensRefreshed) | Err(RecvError::Lagged(_)) => {
-                            if let Err(err) = session::save(&paths, &client, &passphrase) {
+                            if let Err(err) =
+                                session::save_tokens(&paths, &client, &passphrase, in_keyring)
+                            {
                                 tracing::error!(?err, "could not save refreshed tokens");
                             }
                         }
@@ -689,7 +878,13 @@ impl Worker {
                 }
                 change = session_changes.recv() => match change {
                     Ok(SessionChange::UnknownToken(info)) => {
-                        tracing::warn!(?info, "the server no longer accepts this session");
+                        tracing::warn!(
+                            soft_logout = info.soft_logout,
+                            "the server no longer accepts this session"
+                        );
+                        if info.soft_logout {
+                            break SessionEnd::SoftLogout;
+                        }
                         break SessionEnd::Expired;
                     }
                     // Saving is the token saver's job.
@@ -731,7 +926,7 @@ impl Worker {
         token_saver.abort();
         // Once more on the way out, in case a refresh happened during the shutdown.
         if matches!(end, SessionEnd::Shutdown)
-            && let Err(err) = session::save(&self.paths, client, passphrase)
+            && let Err(err) = session::save_tokens(&self.paths, client, passphrase, in_keyring)
         {
             tracing::error!(?err, "could not save the session");
         }
@@ -1149,5 +1344,503 @@ mod tests {
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    struct MockMatrixServer {
+        base_url: String,
+        expire_soft: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        expire_hard: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for MockMatrixServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl MockMatrixServer {
+        async fn start(different_reauth_device: bool) -> Self {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let base_url = format!("http://{addr}");
+            let expire_soft = Arc::new(AtomicBool::new(false));
+            let expire_hard = Arc::new(AtomicBool::new(false));
+            let logins = Arc::new(AtomicUsize::new(0));
+
+            let es = expire_soft.clone();
+            let eh = expire_hard.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let es = es.clone();
+                    let eh = eh.clone();
+                    let logins = logins.clone();
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 8192];
+                        let n = stream.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let mut lines = req.lines();
+                        let first = lines.next().unwrap_or("");
+                        let mut parts = first.split_whitespace();
+                        let method = parts.next().unwrap_or("");
+                        let raw_path = parts.next().unwrap_or("/");
+                        let path = raw_path.split('?').next().unwrap_or("/");
+                        let auth_tok = lines.clone().find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.eq_ignore_ascii_case("authorization").then(|| {
+                                v.trim()
+                                    .strip_prefix("Bearer ")
+                                    .unwrap_or(v.trim())
+                                    .to_owned()
+                            })
+                        });
+
+                        let (status, body) = if path == "/_matrix/client/versions" {
+                            (
+                                "200 OK",
+                                r#"{"versions":["v1.11"],"unstable_features":{"org.matrix.simplified_msc3575":true}}"#.to_owned(),
+                            )
+                        } else if path == "/_matrix/client/v3/login" && method == "GET" {
+                            (
+                                "200 OK",
+                                r#"{"flows":[{"type":"m.login.password"}]}"#.to_owned(),
+                            )
+                        } else if path == "/_matrix/client/v3/login" && method == "POST" {
+                            let count = logins.fetch_add(1, Ordering::SeqCst) + 1;
+                            let dev = if count > 1 && different_reauth_device {
+                                "OTHERDEV"
+                            } else {
+                                "SOFTDEV1"
+                            };
+                            (
+                                "200 OK",
+                                format!(
+                                    r#"{{"user_id":"@alice:localhost","device_id":"{dev}","access_token":"tok_{count}"}}"#
+                                ),
+                            )
+                        } else if path.contains("sync") {
+                            let is_tok1 = auth_tok.as_deref() == Some("tok_1");
+                            if is_tok1 && eh.load(Ordering::SeqCst) {
+                                (
+                                    "401 Unauthorized",
+                                    r#"{"errcode":"M_UNKNOWN_TOKEN","error":"hard expired","soft_logout":false}"#.to_owned(),
+                                )
+                            } else if is_tok1 && es.load(Ordering::SeqCst) {
+                                (
+                                    "401 Unauthorized",
+                                    r#"{"errcode":"M_UNKNOWN_TOKEN","error":"soft expired","soft_logout":true}"#.to_owned(),
+                                )
+                            } else {
+                                ("200 OK", r#"{"pos":"1","lists":{},"rooms":{}}"#.to_owned())
+                            }
+                        } else if path.starts_with("/_matrix/client/") {
+                            ("200 OK", "{}".to_owned())
+                        } else {
+                            ("404 Not Found", "{}".to_owned())
+                        };
+
+                        let resp = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    });
+                }
+            });
+
+            Self {
+                base_url,
+                expire_soft,
+                expire_hard,
+                task,
+            }
+        }
+    }
+
+    async fn store_ed25519_key(paths: &Paths, homeserver: &str, passphrase: &str) -> String {
+        let client = matrix_sdk::Client::builder()
+            .homeserver_url(homeserver)
+            .sqlite_store(paths.store_dir(), Some(passphrase))
+            .build()
+            .await
+            .unwrap();
+        let meta = matrix_sdk::SessionMeta {
+            user_id: "@alice:localhost".try_into().unwrap(),
+            device_id: "SOFTDEV1".into(),
+        };
+        let session =
+            matrix_sdk::AuthSession::Matrix(matrix_sdk::authentication::matrix::MatrixSession {
+                meta,
+                tokens: matrix_sdk::authentication::SessionTokens {
+                    access_token: "inspect".into(),
+                    refresh_token: None,
+                },
+            });
+        client.restore_session(session).await.unwrap();
+        client.encryption().ed25519_key().await.unwrap_or_default()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_soft_logout_keeps_device_and_hard_logout_forgets() {
+        let server = MockMatrixServer::start(false).await;
+        let root = std::env::temp_dir().join(format!("matrix-rat-soft-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "softtest".into(),
+        };
+        paths.create_dirs().unwrap();
+
+        let (handle, mut events) = spawn_with(paths.clone(), SecretStoreMode::File);
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            MatrixEvent::NeedLogin { .. }
+        ));
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver: server.base_url.clone(),
+            username: "alice".into(),
+            password: "pw".into(),
+        });
+
+        // Wait until first sync completes cleanly.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(e) | MatrixEvent::Error(e) => panic!("{e}"),
+                    MatrixEvent::Sync(SyncStatus::Synced) => return,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for initial sync");
+
+        let pass_before: String = {
+            let v: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(paths.session_file()).unwrap()).unwrap();
+            v["passphrase"].as_str().unwrap().to_owned()
+        };
+
+        // Trigger soft_logout = true from the server.
+        server
+            .expire_soft
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let reauth_target = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::NeedReauth { target, .. } => return target,
+                    MatrixEvent::NeedLogin { reason } => {
+                        panic!("soft logout must not drop to NeedLogin: {reason:?}");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for NeedReauth");
+
+        assert_eq!(reauth_target.user_id, "@alice:localhost");
+        assert_eq!(reauth_target.device_id, "SOFTDEV1");
+        assert!(paths.store_dir().exists());
+        assert!(!paths.data_dir.join("store.previous").exists());
+
+        // Shutdown before inspecting the encrypted store directly so SQLite locks close,
+        // then start a fresh worker to also verify soft_logout survives restart.
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+
+        let key_before = store_ed25519_key(&paths, &server.base_url, &pass_before).await;
+        assert!(!key_before.is_empty());
+
+        let (handle, mut events) = spawn_with(paths.clone(), SecretStoreMode::File);
+        match tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            MatrixEvent::NeedReauth { target, .. } => {
+                assert_eq!(target.device_id, "SOFTDEV1");
+            }
+            other => panic!("expected NeedReauth on restart, got {other:?}"),
+        }
+
+        handle.send(MatrixCmd::ReauthPassword {
+            password: "pw".into(),
+        });
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(e) | MatrixEvent::Error(e) => panic!("{e}"),
+                    MatrixEvent::ActionFailed(e) => panic!("unexpected ActionFailed: {e}"),
+                    MatrixEvent::Sync(SyncStatus::Synced) => return,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for re-auth sync");
+        assert!(!paths.data_dir.join("store.previous").exists());
+
+        // Shutdown and verify the encrypted Olm identity key survived intact.
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let key_after = store_ed25519_key(&paths, &server.base_url, &pass_before).await;
+        assert_eq!(key_before, key_after);
+
+        // Hard logout (`soft_logout: false`): restore old expired tok_1 behavior? Simply run a new
+        // worker with expire_hard on tok_1 -> verify NeedLogin & deleted session.json.
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_hard_logout_deletes_session_and_device_mismatch_starts_fresh() {
+        // Part 1: hard logout (soft_logout = false) forgets session.json and emits NeedLogin.
+        let server = MockMatrixServer::start(false).await;
+        let root = std::env::temp_dir().join(format!("matrix-rat-hard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "hardtest".into(),
+        };
+        paths.create_dirs().unwrap();
+
+        let (handle, mut events) = spawn_with(paths.clone(), SecretStoreMode::File);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver: server.base_url.clone(),
+            username: "alice".into(),
+            password: "pw".into(),
+        });
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if matches!(
+                    events.recv().await,
+                    Some(MatrixEvent::Sync(SyncStatus::Synced))
+                ) {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(paths.session_file().exists());
+
+        server
+            .expire_hard
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::NeedLogin { reason } => {
+                        assert!(reason.unwrap_or_default().contains("expired"));
+                        return;
+                    }
+                    MatrixEvent::NeedReauth { .. } => {
+                        panic!("hard logout must not emit NeedReauth");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!paths.session_file().exists());
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Part 2: soft logout where server returns a DIFFERENT device_id on re-auth sets old store aside.
+        let server2 = MockMatrixServer::start(true).await;
+        let root2 =
+            std::env::temp_dir().join(format!("matrix-rat-mismatch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root2);
+        let paths2 = Paths {
+            config_dir: root2.join("config"),
+            data_dir: root2.join("data"),
+            log_dir: root2.join("log"),
+            runtime_dir: root2.join("run"),
+            profile: "mismatchtest".into(),
+        };
+        paths2.create_dirs().unwrap();
+
+        let (handle2, mut events2) = spawn_with(paths2.clone(), SecretStoreMode::File);
+        handle2.send(MatrixCmd::LoginPassword {
+            homeserver: server2.base_url.clone(),
+            username: "alice".into(),
+            password: "pw".into(),
+        });
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if matches!(
+                    events2.recv().await,
+                    Some(MatrixEvent::Sync(SyncStatus::Synced))
+                ) {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        server2
+            .expire_soft
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if matches!(events2.recv().await, Some(MatrixEvent::NeedReauth { .. })) {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        handle2.send(MatrixCmd::ReauthPassword {
+            password: "pw".into(),
+        });
+        let mut saw_notice = false;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match events2.recv().await.expect("worker stopped") {
+                    MatrixEvent::ActionFailed(msg) if msg.contains("new device ID") => {
+                        saw_notice = true;
+                    }
+                    MatrixEvent::Sync(SyncStatus::Synced) if saw_notice => return,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(paths2.data_dir.join("store.previous").exists());
+        handle2.send(MatrixCmd::Shutdown);
+        while events2.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(&root2);
+    }
+
+    /// Verifies against a real local homeserver (`scripts/dev-homeserver.sh` / continuwuity)
+    /// that re-authenticating with the saved `device_id` keeps both the device ID and the
+    /// encrypted SQLite Olm store's identity key intact. (Note: continuwuity itself does not emit
+    /// `soft_logout: true` on `/logout`, so soft logout detection is covered by `worker_soft_logout_*`).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn soft_logout_reauth_preserves_device_id_and_crypto_keys() {
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let reg_token =
+            std::env::var("MATRIX_RAT_REG_TOKEN").unwrap_or_else(|_| "devtoken".to_owned());
+        let root = std::env::temp_dir().join(format!("matrix-rat-e2e-soft-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "e2e-soft".into(),
+        };
+        paths.create_dirs().unwrap();
+
+        // Register a disposable user for this test.
+        let username = format!("sess_{}", std::process::id());
+        let password = "e2e_session_pass".to_owned();
+        {
+            use matrix_sdk::ruma::api::client::account::register::v3::Request as RegisterRequest;
+            use matrix_sdk::ruma::api::client::uiaa::{AuthData, RegistrationToken};
+
+            let reg_client = matrix_sdk::Client::builder()
+                .homeserver_url(&homeserver)
+                .build()
+                .await
+                .unwrap();
+            let mut request = RegisterRequest::new();
+            request.username = Some(username.clone());
+            request.password = Some(password.clone());
+            request.inhibit_login = true;
+            match reg_client.matrix_auth().register(request.clone()).await {
+                Ok(_) => {}
+                Err(err) => {
+                    let session = err
+                        .as_uiaa_response()
+                        .expect("registration UIAA response")
+                        .session
+                        .clone();
+                    let mut auth = RegistrationToken::new(reg_token);
+                    auth.session = session;
+                    request.auth = Some(AuthData::RegistrationToken(auth));
+                    reg_client.matrix_auth().register(request).await.unwrap();
+                }
+            }
+        }
+
+        let active = session::login_password(
+            &paths,
+            &homeserver,
+            &username,
+            &password,
+            SecretStoreMode::File,
+        )
+        .await
+        .unwrap();
+        let orig_device = active.target.device_id.clone();
+        let orig_key = active.client.encryption().ed25519_key().await.unwrap();
+        assert!(active.target.user_id.starts_with(&format!("@{username}:")));
+
+        // Server invalidates the old access token via /logout and we record soft-logout state.
+        active.client.logout().await.unwrap();
+        session::mark_soft_logout(&paths, &active).unwrap();
+        drop(active);
+
+        let session::RestoreOutcome::NeedReauth {
+            target,
+            passphrase,
+            in_keyring,
+        } = session::restore(&paths, SecretStoreMode::File).await
+        else {
+            panic!("expected NeedReauth");
+        };
+        assert_eq!(target.device_id, orig_device);
+
+        let reauth = session::reauth_password(
+            &paths,
+            &target,
+            &password,
+            &passphrase,
+            in_keyring,
+            SecretStoreMode::File,
+        )
+        .await
+        .unwrap();
+        assert!(reauth.kept_device);
+        assert_eq!(reauth.session.target.device_id, orig_device);
+        assert!(!paths.data_dir.join("store.previous").exists());
+        let reauth_key = reauth
+            .session
+            .client
+            .encryption()
+            .ed25519_key()
+            .await
+            .unwrap();
+        assert_eq!(orig_key, reauth_key);
+
+        reauth.session.client.logout().await.unwrap();
+        drop(reauth);
+        session::clear(&paths, Some(&target)).await;
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
