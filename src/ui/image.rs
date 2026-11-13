@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear};
 use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
@@ -55,6 +55,31 @@ pub fn draw_inline(frame: &mut Frame, images: &mut ImageStore, theme: &Theme, in
             let spinner = images.is_loading(&info.key).then(|| images.spinner());
             placeholder(frame, theme, area, skip, size, spinner, &info.name);
         }
+    }
+}
+
+/// Draws a room's picture over the two cells of its coloured tile, once there is
+/// one. Until then, and wherever pictures cannot be drawn, the tile stays.
+pub fn draw_avatar(
+    frame: &mut Frame,
+    images: &mut ImageStore,
+    theme: &Theme,
+    url: &str,
+    area: Rect,
+    covered: bool,
+) {
+    let Some(encoded) = images.avatar(url, covered) else {
+        return;
+    };
+    let pending = !encoded.shown;
+    // The tile's colour stays behind a picture with transparent parts; its bold
+    // letter goes.
+    frame
+        .buffer_mut()
+        .set_style(area, Style::new().remove_modifier(Modifier::BOLD));
+    render(frame, theme, encoded, area, 0);
+    if pending {
+        images.sent_avatar(url, area.x, area.y);
     }
 }
 

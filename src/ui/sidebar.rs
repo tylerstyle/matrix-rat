@@ -156,6 +156,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     ),
                 ]);
                 frame.render_widget(&line, rect);
+                // The room's picture goes over the tile where the terminal can show one.
+                let (tile_width, _) = crate::images::AVATAR_CELLS;
+                if rect.width > tile_width + 1
+                    && let Some(url) = &room.avatar
+                {
+                    let cells = Rect::new(rect.x + 1, rect.y, tile_width, 1);
+                    let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
+                    super::image::draw_avatar(frame, &mut app.images, theme, url, cells, covered);
+                }
                 if badge_width > 0 && rect.width > badge_width + 4 {
                     let badge_rect =
                         Rect::new(rect.right() - badge_width - 1, rect.y, badge_width, 1);

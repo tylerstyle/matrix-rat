@@ -1520,6 +1520,7 @@ impl App {
             MatrixEvent::Image { key, full, result } => {
                 self.images.on_loaded(&key, full, result);
             }
+            MatrixEvent::Avatar { url, result } => self.images.on_avatar(&url, result),
             MatrixEvent::FileSaved { key, open, result } => self.on_file_saved(key, open, result),
             MatrixEvent::Security(security) => self.on_security(security),
             MatrixEvent::Verification(update) => self.on_verification(update),
@@ -1571,6 +1572,7 @@ impl App {
                 room.unread = summary.notifications.min(u32::MAX as u64) as u32;
                 room.bold = summary.unread;
                 room.mention = summary.mention;
+                room.avatar = summary.avatar;
                 room
             })
             .collect();
@@ -2460,6 +2462,7 @@ mod tests {
             notifications,
             mention: false,
             unread: notifications > 0,
+            avatar: None,
         }
     }
 

@@ -200,6 +200,8 @@ pub struct Room {
     pub messages: Vec<Message>,
     /// Unsent text, kept while another room is open.
     pub draft: String,
+    /// `mxc://` address of the room's picture.
+    pub avatar: Option<String>,
 }
 
 pub const OWN_NAME: &str = "you";
@@ -239,6 +241,7 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         typing: None,
         messages,
         draft: String::new(),
+        avatar: None,
     }
 }
 
