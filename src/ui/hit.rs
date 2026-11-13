@@ -12,6 +12,7 @@ pub enum Button {
     Theme,
     CancelCompose,
     JumpToNewest,
+    Palette,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,8 @@ pub enum HitId {
     Thread(usize),
     /// The ✕ of the waiting file at this index in the composer.
     Attachment(usize),
+    /// A row in the command palette (index into its filtered entries).
+    Palette(usize),
 }
 
 #[derive(Debug, Default)]

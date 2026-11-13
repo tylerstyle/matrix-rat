@@ -231,6 +231,14 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        Char('p'),
+        CTRL,
+        Action::OpenPalette,
+        "Ctrl-P",
+        "Command palette",
+    ),
+    bind(
+        Global,
         Char('z'),
         CTRL,
         Action::Suspend,

@@ -3,6 +3,7 @@
 mod attach;
 mod files;
 mod media;
+mod palette;
 mod thread;
 mod verify;
 
@@ -417,6 +418,11 @@ impl App {
             .position(|n| *n == self.wanted_theme)
             .map_or(0, |i| (i as isize + delta).rem_euclid(count) as usize);
         let name = self.theme_names[at].clone();
+        self.apply_theme(name);
+    }
+
+    /// Loads `name`, remembers it, and saves it to the configuration.
+    fn apply_theme(&mut self, name: String) {
         self.set_theme(&name);
         self.config_theme = name.clone();
         self.save_setting("theme", name);
@@ -1342,6 +1348,15 @@ impl App {
                     self.begin_attach();
                 }
             }
+            Action::OpenPalette => self.open_palette(),
+            Action::OpenRoom(index) => self.open_room(index),
+            Action::SelectTheme(index) => {
+                if let Some(name) = self.theme_names.get(index).cloned() {
+                    self.apply_theme(name.clone());
+                    self.show_toast(format!("Theme: {name}"));
+                }
+            }
+            Action::Setting(setting) => self.perform_setting(setting),
         }
     }
 
@@ -1411,7 +1426,7 @@ impl App {
                 self.modal = None;
                 self.show_toast("Encrypted history stays locked until you enter the key");
             }
-            Some(Modal::Emoji(_) | Modal::Settings(_)) => self.modal = None,
+            Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_)) => self.modal = None,
             Some(Modal::Verify(_)) => self.verify_escape(),
             None => {}
         }
@@ -1450,6 +1465,7 @@ impl App {
                 }
                 Some(Modal::Recovery(form)) if !form.busy => form.key.clear(),
                 Some(Modal::Emoji(picker)) => picker.set_query(String::new()),
+                Some(Modal::Palette(palette)) => palette.set_query(String::new()),
                 Some(Modal::Settings(menu)) => {
                     if let Some(text) = &mut menu.editing {
                         text.clear();
@@ -1561,6 +1577,7 @@ impl App {
                 }
             }
             Some(Modal::Verify(_)) => self.on_verify_key(code, mods),
+            Some(Modal::Palette(_)) => self.on_palette_key(code, mods),
             None => {}
         }
     }
@@ -2003,6 +2020,10 @@ impl App {
                 return;
             }
             Some(Modal::Verify(_)) => return self.on_verify_paste(first_line),
+            Some(Modal::Palette(palette)) => {
+                palette.push_str(first_line);
+                return;
+            }
             None => {}
         }
         // Files dropped on the terminal arrive as a paste of their paths.
@@ -2034,7 +2055,10 @@ impl App {
                     Some(HitId::Backdrop) => {
                         self.images.close_viewer();
                         self.help_open = false;
-                        if matches!(self.modal, Some(Modal::Emoji(_) | Modal::Settings(_))) {
+                        if matches!(
+                            self.modal,
+                            Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_))
+                        ) {
                             self.modal = None;
                         }
                     }
@@ -2107,6 +2131,7 @@ impl App {
                         Button::Theme => Action::CycleTheme,
                         Button::CancelCompose => Action::CancelCompose,
                         Button::JumpToNewest => Action::JumpToNewest,
+                        Button::Palette => Action::OpenPalette,
                     }),
                     Some(HitId::Do(action)) => self.perform(action),
                     Some(HitId::Pane(pane)) => self.set_focus(pane),
@@ -2114,6 +2139,7 @@ impl App {
                     Some(HitId::Image(index)) => self.click_image(index),
                     Some(HitId::Thread(index)) => self.open_thread(index),
                     Some(HitId::Attachment(index)) => self.remove_attachment(index),
+                    Some(HitId::Palette(index)) => self.run_palette_at(index),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -2133,16 +2159,19 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                if matches!(self.modal, Some(Modal::Emoji(_))) =>
+                if matches!(self.modal, Some(Modal::Emoji(_) | Modal::Palette(_))) =>
             {
-                if let Some(Modal::Emoji(picker)) = &mut self.modal {
-                    picker.scroll_by(if mouse.kind == MouseEventKind::ScrollUp {
-                        -2
-                    } else {
-                        2
-                    });
-                    self.dirty = true;
+                let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                    -2
+                } else {
+                    2
+                };
+                match &mut self.modal {
+                    Some(Modal::Emoji(picker)) => picker.scroll_by(delta),
+                    Some(Modal::Palette(palette)) => palette.scroll_by(delta),
+                    _ => {}
                 }
+                self.dirty = true;
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if !self.help_open && self.modal.is_none() && !self.images.viewer_open() =>

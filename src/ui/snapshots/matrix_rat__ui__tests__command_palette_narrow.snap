@@ -1,0 +1,20 @@
+---
+source: src/ui/mod.rs
+expression: "render(&mut app, 46, 16)"
+---
+"╭╭ Command palette ─────────────────────────╮╮"
+"││ ⌕ type a command, room, or theme…        ││"
+"││ ────────────────────────────────── 47/47 ││"
+"││ › Action   Emoji picker            Alt-E ││"
+"││   Action   Attach a file           Alt-A ││"
+"││   Action   Find a room            Ctrl-K ││"
+"││   Action   Room list               Alt-1 ││"
+"││   Action   Messages                Alt-2 ││"
+"││   Action   Composer                Alt-3 ││"
+"││   Action   This help                  F1 ││"
+"││   Action   Settings                   F2 ││"
+"╰│   Action   Next theme                 F3 │╯"
+"╭│   Action   Suspend to the shell   Ctrl-Z │╮"
+"││   Action   Quit                   Ctrl-Q ││"
+"╰╰───────── ↑↓ move · Enter run · Esc close ╯╯"
+" ● demo data         F2 settings  F3 rat-dark "
