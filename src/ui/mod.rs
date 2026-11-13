@@ -441,6 +441,28 @@ mod tests {
         }
     }
 
+    /// The context menu of one of our own messages, with Delete armed or not, and a
+    /// title, hanging from the far corner.
+    fn menu_modal(armed: bool) -> Option<crate::modal::Modal> {
+        use crate::menu::{Anchor, Menu, MessageFacts, Target, message_items};
+        let message = crate::model::Message {
+            body: "hello".into(),
+            own: true,
+            ..Default::default()
+        };
+        let keys = crate::keymap::Keymap::default();
+        let items = message_items(&message, MessageFacts::default(), &keys);
+        let target = Target::Composer {
+            room_id: "rust".into(),
+        };
+        let mut menu = Menu::new(target, "A title", items, Anchor::at(u16::MAX, u16::MAX))?;
+        if armed {
+            let delete = menu.items.len() - 1;
+            assert!(!menu.confirmed(delete));
+        }
+        Some(crate::modal::Modal::Menu(menu))
+    }
+
     #[test]
     fn tiny_sizes_do_not_panic() {
         use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, SettingsMenu};
@@ -472,6 +494,8 @@ mod tests {
             Some(Modal::New(NewPopup::new(Stage::Join))),
             Some(Modal::New(create)),
             Some(Modal::RoomInfo(info)),
+            menu_modal(false),
+            menu_modal(true),
         ];
         for modal in modals {
             let mut app = App::demo();

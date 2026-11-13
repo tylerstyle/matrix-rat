@@ -1925,7 +1925,7 @@ impl App {
             Some(Modal::Palette(_)) => self.on_palette_key(code, mods),
             Some(Modal::Search(_)) => self.on_search_key(code, mods),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.on_manage_key(code, mods),
-            Some(Modal::Menu(_)) => self.on_menu_key(code, mods),
+            Some(Modal::Menu(_)) => self.on_menu_key(key, code, mods),
             Some(Modal::Keybinds(_)) => self.on_keybinds_key(key, code, mods),
             None => {}
         }

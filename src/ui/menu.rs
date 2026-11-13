@@ -23,7 +23,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, menu: &Menu) {
         .border_style(theme.style(Role::OverlayBorder))
         .style(theme.style(Role::Text));
     let title = truncate(&menu.title, (rect.width as usize).saturating_sub(4));
-    if width(&title) > 1 {
+    if !title.is_empty() {
         block = block.title(Line::from(Span::styled(
             format!(" {title} "),
             theme.style(Role::TitleFocused),
