@@ -120,7 +120,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         let text = if !app.sidebar.filter.is_empty() {
             " no rooms match"
         } else if app.space.is_some() {
-            " no rooms in this space"
+            " no rooms here"
         } else if app.sidebar.filter.is_empty() {
             " no rooms yet"
         } else {

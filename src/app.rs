@@ -4064,7 +4064,7 @@ mod tests {
         app.select_space(Some(4));
         app.rooms.retain(|room| room.kind != RoomKind::Invite);
         redraw(&mut app, &mut terminal);
-        find(&terminal, "no rooms in this space");
+        find(&terminal, "no rooms here");
 
         // While all rooms are shown, an update leaves the cursor where it is.
         app.select_space(None);
