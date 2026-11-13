@@ -112,7 +112,7 @@ impl App {
 
     /// Steps to the next older (`older`) or newer match. Past the oldest loaded one,
     /// older history is fetched and the search goes on when it arrives.
-    fn search_step(&mut self, older: bool) {
+    pub(super) fn search_step(&mut self, older: bool) {
         let Some(Modal::Search(bar)) = &self.modal else {
             return;
         };
@@ -529,6 +529,32 @@ mod tests {
         app.rooms[0].id = "!other".into();
         app.search_check_room();
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn the_wheel_steps_through_the_matches() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let (mut app, _commands) = app_with(&["rat one", "x", "rat two", "y", "rat three"]);
+        app.timeline.reached_start = true;
+        app.perform(Action::Search);
+        type_text(&mut app, "rat");
+        let wheel = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 10,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert_eq!(app.timeline.selected, Some(4));
+        // Up is towards older messages, as when scrolling them.
+        app.on_event(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.timeline.selected, Some(2));
+        app.on_event(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.timeline.selected, Some(0));
+        app.on_event(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.timeline.selected, Some(2));
+        assert!(matches!(app.modal, Some(Modal::Search(_))));
     }
 
     #[test]

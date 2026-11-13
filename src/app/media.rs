@@ -813,6 +813,46 @@ mod tests {
     }
 
     #[test]
+    fn a_room_cut_by_the_edge_of_the_list_shows_half_its_picture() {
+        let (mut app, mut terminal, _commands) = app_with_rooms(kitty(), 40);
+        app.room_previews = true;
+        frame(&mut app, &mut terminal);
+        for n in 0..40 {
+            app.on_matrix(avatar(n, true));
+        }
+        // Rows of picture cells per screen line, top to bottom.
+        let lines = |terminal: &Terminal<TestBackend>| -> Vec<(u16, usize)> {
+            let mut per_line: std::collections::BTreeMap<u16, usize> = Default::default();
+            for (_, y, _) in kitty_cells(terminal.backend().buffer()) {
+                *per_line.entry(y).or_default() += 1;
+            }
+            per_line.into_iter().collect()
+        };
+        // Whole rooms: every picture line has the four cells of one picture, and
+        // lines come in pairs. Then scroll by a single line, so that the first room
+        // loses its upper line and the last one its lower line.
+        app.sidebar.scroll = 1;
+        frame(&mut app, &mut terminal);
+        let even = lines(&terminal);
+        app.sidebar.scroll = 2;
+        frame(&mut app, &mut terminal);
+        let odd = lines(&terminal);
+        for shown in [&even, &odd] {
+            assert!(shown.iter().all(|(_, cells)| *cells == 4), "{shown:?}");
+        }
+        // Every line of the list below the heading carries a picture in both cases:
+        // a half picture at an edge, not a blank or a bare tile.
+        let list_lines = |shown: &Vec<(u16, usize)>| shown.len();
+        assert_eq!(list_lines(&even), list_lines(&odd));
+        let first_even = even.first().unwrap().0;
+        let first_odd = odd.first().unwrap().0;
+        assert_eq!(
+            first_even, first_odd,
+            "the top line has a picture either way"
+        );
+    }
+
+    #[test]
     fn room_pictures_replace_the_tile_for_visible_rows_only() {
         let (mut app, mut terminal, mut commands) = app_with_rooms(kitty(), 60);
         // Asked for once, and only for the rooms on screen: 26 rows of list below

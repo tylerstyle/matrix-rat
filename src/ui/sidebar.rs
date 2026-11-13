@@ -140,6 +140,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // Lines actually drawn: a room's two lines can be cut apart at either edge.
+    let shown = rows.len().saturating_sub(app.sidebar.scroll).min(height);
     for (n, row) in rows
         .iter()
         .skip(app.sidebar.scroll)
@@ -216,14 +218,23 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 ]);
                 frame.render_widget(&line, rect);
                 // The room's picture goes over the tile where the terminal can show one.
-                // (With two lines per room it is drawn with the second line.)
-                if !wide
+                // With two lines per room it is drawn with the second line, unless that
+                // one is below the edge: then its upper half goes here.
+                if (!wide || n + 1 == shown)
                     && rect.width > tile_cols + 1
                     && let Some(url) = &room.avatar
                 {
                     let cells = Rect::new(rect.x + 1, rect.y, tile_cols, 1);
                     let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
-                    super::image::draw_avatar(frame, &mut app.images, theme, url, cells, covered);
+                    super::image::draw_avatar(
+                        frame,
+                        &mut app.images,
+                        theme,
+                        url,
+                        cells,
+                        0,
+                        covered,
+                    );
                 }
                 if badge_width > 0 && rect.width > badge_width + 4 {
                     let badge_rect =
@@ -304,14 +315,26 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(truncate(text, text_width), muted),
                 ]);
                 frame.render_widget(&line, rect);
-                // The picture covers the tile on both lines, when both are on screen.
-                if n > 0
-                    && rect.width > tile_cols + 1
+                // The picture covers the tile on both lines; if the room's first line is
+                // scrolled out above, its lower half is drawn here.
+                if rect.width > tile_cols + 1
                     && let Some(url) = &room.avatar
                 {
-                    let cells = Rect::new(rect.x + 1, rect.y - 1, tile_cols, 2);
+                    let (cells, skip) = if n > 0 {
+                        (Rect::new(rect.x + 1, rect.y - 1, tile_cols, 2), 0)
+                    } else {
+                        (Rect::new(rect.x + 1, rect.y, tile_cols, 1), 1)
+                    };
                     let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
-                    super::image::draw_avatar(frame, &mut app.images, theme, url, cells, covered);
+                    super::image::draw_avatar(
+                        frame,
+                        &mut app.images,
+                        theme,
+                        url,
+                        cells,
+                        skip,
+                        covered,
+                    );
                 }
                 app.hits.add(rect, HitId::Room(*index));
             }

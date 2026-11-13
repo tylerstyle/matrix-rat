@@ -2846,6 +2846,13 @@ impl App {
                 }
                 self.dirty = true;
             }
+            // In the find bar the wheel goes from match to match.
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if matches!(self.modal, Some(Modal::Search(_))) =>
+            {
+                self.search_step(mouse.kind == MouseEventKind::ScrollUp);
+                self.dirty = true;
+            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                 if self.help_open && self.modal.is_none() =>
             {

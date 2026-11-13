@@ -66,6 +66,8 @@ pub fn draw_avatar(
     theme: &Theme,
     url: &str,
     area: Rect,
+    // Rows of the picture above `area` that are scrolled out of view.
+    skip: u16,
     covered: bool,
 ) {
     let Some(encoded) = images.avatar(url, covered) else {
@@ -77,7 +79,7 @@ pub fn draw_avatar(
     frame
         .buffer_mut()
         .set_style(area, Style::new().remove_modifier(Modifier::all()));
-    render(frame, theme, encoded, area, 0);
+    render(frame, theme, encoded, area, skip);
     // Two rooms can share a picture. Only the first one drawn carries the data; the
     // others just refer to it and must not be mistaken for a failed transmission.
     let carries_data = frame
