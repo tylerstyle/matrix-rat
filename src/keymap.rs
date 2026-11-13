@@ -330,6 +330,14 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Timeline,
+        Char('t'),
+        NONE,
+        Action::OpenThread,
+        "t",
+        "Open the message's thread",
+    ),
+    bind(
+        Timeline,
         KeyCode::End,
         NONE,
         Action::JumpToNewest,

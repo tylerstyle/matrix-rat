@@ -25,7 +25,9 @@ pub fn height(app: &App, pane_width: u16) -> u16 {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
-    let block = super::pane_block(app, Pane::Composer, "Message");
+    let in_thread = app.thread_open();
+    let title = if in_thread { "Thread reply" } else { "Message" };
+    let block = super::pane_block(app, Pane::Composer, title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.hits.add(area, HitId::Pane(Pane::Composer));
@@ -99,7 +101,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let focused = app.focus == Pane::Composer;
     if app.composer.is_empty() {
-        let hint = if focused {
+        let hint = if focused && in_thread {
+            "Reply in thread…"
+        } else if focused {
             "Type a message…"
         } else {
             "Click here or press Alt-3 to write"

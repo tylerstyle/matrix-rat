@@ -42,6 +42,8 @@ pub enum HitId {
     Overlay,
     /// The picture of the message at this index.
     Image(usize),
+    /// The thread line under the message at this index.
+    Thread(usize),
 }
 
 #[derive(Debug, Default)]
