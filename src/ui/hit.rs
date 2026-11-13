@@ -51,6 +51,10 @@ pub enum HitId {
     Palette(usize),
     /// A row in the composer completion popup (index into `completion.items`).
     Complete(usize),
+    /// A row in the key-bindings editor (index into `editor.rows()`).
+    KeybindRow(usize),
+    /// A button in the key-bindings editor.
+    KeybindBtn(crate::keymap::EditorButton),
 }
 
 #[derive(Debug, Default)]

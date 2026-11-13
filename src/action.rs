@@ -99,4 +99,10 @@ pub enum Action {
     InviteUser,
     /// A control of the room popups.
     Manage(crate::manage::Click),
+    /// Jump to the oldest loaded message in the timeline.
+    JumpToOldest,
+    /// Move the room-list cursor to the first visible room.
+    SidebarTop,
+    /// Move the room-list cursor to the last visible room.
+    SidebarBottom,
 }

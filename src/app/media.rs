@@ -74,14 +74,25 @@ impl App {
     }
 
     pub(super) fn on_viewer_key(&mut self, code: KeyCode, mods: KeyModifiers) {
-        match (code, mods) {
-            (KeyCode::Char('q'), KeyModifiers::CONTROL) => self.should_quit = true,
-            (KeyCode::Char('z'), KeyModifiers::CONTROL) => self.suspend_requested = true,
-            (KeyCode::Char('s'), KeyModifiers::NONE) => {
-                if !self.save_attachment(false) {
-                    self.show_toast("This picture cannot be saved");
-                }
+        if let Some(action) = self.keymap.lookup_popup_global(code, mods) {
+            match action {
+                crate::action::Action::Quit => self.should_quit = true,
+                crate::action::Action::Suspend => self.suspend_requested = true,
+                _ => {}
             }
+            return;
+        }
+        if self.keymap.lookup(
+            crate::keymap::Context::Timeline,
+            crossterm::event::KeyEvent::new(code, mods),
+        ) == Some(crate::action::Action::Save)
+        {
+            if !self.save_attachment(false) {
+                self.show_toast("This picture cannot be saved");
+            }
+            return;
+        }
+        match (code, mods) {
             (KeyCode::Esc | KeyCode::Enter, _)
             | (KeyCode::Char('q' | 'o' | ' '), KeyModifiers::NONE) => self.images.close_viewer(),
             _ => {}

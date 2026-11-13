@@ -6,6 +6,7 @@ mod composer;
 mod help;
 pub mod hit;
 mod image;
+mod keybinds;
 mod modal;
 mod palette;
 mod roominfo;
@@ -190,6 +191,39 @@ mod tests {
     }
 
     #[test]
+    fn keybinds_editor_and_vim_help() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::demo();
+        app.perform(Action::OpenSettings);
+        // Move to Setting::Keys and press Enter to open the key-bindings editor.
+        app.perform(Action::Setting(crate::modal::Setting::Keys));
+        insta::assert_snapshot!("keybinds_editor", render(&mut app, 100, 30));
+
+        // Select "Next pane" (Tab) -> Capture -> press Ctrl-Q -> no, press Alt-E -> conflict prompt.
+        app.on_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.on_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::ALT,
+        )));
+        insta::assert_snapshot!("keybinds_conflict", render(&mut app, 100, 30));
+
+        // Switch to vim preset, close editor, open F1 help overlay to inspect rendered vim bindings.
+        app.on_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        app.on_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.perform(Action::ToggleHelp);
+        insta::assert_snapshot!("keybinds_vim_help", render(&mut app, 100, 30));
+    }
+
+    #[test]
     fn find_bar() {
         let mut app = App::demo();
         render(&mut app, 100, 30);
@@ -356,12 +390,12 @@ mod tests {
     fn every_key_in_the_help_can_be_reached() {
         use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
-        let last = crate::keymap::DEFAULT.last().unwrap().description;
-        // At the size the overlay was made for, everything is there at once.
         let mut app = App::demo();
+        let last = app.keymap.bindings().last().unwrap().description;
+        // At the size the overlay was made for, everything is there at once.
         app.perform(Action::ToggleHelp);
         let text = render(&mut app, 100, 30);
-        for binding in crate::keymap::DEFAULT {
+        for binding in app.keymap.bindings() {
             assert!(
                 text.contains(binding.description),
                 "{}",
@@ -383,7 +417,7 @@ mod tests {
                 app.on_event(key(KeyCode::Down));
                 seen.push_str(&render(&mut app, w, h));
             }
-            for binding in crate::keymap::DEFAULT {
+            for binding in app.keymap.bindings() {
                 assert!(
                     seen.contains(binding.description),
                     "{w}x{h}: {}",
@@ -422,6 +456,9 @@ mod tests {
         };
         info.editing = Some((crate::manage::InfoRow::Topic, "a topic".into()));
         let _: &InfoPopup = &info;
+        let with_keybinds = Some(Modal::Keybinds(crate::keymap::Editor::new(
+            &crate::keymap::Keymap::default(),
+        )));
         let modals = [
             None,
             Some(Modal::Emoji(EmojiPicker::default())),
@@ -429,6 +466,7 @@ mod tests {
             Some(Modal::Login(LoginForm::new(Some("an error".into())))),
             Some(Modal::Recovery(RecoveryForm::default())),
             palette_modal,
+            with_keybinds,
             Some(Modal::New(NewPopup::new(Stage::Choose))),
             Some(Modal::New(NewPopup::new(Stage::Join))),
             Some(Modal::New(create)),

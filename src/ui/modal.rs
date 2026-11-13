@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use super::hit::HitId;
 use crate::action::Action;
 use crate::app::App;
+use crate::keymap::Context;
 use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, Setting, SettingsMenu};
 use crate::text::{truncate, width};
 use crate::theme::{Role, Theme};
@@ -29,6 +30,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Search(bar) => super::search::draw(frame, app, area, bar),
         Modal::New(form) => super::roominfo::draw_new(frame, app, area, form),
         Modal::RoomInfo(info) => super::roominfo::draw_info(frame, app, area, info),
+        Modal::Keybinds(editor) => super::keybinds::draw(frame, app, area, editor),
     }
     app.modal = Some(modal);
 }
@@ -241,7 +243,10 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
                     theme.style(Role::Text),
                 )),
             },
-            Setting::Keys => spans.push(Span::styled("F1", theme.style(Role::StatusKey))),
+            Setting::Keys => spans.push(Span::styled(
+                truncate(&value, room),
+                theme.style(Role::StatusKey),
+            )),
             Setting::Encryption => {
                 let role = if value.starts_with("not") {
                     Role::Error
@@ -292,12 +297,17 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
     let Some(rect) = centered(area, 64, 15) else {
         return;
     };
+    let quit = app
+        .keymap
+        .label_in(Context::Global, Action::Quit)
+        .or_else(|| app.keymap.label_for(Action::Quit))
+        .unwrap_or("Ctrl-Q");
     let footer = if form.busy.is_some() {
-        "Esc cancel · Ctrl-Q quit"
+        format!("Esc cancel · {quit} quit")
     } else {
-        "Tab next · Enter continue · Ctrl-Q quit"
+        format!("Tab next · Enter continue · {quit} quit")
     };
-    let inner = popup(frame, app, area, rect, "Log in to Matrix", footer);
+    let inner = popup(frame, app, area, rect, "Log in to Matrix", &footer);
     let theme = &app.theme;
     let busy = form.busy.is_some();
 
