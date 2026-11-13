@@ -8,7 +8,8 @@ use super::hit::{Button, HitId};
 use crate::action::Action;
 use crate::action::Pane;
 use crate::app::App;
-use crate::model::{MsgKind, Room, RoomKind, SendState};
+use crate::images::{ImageStore, Slot};
+use crate::model::{Message, MsgKind, Room, RoomKind, SendState};
 use crate::rich::{self, Format, Rich, Segment};
 use crate::text::{truncate, width, wrap};
 use crate::theme::{Role, Theme};
@@ -24,6 +25,18 @@ pub struct Row {
     source: usize,
     /// Clickable column ranges inside the row.
     hits: Vec<(u16, u16, HitId)>,
+    /// Set if the row is kept free for a picture.
+    image: Option<ImageRow>,
+}
+
+/// One row of the space a picture takes.
+#[derive(Debug, Clone, Copy)]
+struct ImageRow {
+    /// Which row of the picture, from its top.
+    row: u16,
+    /// Size of the whole picture in cells.
+    cols: u16,
+    rows: u16,
 }
 
 impl Row {
@@ -33,18 +46,31 @@ impl Row {
             msg,
             source: 0,
             hits: Vec::new(),
+            image: None,
         }
     }
 }
 
 const INDENT: &str = "  ";
 
-/// Lays out a room's messages. `revealed` is the message whose spoilers are shown.
+/// "(edited)", "sending" or "not sent", shown after a message's text.
+fn marker(message: &Message) -> Option<(&'static str, Role)> {
+    match (message.state, message.edited) {
+        (SendState::Sending, _) => Some(("◌ sending", Role::Muted)),
+        (SendState::Failed, _) => Some(("✕ not sent", Role::Error)),
+        (SendState::Sent, true) => Some(("(edited)", Role::Muted)),
+        (SendState::Sent, false) => None,
+    }
+}
+
+/// Lays out a room's messages. `revealed` is the message whose spoilers are shown;
+/// `images` says how much space each picture gets.
 pub fn build_rows(
     room: &Room,
     max_width: usize,
     theme: &Theme,
     revealed: Option<usize>,
+    images: &ImageStore,
 ) -> Vec<Row> {
     let body_width = max_width.saturating_sub(INDENT.len()).max(1);
     // Foreground only, so the row's background (selection, hover) shows through.
@@ -146,6 +172,52 @@ pub fn build_rows(
                 ));
             }
 
+            // A picture: rows are kept free here and painted over when drawn. Its
+            // caption follows as the text; without pictures the text names the file.
+            let mut body_text = message.body.as_str();
+            let mut text_wanted = true;
+            if let Some(image) = &message.image {
+                let slot = images.slot(image, body_width);
+                let start = INDENT.len() as u16;
+                match &slot {
+                    Slot::Cells(cols, count) => {
+                        for row in 0..*count {
+                            rows.push(Row {
+                                line: Line::from(Span::raw(INDENT)),
+                                msg: Some(i),
+                                source: i,
+                                hits: vec![(start, start + cols, HitId::Image(i))],
+                                image: Some(ImageRow {
+                                    row,
+                                    cols: *cols,
+                                    rows: *count,
+                                }),
+                            });
+                        }
+                    }
+                    Slot::Failed(reason) => {
+                        let text = truncate(&format!("🖼  {} — {reason}", image.name), body_width);
+                        let end = start + width(&text) as u16;
+                        rows.push(Row {
+                            line: Line::from(vec![
+                                Span::raw(INDENT),
+                                Span::styled(text, theme.style(Role::Muted)),
+                            ]),
+                            msg: Some(i),
+                            source: i,
+                            // Clicking tries again, through the viewer.
+                            hits: vec![(start, end, HitId::Image(i))],
+                            image: None,
+                        });
+                    }
+                    Slot::Off => {}
+                }
+                if slot != Slot::Off {
+                    body_text = image.caption.as_deref().unwrap_or("");
+                    text_wanted = !body_text.is_empty();
+                }
+            }
+
             let (body_style, intro) = match message.kind {
                 MsgKind::Emote => (
                     Style::new().fg(theme.user_color(&message.sender)),
@@ -154,7 +226,7 @@ pub fn build_rows(
                 MsgKind::Redacted | MsgKind::Undecryptable => (theme.style(Role::ReplyQuote), None),
                 _ => (text_style, None),
             };
-            let mut rich = Rich::of(message.html.as_deref(), &message.body);
+            let mut rich = Rich::of(message.html.as_deref(), body_text);
             if let (Some(intro), Some(first)) = (intro, rich.lines.first_mut()) {
                 first.segments.insert(
                     0,
@@ -165,7 +237,21 @@ pub fn build_rows(
                 );
             }
             let reveal = revealed == Some(i);
-            let mut wrapped = rich::wrap(&rich, body_width);
+            let mut wrapped = if text_wanted {
+                rich::wrap(&rich, body_width)
+            } else {
+                // A picture without a caption; a marker still gets its row.
+                if let Some((label, role)) = marker(message) {
+                    rows.push(Row::plain(
+                        Line::from(vec![
+                            Span::raw(INDENT),
+                            Span::styled(truncate(label, body_width), theme.style(role)),
+                        ]),
+                        Some(i),
+                    ));
+                }
+                Vec::new()
+            };
             let last = wrapped.len().saturating_sub(1);
             for (n, row) in wrapped.drain(..).enumerate() {
                 let mut spans = vec![Span::raw(INDENT)];
@@ -190,13 +276,7 @@ pub fn build_rows(
                 }
                 // "(edited)", "sending" and "not sent" go after the text, or on a row of
                 // their own when there is no room left.
-                let marker = match (message.state, message.edited) {
-                    (SendState::Sending, _) => Some(("◌ sending", Role::Muted)),
-                    (SendState::Failed, _) => Some(("✕ not sent", Role::Error)),
-                    (SendState::Sent, true) => Some(("(edited)", Role::Muted)),
-                    (SendState::Sent, false) => None,
-                };
-                match marker {
+                match marker(message) {
                     Some((label, role)) if n == last => {
                         if col + 1 + width(label) <= max_width {
                             spans.push(Span::raw(" "));
@@ -206,6 +286,7 @@ pub fn build_rows(
                                 msg: Some(i),
                                 source: i,
                                 hits,
+                                image: None,
                             });
                         } else {
                             rows.push(Row {
@@ -213,6 +294,7 @@ pub fn build_rows(
                                 msg: Some(i),
                                 source: i,
                                 hits,
+                                image: None,
                             });
                             rows.push(Row::plain(
                                 Line::from(vec![
@@ -228,6 +310,7 @@ pub fn build_rows(
                         msg: Some(i),
                         source: i,
                         hits,
+                        image: None,
                     }),
                 }
             }
@@ -248,6 +331,7 @@ pub fn build_rows(
                         msg: Some(i),
                         source: i,
                         hits: std::mem::take(&mut hits),
+                        image: None,
                     });
                     col = INDENT.len();
                 }
@@ -270,6 +354,7 @@ pub fn build_rows(
                     msg: Some(i),
                     source: i,
                     hits,
+                    image: None,
                 });
             }
         }
@@ -319,10 +404,22 @@ fn styled(segment: &Segment, base: Style, theme: &Theme, reveal: bool) -> (Strin
 /// affects them has changed.
 #[derive(Debug)]
 pub struct RowCache {
-    key: (String, u64, usize, String, Option<usize>),
+    key: (String, u64, usize, String, Option<usize>, u64),
     rows: Vec<Row>,
-    /// Id of the newest message when the rows were built.
-    newest: String,
+    /// What was at the bottom of the view when it was last drawn scrolled up.
+    anchor: Option<Anchor>,
+}
+
+/// Pins the view to a message while the rows around it change: new messages below,
+/// a picture whose size becomes known, another width.
+#[derive(Debug, Clone)]
+struct Anchor {
+    /// The message the bottom row of the view belonged to.
+    id: String,
+    /// Rows of that message below the bottom row of the view.
+    below: usize,
+    /// The scroll position this was recorded at.
+    scroll: usize,
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -409,27 +506,36 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         // Changes whenever a theme is (re)loaded, even under the same name.
         app.theme_rev.to_string(),
         revealed,
+        // Changes when a picture arrives or fails, which may change its height.
+        app.images.layout_rev,
     );
-    let newest = room
-        .messages
-        .last()
-        .map(|m| m.id.clone())
-        .unwrap_or_default();
     let previous = app.row_cache.take();
-    let cache = match previous {
+    let mut cache = match previous {
         Some(cache) if cache.key == key => cache,
         previous => {
-            let rows = build_rows(room, content.width as usize, theme, revealed);
+            let rows = build_rows(room, content.width as usize, theme, revealed, &app.images);
             // Reading older messages: keep the same ones on screen when new ones
-            // arrive below.
-            if let Some(old) = previous.filter(|old| old.key.0 == key.0)
+            // arrive below or something changes its height.
+            if let Some(anchor) = previous
+                .filter(|old| old.key.0 == key.0)
+                .and_then(|old| old.anchor)
                 && app.timeline.scroll > 0
-                && !old.newest.is_empty()
-                && let Some(at) = room.messages.iter().position(|m| m.id == old.newest)
+                && let Some(at) = room.messages.iter().position(|m| m.id == anchor.id)
+                && let Some(last) = rows.iter().rposition(|row| row.source == at)
+                && let Some(first) = rows.iter().position(|row| row.source == at)
             {
-                app.timeline.scroll += rows.iter().filter(|row| row.source > at).count();
+                let bottom = last.saturating_sub(anchor.below).max(first);
+                let pinned = rows.len() - 1 - bottom;
+                // What the user scrolled since then still counts.
+                app.timeline.scroll = pinned
+                    .saturating_add(app.timeline.scroll)
+                    .saturating_sub(anchor.scroll);
             }
-            RowCache { key, rows, newest }
+            RowCache {
+                key,
+                rows,
+                anchor: None,
+            }
         }
     };
     let rows = &cache.rows;
@@ -473,7 +579,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _)) if m == msg)
+            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m)) if m == msg)
             {
                 frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }
@@ -487,6 +593,64 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add(Rect::new(rect.x + start, rect.y, end - start, 1), *id);
         }
     }
+
+    // Pictures are painted over the rows kept free for them; what is scrolled out of
+    // the view is left out.
+    let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
+    let indent = INDENT.len() as u16;
+    let last_visible = (top + height).min(rows.len());
+    let mut n = top;
+    while n < last_visible {
+        let Some(slot) = rows[n].image else {
+            n += 1;
+            continue;
+        };
+        let source = rows[n].source;
+        let count = rows[n..last_visible]
+            .iter()
+            .take_while(|row| row.source == source && row.image.is_some())
+            .count();
+        if let Some(info) = room.messages.get(source).and_then(|m| m.image.as_ref()) {
+            let rect = Rect::new(
+                content.x + indent,
+                content.y + pad + (n - top) as u16,
+                content.width.saturating_sub(indent),
+                count as u16,
+            );
+            let inline = super::image::Inline {
+                info,
+                area: rect,
+                skip: slot.row,
+                size: (slot.cols, slot.rows),
+                covered,
+            };
+            super::image::draw_inline(frame, &mut app.images, theme, inline);
+        }
+        n += count;
+    }
+    // Pictures within a page of the view are fetched ahead.
+    let near = top.saturating_sub(height)..(top + 2 * height).min(rows.len());
+    for row in &rows[near] {
+        if row.image.is_some_and(|slot| slot.row == 0)
+            && let Some(info) = room.messages.get(row.source).and_then(|m| m.image.as_ref())
+        {
+            app.images.request(info);
+        }
+    }
+
+    // Remember what is at the bottom of a scrolled view, to stay there (see `Anchor`).
+    let anchor = (scroll > 0 && last_visible > 0)
+        .then(|| {
+            let bottom = last_visible - 1;
+            let source = rows[bottom].source;
+            let id = room.messages.get(source)?.id.clone();
+            let below = rows[bottom + 1..]
+                .iter()
+                .take_while(|row| row.source == source)
+                .count();
+            (!id.is_empty()).then_some(Anchor { id, below, scroll })
+        })
+        .flatten();
 
     if max_scroll > 0 {
         let mut state = ScrollbarState::new(max_scroll + 1).position(top);
@@ -524,12 +688,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             app.hits.add(rect, HitId::Button(Button::JumpToNewest));
         }
     }
+    cache.anchor = anchor;
     app.row_cache = Some(cache);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::images::Graphics;
     use crate::model::demo_rooms;
     use crate::theme::DEFAULT_THEME;
 
@@ -537,8 +703,9 @@ mod tests {
     fn rows_fit_and_group_by_sender() {
         let theme = Theme::builtin(DEFAULT_THEME).unwrap();
         let room = &demo_rooms()[0];
+        let images = ImageStore::new(Graphics::halfblocks());
         for max in [10, 20, 37, 80] {
-            let rows = build_rows(room, max, &theme, None);
+            let rows = build_rows(room, max, &theme, None, &images);
             for row in &rows {
                 assert!(row.line.width() <= max, "width {max}: {:?}", row.line);
             }

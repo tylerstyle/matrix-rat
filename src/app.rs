@@ -1,5 +1,7 @@
 //! Application state, input handling and the event loop.
 
+mod media;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -151,6 +153,8 @@ pub struct App {
     pub should_quit: bool,
     pub suspend_requested: bool,
     pub dirty: bool,
+    /// Pictures: the cache and the viewer.
+    pub images: crate::images::ImageStore,
 }
 
 impl App {
@@ -225,6 +229,7 @@ impl App {
             should_quit: false,
             suspend_requested: false,
             dirty: true,
+            images: crate::images::ImageStore::new(crate::images::Graphics::halfblocks()),
         }
     }
 
@@ -603,6 +608,7 @@ impl App {
     pub fn after_draw(&mut self) {
         self.maybe_mark_read();
         self.maybe_load_older();
+        self.send_image_requests();
     }
 
     /// Sends a read receipt, but only for what the user can actually be looking at:
@@ -613,6 +619,7 @@ impl App {
             && self.timeline.scroll == 0
             && self.modal.is_none()
             && !self.help_open
+            && !self.images.viewer_open()
             && self.window_focused;
         if !seen || self.matrix.is_none() {
             return;
@@ -942,7 +949,8 @@ impl App {
                 match selected.and_then(|i| self.messages().get(i).map(|m| (i, m))) {
                     Some((_, message))
                         if message.own
-                            && !matches!(message.kind, MsgKind::Text | MsgKind::Emote) =>
+                            && (message.image.is_some()
+                                || !matches!(message.kind, MsgKind::Text | MsgKind::Emote)) =>
                     {
                         self.show_toast("This message cannot be edited");
                     }
@@ -972,7 +980,7 @@ impl App {
             Action::Copy => self.show_toast("Copying is not available yet"),
             Action::Open => {
                 let opened = match self.timeline.selected {
-                    Some(i) => self.open_link(i, 0),
+                    Some(i) => self.open_image(i) || self.open_link(i, 0),
                     None => false,
                 };
                 if !opened {
@@ -1270,6 +1278,9 @@ impl App {
                 self.sync = Some(SyncStatus::Error(error.clone()));
                 self.show_toast(error);
             }
+            MatrixEvent::Image { key, full, result } => {
+                self.images.on_loaded(&key, full, result);
+            }
         }
     }
 
@@ -1402,7 +1413,11 @@ impl App {
                 self.on_paste(&text);
                 self.update_typing();
             }
-            Event::Resize(..) => self.dirty = true,
+            Event::Resize(..) => {
+                // A resized terminal may have dropped the pictures it was sent.
+                self.images.forget_encoded();
+                self.dirty = true;
+            }
             Event::FocusGained => {
                 self.window_focused = true;
                 self.dirty = true;
@@ -1433,6 +1448,10 @@ impl App {
         }
         if self.modal.is_some() {
             self.on_modal_key(code, mods);
+            return;
+        }
+        if self.images.viewer_open() {
+            self.on_viewer_key(code, mods);
             return;
         }
 
@@ -1576,6 +1595,7 @@ impl App {
                 // own controls can be hit.
                 match hit {
                     Some(HitId::Backdrop) => {
+                        self.images.close_viewer();
                         self.help_open = false;
                         if matches!(self.modal, Some(Modal::Emoji(_))) {
                             self.modal = None;
@@ -1639,6 +1659,7 @@ impl App {
                     Some(HitId::Do(action)) => self.perform(action),
                     Some(HitId::Pane(pane)) => self.set_focus(pane),
                     Some(HitId::Overlay) | None => {}
+                    Some(HitId::Image(index)) => self.click_image(index),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -1666,7 +1687,7 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                if !self.help_open && self.modal.is_none() =>
+                if !self.help_open && self.modal.is_none() && !self.images.viewer_open() =>
             {
                 let up = mouse.kind == MouseEventKind::ScrollUp;
                 // The wheel scrolls what is under the pointer, wherever the focus is.
@@ -1703,6 +1724,9 @@ impl App {
             self.toast = None;
             self.dirty = true;
         }
+        if self.images.tick() {
+            self.dirty = true;
+        }
     }
 }
 
@@ -1721,6 +1745,11 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     let guard = TerminalGuard::enter(config.mouse)?;
     // Terminal queries (image protocol, background colour) go here, before the event stream.
     let mut terminal = guard.activate()?;
+    // What can this terminal draw? Asked on the alternate screen (where a terminal that
+    // prints the question instead of answering does no harm) and before anything else
+    // reads stdin.
+    let graphics = crate::images::Graphics::detect(config.images);
+    terminal.clear()?;
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -1735,18 +1764,21 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     };
     let mut app = App::new(config, paths.themes_dir(), matrix.clone());
     app.config_file = Some(paths.config_file());
+    let mut encoded_images = app.start_images(graphics);
     let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
 
     while !app.should_quit {
         if app.suspend_requested {
             app.suspend_requested = false;
             terminal::suspend(&mut terminal)?;
+            app.images.forget_encoded();
             app.dirty = true;
         }
         if app.dirty {
             app.dirty = false;
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
             app.after_draw();
+            app.flush_images(false);
         }
         tokio::select! {
             event = events.next() => match event {
@@ -1761,12 +1793,14 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
                 }
             } => app.on_matrix(event),
             _ = theme_watch.changed() => app.reload_theme(),
+            Some(done) = encoded_images.recv() => app.on_image_encoded(done),
             _ = tick.tick() => app.on_tick(),
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
             _ = sigterm.recv() => app.should_quit = true,
             _ = sighup.recv() => app.should_quit = true,
         }
     }
+    app.flush_images(true);
     // Let the worker stop syncing cleanly, but never hang on the way out.
     if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
         matrix.send(MatrixCmd::Shutdown);

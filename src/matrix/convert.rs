@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Local, TimeZone};
 use matrix_sdk::ruma::events::room::message::MessageType;
+use matrix_sdk::ruma::events::room::{ImageInfo as RumaImageInfo, MediaSource};
 use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, UserId};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
@@ -11,7 +12,9 @@ use matrix_sdk_ui::timeline::{
     TimelineEventItemId, TimelineItem, TimelineItemContent, VirtualTimelineItem,
 };
 
-use crate::model::{ItemRef, Message, MsgKind, Reaction, SendState};
+use crate::model::{
+    ImageInfo, ImageSource, ItemRef, MediaRef, Message, MsgKind, Reaction, SendState,
+};
 use crate::text::{sanitize, sanitize_line};
 
 pub fn convert(items: &Vector<Arc<TimelineItem>>, own: &UserId) -> Vec<Message> {
@@ -135,7 +138,17 @@ fn event_message(
                             message.html = c.formatted.as_ref().map(|f| f.body.clone());
                             c.body.clone()
                         }
-                        MessageType::Image(c) => format!("🖼  {}", c.filename()),
+                        MessageType::Image(c) => {
+                            let image = image_info(
+                                c.source.clone(),
+                                c.filename(),
+                                c.caption(),
+                                c.info.as_deref(),
+                            );
+                            let text = image_fallback(&image);
+                            message.image = Some(image);
+                            text
+                        }
                         MessageType::File(c) => format!("📎 {}", c.filename()),
                         MessageType::Video(c) => format!("🎞  {}", c.filename()),
                         MessageType::Audio(c) => format!("🔊 {}", c.filename()),
@@ -151,7 +164,17 @@ fn event_message(
                     message.kind = MsgKind::Undecryptable;
                     message.body = "Unable to decrypt (waiting for keys)".to_owned();
                 }
-                MsgLikeKind::Sticker(_) => message.body = "[sticker]".to_owned(),
+                MsgLikeKind::Sticker(sticker) => {
+                    let content = sticker.content();
+                    let image = image_info(
+                        MediaSource::from(content.source.clone()),
+                        &content.body,
+                        None,
+                        Some(&content.info),
+                    );
+                    message.body = format!("[sticker] {}", image.name);
+                    message.image = Some(image);
+                }
                 MsgLikeKind::Poll(_) => message.body = "[poll]".to_owned(),
                 _ => message.body = "[unsupported message]".to_owned(),
             }
@@ -216,6 +239,58 @@ fn event_message(
     Some(message)
 }
 
+/// What the UI needs to show a picture. Everything in it comes from the sender.
+fn image_info(
+    source: MediaSource,
+    filename: &str,
+    caption: Option<&str>,
+    info: Option<&RumaImageInfo>,
+) -> ImageInfo {
+    let key = match &source {
+        MediaSource::Plain(uri) => uri.to_string(),
+        MediaSource::Encrypted(file) => file.url.to_string(),
+    };
+    let name = sanitize_line(filename);
+    let dimensions = info.and_then(|info| {
+        let width = u32::try_from(u64::from(info.width?)).ok()?;
+        let height = u32::try_from(u64::from(info.height?)).ok()?;
+        (width > 0 && height > 0).then_some((width, height))
+    });
+    let thumbnail = info.and_then(|info| {
+        let size = info
+            .thumbnail_info
+            .as_ref()
+            .and_then(|thumbnail| thumbnail.size)
+            .map(u64::from);
+        Some((info.thumbnail_source.clone()?, size))
+    });
+    ImageInfo {
+        key: sanitize_line(&key),
+        source: ImageSource::Matrix(Box::new(MediaRef {
+            full: source,
+            thumbnail,
+        })),
+        name: if name.trim().is_empty() {
+            "image".to_owned()
+        } else {
+            name
+        },
+        caption: caption
+            .map(sanitize)
+            .filter(|caption| !caption.trim().is_empty()),
+        dimensions,
+        size: info.and_then(|info| info.size).map(u64::from),
+    }
+}
+
+/// The text shown instead of a picture where pictures are not drawn.
+fn image_fallback(image: &ImageInfo) -> String {
+    match &image.caption {
+        Some(caption) => format!("🖼  {}\n{caption}", image.name),
+        None => format!("🖼  {}", image.name),
+    }
+}
+
 fn system(message: &mut Message, text: String) {
     message.kind = MsgKind::System;
     message.body = text;
@@ -230,6 +305,59 @@ fn system_owned(mut message: Message, text: String) -> Message {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn image_info_is_taken_from_the_event_and_made_safe() {
+        use matrix_sdk::ruma::events::room::ThumbnailInfo;
+        use matrix_sdk::ruma::{UInt, mxc_uri};
+
+        let mut info = RumaImageInfo::new();
+        info.width = UInt::new(640);
+        info.height = UInt::new(480);
+        info.size = UInt::new(12_345);
+        let mut thumbnail = ThumbnailInfo::new();
+        thumbnail.size = UInt::new(900);
+        info.thumbnail_info = Some(Box::new(thumbnail));
+        info.thumbnail_source = Some(MediaSource::Plain(
+            mxc_uri!("mxc://example.org/thumb").to_owned(),
+        ));
+        let source = MediaSource::Plain(mxc_uri!("mxc://example.org/abc").to_owned());
+        let image = image_info(
+            source.clone(),
+            "cat\u{1b}[31m.png",
+            Some("look\u{7} at it"),
+            Some(&info),
+        );
+        assert_eq!(image.key, "mxc://example.org/abc");
+        assert_eq!(image.name, "cat[31m.png");
+        assert_eq!(image.caption.as_deref(), Some("look at it"));
+        assert_eq!(image.dimensions, Some((640, 480)));
+        assert_eq!(image.size, Some(12_345));
+        let ImageSource::Matrix(media) = &image.source else {
+            panic!("not a Matrix source");
+        };
+        assert!(matches!(
+            media.thumbnail,
+            Some((MediaSource::Plain(_), Some(900)))
+        ));
+        assert_eq!(image_fallback(&image), "🖼  cat[31m.png\nlook at it");
+        // The key of an encrypted file must not show up in debug output.
+        assert_eq!(format!("{:?}", image.source), "Matrix");
+
+        // No info at all: no dimensions, and an empty name gets a stand-in.
+        let bare = image_info(source, " ", None, None);
+        assert_eq!(bare.name, "image");
+        assert_eq!(bare.dimensions, None);
+        assert!(bare.caption.is_none());
+        assert_eq!(image_fallback(&bare), "🖼  image");
+
+        // Nonsense dimensions are ignored instead of trusted.
+        let mut zero = RumaImageInfo::new();
+        zero.width = UInt::new(0);
+        zero.height = UInt::new(10);
+        let source = MediaSource::Plain(mxc_uri!("mxc://example.org/abc").to_owned());
+        assert_eq!(image_info(source, "a", None, Some(&zero)).dimensions, None);
+    }
 
     #[test]
     fn day_labels() {
