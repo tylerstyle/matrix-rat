@@ -88,6 +88,11 @@ impl Timelines {
             .await
             .context("could not open the room's messages")?;
         let timeline = Arc::new(timeline);
+        // Sync only delivers the members it thinks are needed, which leaves many
+        // senders (bridged users above all) without a name. Fetch the member list once;
+        // the timeline then fills in the names of what is already shown.
+        let members = timeline.clone();
+        tokio::spawn(async move { members.fetch_members().await });
         self.cache.push_back((room_id.to_owned(), timeline.clone()));
         while self.cache.len() > KEEP_TIMELINES {
             self.cache.pop_front();

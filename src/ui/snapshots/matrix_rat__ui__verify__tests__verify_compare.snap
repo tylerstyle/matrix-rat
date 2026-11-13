@@ -5,15 +5,15 @@ expression: "render(&mut app, 100, 24)"
 "╭ 1 Rooms ─────────────╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
 "│ Filter rooms…        ││  Yes — startup is instant now. Room previews come straight from disk.   ││"
 "│ Favourites           ││   👍 2   🎉 1                                                           ││" Hidden by multi-width symbols: [(29, " "), (36, " ")]
-"│ # rust               ││  Back-pagination also survives restarts, which is a big deal for large  ││"
-"│ # matrix-rat   ╭ Verify this device ────────────────────────────────────────────╮verything from ││"
+"│ R  rust              ││  Back-pagination also survives restarts, which is a big deal for large  ││"
+"│ M  matrix-rat  ╭ Verify this device ────────────────────────────────────────────╮verything from ││"
 "│ People         │                                                                │               ┃│"
-"│ ● bob          │ Compare with what your device “Element Desktop (QWERTYUIOP)”   │───────────────┃│"
-"│ ○ carol        │ shows:                                                         │               ┃│"
+"│ B  bob         │ Compare with what your device “Element Desktop (QWERTYUIOP)”   │───────────────┃│"
+"│ C  carol       │ shows:                                                         │               ┃│"
 "│ Rooms          │                                                                │               ┃│"
-"│ # design       │             🐶          ☂           🎧          🦋             │               ┃│" Hidden by multi-width symbols: [(32, " "), (56, " "), (68, " ")]
-"│ # nixos        │            Dog       Umbrella   Headphones  Butterfly          │               ┃│"
-"│ # off-topic    │                                                                │?              ┃│"
+"│ D  design      │             🐶          ☂           🎧          🦋             │               ┃│" Hidden by multi-width symbols: [(32, " "), (56, " "), (68, " ")]
+"│ N  nixos       │            Dog       Umbrella   Headphones  Butterfly          │               ┃│"
+"│ O  off-topic   │                                                                │?              ┃│"
 "│                │                   ☎           🔒          📌                   │               ┃│" Hidden by multi-width symbols: [(50, " "), (62, " ")]
 "│                │               Telephone      Lock        Pin                   │               ┃│"
 "│                │                                                                │               ┃│"

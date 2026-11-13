@@ -5,9 +5,23 @@ use ratatui::text::{Line, Span};
 use super::hit::HitId;
 use crate::action::Pane;
 use crate::app::{App, SideRow};
-use crate::model::RoomKind;
 use crate::text::{truncate, width};
 use crate::theme::Role;
+
+/// The first letter of a name, in exactly two columns.
+fn initial(name: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    let first = name
+        .trim_start_matches(|c: char| !c.is_alphanumeric() && c.is_ascii())
+        .graphemes(true)
+        .next()
+        .unwrap_or("?");
+    match width(first) {
+        1 => format!("{} ", first.to_uppercase()),
+        2 => first.to_owned(),
+        _ => "? ".to_owned(),
+    }
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = super::pane_block(app, Pane::Sidebar, "Rooms");
@@ -120,16 +134,18 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     n => format!(" {n} "),
                 };
                 let badge_width = width(&badge) as u16;
-                let (icon, icon_role) = match room.kind {
-                    RoomKind::Person if room.online => ("●", Role::Online),
-                    RoomKind::Person => ("○", Role::Muted),
-                    _ => ("#", Role::Muted),
-                };
-                // 3 columns of icon, 1 of padding before the badge.
-                let name_width = (rect.width.saturating_sub(4 + badge_width)) as usize;
+                // A small coloured tile with the room's initial stands in for its
+                // picture: 1 column of margin, 2 of tile, 1 of gap.
+                let name_width = (rect.width.saturating_sub(5 + badge_width)) as usize;
                 let name_style = theme.style(base);
+                let tile = ratatui::style::Style::new()
+                    .fg(theme.style(Role::UnreadBadge).fg.unwrap_or_default())
+                    .bg(theme.user_color(&room.name))
+                    .add_modifier(ratatui::style::Modifier::BOLD);
                 let line = Line::from(vec![
-                    Span::styled(format!(" {icon} "), theme.style(icon_role)),
+                    Span::raw(" "),
+                    Span::styled(initial(&room.name), tile),
+                    Span::raw(" "),
                     Span::styled(
                         truncate(&room.name, name_width),
                         ratatui::style::Style {
