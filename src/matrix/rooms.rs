@@ -120,8 +120,19 @@ impl Timelines {
                 .spawn(async move { members.fetch_members().await });
         }
         self.cache.push_back((key, timeline.clone()));
-        while self.cache.len() > KEEP_TIMELINES {
-            self.cache.pop_front();
+        // The open thread's timeline does not take a room's place.
+        let rooms = |cache: &VecDeque<(String, Arc<Timeline>)>| {
+            cache
+                .iter()
+                .filter(|(id, _)| !threads::is_thread(id))
+                .count()
+        };
+        while rooms(&self.cache) > KEEP_TIMELINES {
+            let oldest = self
+                .cache
+                .iter()
+                .position(|(id, _)| !threads::is_thread(id));
+            self.cache.remove(oldest.expect("there are rooms"));
         }
         Ok(timeline)
     }
@@ -182,7 +193,7 @@ impl Timelines {
                             room_id,
                             generation,
                             self.events.clone(),
-                            self.thread.is_some(),
+                            self.thread.clone(),
                             self.read_marks.clone(),
                         )));
                     }
@@ -303,20 +314,34 @@ impl Timelines {
                 } else {
                     ReceiptType::ReadPrivate
                 };
-                // A thread that was read is remembered here as well (see `ReadMarks`).
-                let mark = self
+                let thread = self
                     .thread
                     .as_deref()
-                    .map(|root| (threads::key(&room_id, Some(root)), self.read_marks.clone()));
+                    .map(|root| threads::key(&room_id, Some(root)));
                 if let Ok(timeline) = self.timeline(&room_id).await {
+                    // A thread that was read is remembered here as well (see
+                    // `ReadMarks`): what its newest reply is now, in the order of the
+                    // requests, and only once the receipt went through.
+                    let mark = match thread {
+                        Some(key) => Some((
+                            key,
+                            self.read_marks.ticket(),
+                            threads::newest_reply(&timeline).await,
+                        )),
+                        None => None,
+                    };
+                    let marks = self.read_marks.clone();
                     tokio::spawn(async move {
-                        if let Err(err) = timeline.mark_as_read(receipt).await {
-                            tracing::debug!(?err, "could not send read receipt");
-                        }
-                        if let Some((key, marks)) = mark
-                            && let Some(newest) = timeline.latest_event_id().await
-                        {
-                            marks.set(key, newest.to_string());
+                        match timeline.mark_as_read(receipt).await {
+                            // Also when nothing had to be sent: it was read already.
+                            Ok(_) => {
+                                if let Some((key, ticket, newest)) = mark
+                                    && !newest.is_empty()
+                                {
+                                    marks.set(key, ticket, newest);
+                                }
+                            }
+                            Err(err) => tracing::debug!(?err, "could not send read receipt"),
                         }
                     });
                 }
@@ -420,16 +445,17 @@ fn content_without_relation(message: &Outgoing) -> Result<RoomMessageEventConten
 }
 
 /// Sends the whole timeline to the UI whenever it changes, and who is typing.
-/// `in_thread`: the timeline is a thread's, not the room's.
+/// `thread`: the timeline is not the room's but that of the thread starting at this event.
 async fn forward(
     room: Room,
     timeline: Arc<Timeline>,
     room_id: String,
     generation: u64,
     events: UnboundedSender<MatrixEvent>,
-    in_thread: bool,
+    thread: Option<String>,
     read_marks: threads::ReadMarks,
 ) {
+    let in_thread = thread.is_some();
     let own = room.own_user_id().to_owned();
     let (mut items, changes) = timeline.subscribe().await;
     pin_mut!(changes);
@@ -441,7 +467,15 @@ async fn forward(
             room_id: room_id.clone(),
             generation,
             messages,
-            reached_start: items.iter().any(|item| item.is_timeline_start()),
+            reached_start: match &thread {
+                // A thread's timeline has no start marker. Its first message is the
+                // last thing loaded, when there is nothing older left.
+                Some(root) => items
+                    .iter()
+                    .filter_map(|item| item.as_event()?.event_id())
+                    .any(|id| id == root.as_str()),
+                None => items.iter().any(|item| item.is_timeline_start()),
+            },
         }
     };
     // Which threads have unread replies; nothing to look up inside a thread.

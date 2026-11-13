@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use matrix_sdk::ruma::EventId;
+use matrix_sdk::ruma::events::receipt::{ReceiptThread, ReceiptType};
 use matrix_sdk::{Room, ThreadingSupport};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
-    MsgLikeContent, RoomExt, Timeline, TimelineDetails, TimelineEventItemId, TimelineFocus,
-    TimelineItem, TimelineReadReceiptTracking,
+    MsgLikeContent, MsgLikeKind, RoomExt, Timeline, TimelineDetails, TimelineEventItemId,
+    TimelineFocus, TimelineItem, TimelineReadReceiptTracking,
 };
 
 use super::convert::display_name;
@@ -87,54 +88,127 @@ pub fn summary(content: &MsgLikeContent) -> Option<ThreadSummary> {
 /// keep one read receipt per room and user never confirm a thread's receipt, and the
 /// thread would stay "new" although it was just read.
 #[derive(Clone, Default)]
-pub struct ReadMarks(Arc<Mutex<HashMap<String, String>>>);
+pub struct ReadMarks(Arc<Mutex<ReadMarksInner>>);
+
+#[derive(Default)]
+struct ReadMarksInner {
+    /// Counts the requests to mark something read, in the order they were made.
+    tickets: u64,
+    /// Per thread: the ticket of the request, and the ids the newest reply read goes by.
+    read: HashMap<String, (u64, Vec<String>)>,
+}
 
 impl ReadMarks {
-    pub fn set(&self, key: String, newest: String) {
-        if let Ok(mut marks) = self.0.lock() {
-            marks.insert(key, newest);
+    /// A place in the order of requests. Receipts are sent in the background and may
+    /// finish in any order; a later request's mark is never replaced by an earlier one's.
+    pub fn ticket(&self) -> u64 {
+        match self.0.lock() {
+            Ok(mut marks) => {
+                marks.tickets += 1;
+                marks.tickets
+            }
+            Err(_) => 0,
+        }
+    }
+
+    pub fn set(&self, key: String, ticket: u64, newest: Vec<String>) {
+        if let Ok(mut marks) = self.0.lock()
+            && marks.read.get(&key).is_none_or(|(at, _)| *at < ticket)
+        {
+            marks.read.insert(key, (ticket, newest));
         }
     }
 
     fn covers(&self, key: &str, newest: &str) -> bool {
-        self.0
-            .lock()
-            .is_ok_and(|marks| marks.get(key).is_some_and(|read| read == newest))
+        self.0.lock().is_ok_and(|marks| {
+            marks
+                .read
+                .get(key)
+                .is_some_and(|(_, read)| read.iter().any(|id| id == newest))
+        })
     }
 }
 
-/// Event ids of the messages in `items` whose threads have replies the user has not
-/// read, going by what this device knows of each thread.
+/// The ids the newest reply of a thread's timeline goes by in the thread's summary:
+/// its own, and that of its latest edit. Reactions, deletions and deleted messages
+/// are not replies there, and neither are messages still on their way.
+pub async fn newest_reply(timeline: &Timeline) -> Vec<String> {
+    let items = timeline.items().await;
+    let newest = items
+        .iter()
+        .rev()
+        .filter_map(|item| item.as_event())
+        .find(|event| {
+            event.event_id().is_some()
+                && event.is_remote_event()
+                && !event
+                    .content()
+                    .as_msglike()
+                    .is_some_and(|content| matches!(content.kind, MsgLikeKind::Redacted))
+        });
+    let Some(newest) = newest else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = newest
+        .event_id()
+        .map(|id| id.to_string())
+        .into_iter()
+        .collect();
+    let edit = newest
+        .latest_edit_json()
+        .and_then(|edit| edit.get_field::<String>("event_id").ok().flatten());
+    ids.extend(edit);
+    ids
+}
+
+/// Event ids of the messages in `items` whose threads have a newest reply the user
+/// has not read: it is someone else's, and neither this session nor a read receipt
+/// of the user's covers it. Only looks at what is stored; nothing is loaded or kept
+/// per thread.
 pub async fn unread(
     room: &Room,
     items: &Vector<Arc<TimelineItem>>,
     read: &ReadMarks,
 ) -> HashSet<String> {
-    let client = room.client();
-    let cache = client.event_cache();
+    let own = room.own_user_id();
     let mut unread = HashSet::new();
     for event in items.iter().filter_map(|item| item.as_event()) {
-        let Some(event_id) = event.event_id() else {
+        let Some(root) = event.event_id() else {
             continue;
         };
         let Some(summary) = event.content().thread_summary() else {
             continue;
         };
-        if let TimelineDetails::Ready(newest) = &summary.latest_event
-            && let TimelineEventItemId::EventId(newest) = &newest.identifier
-            && read.covers(
-                &key(room.room_id().as_str(), Some(event_id.as_str())),
-                newest.as_str(),
+        // Without knowing the newest reply there is nothing to compare with.
+        let TimelineDetails::Ready(newest) = &summary.latest_event else {
+            continue;
+        };
+        let TimelineEventItemId::EventId(newest_id) = &newest.identifier else {
+            continue;
+        };
+        if newest.sender == own
+            || read.covers(
+                &key(room.room_id().as_str(), Some(root.as_str())),
+                newest_id.as_str(),
             )
         {
             continue;
         }
-        let count = match cache.thread(room.room_id(), event_id).await {
-            Ok((thread, _)) => thread.num_unread_messages().await.unwrap_or(0),
-            Err(_) => 0,
-        };
-        if count > 0 {
-            unread.insert(event_id.to_string());
+        // A receipt for the thread, or one for the whole room as clients without
+        // threads send it. The room's own ("main") receipt says nothing about threads.
+        let mut seen = false;
+        for thread in [
+            ReceiptThread::Thread(root.to_owned()),
+            ReceiptThread::Unthreaded,
+        ] {
+            for kind in [ReceiptType::Read, ReceiptType::ReadPrivate] {
+                if let Ok(Some((at, receipt))) = room.load_user_receipt(kind, &thread, own).await {
+                    seen |= at == *newest_id || receipt.ts.is_some_and(|ts| ts >= newest.timestamp);
+                }
+            }
+        }
+        if !seen {
+            unread.insert(root.to_string());
         }
     }
     unread
@@ -172,14 +246,24 @@ mod tests {
     #[test]
     fn read_marks_cover_only_the_newest_reply_that_was_read() {
         let marks = ReadMarks::default();
-        assert!(!marks.covers("room\n$root", "$one"));
+        let key = "room\n$root".to_owned();
+        assert!(!marks.covers(&key, "$one"));
+        let (first, second) = (marks.ticket(), marks.ticket());
+        marks.set(
+            key.clone(),
+            second,
+            vec!["$two".to_owned(), "$edit".to_owned()],
+        );
+        // A message goes by its own id and by that of its latest edit.
+        assert!(marks.covers(&key, "$two") && marks.covers(&key, "$edit"));
+        // An earlier request that finishes late does not turn the mark back.
         marks
             .clone()
-            .set("room\n$root".to_owned(), "$one".to_owned());
-        assert!(marks.covers("room\n$root", "$one"));
-        // A newer reply, or another thread, is unread again.
-        assert!(!marks.covers("room\n$root", "$two"));
-        assert!(!marks.covers("room\n$other", "$one"));
+            .set(key.clone(), first, vec!["$one".to_owned()]);
+        assert!(marks.covers(&key, "$two") && !marks.covers(&key, "$one"));
+        // A newer reply, or another thread, is unread.
+        assert!(!marks.covers(&key, "$three"));
+        assert!(!marks.covers("room\n$other", "$two"));
     }
 
     #[test]
@@ -437,7 +521,7 @@ mod tests {
             let thread = first.thread.clone()?;
             let newest = thread.latest.as_ref().map(|latest| latest.1.clone());
             (thread.replies == replies && newest == Some(text(latest))).then_some(())?;
-            for hidden in ["one", "two", "three", "four"] {
+            for hidden in ["one", "two", "three", "four", "five"] {
                 assert!(
                     m.iter().all(|m| m.body != text(hidden)),
                     "{hidden} is in the room"
@@ -507,6 +591,62 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(20), read)
             .await
             .expect("the thread stayed unread after it was read");
+
+        // Once more, with a reaction as the last thing that happened in the thread:
+        // what counts as read is the newest reply, not the reaction to it.
+        their_thread
+            .send(RoomMessageEventContent::text_plain(text("five")).into())
+            .await
+            .expect("send from the second user");
+        generation += 1;
+        handle.send(MatrixCmd::OpenThread {
+            room_id: room_id.clone(),
+            root: root.clone(),
+            generation,
+        });
+        let five = until(&mut events, "the fifth reply", generation, |m| {
+            sent(m, &text("five"))
+        })
+        .await;
+        their_thread
+            .toggle_reaction(
+                &TimelineEventItemId::EventId(EventId::parse(&five).unwrap()),
+                "👍",
+            )
+            .await
+            .expect("reaction from the second user");
+        until(&mut events, "the reaction", generation, |m| {
+            let reacted = m.iter().find(|m| m.body == text("five"))?;
+            (!reacted.reactions.is_empty()).then_some(())
+        })
+        .await;
+        handle.send(MatrixCmd::InThread {
+            root: root.clone(),
+            command: Box::new(MatrixCmd::MarkRead {
+                room_id: room_id.clone(),
+                public: true,
+            }),
+        });
+        let read = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                generation += 1;
+                handle.send(MatrixCmd::OpenRoom {
+                    room_id: room_id.clone(),
+                    generation,
+                });
+                let thread = until(&mut events, "the room once more", generation, |m| {
+                    in_room(m, 5, "five")
+                })
+                .await;
+                if !thread.unread {
+                    return;
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(20), read)
+            .await
+            .expect("the thread stayed unread after a reaction and reading it");
 
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}

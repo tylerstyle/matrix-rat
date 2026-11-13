@@ -914,7 +914,8 @@ impl App {
             && !self.help_open
             && !self.images.viewer_open()
             && self.window_focused;
-        if !seen || self.matrix.is_none() {
+        // A thread whose replies have not arrived yet shows nothing to have read.
+        if !seen || self.matrix.is_none() || self.thread_loading() {
             return;
         }
         let newest = self.messages().iter().rev().find_map(|m| match &m.item {
