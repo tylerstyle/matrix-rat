@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::App;
 use crate::action::Action;
+use crate::lineedit::{EditKeys, LineEdit};
 use crate::modal::{Modal, Setting, SettingsMenu};
 use crate::model::{MsgKind, RoomKind, SendState};
 use crate::palette::{MessageCaps, Palette, PaletteContext, RoomItem, Target};
@@ -90,7 +91,6 @@ impl App {
     }
 
     pub(super) fn on_palette_key(&mut self, code: KeyCode, mods: KeyModifiers) {
-        let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         let Some(Modal::Palette(palette)) = &mut self.modal else {
             return;
         };
@@ -108,12 +108,15 @@ impl App {
                 let selected = palette.selected;
                 self.run_palette_at(selected);
             }
-            (KeyCode::Backspace, _) => palette.pop_char(),
-            (KeyCode::Char(c), _) if plain => {
-                let mut buf = [0; 4];
-                palette.push_str(c.encode_utf8(&mut buf));
+            _ => {
+                if palette
+                    .query
+                    .handle_key(code, mods, EditKeys::FULL)
+                    .changed()
+                {
+                    palette.on_query_changed();
+                }
             }
-            _ => {}
         }
     }
 
@@ -168,7 +171,7 @@ impl App {
             }
             Setting::DownloadDir => {
                 let mut menu = SettingsMenu::select(Setting::DownloadDir, self.has_theme_pair());
-                menu.editing = Some(self.download_dir.clone());
+                menu.editing = Some(LineEdit::from(self.download_dir.as_str()));
                 self.open_modal(Modal::Settings(menu));
             }
             Setting::Keys => self.change_setting(Setting::Keys, 0),
@@ -617,5 +620,42 @@ mod tests {
         };
         assert!(scroll > 0);
         assert_eq!(app.timeline.scroll, tl_scroll);
+    }
+
+    #[test]
+    fn palette_query_edits_mid_text_and_clicks_to_place() {
+        let (mut app, mut terminal) = drawn();
+        let ctrl = |c: char| key_mod(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let ctrl_key = |code: KeyCode| key_mod(code, KeyModifiers::CONTROL);
+        let alt = |c: char| key_mod(KeyCode::Char(c), KeyModifiers::ALT);
+
+        app.on_event(ctrl_p());
+        type_text(&mut app, "cafe\u{0301} beta");
+        app.on_event(ctrl_key(KeyCode::Left)); // before "beta"
+        app.on_event(ctrl('k')); // "cafe\u{0301} "
+        app.on_event(key(KeyCode::Backspace)); // "cafe\u{0301}"
+        app.on_event(key(KeyCode::Home));
+        app.on_event(alt('f'));
+        app.on_event(key(KeyCode::Backspace)); // deletes whole e\u{0301}
+        app.on_event(key(KeyCode::Char('e')));
+        match &app.modal {
+            Some(Modal::Palette(p)) => assert_eq!(p.query, "cafe"),
+            other => panic!("unexpected modal: {other:?}"),
+        }
+
+        // Paste multiline text and click inside the rendered query row.
+        app.on_event(ctrl('u'));
+        app.on_event(Event::Paste("theme\nsecond".into()));
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "theme");
+        app.on_event(click(col + 2, row)); // th|eme
+        app.on_event(key(KeyCode::Delete)); // thme
+        match &app.modal {
+            Some(Modal::Palette(p)) => {
+                assert_eq!(p.query, "thme");
+                assert!(!p.filtered.is_empty());
+            }
+            other => panic!("unexpected modal: {other:?}"),
+        }
     }
 }

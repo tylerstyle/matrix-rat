@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::App;
 use crate::action::Pane;
+use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::MatrixCmd;
 use crate::modal::Modal;
 use crate::model::{MsgKind, RoomKind};
@@ -16,7 +17,7 @@ const MAX_DIG: u8 = 15;
 
 #[derive(Debug, Clone, Default)]
 pub struct SearchBar {
-    pub query: String,
+    pub query: LineEdit,
     /// Id of the message the search is at, if any matches.
     pub hit: Option<String>,
     /// Position of that message among the matches (1 is the newest) and their number,
@@ -261,7 +262,6 @@ impl App {
     }
 
     pub(super) fn on_search_key(&mut self, code: KeyCode, mods: KeyModifiers) {
-        let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         let Some(Modal::Search(bar)) = &mut self.modal else {
             return;
         };
@@ -271,31 +271,18 @@ impl App {
             (KeyCode::Enter, m) if m.contains(KeyModifiers::SHIFT) => self.search_step(false),
             (KeyCode::Enter | KeyCode::Up, _) => self.search_step(true),
             (KeyCode::Down, _) => self.search_step(false),
-            (KeyCode::Backspace, _) => {
-                bar.query.pop();
-                self.search_restart();
+            _ => {
+                if bar.query.handle_key(code, mods, EditKeys::FULL).changed() {
+                    self.search_restart();
+                }
             }
-            // Nothing that could reach the terminal as a control sequence.
-            (KeyCode::Char(c), _)
-                if plain && !crate::text::sanitize_line(c.encode_utf8(&mut [0; 4])).is_empty() =>
-            {
-                bar.query.push(c);
-                self.search_restart();
-            }
-            _ => {}
         }
     }
 
     pub(super) fn search_paste(&mut self, text: &str) {
-        if let Some(Modal::Search(bar)) = &mut self.modal {
-            bar.query.push_str(&crate::text::sanitize_line(text));
-            self.search_restart();
-        }
-    }
-
-    pub(super) fn search_clear(&mut self) {
-        if let Some(Modal::Search(bar)) = &mut self.modal {
-            bar.query.clear();
+        if let Some(Modal::Search(bar)) = &mut self.modal
+            && bar.query.paste(text).changed()
+        {
             self.search_restart();
         }
     }
@@ -551,5 +538,59 @@ mod tests {
         app.rooms.clear();
         app.perform(Action::Search);
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn search_bar_edits_mid_text_and_clicks_to_place() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut app, _commands) = app_with(&["rat alpha", "rat three"]);
+        app.timeline.reached_start = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let ctrl = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        let ctrl_key = |code: KeyCode| Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
+        let alt = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+
+        app.perform(Action::Search);
+        type_text(&mut app, "rat👍🏽 typo");
+        app.on_event(ctrl_key(KeyCode::Left));
+        app.on_event(key(KeyCode::Backspace));
+        app.on_event(key(KeyCode::Backspace)); // deletes whole 👍🏽
+        app.on_event(ctrl('k')); // "rat"
+        assert_eq!(bar(&app).query, "rat");
+        assert_eq!(bar(&app).total, 2);
+
+        // Add " two", use Ctrl-A / Delete / Ctrl-W, then click to place cursor mid-string.
+        type_text(&mut app, " alpha");
+        app.on_event(alt('b'));
+        app.on_event(ctrl('e'));
+        app.on_event(ctrl('a'));
+        app.on_event(key(KeyCode::Char(' ')));
+        app.on_event(key(KeyCode::Home));
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(bar(&app).query, "rat alpha");
+        assert_eq!(bar(&app).total, 1);
+
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let screen = format!("{}", terminal.backend());
+        let (col, row) = screen
+            .lines()
+            .enumerate()
+            .find_map(|(r, line)| {
+                line.find("rat alpha")
+                    .map(|byte| ((crate::text::width(&line[..byte]) - 1) as u16, r as u16))
+            })
+            .unwrap();
+        app.on_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col + 3, // after "rat", before " alpha"
+            row,
+            modifiers: KeyModifiers::NONE,
+        }));
+        app.on_event(key(KeyCode::Char('!')));
+        assert_eq!(bar(&app).query, "rat! alpha");
+        assert_eq!(bar(&app).total, 0);
     }
 }

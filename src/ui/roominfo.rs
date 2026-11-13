@@ -7,7 +7,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use super::hit::HitId;
+use super::hit::{HitId, InputTarget};
 use super::modal::{button, centered, field, popup, row};
 use crate::action::Action;
 use crate::app::App;
@@ -46,22 +46,6 @@ pub fn title_hit(hits: &mut super::hit::HitMap, area: Rect, title: &str) {
     );
 }
 
-/// The end of `text` that fits into `columns`, cut between whole characters as they
-/// appear on screen: where typing happens.
-fn tail(text: &str, columns: usize) -> &str {
-    use unicode_segmentation::UnicodeSegmentation;
-    let mut used = 0;
-    let mut start = text.len();
-    for (at, grapheme) in text.grapheme_indices(true).rev() {
-        used += width(grapheme);
-        if used > columns {
-            break;
-        }
-        start = at;
-    }
-    &text[start..]
-}
-
 /// `text` cut or padded to exactly `columns` on screen.
 fn fit(text: &str, columns: usize) -> String {
     let mut out = truncate(text, columns);
@@ -76,7 +60,7 @@ fn hit(click: Click) -> HitId {
 
 // ----- new chat or room --------------------------------------------------------------
 
-pub fn draw_new(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
+pub fn draw_new(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
     match form.stage {
         Stage::Choose => chooser(frame, app, area, form),
         Stage::Create => create(frame, app, area, form),
@@ -164,19 +148,18 @@ fn footer(form: &NewPopup) -> &'static str {
     }
 }
 
-fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
+fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
     let Some(rect) = centered(area, 66, 11) else {
         return;
     };
     let inner = popup(frame, app, area, rect, form.stage.title(), footer(form));
     let theme = app.theme.clone();
     let busy = form.busy.is_some();
-    let (hint, label, value, action) = match form.stage {
+    let (hint, label, action) = match form.stage {
         Stage::Join => (
             "An address like #room:server or !id:server, or a matrix.to link pasted as it is."
                 .to_owned(),
             "Address",
-            &form.address,
             " Join ",
         ),
         Stage::Invite => (
@@ -185,7 +168,6 @@ fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
                 form.room.as_ref().map_or("this room", |(_, name)| name)
             ),
             "User ID",
-            &form.user,
             " Invite ",
         ),
         _ => (
@@ -193,7 +175,6 @@ fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
              them, it is opened."
                 .to_owned(),
             "User ID",
-            &form.user,
             " Start chat ",
         ),
     };
@@ -205,8 +186,16 @@ fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
         Rect::new(inner.x, inner.y, inner.width, hint_height),
     );
     let input = row(inner, 3);
-    let cursor = field(frame, &theme, input, label, value, !busy);
     app.hits.add(input, hit(Click::Slot(0)));
+    let value = match form.stage {
+        Stage::Join => &mut form.address,
+        _ => &mut form.user,
+    };
+    let (cursor, value_rect) = field(frame, &theme, input, label, value, false, !busy);
+    if !busy {
+        app.hits
+            .add(value_rect, HitId::Input(InputTarget::NewField(0)));
+    }
     let buttons = row(inner, 5);
     if !busy && buttons.width > 0 {
         let w = (width(action) as u16).min(buttons.width);
@@ -242,26 +231,32 @@ fn switch(
     frame.render_widget(Line::from(spans), rect);
 }
 
-fn create(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
+fn create(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
     let Some(rect) = centered(area, 66, 16) else {
         return;
     };
     let inner = popup(frame, app, area, rect, form.stage.title(), footer(form));
     let theme = app.theme.clone();
     let busy = form.busy.is_some();
-    let focused = |slot: usize| !busy && form.focus == slot;
+    let focus = form.focus;
+    let focused = |slot: usize| !busy && focus == slot;
     // Every other row when there is room.
     let pitch = if inner.height >= 12 { 2 } else { 1 };
     let at = |slot: usize| row(inner, (pitch - 1) + slot as u16 * pitch);
     let mut cursor = None;
 
     for (slot, label, value) in [
-        (NewPopup::NAME, "Name", &form.name),
-        (NewPopup::TOPIC, "Topic", &form.topic),
+        (NewPopup::NAME, "Name", &mut form.name),
+        (NewPopup::TOPIC, "Topic", &mut form.topic),
     ] {
         let rect = at(slot);
-        cursor = cursor.or(field(frame, &theme, rect, label, value, focused(slot)));
         app.hits.add(rect, hit(Click::Slot(slot)));
+        let (pos, value_rect) = field(frame, &theme, rect, label, value, false, focused(slot));
+        cursor = cursor.or(pos);
+        if !busy {
+            app.hits
+                .add(value_rect, HitId::Input(InputTarget::NewField(slot)));
+        }
     }
 
     let arrow = theme.style(Role::StatusKey);
@@ -290,17 +285,61 @@ fn create(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
 
     let extra = at(NewPopup::EXTRA);
     if form.public {
-        // Shown with its sigil; the server completes it with its own name.
-        let shown = format!("#{}", form.alias.trim_start_matches('#'));
-        cursor = cursor.or(field(
-            frame,
-            &theme,
-            extra,
-            "Address",
-            &shown,
-            focused(NewPopup::EXTRA),
-        ));
         app.hits.add(extra, hit(Click::Slot(NewPopup::EXTRA)));
+        if form.alias.starts_with('#') {
+            let (pos, value_rect) = field(
+                frame,
+                &theme,
+                extra,
+                "Address",
+                &mut form.alias,
+                false,
+                focused(NewPopup::EXTRA),
+            );
+            cursor = cursor.or(pos);
+            if !busy {
+                app.hits.add(
+                    value_rect,
+                    HitId::Input(InputTarget::NewField(NewPopup::EXTRA)),
+                );
+            }
+        } else if extra.width > 0 {
+            const LABEL: usize = 13;
+            let room = (extra.width as usize).saturating_sub(LABEL + 2);
+            let view = form.alias.view(room, false);
+            let is_focused = focused(NewPopup::EXTRA);
+            let label_style = if is_focused {
+                theme.style(Role::TitleFocused)
+            } else {
+                theme.style(Role::Muted)
+            };
+            let underline = "_".repeat(room.saturating_sub(width(&view.text)));
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(format!("{:<LABEL$}", "Address"), label_style),
+                    Span::raw("#"),
+                    Span::raw(view.text),
+                    Span::styled(underline, theme.style(Role::Border)),
+                ]),
+                extra,
+            );
+            if is_focused {
+                let x =
+                    extra.x + (LABEL + 1 + view.cursor_col).min(extra.width as usize - 1) as u16;
+                cursor = cursor.or(Some(Position::new(x, extra.y)));
+            }
+            if !busy {
+                app.hits.add(
+                    Rect::new(
+                        extra.x + LABEL as u16 + 1,
+                        extra.y,
+                        extra.width.saturating_sub(LABEL as u16 + 1),
+                        1,
+                    ),
+                    HitId::Input(InputTarget::NewField(NewPopup::EXTRA)),
+                );
+            }
+        }
     } else {
         let (dot, role) = if form.encrypted {
             ("● on", Role::StatusOk)
@@ -523,20 +562,6 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
                     Span::styled("Members", theme.style(Role::SidebarSection)),
                     Span::styled("  ⌕ ", theme.style(Role::StatusKey)),
                 ];
-                if info.filter.is_empty() {
-                    spans.push(Span::styled(
-                        "type to filter…",
-                        theme.style(Role::Placeholder),
-                    ));
-                } else {
-                    // The end of a long filter, with the cursor right behind it.
-                    let shown = tail(&info.filter, room.saturating_sub(12));
-                    if info.editing.is_none() {
-                        let x = rect.x + (11 + width(shown)).min(room.saturating_sub(1)) as u16;
-                        cursor = Some(Position::new(x, rect.y));
-                    }
-                    spans.push(Span::raw(shown.to_owned()));
-                }
                 let note = match &info.details {
                     Some(details) if details.members_loading => "  loading…".to_owned(),
                     Some(details) if details.members_partial => {
@@ -547,8 +572,36 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
                     }
                     _ => String::new(),
                 };
+                let max_cols = room.saturating_sub(12);
+                let hit_w = if info.filter.is_empty() {
+                    spans.push(Span::styled(
+                        "type to filter…",
+                        theme.style(Role::Placeholder),
+                    ));
+                    rect.width.saturating_sub(11)
+                } else {
+                    let view = info.filter.view(max_cols, false);
+                    let shown_w = width(&view.text);
+                    if info.editing.is_none() {
+                        let x = (rect.x + 11 + view.cursor_col as u16)
+                            .min(rect.right().saturating_sub(1));
+                        cursor = Some(Position::new(x, rect.y));
+                    }
+                    spans.push(Span::raw(view.text));
+                    if note.is_empty() {
+                        (max_cols + 1).min(rect.width.saturating_sub(11) as usize) as u16
+                    } else {
+                        (shown_w + 1).min(rect.width.saturating_sub(11) as usize) as u16
+                    }
+                };
                 spans.push(Span::styled(note, theme.style(Role::Muted)));
                 frame.render_widget(Line::from(spans), rect);
+                if !busy && info.editing.is_none() {
+                    app.hits.add(
+                        Rect::new(rect.x + 11, rect.y, hit_w, 1),
+                        HitId::Input(InputTarget::InfoFilter),
+                    );
+                }
             }
             Entry::Row(index, row) => {
                 let selected = *index == info.selected;
@@ -650,7 +703,7 @@ fn info_row(
     frame: &mut Frame,
     app: &mut App,
     theme: &Theme,
-    info: &InfoPopup,
+    info: &mut InfoPopup,
     rect: Rect,
     index: usize,
     row: InfoRow,
@@ -666,7 +719,6 @@ fn info_row(
     } else {
         theme.style(Role::Text)
     };
-    let room = (rect.width as usize).saturating_sub(2);
     let hovered = matches!(
         app.hover,
         Some(HitId::Do(Action::Manage(
@@ -699,7 +751,7 @@ fn info_row(
     }
 
     // Name or topic while it is typed: the whole row is the input.
-    if let Some((editing, text)) = &info.editing
+    if let Some((editing, text)) = &mut info.editing
         && *editing == row
     {
         let label = if row == InfoRow::Name {
@@ -707,18 +759,23 @@ fn info_row(
         } else {
             "Topic"
         };
-        let space = room.saturating_sub(ACTION_LABEL + 1);
-        let shown = tail(text, space).to_owned();
-        let x = rect.x + (2 + ACTION_LABEL + width(&shown)).min(rect.width as usize - 1) as u16;
-        let rest = "_".repeat(space.saturating_sub(width(&shown)));
+        let value_x = rect.x + 2 + ACTION_LABEL as u16;
+        let space = (rect.width as usize).saturating_sub(2 + ACTION_LABEL + 1);
+        let view = text.view(space, false);
+        let x = (value_x + view.cursor_col as u16).min(rect.right().saturating_sub(1));
+        let rest = "_".repeat(space.saturating_sub(width(&view.text)));
         finish(
             frame,
             vec![
                 marker,
                 Span::styled(format!("{label:<ACTION_LABEL$}"), label_style),
-                Span::raw(shown),
+                Span::raw(view.text),
                 Span::styled(rest, theme.style(Role::Border)),
             ],
+        );
+        app.hits.add(
+            Rect::new(value_x, rect.y, rect.right().saturating_sub(value_x), 1),
+            HitId::Input(InputTarget::InfoEdit(row)),
         );
         return Some(Position::new(x, rect.y));
     }

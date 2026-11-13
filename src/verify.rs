@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::lineedit::LineEdit;
 use crate::matrix::{
     BackupStatus, DeviceTrust, Identity, RecoveryStatus, Security, VerifyStage, VerifyUpdate,
 };
@@ -199,7 +200,7 @@ pub struct VerifyPopup {
     pub field_focused: bool,
     /// The account password, when the server asks for it to set up cross-signing.
     /// `Some` shows the (masked) field.
-    pub password: Option<String>,
+    pub password: Option<LineEdit>,
     /// Why the last password did not work.
     pub password_error: Option<&'static str>,
     /// Set by the last draw: every emoji (or digit) of the comparison is on screen.
@@ -385,7 +386,7 @@ mod tests {
         offer.step(&state, -1);
         assert_eq!(offer.focused(&state), Some(Button::SetUp));
         // The server wants the password: the field joins the cycle.
-        offer.password = Some(String::new());
+        offer.password = Some(LineEdit::secret());
         offer.field_focused = true;
         assert_eq!(offer.focused(&state), None);
         offer.step(&state, 1);
@@ -399,8 +400,13 @@ mod tests {
         assert!(!offer.has_field(&state));
         offer.step(&state, 1);
         assert_eq!(offer.focused(&state), None);
-        offer.password = Some("hunter2".into());
+        offer.password = Some({
+            let mut pw = LineEdit::secret();
+            pw.set("hunter2");
+            pw
+        });
         assert!(!format!("{offer:?}").contains("hunter2"));
+        assert!(!format!("{:?}", offer.password).contains("hunter2"));
     }
 
     #[test]

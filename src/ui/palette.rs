@@ -3,9 +3,8 @@
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-use unicode_segmentation::UnicodeSegmentation;
 
-use super::hit::HitId;
+use super::hit::{HitId, InputTarget};
 use super::modal::{centered, popup, row};
 use crate::app::App;
 use crate::palette::{Category, Palette};
@@ -36,33 +35,30 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
     // Search row.
     let search = row(inner, 0);
     let max_query = (search.width as usize).saturating_sub(2);
-    let (search_line, query_cols) = if palette.query.is_empty() {
-        (
-            Line::from(vec![
-                Span::styled("⌕ ", theme.style(Role::StatusKey)),
-                Span::styled(
-                    truncate("type a command, room, or theme…", max_query),
-                    theme.style(Role::Placeholder),
-                ),
-            ]),
-            0,
-        )
+    let view = palette.query.view(max_query.saturating_sub(1), false);
+    let search_line = if palette.query.is_empty() {
+        Line::from(vec![
+            Span::styled("⌕ ", theme.style(Role::StatusKey)),
+            Span::styled(
+                truncate("type a command, room, or theme…", max_query),
+                theme.style(Role::Placeholder),
+            ),
+        ])
     } else {
-        let shown = tail_fit(&palette.query, max_query.saturating_sub(1));
-        let cols = width(&shown) as u16;
-        (
-            Line::from(vec![
-                Span::styled("⌕ ", theme.style(Role::StatusKey)),
-                Span::raw(shown),
-            ]),
-            cols,
-        )
+        Line::from(vec![
+            Span::styled("⌕ ", theme.style(Role::StatusKey)),
+            Span::raw(view.text),
+        ])
     };
     frame.render_widget(search_line, search);
     frame.set_cursor_position(Position::new(
-        (search.x + 2 + query_cols).min(search.right().saturating_sub(1)),
+        (search.x + 2 + view.cursor_col as u16).min(search.right().saturating_sub(1)),
         search.y,
     ));
+    app.hits.add(
+        Rect::new(search.x + 2, search.y, search.width.saturating_sub(2), 1),
+        HitId::Input(InputTarget::PaletteQuery),
+    );
 
     // Optional separator rule + match count when there is room.
     let list_y = if inner.height >= 4 {
@@ -224,26 +220,4 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
         }
         app.hits.add(rect, HitId::Palette(vis));
     }
-}
-
-/// Drops leading graphemes until `s` fits inside `max_cols`, keeping the tail visible.
-fn tail_fit(s: &str, max_cols: usize) -> String {
-    if max_cols == 0 {
-        return String::new();
-    }
-    if width(s) <= max_cols {
-        return s.to_owned();
-    }
-    let graphemes: Vec<&str> = s.graphemes(true).collect();
-    let mut start = graphemes.len();
-    let mut used = 0;
-    while start > 0 {
-        let gw = width(graphemes[start - 1]);
-        if used + gw > max_cols {
-            break;
-        }
-        used += gw;
-        start -= 1;
-    }
-    graphemes[start..].concat()
 }

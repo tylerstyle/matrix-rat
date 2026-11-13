@@ -6,6 +6,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use crate::action::{Action, Pane};
 use crate::app::ComposeMode;
 use crate::keymap;
+use crate::lineedit::LineEdit;
 use crate::modal::Setting;
 
 /// Broad grouping shown alongside each command palette entry.
@@ -112,7 +113,7 @@ pub struct PaletteContext {
 /// State for the command palette popup (`Ctrl-P`).
 #[derive(Debug, Clone)]
 pub struct Palette {
-    pub query: String,
+    pub query: LineEdit,
     pub entries: Vec<Entry>,
     /// Indices into `entries`, ordered best match first.
     pub filtered: Vec<usize>,
@@ -135,7 +136,7 @@ impl Palette {
         collect_themes(&ctx, &mut entries);
 
         let mut palette = Self {
-            query: String::new(),
+            query: LineEdit::new(),
             entries,
             filtered: Vec::new(),
             selected: 0,
@@ -147,33 +148,20 @@ impl Palette {
         palette
     }
 
+    #[cfg(test)]
     pub fn set_query(&mut self, query: String) {
-        if self.query == query {
+        if self.query.as_str() == query {
             return;
         }
-        self.query = query;
+        self.query.set(query);
+        self.on_query_changed();
+    }
+
+    pub fn on_query_changed(&mut self) {
         self.selected = 0;
         self.scroll = 0;
         self.reveal = true;
         self.refilter();
-    }
-
-    pub fn push_str(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let mut next = std::mem::take(&mut self.query);
-        next.push_str(text);
-        self.set_query(next);
-    }
-
-    pub fn pop_char(&mut self) {
-        if self.query.is_empty() {
-            return;
-        }
-        let mut next = std::mem::take(&mut self.query);
-        next.pop();
-        self.set_query(next);
     }
 
     /// Moves the selection by `delta`, clamping to the filtered results.

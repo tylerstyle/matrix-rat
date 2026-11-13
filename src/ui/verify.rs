@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
-use super::hit::{HitId, HitMap};
+use super::hit::{HitId, HitMap, InputTarget};
 use super::modal::{button, centered, field, popup, row};
 use crate::action::Action;
 use crate::app::App;
@@ -110,22 +110,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut Veri
     }
     if has_field {
         let at = row(inner, 2 + body_end);
-        let masked = "•".repeat(
-            popup_state
-                .password
-                .as_ref()
-                .map_or(0, |p| p.chars().count()),
-        );
-        let cursor = field(
-            frame,
-            theme,
-            at,
-            "Password",
-            &masked,
-            popup_state.field_focused,
-        );
-        if let Some(cursor) = cursor {
-            frame.set_cursor_position(cursor);
+        let focused_field = popup_state.field_focused;
+        if let Some(password) = popup_state.password.as_mut() {
+            let (cursor, value_rect) =
+                field(frame, theme, at, "Password", password, true, focused_field);
+            app.hits.add(at, HitId::Field(0));
+            app.hits
+                .add(value_rect, HitId::Input(InputTarget::VerifyPassword));
+            if let Some(cursor) = cursor {
+                frame.set_cursor_position(cursor);
+            }
         }
     }
 

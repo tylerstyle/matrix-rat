@@ -4,6 +4,7 @@
 use matrix_sdk::ruma::matrix_uri::MatrixId;
 use matrix_sdk::ruma::{MatrixToUri, MatrixUri, RoomAliasId, RoomId, ServerName, UserId};
 
+use crate::lineedit::{EditOutcome, LineEdit};
 use crate::matrix::{MemberRole, NotifyLevel, RoomDetails, RoomMember};
 use crate::model::RoomKind;
 
@@ -360,12 +361,12 @@ pub struct NewPopup {
     pub choice: usize,
     /// Opened at a form directly: Esc closes instead of going back to the chooser.
     pub single: bool,
-    pub address: String,
-    pub user: String,
-    pub name: String,
-    pub topic: String,
+    pub address: LineEdit,
+    pub user: LineEdit,
+    pub name: LineEdit,
+    pub topic: LineEdit,
     pub public: bool,
-    pub alias: String,
+    pub alias: LineEdit,
     pub encrypted: bool,
     /// The slot with the cursor (see `Self::slots`).
     pub focus: usize,
@@ -401,12 +402,12 @@ impl NewPopup {
             stage,
             choice: 0,
             single: stage != Stage::Choose,
-            address: String::new(),
-            user: String::new(),
-            name: String::new(),
-            topic: String::new(),
+            address: LineEdit::new().with_max_bytes(FIELD_MAX),
+            user: LineEdit::new().with_max_bytes(FIELD_MAX),
+            name: LineEdit::new().with_max_bytes(FIELD_MAX),
+            topic: LineEdit::new().with_max_bytes(FIELD_MAX),
             public: false,
-            alias: String::new(),
+            alias: LineEdit::new().with_max_bytes(FIELD_MAX),
             encrypted: true,
             focus: 0,
             busy: None,
@@ -425,10 +426,14 @@ impl NewPopup {
     }
 
     /// The text being typed into, if the cursor is in a text field.
-    pub fn field_mut(&mut self) -> Option<&mut String> {
-        match (self.stage, self.focus) {
-            (Stage::Join, _) => Some(&mut self.address),
-            (Stage::Direct | Stage::Invite, _) => Some(&mut self.user),
+    pub fn field_mut(&mut self) -> Option<&mut LineEdit> {
+        self.field_at_mut(self.focus)
+    }
+
+    pub fn field_at_mut(&mut self, slot: usize) -> Option<&mut LineEdit> {
+        match (self.stage, slot) {
+            (Stage::Join, 0) => Some(&mut self.address),
+            (Stage::Direct | Stage::Invite, 0) => Some(&mut self.user),
             (Stage::Create, Self::NAME) => Some(&mut self.name),
             (Stage::Create, Self::TOPIC) => Some(&mut self.topic),
             (Stage::Create, Self::EXTRA) if self.public => Some(&mut self.alias),
@@ -516,7 +521,7 @@ pub struct InfoPopup {
     pub details: Option<RoomDetails>,
     pub error: Option<String>,
     /// Narrows the member list.
-    pub filter: String,
+    pub filter: LineEdit,
     /// Index into `Self::rows`.
     pub selected: usize,
     /// First line shown, and how many fit (as of the last draw).
@@ -525,7 +530,7 @@ pub struct InfoPopup {
     /// Ask the next draw to bring the selected row into view.
     pub reveal: bool,
     /// The name or topic while it is being typed.
-    pub editing: Option<(InfoRow, String)>,
+    pub editing: Option<(InfoRow, LineEdit)>,
     pub confirm: Option<Confirm>,
     /// A change is on its way to the server.
     pub busy: Option<&'static str>,
@@ -553,7 +558,7 @@ impl InfoPopup {
             kind,
             details: None,
             error: None,
-            filter: String::new(),
+            filter: LineEdit::new().with_max_bytes(FIELD_MAX),
             selected: 0,
             scroll: 0,
             page: 10,
@@ -678,10 +683,17 @@ impl InfoPopup {
         self.reveal = true;
     }
 
-    /// Changes the member filter; the first match gets the selection.
-    pub fn set_filter(&mut self, filter: String) {
+    /// Mutates the member filter in place; when the text changes, the first match gets the selection.
+    pub fn apply_filter(&mut self, edit: impl FnOnce(&mut LineEdit) -> EditOutcome) -> EditOutcome {
         let before = self.current();
-        self.filter = filter;
+        let outcome = edit(&mut self.filter);
+        if outcome.changed() {
+            self.after_filter_change(before);
+        }
+        outcome
+    }
+
+    fn after_filter_change(&mut self, before: Option<InfoRow>) {
         self.confirm = None;
         let rows = self.rows();
         let wanted = if self.filter.is_empty() {
@@ -692,6 +704,18 @@ impl InfoPopup {
         };
         self.selected = wanted.unwrap_or(self.selected.min(rows.len().saturating_sub(1)));
         self.reveal = true;
+    }
+
+    /// Changes the member filter; the first match gets the selection.
+    pub fn set_filter(&mut self, filter: String) {
+        self.apply_filter(|edit| {
+            if edit.as_str() == filter {
+                EditOutcome::Ignored
+            } else {
+                edit.set(filter);
+                EditOutcome::Changed
+            }
+        });
     }
 
     /// Takes new details, keeping the selection on the same row (members move when
@@ -1264,12 +1288,12 @@ mod tests {
         form.go(Stage::CHOICES[form.choice]);
         assert_eq!(form.stage, Stage::Create);
         // Name, topic, a switch, the encryption switch, the button.
-        form.field_mut().unwrap().push('n');
+        form.field_mut().unwrap().insert("n");
         form.step(2);
         assert!(form.field_mut().is_none() && form.flip(NewPopup::ACCESS));
         assert!(form.public);
         form.step(1);
-        form.field_mut().unwrap().push('a');
+        form.field_mut().unwrap().insert("a");
         assert_eq!((form.name.as_str(), form.alias.as_str()), ("n", "a"));
         assert!(!form.flip(NewPopup::EXTRA) && form.encrypted);
         form.flip(NewPopup::ACCESS);

@@ -3,6 +3,7 @@
 use emojis::Emoji;
 
 use crate::emoji;
+use crate::lineedit::LineEdit;
 use crate::matrix::{ReauthKind, ReauthTarget};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,11 +13,11 @@ pub struct ReauthInfo {
     pub kind: ReauthKind,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LoginForm {
-    pub homeserver: String,
-    pub username: String,
-    pub password: String,
+    pub homeserver: LineEdit,
+    pub username: LineEdit,
+    pub password: LineEdit,
     /// 0–2 are the text fields, 3 and 4 the two buttons.
     pub focus: usize,
     /// A progress message while a login is running; input is locked meanwhile.
@@ -31,6 +32,22 @@ pub struct LoginForm {
     pub reauth: Option<ReauthInfo>,
 }
 
+impl Default for LoginForm {
+    fn default() -> Self {
+        Self {
+            homeserver: LineEdit::new(),
+            username: LineEdit::new(),
+            password: LineEdit::secret(),
+            focus: 0,
+            busy: None,
+            error: None,
+            note: None,
+            browser_url: None,
+            reauth: None,
+        }
+    }
+}
+
 impl LoginForm {
     pub const FIELDS: usize = 3;
     pub const PASSWORD_BUTTON: usize = 3;
@@ -39,7 +56,7 @@ impl LoginForm {
 
     pub fn new(error: Option<String>) -> Self {
         Self {
-            homeserver: "matrix.org".to_owned(),
+            homeserver: LineEdit::from("matrix.org"),
             error,
             ..Self::default()
         }
@@ -51,9 +68,9 @@ impl LoginForm {
             ReauthKind::Browser => Self::BROWSER_BUTTON,
         };
         Self {
-            homeserver: target.homeserver,
-            username: target.user_id.clone(),
-            password: String::new(),
+            homeserver: LineEdit::from(target.homeserver),
+            username: LineEdit::from(target.user_id.clone()),
+            password: LineEdit::secret(),
             focus,
             busy: None,
             error: None,
@@ -107,11 +124,23 @@ impl LoginForm {
         }
     }
 
-    pub fn field_mut(&mut self) -> Option<&mut String> {
+    pub fn field_mut(&mut self) -> Option<&mut LineEdit> {
         if !self.can_focus(self.focus) {
             return None;
         }
         match self.focus {
+            0 => Some(&mut self.homeserver),
+            1 => Some(&mut self.username),
+            2 => Some(&mut self.password),
+            _ => None,
+        }
+    }
+
+    pub fn field_at_mut(&mut self, slot: usize) -> Option<&mut LineEdit> {
+        if !self.can_focus(slot) {
+            return None;
+        }
+        match slot {
             0 => Some(&mut self.homeserver),
             1 => Some(&mut self.username),
             2 => Some(&mut self.password),
@@ -138,11 +167,21 @@ impl LoginForm {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RecoveryForm {
-    pub key: String,
+    pub key: LineEdit,
     pub busy: bool,
     pub error: Option<String>,
+}
+
+impl Default for RecoveryForm {
+    fn default() -> Self {
+        Self {
+            key: LineEdit::secret(),
+            busy: false,
+            error: None,
+        }
+    }
 }
 
 // Hand-written so the password and the recovery key can never end up in a log.
@@ -173,7 +212,7 @@ const QUICK_REACTIONS: [&str; 10] = ["👍", "❤️", "😂", "🎉", "😮", "
 pub struct EmojiPicker {
     /// Index and id of the message to react to; `None` inserts into the draft.
     pub react_to: Option<(usize, String)>,
-    pub query: String,
+    pub query: LineEdit,
     pub results: Vec<&'static Emoji>,
     pub selected: usize,
     /// First visible row of the grid.
@@ -189,7 +228,7 @@ impl Default for EmojiPicker {
     fn default() -> Self {
         Self {
             react_to: None,
-            query: String::new(),
+            query: LineEdit::new(),
             results: emoji::search(""),
             selected: 0,
             scroll: 0,
@@ -206,13 +245,19 @@ impl EmojiPicker {
             react_to: Some((index, message_id)),
             ..Self::default()
         };
-        picker.set_query(String::new());
+        picker.refilter();
         picker
     }
 
+    #[cfg(test)]
     pub fn set_query(&mut self, query: String) {
-        self.results = emoji::search(&query);
-        if query.is_empty() && self.react_to.is_some() {
+        self.query.set(query);
+        self.refilter();
+    }
+
+    pub fn refilter(&mut self) {
+        self.results = emoji::search(&self.query);
+        if self.query.is_empty() && self.react_to.is_some() {
             let quick: Vec<_> = QUICK_REACTIONS
                 .iter()
                 .filter_map(|e| emojis::get(e))
@@ -220,7 +265,6 @@ impl EmojiPicker {
             self.results.retain(|e| !quick.contains(e));
             self.results.splice(0..0, quick);
         }
-        self.query = query;
         self.selected = 0;
         self.scroll = 0;
     }
@@ -368,7 +412,7 @@ pub struct SettingsMenu {
     /// Log out was chosen once; choosing it again does it.
     pub confirm_logout: bool,
     /// The download folder while it is being typed.
-    pub editing: Option<String>,
+    pub editing: Option<LineEdit>,
     /// Whether `ThemeDark` and `ThemeLight` slot rows are shown.
     pub show_theme_pair: bool,
 }
@@ -451,7 +495,7 @@ mod tests {
         assert!(form.field_mut().is_none());
         form.next();
         form.next();
-        form.field_mut().unwrap().push('a');
+        form.field_mut().unwrap().insert("a");
         assert_eq!(form.username, "a");
     }
 
@@ -477,7 +521,7 @@ mod tests {
         pw.focus_slot(LoginForm::BROWSER_BUTTON);
         assert_eq!(pw.focus, 2);
         // Typing edits only password, Tab cycles only Password <-> Log in button.
-        pw.field_mut().unwrap().push_str("secret_pw");
+        pw.field_mut().unwrap().insert("secret_pw");
         assert!(!format!("{pw:?}").contains("secret_pw"));
         pw.next();
         assert_eq!(pw.focus, LoginForm::PASSWORD_BUTTON);
@@ -510,12 +554,12 @@ mod tests {
     #[test]
     fn debug_output_hides_secrets() {
         let mut form = LoginForm::new(None);
-        form.password = "hunter2".into();
+        form.password.set("hunter2");
         assert!(!format!("{form:?}").contains("hunter2"));
-        let recovery = RecoveryForm {
-            key: "EsTc secret".into(),
-            ..RecoveryForm::default()
-        };
+        assert!(!format!("{:?}", form.password).contains("hunter2"));
+        let mut recovery = RecoveryForm::default();
+        recovery.key.set("EsTc secret");
+        assert!(!format!("{:?}", recovery.key).contains("secret"));
         assert!(!format!("{:?}", Modal::Recovery(recovery)).contains("secret"));
         let command = crate::matrix::MatrixCmd::LoginPassword {
             homeserver: "example.org".into(),

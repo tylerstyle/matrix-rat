@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::App;
 use crate::action::{Action, Pane};
+use crate::lineedit::{EditKeys, LineEdit};
 use crate::manage::{
     Address, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NewPopup, Pending, Stage, clean_input,
     parse_address, parse_alias_local, parse_user,
@@ -30,17 +31,6 @@ pub struct ManageState {
     pending_open: Option<(String, Instant)>,
     /// Numbers the requests whose answers have to find the popup that asked.
     requests: u64,
-}
-
-/// Adds `text` to a one-line input: nothing that could steer the terminal or reorder
-/// the line gets in, and the field stays within bounds.
-fn push_clean(field: &mut String, text: &str) {
-    for c in clean_input(text).chars() {
-        if field.len() + c.len_utf8() > FIELD_MAX {
-            break;
-        }
-        field.push(c);
-    }
 }
 
 impl App {
@@ -246,26 +236,19 @@ impl App {
             KeyCode::BackTab | KeyCode::Up => popup.step(-1),
             KeyCode::Enter if popup.focus + 1 < popup.slots() => popup.step(1),
             KeyCode::Enter => self.submit_new(),
-            KeyCode::Left | KeyCode::Right if popup.field_mut().is_none() => {
+            KeyCode::Left | KeyCode::Right if popup.field_mut().is_none() && plain => {
                 popup.flip(popup.focus);
             }
-            KeyCode::Backspace => {
-                if let Some(field) = popup.field_mut() {
-                    field.pop();
+            KeyCode::Char(' ') if popup.field_mut().is_none() && plain => {
+                popup.flip(popup.focus);
+            }
+            _ => {
+                if let Some(field) = popup.field_mut()
+                    && field.handle_key(code, mods, EditKeys::FULL).changed()
+                {
                     popup.error = None;
                 }
             }
-            KeyCode::Char(c) if plain => match popup.field_mut() {
-                Some(field) => {
-                    push_clean(field, c.encode_utf8(&mut [0; 4]));
-                    popup.error = None;
-                }
-                None if c == ' ' => {
-                    popup.flip(popup.focus);
-                }
-                None => {}
-            },
-            _ => {}
         }
     }
 
@@ -325,36 +308,21 @@ impl App {
         }
     }
 
-    /// Ctrl-U: empties the text being typed.
-    pub(super) fn manage_clear_input(&mut self) {
-        match &mut self.modal {
-            Some(Modal::New(popup)) if popup.busy.is_none() => {
-                if let Some(field) = popup.field_mut() {
-                    field.clear();
-                }
-            }
-            Some(Modal::RoomInfo(info)) => match &mut info.editing {
-                Some((_, text)) => text.clear(),
-                None => info.set_filter(String::new()),
-            },
-            _ => {}
-        }
-    }
-
     pub(super) fn on_manage_paste(&mut self, first_line: &str) {
         match &mut self.modal {
             Some(Modal::New(popup)) if popup.busy.is_none() => {
-                if let Some(field) = popup.field_mut() {
-                    push_clean(field, first_line);
+                if let Some(field) = popup.field_mut()
+                    && field.paste(first_line).changed()
+                {
                     popup.error = None;
                 }
             }
             Some(Modal::RoomInfo(info)) => match &mut info.editing {
-                Some((_, text)) => push_clean(text, first_line),
+                Some((_, edit)) => {
+                    edit.paste(first_line);
+                }
                 None => {
-                    let mut filter = std::mem::take(&mut info.filter);
-                    push_clean(&mut filter, first_line);
-                    info.set_filter(filter);
+                    info.apply_filter(|f| f.paste(first_line));
                 }
             },
             _ => {}
@@ -379,14 +347,11 @@ impl App {
         if code == KeyCode::Esc {
             return self.manage_escape();
         }
-        if let Some((_, text)) = &mut info.editing {
-            match code {
-                KeyCode::Enter => self.submit_edit(),
-                KeyCode::Backspace => {
-                    text.pop();
-                }
-                KeyCode::Char(c) if plain => push_clean(text, c.encode_utf8(&mut [0; 4])),
-                _ => {}
+        if let Some((_, edit)) = &mut info.editing {
+            if code == KeyCode::Enter {
+                self.submit_edit();
+            } else {
+                edit.handle_key(code, mods, EditKeys::FULL);
             }
             return;
         }
@@ -405,7 +370,7 @@ impl App {
                 info.reveal = false;
             }
             KeyCode::End => info.step(isize::MAX / 2),
-            KeyCode::Left | KeyCode::Right if row == Some(InfoRow::Notify) => {
+            KeyCode::Left | KeyCode::Right if row == Some(InfoRow::Notify) && plain => {
                 self.info_activate(InfoRow::Notify, if code == KeyCode::Left { -1 } else { 1 });
             }
             KeyCode::Enter => {
@@ -414,17 +379,15 @@ impl App {
                 }
             }
             KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) => self.remove_member(),
-            KeyCode::Backspace => {
-                let mut filter = std::mem::take(&mut info.filter);
-                filter.pop();
-                info.set_filter(filter);
+            _ => {
+                let keys = EditKeys {
+                    arrows: row != Some(InfoRow::Notify),
+                    home_end: false,
+                    delete: !matches!(row, Some(InfoRow::Member(_))),
+                    kill_to_end: true,
+                };
+                info.apply_filter(|f| f.handle_key(code, mods, keys));
             }
-            KeyCode::Char(c) if plain => {
-                let mut filter = std::mem::take(&mut info.filter);
-                push_clean(&mut filter, c.encode_utf8(&mut [0; 4]));
-                info.set_filter(filter);
-            }
-            _ => {}
         }
     }
 
@@ -577,7 +540,7 @@ impl App {
                         crate::text::sanitize_line(&details.topic)
                     }
                 });
-                info.editing = Some((row, current));
+                info.editing = Some((row, LineEdit::with_text(current).with_max_bytes(FIELD_MAX)));
                 return;
             }
             InfoRow::Invite => return self.open_new(Stage::Invite),
@@ -662,9 +625,10 @@ impl App {
         let Some(Modal::RoomInfo(info)) = &mut self.modal else {
             return;
         };
-        let Some((row, text)) = info.editing.clone() else {
+        let Some((row, text)) = &info.editing else {
             return;
         };
+        let row = *row;
         let text = clean_input(text.trim());
         let room_id = info.room_id.clone();
         let unchanged = info.details.as_ref().is_some_and(|details| match row {
@@ -2393,8 +2357,8 @@ mod tests {
                 panic!()
             };
             // However it got into the form.
-            popup.name = " Rat\u{1b}[2J plans\u{202e} ".into();
-            popup.topic = "what\u{7} next".into();
+            popup.name.set(" Rat\u{1b}[2J plans\u{202e} ");
+            popup.topic.set("what\u{7} next");
             popup.focus = NewPopup::BUTTON;
         }
         app.on_event(key(KeyCode::Enter));
@@ -2586,5 +2550,138 @@ mod tests {
             let line = text.lines().nth(cursor.y as usize).unwrap_or_default();
             assert!(line.contains("éé"), "{width}x{height}: {line}");
         }
+    }
+
+    #[test]
+    fn manage_forms_and_room_info_edit_mid_text_and_click_to_place() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let ctrl_key = |code: KeyCode| Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
+        let alt = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+
+        // 1. NewPopup (Stage::Create): mid-text edit and click-to-place incl. #alias offset.
+        app.on_event(ctrl('n'));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter)); // Create stage
+        assert_eq!(new_popup(&app).stage, Stage::Create);
+        type_text(&mut app, "rats👍🏽 club");
+        app.on_event(ctrl_key(KeyCode::Left)); // before "club"
+        app.on_event(key(KeyCode::Left)); // before ' ' -> after 👍🏽
+        app.on_event(key(KeyCode::Backspace)); // removes whole 👍🏽, keeping the space
+        app.on_event(alt('f')); // after "club"
+        app.on_event(ctrl('w')); // removes "club"
+        app.on_event(alt('b'));
+        app.on_event(ctrl('k'));
+        assert_eq!(new_popup(&app).name, "");
+        app.on_event(ctrl('u'));
+        type_text(&mut app, "rats 👍🏽 club");
+        app.on_event(ctrl_key(KeyCode::Left)); // before "club"
+        app.on_event(key(KeyCode::Left)); // before ' '
+        app.on_event(key(KeyCode::Backspace)); // removes whole 👍🏽 -> "rats  club"
+        assert_eq!(new_popup(&app).name, "rats  club");
+        app.on_event(ctrl('k')); // removes " club" after cursor
+        assert_eq!(new_popup(&app).name, "rats ");
+
+        // Switch to public and edit alias; click on 'b' after "#alpha-".
+        app.on_event(key(KeyCode::Tab)); // Topic
+        app.on_event(key(KeyCode::Tab)); // Access
+        app.on_event(key(KeyCode::Char(' '))); // public = true
+        app.on_event(key(KeyCode::Tab)); // Address / alias
+        type_text(&mut app, "alpha-beta");
+        let text = screen(&mut app, &mut terminal);
+        let (col, row) = find(&text, "#alpha-beta");
+        app.on_event(click(col + 1 + 6, row)); // right at 'b' (skip '#' + "alpha-")
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(new_popup(&app).alias, "alpha-eta");
+        app.on_event(key(KeyCode::End));
+        app.on_event(ctrl('w')); // removes "eta" from the right end
+        assert_eq!(new_popup(&app).alias, "alpha-");
+        app.on_event(key(KeyCode::Esc));
+        app.on_event(key(KeyCode::Esc));
+
+        // 2. InfoPopup editing + filter collision policy + click-to-place.
+        with_info(&mut app, &mut commands);
+        // Move to Rename row and enter inline editing.
+        let rename_pos = info(&app)
+            .rows()
+            .iter()
+            .position(|r| *r == InfoRow::Name)
+            .unwrap();
+        for _ in 0..rename_pos {
+            app.on_event(key(KeyCode::Down));
+        }
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(info(&app).editing, Some((InfoRow::Name, _))));
+        app.on_event(ctrl('u'));
+        type_text(&mut app, "Big Rats");
+        app.on_event(ctrl('a'));
+        app.on_event(key(KeyCode::Char('*')));
+        let text = screen(&mut app, &mut terminal);
+        let (col, row) = find(&text, "*Big Rats");
+        app.on_event(click(col + 4, row)); // after "Big" in "*Big Rats" -> before ' '
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(
+            info(&app).editing.as_ref().map(|(_, t)| t.as_str()),
+            Some("*BigRats")
+        );
+        app.on_event(key(KeyCode::Esc)); // close inline edit
+
+        // Collision policy for InfoPopup.filter:
+        // (a) On Notify row: plain Left/Right change Notify level; Ctrl-Left/Ctrl-E edit filter.
+        type_text(&mut app, "qq");
+        let notify_pos = info(&app)
+            .rows()
+            .iter()
+            .position(|r| *r == InfoRow::Notify)
+            .unwrap();
+        app.on_event(key(KeyCode::Home));
+        for _ in 0..notify_pos {
+            app.on_event(key(KeyCode::Down));
+        }
+        assert_eq!(info(&app).current(), Some(InfoRow::Notify));
+        let _ = sent(&mut commands);
+        app.on_event(key(KeyCode::Right));
+        assert!(!sent(&mut commands).is_empty());
+        answer(
+            &mut app,
+            ManageEvent::Done {
+                room_id: ROOM.into(),
+                change: Change::Notify,
+                result: Ok(()),
+            },
+        );
+        assert_eq!(info(&app).filter, "qq");
+        assert_eq!(info(&app).filter.cursor(), 2);
+        app.on_event(ctrl_key(KeyCode::Left));
+        assert_eq!(info(&app).filter.cursor(), 0);
+        app.on_event(ctrl('e'));
+        app.on_event(key(KeyCode::Char('z')));
+        assert_eq!(info(&app).filter, "qqz");
+
+        // (b) On Favourite row (index 0): Home/End step rows, while Delete/Left/Right edit filter.
+        app.on_event(key(KeyCode::End));
+        let last_idx = info(&app).rows().len() - 1;
+        assert_eq!(info(&app).selected, last_idx);
+        app.on_event(key(KeyCode::Home));
+        assert_eq!(info(&app).selected, 0);
+        app.on_event(key(KeyCode::Left)); // "qq|z"
+        app.on_event(key(KeyCode::Delete)); // "qq"
+        assert_eq!(info(&app).filter, "qq");
+
+        // (c) Click rendered filter text (HitId::Input(InfoFilter)) places filter cursor.
+        let text = screen(&mut app, &mut terminal);
+        let (col, row) = find(&text, "qq");
+        app.on_event(click(col + 1, row)); // q|q
+        app.on_event(key(KeyCode::Char('Y')));
+        assert_eq!(info(&app).filter, "qYq");
+
+        // (d) On Member(_) row: Delete confirms member removal instead of editing filter.
+        app.on_event(ctrl('u'));
+        type_text(&mut app, "bo"); // matches member bob
+        app.on_event(key(KeyCode::End)); // lands on bob (last visible row)
+        assert!(matches!(info(&app).current(), Some(InfoRow::Member(_))));
+        app.on_event(key(KeyCode::Delete));
+        assert!(info(&app).confirm.is_some());
+        assert_eq!(info(&app).filter, "bo");
     }
 }

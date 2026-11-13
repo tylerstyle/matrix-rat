@@ -6,14 +6,17 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
-use super::hit::HitId;
+use super::hit::{HitId, InputTarget};
 use crate::action::Action;
 use crate::app::App;
 use crate::keymap::Context;
+use crate::lineedit::LineEdit;
 use crate::matrix::ReauthKind;
 use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, Setting, SettingsMenu};
 use crate::text::{sanitize, sanitize_line, truncate, width};
 use crate::theme::{Role, Theme};
+
+const FIELD_LABEL: usize = 13;
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     // Taken out while drawing so the popup state and the rest of the app can be
@@ -100,42 +103,45 @@ pub(super) fn row(inner: Rect, n: u16) -> Rect {
     }
 }
 
-/// A labelled one-line input. Returns where the cursor belongs when it has the focus.
+/// A labelled one-line input. Returns where the cursor belongs (when focused) and
+/// the rectangle of the editable value area for pointer hit-testing.
 pub(super) fn field(
     frame: &mut Frame,
     theme: &Theme,
     rect: Rect,
     label: &str,
-    value: &str,
+    value: &mut LineEdit,
+    masked: bool,
     focused: bool,
-) -> Option<Position> {
+) -> (Option<Position>, Rect) {
     if rect.width == 0 {
-        return None;
+        return (None, Rect::default());
     }
-    const LABEL: usize = 13;
-    let room = (rect.width as usize).saturating_sub(LABEL + 1);
-    // Show the end of a value that is too long, where typing happens.
-    let mut shown = value.to_owned();
-    while width(&shown) > room && !shown.is_empty() {
-        shown.remove(0);
-    }
+    let room = (rect.width as usize).saturating_sub(FIELD_LABEL + 1);
+    let view = value.view(room, masked);
     let label_style = if focused {
         theme.style(Role::TitleFocused)
     } else {
         theme.style(Role::Muted)
     };
     let cursor = Position::new(
-        rect.x + (LABEL + width(&shown)).min(rect.width as usize - 1) as u16,
+        rect.x + (FIELD_LABEL + view.cursor_col).min(rect.width as usize - 1) as u16,
         rect.y,
     );
-    let underline = "_".repeat(room.saturating_sub(width(&shown)));
+    let underline = "_".repeat(room.saturating_sub(width(&view.text)));
     let line = Line::from(vec![
-        Span::styled(format!("{label:<LABEL$}"), label_style),
-        Span::raw(shown),
+        Span::styled(format!("{label:<FIELD_LABEL$}"), label_style),
+        Span::raw(view.text),
         Span::styled(underline, theme.style(Role::Border)),
     ]);
     frame.render_widget(line, rect);
-    focused.then_some(cursor)
+    let value_rect = Rect::new(
+        rect.x + FIELD_LABEL as u16,
+        rect.y,
+        rect.width.saturating_sub(FIELD_LABEL as u16),
+        1,
+    );
+    (focused.then_some(cursor), value_rect)
 }
 
 pub(super) fn button(frame: &mut Frame, theme: &Theme, rect: Rect, label: &str, focused: bool) {
@@ -147,7 +153,7 @@ pub(super) fn button(frame: &mut Frame, theme: &Theme, rect: Rect, label: &str, 
     frame.render_widget(Line::from(Span::styled(label.to_owned(), style)), rect);
 }
 
-fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
+fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMenu) {
     const LABEL: u16 = 20;
     let visible_settings: Vec<(usize, Setting)> = Setting::ALL
         .into_iter()
@@ -257,18 +263,20 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
                 let dot = if on { "● " } else { "○ " };
                 spans.push(Span::styled(format!("{dot}{value}"), theme.style(role)));
             }
-            Setting::DownloadDir => match (&menu.editing, selected) {
+            Setting::DownloadDir => match (&mut menu.editing, selected) {
                 (Some(typed), true) => {
-                    // Show the end of a long path, where typing happens.
-                    let mut shown = typed.clone();
-                    while width(&shown) + 1 > room && !shown.is_empty() {
-                        shown.remove(0);
-                    }
-                    frame
-                        .set_cursor_position(Position::new(value_x + width(&shown) as u16, rect.y));
-                    let rest = "_".repeat(room.saturating_sub(width(&shown)));
-                    spans.push(Span::styled(shown, theme.style(Role::Text)));
+                    let view = typed.view(room.saturating_sub(1), false);
+                    frame.set_cursor_position(Position::new(
+                        (value_x + view.cursor_col as u16).min(rect.right().saturating_sub(1)),
+                        rect.y,
+                    ));
+                    let rest = "_".repeat(room.saturating_sub(width(&view.text)));
+                    spans.push(Span::styled(view.text, theme.style(Role::Text)));
                     spans.push(Span::styled(rest, theme.style(Role::Border)));
+                    app.hits.add(
+                        Rect::new(value_x, rect.y, room as u16, 1),
+                        HitId::Input(InputTarget::DownloadDir),
+                    );
                 }
                 _ => spans.push(Span::styled(
                     truncate(&value, room),
@@ -358,7 +366,7 @@ fn login_button(
     area.x + w + 2
 }
 
-fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
+fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &mut LoginForm) {
     let Some(rect) = centered(area, 64, 15) else {
         return;
     };
@@ -392,17 +400,22 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
         fixed_field(frame, &app.theme, row(inner, 3), "Account", &reauth.user_id);
         match reauth.kind {
             ReauthKind::Password => {
-                let masked = "•".repeat(form.password.chars().count());
                 let pw_rect = row(inner, 5);
-                cursor = field(
+                let (at, value_rect) = field(
                     frame,
                     &app.theme,
                     pw_rect,
                     "Password",
-                    masked.as_str(),
+                    &mut form.password,
+                    true,
                     !busy && form.focus == 2,
                 );
+                cursor = at;
                 app.hits.add(pw_rect, HitId::Field(2));
+                if !busy {
+                    app.hits
+                        .add(value_rect, HitId::Input(InputTarget::Login(2)));
+                }
 
                 let buttons = row(inner, 7);
                 login_button(
@@ -431,24 +444,28 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
             }
         }
     } else {
-        let masked = "•".repeat(form.password.chars().count());
         let fields = [
-            ("Homeserver", form.homeserver.as_str()),
-            ("Username", form.username.as_str()),
-            ("Password", masked.as_str()),
+            (0usize, "Homeserver", &mut form.homeserver, false),
+            (1usize, "Username", &mut form.username, false),
+            (2usize, "Password", &mut form.password, true),
         ];
-        for (n, (label, value)) in fields.into_iter().enumerate() {
+        for (n, label, value, masked) in fields {
             let rect = row(inner, 1 + n as u16 * 2);
-            let at = field(
+            let (at, value_rect) = field(
                 frame,
                 &app.theme,
                 rect,
                 label,
                 value,
+                masked,
                 !busy && form.focus == n,
             );
             cursor = cursor.or(at);
             app.hits.add(rect, HitId::Field(n));
+            if !busy {
+                app.hits
+                    .add(value_rect, HitId::Input(InputTarget::Login(n)));
+            }
         }
 
         let buttons = row(inner, 7);
@@ -512,7 +529,7 @@ fn login(frame: &mut Frame, app: &mut App, area: Rect, form: &LoginForm) {
     }
 }
 
-fn recovery(frame: &mut Frame, app: &mut App, area: Rect, form: &RecoveryForm) {
+fn recovery(frame: &mut Frame, app: &mut App, area: Rect, form: &mut RecoveryForm) {
     let Some(rect) = centered(area, 70, 13) else {
         return;
     };
@@ -539,14 +556,19 @@ fn recovery(frame: &mut Frame, app: &mut App, area: Rect, form: &RecoveryForm) {
             2.min(inner.height.saturating_sub(1)),
         ),
     );
-    let cursor = field(
+    let (cursor, value_rect) = field(
         frame,
         theme,
         row(inner, 4),
         "Recovery key",
-        &form.key,
+        &mut form.key,
+        false,
         !form.busy,
     );
+    if !form.busy {
+        app.hits
+            .add(value_rect, HitId::Input(InputTarget::Recovery));
+    }
     let buttons = row(inner, 6);
     if !form.busy {
         let mut x = buttons.x;
@@ -632,6 +654,8 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
 
     // Search field.
     let search = row(inner, 0);
+    let max_cols = (search.width as usize).saturating_sub(3);
+    let view = picker.query.view(max_cols, false);
     let line = if picker.query.is_empty() {
         Line::from(vec![
             Span::styled("⌕ ", theme.style(Role::StatusKey)),
@@ -640,17 +664,18 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
     } else {
         Line::from(vec![
             Span::styled("⌕ ", theme.style(Role::StatusKey)),
-            Span::raw(truncate(
-                &picker.query,
-                (search.width as usize).saturating_sub(3),
-            )),
+            Span::raw(view.text),
         ])
     };
     frame.render_widget(line, search);
     frame.set_cursor_position(Position::new(
-        (search.x + 2 + width_of(&picker.query)).min(search.right().saturating_sub(1)),
+        (search.x + 2 + view.cursor_col as u16).min(search.right().saturating_sub(1)),
         search.y,
     ));
+    app.hits.add(
+        Rect::new(search.x + 2, search.y, search.width.saturating_sub(2), 1),
+        HitId::Input(InputTarget::EmojiQuery),
+    );
 
     // Grid, with the last row kept for the selected emoji's name.
     let grid = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 2);
@@ -714,8 +739,4 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
             row(inner, inner.height - 1),
         );
     }
-}
-
-fn width_of(text: &str) -> u16 {
-    width(text) as u16
 }
