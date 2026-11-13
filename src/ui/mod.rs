@@ -7,6 +7,7 @@ mod modal;
 mod sidebar;
 mod status;
 mod timeline;
+mod verify;
 
 pub use timeline::RowCache;
 

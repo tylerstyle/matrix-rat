@@ -11,6 +11,7 @@ use matrix_sdk::authentication::oauth::registration::{
 use matrix_sdk::authentication::oauth::{
     ClientId, ClientRegistrationData, OAuthSession, UserSession,
 };
+use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::utils::local_server::LocalServerBuilder;
 use matrix_sdk::{AuthSession, Client};
@@ -47,11 +48,24 @@ enum SavedAuth {
     },
 }
 
+/// Encryption choices shared by every client. Message keys missing for a message are
+/// fetched from the server-side backup when this device can use it (after recovery or
+/// verification). Cross-signing is never set up behind the user's back: creating an
+/// account's identity is an explicit action.
+fn encryption_settings() -> EncryptionSettings {
+    EncryptionSettings {
+        auto_enable_cross_signing: false,
+        backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
+        auto_enable_backups: false,
+    }
+}
+
 /// For a new login: accepts a server name or URL and looks the homeserver up online.
 async fn discover_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Result<Client> {
     Client::builder()
         .server_name_or_homeserver_url(homeserver)
         .sqlite_store(paths.store_dir(), Some(passphrase))
+        .with_encryption_settings(encryption_settings())
         .handle_refresh_tokens()
         .build()
         .await
@@ -64,6 +78,7 @@ async fn offline_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Re
     Client::builder()
         .homeserver_url(homeserver)
         .sqlite_store(paths.store_dir(), Some(passphrase))
+        .with_encryption_settings(encryption_settings())
         .handle_refresh_tokens()
         .build()
         .await

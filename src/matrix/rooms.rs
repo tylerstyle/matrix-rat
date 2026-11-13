@@ -287,7 +287,8 @@ impl Timelines {
             | MatrixCmd::LoginBrowser { .. }
             | MatrixCmd::CancelLogin
             | MatrixCmd::Recover { .. }
-            | MatrixCmd::Shutdown => {}
+            | MatrixCmd::Shutdown
+            | MatrixCmd::Verification(_) => {}
         }
     }
 }

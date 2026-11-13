@@ -1,0 +1,28 @@
+---
+source: src/ui/verify.rs
+expression: "render(&mut app, 100, 24)"
+---
+"╭ 1 Rooms ─────────────╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
+"│ Filter rooms…        ││  Yes — startup is instant now. Room previews come straight from disk.   ││"
+"│ Favourites           ││   👍 2   🎉 1                                                           ││" Hidden by multi-width symbols: [(29, " "), (36, " ")]
+"│ # rust               ││  Back-pagination also survives restarts, which is a big deal for large  ││"
+"│ # matrix-rat         ││  rooms like this one where scrolling up used to refetch everything from ││"
+"│ People               ││  the server every single time.                                          ┃│"
+"│ ● bob             2  ││───────────────────────────────── Today ─────────────────────────────────┃│"
+"│ ○ carol        ╭ Verify this device ────────────────────────────────────────────╮               ┃│"
+"│ Rooms          │                                                                │               ┃│"
+"│ # design       │ ✓ This device is now verified.                                 │               ┃│"
+"│ # nixos        │                                                                │               ┃│"
+"│ # off-topic    │ Your other device sends it the keys it lacks, so encrypted     │?              ┃│"
+"│                │ history unlocks shortly.                                       │               ┃│"
+"│                │                                                                │               ┃│"
+"│                │  Close                                                         │               ┃│"
+"│                │                                                                │               ┃│"
+"│                ╰──────────────────────────────────────────── Enter or Esc close ╯               ┃│"
+"│                      ││● dave  10:02                                                            ┃│"
+"│                      ││  Shipping a TUI client on top of it this week 🐀                        ┃│" Hidden by multi-width symbols: [(73, " ")]
+"│                      │╰ carol is typing… ────────────────────────────────────────────────────────╯"
+"│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
+"│                      ││ Type a message…                                                       ☺  │"
+"╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
+" ● demo data  ⚠ unverified device — verify  Enter send  Shift-Enter line break F1 help  F3 rat-dark "

@@ -145,6 +145,7 @@ pub enum Modal {
     Login(LoginForm),
     Recovery(RecoveryForm),
     Emoji(EmojiPicker),
+    Verify(crate::verify::VerifyPopup),
 }
 
 #[cfg(test)]

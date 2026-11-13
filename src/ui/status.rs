@@ -55,6 +55,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(format!(" {dot} "), theme.style(dot_role)),
         Span::styled(format!("{text}  "), status),
     ];
+    super::verify::status_hint(
+        &app.verify,
+        &app.modal,
+        theme,
+        app.hover,
+        &mut app.hits,
+        Rect::new(area.x, area.y, right - area.x, 1),
+        &mut spans,
+    );
     if let Some((text, _)) = &app.toast {
         spans.push(Span::styled(format!(" {text} "), theme.style(Role::Toast)));
     } else {

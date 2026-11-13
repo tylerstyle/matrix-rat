@@ -1,5 +1,7 @@
 //! Application state, input handling and the event loop.
 
+mod verify;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -139,6 +141,8 @@ pub struct App {
     /// Bumped whenever the open room's messages change, to invalidate `row_cache`.
     pub timeline_rev: u64,
     pub row_cache: Option<crate::ui::RowCache>,
+    /// Encryption status and device verification.
+    pub verify: crate::verify::VerifyState,
     pub theme: Theme,
     theme_names: Vec<String>,
     themes_dir: PathBuf,
@@ -213,6 +217,7 @@ impl App {
             theme_rev: 0,
             timeline_rev: 0,
             row_cache: None,
+            verify: Default::default(),
             theme,
             theme_names: Theme::builtin_names(),
             themes_dir: PathBuf::new(),
@@ -1004,6 +1009,8 @@ impl App {
             Action::LoginBrowser => self.submit_login(true),
             Action::RecoverySubmit => self.submit_recovery(),
             Action::CloseModal => self.close_modal(),
+            Action::StartVerification => self.start_verification(),
+            Action::Verify(button) => self.verify_button(button),
         }
     }
 
@@ -1074,6 +1081,7 @@ impl App {
                 self.show_toast("Encrypted history stays locked until you enter the key");
             }
             Some(Modal::Emoji(_)) => self.modal = None,
+            Some(Modal::Verify(_)) => self.verify_escape(),
             None => {}
         }
     }
@@ -1168,6 +1176,7 @@ impl App {
                     _ => {}
                 }
             }
+            Some(Modal::Verify(_)) => self.on_verify_key(code),
             None => {}
         }
     }
@@ -1188,6 +1197,7 @@ impl App {
                 self.typing_sent = None;
                 self.user_id = None;
                 self.recovery_prompted = false;
+                self.verify = Default::default();
                 self.sync = Some(SyncStatus::Stopped);
                 self.open_modal(Modal::Login(LoginForm::new(reason)));
             }
@@ -1270,6 +1280,9 @@ impl App {
                 self.sync = Some(SyncStatus::Error(error.clone()));
                 self.show_toast(error);
             }
+            MatrixEvent::Security(security) => self.on_security(security),
+            MatrixEvent::Verification(update) => self.on_verification(update),
+            MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
         }
     }
 
@@ -1551,6 +1564,7 @@ impl App {
                 picker.set_query(query);
                 return;
             }
+            Some(Modal::Verify(_)) => return,
             None => {}
         }
         match self.focus {

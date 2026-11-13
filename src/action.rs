@@ -58,4 +58,9 @@ pub enum Action {
     RecoverySubmit,
     /// Esc on a popup.
     CloseModal,
+    /// Verify this device with another of the user's devices (or offer what fits:
+    /// the recovery key, or setting up cross-signing).
+    StartVerification,
+    /// A control of the device verification popup.
+    Verify(crate::verify::Button),
 }

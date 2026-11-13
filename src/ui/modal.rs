@@ -23,13 +23,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Login(form) => login(frame, app, area, form),
         Modal::Recovery(form) => recovery(frame, app, area, form),
         Modal::Emoji(picker) => emoji(frame, app, area, picker),
+        Modal::Verify(popup) => super::verify::draw(frame, app, area, popup),
     }
     app.modal = Some(modal);
 }
 
 /// Dims the screen, registers the backdrop and draws an empty popup frame.
 /// Returns the area inside the border, with one column of padding.
-fn popup(
+pub(super) fn popup(
     frame: &mut Frame,
     app: &mut App,
     area: Rect,
@@ -69,7 +70,7 @@ fn popup(
     )
 }
 
-fn centered(area: Rect, width: u16, height: u16) -> Option<Rect> {
+pub(super) fn centered(area: Rect, width: u16, height: u16) -> Option<Rect> {
     let width = width.min(area.width.saturating_sub(2));
     let height = height.min(area.height.saturating_sub(1));
     (width >= 20 && height >= 5).then(|| {
@@ -82,7 +83,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Option<Rect> {
     })
 }
 
-fn row(inner: Rect, n: u16) -> Rect {
+pub(super) fn row(inner: Rect, n: u16) -> Rect {
     if n < inner.height {
         Rect::new(inner.x, inner.y + n, inner.width, 1)
     } else {
@@ -128,7 +129,7 @@ fn field(
     focused.then_some(cursor)
 }
 
-fn button(frame: &mut Frame, theme: &Theme, rect: Rect, label: &str, focused: bool) {
+pub(super) fn button(frame: &mut Frame, theme: &Theme, rect: Rect, label: &str, focused: bool) {
     let style = if focused {
         theme.style(Role::Pill)
     } else {

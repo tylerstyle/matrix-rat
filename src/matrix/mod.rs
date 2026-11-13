@@ -4,6 +4,12 @@
 mod convert;
 mod rooms;
 mod session;
+mod verify;
+
+pub use verify::{
+    Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, VerifyCmd, VerifyStage,
+    VerifyUpdate,
+};
 
 use std::time::Duration;
 
@@ -89,6 +95,8 @@ pub enum MatrixCmd {
         room_id: String,
     },
     Shutdown,
+    /// Device verification and cross-signing.
+    Verification(VerifyCmd),
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -116,6 +124,7 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Join { room_id } => write!(f, "Join({room_id})"),
             Self::Leave { room_id } => write!(f, "Leave({room_id})"),
             Self::Shutdown => f.write_str("Shutdown"),
+            Self::Verification(command) => write!(f, "Verification({command:?})"),
         }
     }
 }
@@ -198,6 +207,12 @@ pub enum MatrixEvent {
     /// Something the user did could not be carried out.
     ActionFailed(String),
     Error(String),
+    /// The encryption status of this device changed.
+    Security(Security),
+    /// A device verification moved on.
+    Verification(VerifyUpdate),
+    /// Outcome of [`VerifyCmd::SetUp`].
+    CrossSigningSetUp(Result<(), String>),
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -234,6 +249,13 @@ impl std::fmt::Debug for MatrixEvent {
             }
             Self::ActionFailed(error) => write!(f, "ActionFailed({error})"),
             Self::Error(error) => write!(f, "Error({error})"),
+            Self::Security(security) => write!(f, "Security({security:?})"),
+            Self::Verification(update) => {
+                write!(f, "Verification({}, {:?})", update.flow, update.stage)
+            }
+            Self::CrossSigningSetUp(result) => {
+                write!(f, "CrossSigningSetUp(ok: {})", result.is_ok())
+            }
         }
     }
 }
@@ -352,7 +374,9 @@ impl Worker {
         loop {
             let request = match commands.recv().await? {
                 MatrixCmd::Shutdown => return None,
-                MatrixCmd::CancelLogin | MatrixCmd::Recover { .. } => continue,
+                MatrixCmd::CancelLogin | MatrixCmd::Recover { .. } | MatrixCmd::Verification(_) => {
+                    continue;
+                }
                 request => request,
             };
             let login = async {
@@ -431,8 +455,10 @@ impl Worker {
 
         let mut rooms: Vector<RoomListItem> = Vector::new();
         let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
+        let mut verifier = verify::Verifier::start(client, self.events.clone());
         let end = loop {
             tokio::select! {
+                incoming = verifier.next_incoming() => verifier.on_incoming(incoming).await,
                 Some(diffs) = entries.next() => {
                     for diff in diffs {
                         diff.apply(&mut rooms);
@@ -468,10 +494,12 @@ impl Worker {
                         });
                     }
                     Some(MatrixCmd::Shutdown) | None => break SessionEnd::Shutdown,
+                    Some(MatrixCmd::Verification(command)) => verifier.handle(command).await,
                     Some(command) => timelines.handle(command).await,
                 },
             }
         };
+        verifier.stop();
         timelines.close();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
