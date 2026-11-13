@@ -4,8 +4,7 @@ expression: "lines(&busy, 44).join(\"\\n\")"
 ---
 ────────────────── Today ───────────────────
 ● alice  12:00
-  Has anyone tried the new event cache yet?
-                                      ✓ erin
+  Has anyone tried the new event cache ye… ✓
 
 ● you  12:00
   Yes, startup is instant now.    ✓ B C F +9

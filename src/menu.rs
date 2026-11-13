@@ -24,9 +24,11 @@ pub enum Target {
         message: MessageRef,
         url: String,
     },
-    /// A room in the room list, by its id.
+    /// A room in the room list, by its id, and the section it was in when the menu
+    /// was made (what the menu offers depends on it).
     Room {
         id: String,
+        kind: RoomKind,
     },
     /// The draft of this room.
     Composer {
@@ -43,6 +45,21 @@ pub struct MessageRef {
     /// The message's stable id. Empty for demo data, which is found by `index`.
     pub id: String,
     pub index: usize,
+    /// What the menu's entries were chosen for. A message that is sent, fails or
+    /// is deleted keeps its id, but its menu is no longer the right one.
+    pub state: SendState,
+    pub kind: MsgKind,
+    /// The server has it (it has an event id).
+    pub on_server: bool,
+}
+
+impl MessageRef {
+    /// Whether `message` is still what the menu was made for.
+    pub fn fits(&self, message: &Message) -> bool {
+        self.state == message.state
+            && self.kind == message.kind
+            && self.on_server == matches!(message.item, Some(ItemRef::Event(_)))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +131,9 @@ pub fn key_hint(keys: &Keymap, context: Context, action: Action, first: bool) ->
         .unwrap_or("")
 }
 
+/// What an entry that asks first says once it was chosen.
+const ARMED: &str = "Again to delete";
+
 #[derive(Debug, Clone)]
 pub struct Menu {
     pub target: Target,
@@ -180,7 +200,7 @@ impl Menu {
     /// What the entry at `index` shows: its label, or the question once armed.
     pub fn label(&self, index: usize) -> &str {
         match self.items.get(index) {
-            Some(_) if self.armed == Some(index) => "Again to delete",
+            Some(_) if self.armed == Some(index) => ARMED,
             Some(item) => &item.label,
             None => "",
         }
@@ -238,9 +258,17 @@ impl Menu {
         let content = self
             .items
             .iter()
-            .map(|item| match width(&item.hint) {
-                0 => width(&item.label),
-                hint => width(&item.label) + 2 + hint,
+            .map(|item| {
+                let label = match width(&item.hint) {
+                    0 => width(&item.label),
+                    hint => width(&item.label) + 2 + hint,
+                };
+                // The question takes the label's place and must fit as well.
+                if item.confirm {
+                    label.max(width(ARMED))
+                } else {
+                    label
+                }
             })
             .max()
             .unwrap_or(0)
@@ -276,6 +304,8 @@ pub struct MessageFacts {
     pub in_thread: bool,
     /// A link to the message can be made.
     pub permalink: bool,
+    /// The user wants to see who has read what (the `read_markers` setting).
+    pub read_markers: bool,
 }
 
 /// The entries for a message. Empty for lines that are not messages.
@@ -360,7 +390,7 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
         };
         items.push(Item::action(keys, label, Timeline, Action::Save));
     }
-    if !message.read_by.is_empty() {
+    if facts.read_markers && !message.read_by.is_empty() {
         items.push(Item::new("Read by…", "", Run::ReadBy));
     }
     if message.own && !sent {
@@ -479,6 +509,13 @@ mod tests {
         Keymap::from_preset(crate::keymap::Preset::Default)
     }
 
+    fn room_target() -> Target {
+        Target::Room {
+            id: "r".into(),
+            kind: RoomKind::Room,
+        }
+    }
+
     fn labels(items: &[Item]) -> Vec<&str> {
         items.iter().map(|item| item.label.as_str()).collect()
     }
@@ -498,6 +535,7 @@ mod tests {
         connected: true,
         in_thread: false,
         permalink: true,
+        read_markers: true,
     };
 
     fn file() -> Attachment {
@@ -721,6 +759,12 @@ mod tests {
             total: 5,
         };
         assert!(labels(&message_items(&message, CONNECTED, &keys())).contains(&"Read by…"));
+        // Not wanted: not offered either.
+        let quiet = MessageFacts {
+            read_markers: false,
+            ..CONNECTED
+        };
+        assert!(!labels(&message_items(&message, quiet, &keys())).contains(&"Read by…"));
         let items = read_by_items(&message.read_by);
         assert_eq!(labels(&items), ["bob", "carol[2J", "and 3 more"]);
         assert_eq!(items[0].hint, "14:05");
@@ -783,12 +827,12 @@ mod tests {
             .map(|n| Item::new(&format!("Entry {n}"), "Ctrl-X", Run::OpenLink))
             .collect();
         let anchor = Anchor::at(anchor.0, anchor.1);
-        Menu::new(Target::Room { id: "r".into() }, "", items, anchor).unwrap()
+        Menu::new(room_target(), "", items, anchor).unwrap()
     }
 
     #[test]
     fn nothing_to_offer_is_no_menu() {
-        let target = Target::Room { id: "r".into() };
+        let target = room_target();
         assert!(Menu::new(target, "", Vec::new(), Anchor::at(0, 0)).is_none());
     }
 
@@ -850,7 +894,7 @@ mod tests {
             Item::new("React…", "", Run::Do(Action::React)),
             Item::new("Delete", "", Run::Do(Action::Delete)),
         ];
-        let target = Target::Room { id: "r".into() };
+        let target = room_target();
         let mut menu = Menu::new(target, "", items, Anchor::at(0, 0)).unwrap();
         menu.step(-1);
         assert_eq!(menu.selected, 2);
@@ -880,12 +924,55 @@ mod tests {
         let unsent = message_items(&failed, CONNECTED, &keys());
         assert!(unsent.iter().all(|item| !item.confirm));
 
-        let target = Target::Room { id: "r".into() };
+        let target = room_target();
         let mut menu = Menu::new(target, "", items, Anchor::at(0, 0)).unwrap();
         assert!(menu.confirmed(0));
         assert!(!menu.confirmed(delete));
         assert_eq!(menu.selected, delete);
         assert_eq!(menu.label(delete), "Again to delete");
+        // The question fits whatever else is in the menu, also without a key.
+        let mut bare = keys();
+        for action in [
+            Action::Delete,
+            Action::Reply,
+            Action::Copy,
+            Action::OpenThread,
+        ] {
+            bare.unbind_action(Context::Timeline, action).unwrap();
+        }
+        let mut short = text(true);
+        short.item = None;
+        let facts = MessageFacts {
+            in_thread: true,
+            ..MessageFacts::default()
+        };
+        let items = message_items(&short, facts, &bare);
+        let narrow = Menu::new(room_target(), "", items, Anchor::at(0, 0)).unwrap();
+        let (rect, _) = narrow.place(Rect::new(0, 0, 80, 24)).unwrap();
+        assert_eq!(rect.width as usize, width("Again to delete") + 4);
+        // A message that changed is not what its menu was made for.
+        let mut wanted = MessageRef {
+            room_id: "!r".into(),
+            thread: None,
+            id: "m1".into(),
+            index: 0,
+            state: SendState::Sending,
+            kind: MsgKind::Text,
+            on_server: false,
+        };
+        let mut message = text(true);
+        message.item = Some(ItemRef::Transaction("t".into()));
+        message.state = SendState::Sending;
+        assert!(wanted.fits(&message));
+        message.state = SendState::Sent;
+        assert!(!wanted.fits(&message));
+        wanted.state = SendState::Sent;
+        message.item = Some(ItemRef::Event("$e".into()));
+        assert!(!wanted.fits(&message));
+        wanted.on_server = true;
+        assert!(wanted.fits(&message));
+        message.kind = MsgKind::Redacted;
+        assert!(!wanted.fits(&message));
         assert!(menu.confirmed(delete));
         // Moving away takes the question back.
         menu.armed = None;

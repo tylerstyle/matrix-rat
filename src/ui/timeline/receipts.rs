@@ -4,8 +4,8 @@
 //! They sit in the free space of a row that is there anyway, so a receipt that moves
 //! from one message to the next (which they do all the time) changes no row count
 //! and nothing on screen jumps. Where there is little room the marker shrinks
-//! (fewer initials, then just the tick). Only when the row is full to the last
-//! columns does the marker get a row of its own.
+//! (fewer initials, then just the tick), and on a row that is full to the last
+//! columns the end of the text gives way to it. No row is ever added.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -18,28 +18,31 @@ use crate::ui::sidebar::initial;
 
 /// Columns kept free between a message's text and its marker.
 const GAP: usize = 2;
+/// Narrowest view in which the end of a full row gives way to a marker.
+const CUT_MIN: usize = 12;
 /// Initials shown at most; the rest is counted.
 const TILES: usize = 3;
 /// Longest name spelled out, in columns.
 const NAME: usize = 16;
 
 /// Adds the read markers of `room`'s messages to their rows.
-pub(super) fn add(rows: Vec<Row>, room: &Room, max_width: usize, theme: &Theme) -> Vec<Row> {
-    if room.messages.iter().all(|m| m.read_by.is_empty()) {
-        return rows;
-    }
+///
+/// No row is ever added: how many rows a message takes does not depend on who has
+/// read it, so nothing moves when receipts do. Where the last row is full to the
+/// last columns, its end gives way to the smallest marker ("… ✓") for as long as
+/// a receipt sits there.
+pub(super) fn add(mut rows: Vec<Row>, room: &Room, max_width: usize, theme: &Theme) -> Vec<Row> {
     let direct = room.kind == RoomKind::Person;
-    let mut out: Vec<Row> = Vec::with_capacity(rows.len() + 2);
-    let mut rows = rows.into_iter().peekable();
-    while let Some(row) = rows.next() {
-        let source = row.source;
-        let last_of_message = rows.peek().is_none_or(|next| next.source != source);
-        out.push(row);
+    for at in 0..rows.len() {
+        let source = rows[at].source;
+        if rows.get(at + 1).is_some_and(|next| next.source == source) {
+            continue;
+        }
         let read_by = match room.messages.get(source) {
-            Some(message) if last_of_message && !message.read_by.is_empty() => &message.read_by,
+            Some(message) if !message.read_by.is_empty() => &message.read_by,
             _ => continue,
         };
-        let row = out.last_mut().expect("just pushed");
+        let row = &mut rows[at];
         // A picture is painted over its rows: its width counts as taken.
         let text = row.line.width();
         let taken = match row.image {
@@ -52,22 +55,48 @@ pub(super) fn add(rows: Vec<Row>, room: &Room, max_width: usize, theme: &Theme) 
             let pad = max_width - text - marker_width;
             row.line.spans.push(Span::raw(" ".repeat(pad)));
             row.line.spans.extend(spans);
-        } else if let Some(spans) = marker(read_by, direct, theme, max_width) {
-            // No room at all on the message's last row.
-            let marker_width: usize = spans.iter().map(|span| width(&span.content)).sum();
-            let mut line = vec![Span::raw(" ".repeat(max_width - marker_width))];
-            line.extend(spans);
-            let msg = row.msg;
-            out.push(Row {
-                line: Line::from(line),
-                msg,
-                source,
-                hits: Vec::new(),
-                image: None,
-            });
+        } else if row.image.is_none() && max_width >= CUT_MIN {
+            // "… ✓" over the end of the text. (Nothing can be written over a
+            // picture; who read that is in the menu.)
+            cut(&mut row.line, max_width - 3);
+            let muted = Style {
+                fg: theme.style(Role::Muted).fg,
+                ..Style::new()
+            };
+            let pad = max_width - 3 - row.line.width();
+            row.line
+                .spans
+                .push(Span::styled(format!("…{} ✓", " ".repeat(pad)), muted));
         }
     }
-    out
+    rows
+}
+
+/// Shortens `line` to at most `columns` columns, cutting between characters.
+fn cut(line: &mut Line<'static>, columns: usize) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut left = columns;
+    let mut keep = 0;
+    for span in &mut line.spans {
+        let span_width = width(&span.content);
+        if span_width <= left {
+            left -= span_width;
+            keep += 1;
+            continue;
+        }
+        let mut text = String::new();
+        for grapheme in span.content.graphemes(true) {
+            if width(grapheme) > left {
+                break;
+            }
+            left -= width(grapheme);
+            text.push_str(grapheme);
+        }
+        span.content = text.into();
+        keep += 1;
+        break;
+    }
+    line.spans.truncate(keep);
 }
 
 /// The marker in the widest form that fits into `room` columns, if any does.
@@ -81,6 +110,9 @@ fn marker(
     theme: &Theme,
     room: usize,
 ) -> Option<Vec<Span<'static>>> {
+    if read_by.is_empty() {
+        return None;
+    }
     let muted = Style {
         fg: theme.style(Role::Muted).fg,
         ..Style::new()
@@ -270,23 +302,53 @@ mod tests {
                 }
             }
         }
-        // Rows that are full to the edge: the marker takes a row of its own, on
-        // either message the same, so moving between them changes nothing either.
+        // Rows that are full to the edge: the end of the text gives way to the
+        // marker, and still no row is added or moved.
         let full = "x".repeat(38);
         let base = room(
             RoomKind::Room,
-            vec![message("you", &full), message("you", &full)],
+            vec![
+                message("you", &full),
+                message("alice", "short"),
+                message("you", &full),
+            ],
         );
-        let bare = lines(&base, 40).len();
-        let mut counts = Vec::new();
-        for at in 0..2 {
+        let bare = lines(&base, 40);
+        for at in 0..3 {
             let mut moved = base.clone();
             moved.messages[at].read_by = readers(&["bob"], 1);
             let rows = lines(&moved, 40);
-            assert!(rows.iter().any(|row| row.trim() == "✓ bob"), "{rows:?}");
-            counts.push(rows.len());
+            assert_eq!(rows.len(), bare.len(), "{at}");
+            let changed: Vec<usize> = (0..rows.len()).filter(|n| rows[*n] != bare[*n]).collect();
+            assert_eq!(changed.len(), 1, "{at}: {rows:?}");
+            let row = &rows[changed[0]];
+            assert_eq!(width(row), 40, "{row:?}");
+            if at == 1 {
+                assert!(row.ends_with("✓ bob"), "{row:?}");
+            } else {
+                assert_eq!(*row, format!("  {}… ✓", "x".repeat(35)));
+            }
         }
-        assert_eq!(counts, [bare + 1, bare + 1]);
+        // Wide characters are cut whole, and a thread line gives way as well.
+        let mut wide = room(RoomKind::Room, vec![message("you", &"日".repeat(19))]);
+        wide.messages[0].read_by = readers(&["bob"], 1);
+        let rows = lines(&wide, 40);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2], format!("  {}…  ✓", "日".repeat(17)));
+        wide.messages[0].body = "short".into();
+        wide.messages[0].thread = Some(crate::model::ThreadSummary {
+            replies: 3,
+            latest: Some(("carol".into(), "a long answer ".repeat(5))),
+            unread: false,
+            demo_replies: Vec::new(),
+        });
+        let rows = lines(&wide, 40);
+        assert_eq!(rows.len(), 4);
+        assert!(
+            rows[3].starts_with("  💬 3 replies") && rows[3].ends_with("… ✓"),
+            "{rows:?}"
+        );
+        assert_eq!(width(&rows[3]), 40);
     }
 
     #[test]

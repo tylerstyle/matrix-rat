@@ -199,6 +199,8 @@ impl App {
                     match (roots.pop(), room.messages.get_mut(view.root_index)) {
                         (Some(mut edited), Some(first)) => {
                             edited.id = std::mem::take(&mut first.id);
+                            // The room's receipts were kept out of the thread.
+                            edited.read_by = std::mem::take(&mut first.read_by);
                             edited.thread = ThreadSummary::of(replies);
                             *first = edited;
                         }
