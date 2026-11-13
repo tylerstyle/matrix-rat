@@ -1,25 +1,19 @@
 //! The app's side of device verification: actions, popup keys and worker events.
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::App;
 use crate::matrix::{
-    Answer, DeviceTrust, Identity, MatrixCmd, RecoveryStatus, Security, VerifyCmd, VerifyStage,
-    VerifyUpdate,
+    Answer, DeviceTrust, Identity, MatrixCmd, RecoveryStatus, Security, SetUpOutcome, VerifyCmd,
+    VerifyStage, VerifyUpdate,
 };
 use crate::modal::{Modal, RecoveryForm};
-use crate::verify::{Button, PopupKind, VerifyPopup};
+use crate::verify::{Button, PopupKind, VerifyPopup, stuck};
 
 impl App {
     /// The verification popup is showing the running verification.
     fn flow_popup_open(&self) -> bool {
-        matches!(
-            self.modal,
-            Some(Modal::Verify(VerifyPopup {
-                kind: PopupKind::Flow,
-                ..
-            }))
-        )
+        matches!(&self.modal, Some(Modal::Verify(popup)) if popup.kind == PopupKind::Flow)
     }
 
     /// Whether a verification may take the screen now. It makes way only for the login
@@ -32,6 +26,13 @@ impl App {
         }
     }
 
+    /// News from the worker belongs to the session that is logged in. Between a logout
+    /// (or an expired session) and the next login, whatever the old session still had
+    /// queued is dropped.
+    fn session_live(&self) -> bool {
+        self.user_id.is_some()
+    }
+
     /// "Verify this device": asks the user's other devices, or offers what fits better.
     pub(super) fn start_verification(&mut self) {
         if self.matrix.is_none() {
@@ -39,14 +40,17 @@ impl App {
         }
         if self.verify.active().is_some() {
             if self.may_show_verification() {
+                self.verify.deferred = false;
                 self.open_modal(Modal::Verify(VerifyPopup::flow()));
             }
             return;
         }
         let security = self.verify.security.unwrap_or_default();
         match (security.identity, security.device) {
-            (_, DeviceTrust::Verified) => self.open_modal(Modal::Verify(VerifyPopup::status())),
             (Identity::Missing, _) => self.open_modal(Modal::Verify(VerifyPopup::set_up())),
+            (_, DeviceTrust::Verified) => self.open_modal(Modal::Verify(VerifyPopup::status())),
+            // Nothing can vouch for this device: explain instead of asking nobody.
+            _ if stuck(&security) => self.open_modal(Modal::Verify(VerifyPopup::status())),
             _ if !security.other_devices && security.recovery == RecoveryStatus::NeedsKey => {
                 // No device to verify with, but the recovery key does the same job.
                 self.open_modal(Modal::Recovery(RecoveryForm::default()));
@@ -58,65 +62,82 @@ impl App {
         }
     }
 
-    /// A button of the verification popup, clicked or pressed.
+    /// A button of the verification popup, clicked or chosen with Enter. It only counts
+    /// if the popup shows it right now, and (but for Close) not in the first moment
+    /// after the buttons appeared or changed.
     pub(super) fn verify_button(&mut self, button: Button) {
+        let allowed = match (&self.modal, button) {
+            // From the status line.
+            (_, Button::Show) => true,
+            (Some(Modal::Verify(popup)), _) => {
+                popup.buttons(&self.verify).contains(&button)
+                    && (button == Button::Close || popup.armed())
+            }
+            _ => false,
+        };
+        if allowed {
+            self.press(button);
+        }
+    }
+
+    fn press(&mut self, button: Button) {
         let flow = self.verify.active().map(|f| f.flow);
         let answer =
             |answer| flow.map(|flow| MatrixCmd::Verification(VerifyCmd::Answer { flow, answer }));
-        match button {
-            Button::Accept => {
-                if let Some(command) = answer(Answer::Accept) {
-                    self.send_matrix(command);
-                }
-            }
-            Button::Start => {
-                if let Some(command) = answer(Answer::Start) {
-                    self.send_matrix(command);
-                }
-            }
-            Button::Match => {
-                if let Some(command) = answer(Answer::Match) {
-                    self.send_matrix(command);
-                }
-            }
+        let send = match button {
+            Button::Accept => answer(Answer::Accept),
+            Button::Start => answer(Answer::Start),
+            Button::Match => answer(Answer::Match),
             // The other side hears about it; the popup explains what it means.
-            Button::Mismatch => {
-                if let Some(command) = answer(Answer::Mismatch) {
-                    self.send_matrix(command);
-                }
-            }
+            Button::Mismatch => answer(Answer::Mismatch),
+            // Withdraws the unanswered request and sends a new one; same popup.
+            Button::Retry => answer(Answer::Retry),
             // The user is done with it: tell the other side and get out of the way.
             Button::Decline | Button::Cancel => {
-                if let Some(command) = answer(Answer::Cancel) {
-                    self.send_matrix(command);
-                }
+                let command = answer(Answer::Cancel);
                 self.verify.dismissed = flow;
                 self.verify.flow = None;
                 self.close_verify_popup();
+                command
             }
             Button::Close => {
                 if self.verify.active().is_none() {
                     self.verify.flow = None;
                 }
                 self.close_verify_popup();
+                None
             }
             Button::Show => {
                 if self.verify.flow.is_some() && self.may_show_verification() {
+                    self.verify.deferred = false;
                     self.open_modal(Modal::Verify(VerifyPopup::flow()));
                 }
+                None
             }
-            Button::Retry => {
-                // The old request's last words are not shown; the new one takes its place.
-                self.verify.dismissed = flow;
-                self.send_matrix(MatrixCmd::Verification(VerifyCmd::Request));
-            }
-            Button::SetUp => {
-                if !self.verify.setting_up {
-                    self.verify.setting_up = true;
-                    self.send_matrix(MatrixCmd::Verification(VerifyCmd::SetUp { password: None }));
-                }
-            }
+            Button::SetUp => self.submit_set_up(),
+        };
+        if let Some(command) = send {
+            self.send_matrix(command);
         }
+    }
+
+    /// Sends the set-up request, with the password if the field is shown. The password
+    /// leaves the popup as it is sent.
+    fn submit_set_up(&mut self) -> Option<MatrixCmd> {
+        if self.verify.setting_up {
+            return None;
+        }
+        let Some(Modal::Verify(popup)) = &mut self.modal else {
+            return None;
+        };
+        let password = match &mut popup.password {
+            Some(typed) if typed.is_empty() => return None,
+            Some(typed) => Some(std::mem::take(typed)),
+            None => None,
+        };
+        popup.password_error = None;
+        self.verify.setting_up = true;
+        Some(MatrixCmd::Verification(VerifyCmd::SetUp { password }))
     }
 
     fn close_verify_popup(&mut self) {
@@ -125,20 +146,47 @@ impl App {
         }
     }
 
-    pub(super) fn on_verify_key(&mut self, code: KeyCode) {
+    pub(super) fn on_verify_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         let Some(Modal::Verify(popup)) = &mut self.modal else {
             return;
         };
         let state = &self.verify;
+        let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let typing = popup.field_focused && popup.has_field(state);
         let pressed = match code {
-            KeyCode::Esc => Some(popup.escape(state)),
-            KeyCode::Enter | KeyCode::Char(' ') => popup.focused(state),
-            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+            KeyCode::Esc => {
+                let button = popup.escape(state);
+                return self.press(button);
+            }
+            // Space never chooses a button: it is too easy to type by accident.
+            KeyCode::Enter if typing => Some(Button::SetUp),
+            KeyCode::Enter => popup.focused(state),
+            KeyCode::Tab | KeyCode::Down => {
                 popup.step(state, 1);
                 None
             }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+            KeyCode::BackTab | KeyCode::Up => {
                 popup.step(state, -1);
+                None
+            }
+            KeyCode::Right if !typing => {
+                popup.step(state, 1);
+                None
+            }
+            KeyCode::Left if !typing => {
+                popup.step(state, -1);
+                None
+            }
+            KeyCode::Backspace if typing => {
+                if let Some(password) = &mut popup.password {
+                    password.pop();
+                }
+                None
+            }
+            KeyCode::Char(c) if typing && plain => {
+                if let Some(password) = &mut popup.password {
+                    password.push(c);
+                }
                 None
             }
             _ => None,
@@ -148,15 +196,43 @@ impl App {
         }
     }
 
+    pub(super) fn on_verify_paste(&mut self, text: &str) {
+        if let Some(Modal::Verify(popup)) = &mut self.modal
+            && popup.field_focused
+            && popup.has_field(&self.verify)
+            && let Some(password) = &mut popup.password
+        {
+            password.push_str(text);
+        }
+    }
+
     /// Esc on the popup, from wherever it comes.
     pub(super) fn verify_escape(&mut self) {
         if let Some(Modal::Verify(popup)) = &self.modal {
             let button = popup.escape(&self.verify);
-            self.verify_button(button);
+            self.press(button);
+        }
+    }
+
+    /// Called a few times a second: opens a request that waited for the user to stop
+    /// typing.
+    pub(super) fn verify_tick(&mut self) {
+        if !self.verify.deferred {
+            return;
+        }
+        if self.verify.active().is_none() {
+            self.verify.deferred = false;
+        } else if !self.verify.typing() && self.may_show_verification() {
+            self.verify.deferred = false;
+            self.open_modal(Modal::Verify(VerifyPopup::flow()));
+            self.dirty = true;
         }
     }
 
     pub(super) fn on_security(&mut self, security: Security) {
+        if !self.session_live() {
+            return;
+        }
         let was = self.verify.security;
         self.verify.security = Some(security);
         // Say so when this device becomes verified after it was not (not at startup).
@@ -173,21 +249,18 @@ impl App {
             self.modal = None;
         }
         if security.identity == Identity::Present
-            && matches!(
-                self.modal,
-                Some(Modal::Verify(VerifyPopup {
-                    kind: PopupKind::SetUp,
-                    ..
-                }))
-            )
             && !self.verify.setting_up
+            && matches!(&self.modal, Some(Modal::Verify(popup)) if popup.kind == PopupKind::SetUp)
         {
             self.modal = None;
         }
     }
 
     pub(super) fn on_verification(&mut self, update: VerifyUpdate) {
-        if self.verify.dismissed == Some(update.flow) || update.flow < self.verify.newest {
+        if !self.session_live()
+            || self.verify.dismissed == Some(update.flow)
+            || update.flow < self.verify.newest
+        {
             return;
         }
         self.verify.newest = update.flow;
@@ -208,35 +281,61 @@ impl App {
             VerifyStage::Cancelled { reason } => Some(format!("Verification ended: {reason}")),
             _ => None,
         };
+        let incoming = update.stage == VerifyStage::Requested;
         self.verify.flow = Some(update);
 
         if let Some(Modal::Verify(popup)) = &mut self.modal
             && popup.kind == PopupKind::Flow
         {
             if stage_changed {
-                popup.focus = 0;
+                // New buttons: no focus carried over, and a moment before they count.
+                popup.rearm();
+                popup.compare_shown = false;
             }
             return;
         }
         if final_stage {
             // Nobody is looking at it: a toast is enough.
             self.verify.flow = None;
+            self.verify.deferred = false;
             if let Some(summary) = summary {
                 self.show_toast(summary);
             }
-        } else if !same_flow && self.may_show_verification() {
-            self.open_modal(Modal::Verify(VerifyPopup::flow()));
+        } else if !same_flow {
+            if incoming && self.verify.typing() {
+                // Not in the middle of someone's sentence: the status line shows it,
+                // and the popup opens once they pause.
+                self.verify.deferred = true;
+            } else if self.may_show_verification() {
+                self.open_modal(Modal::Verify(VerifyPopup::flow()));
+            }
         }
     }
 
-    pub(super) fn on_cross_signing_set_up(&mut self, result: Result<(), String>) {
+    pub(super) fn on_cross_signing_set_up(&mut self, outcome: SetUpOutcome) {
+        if !self.session_live() {
+            return;
+        }
         self.verify.setting_up = false;
-        match result {
-            Ok(()) => {
+        match outcome {
+            SetUpOutcome::Done => {
                 self.close_verify_popup();
                 self.show_toast("Encryption is set up for your account");
             }
-            Err(error) => {
+            SetUpOutcome::NeedsPassword { rejected } => {
+                match &mut self.modal {
+                    Some(Modal::Verify(popup)) if popup.kind == PopupKind::SetUp => {
+                        popup.password = Some(String::new());
+                        popup.field_focused = true;
+                        popup.password_error =
+                            rejected.then_some("That password was not accepted.");
+                        popup.rearm();
+                    }
+                    // The popup was closed meanwhile.
+                    _ => self.show_toast("Setting up encryption needs your password"),
+                }
+            }
+            SetUpOutcome::Failed(error) => {
                 self.close_verify_popup();
                 self.show_toast(error);
             }
@@ -246,15 +345,16 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        Event, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
+    use std::time::Instant;
+
+    use crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::matrix::{MatrixEvent, MatrixHandle, SasEmoji};
     use crate::ui;
+    use crate::verify::{GUARD, TYPING_PAUSE};
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -277,6 +377,7 @@ mod tests {
         let mut app = App::demo();
         let (handle, commands) = MatrixHandle::for_test();
         app.matrix = Some(handle);
+        app.user_id = Some("@me:example.org".into());
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         (app, terminal, commands)
@@ -285,6 +386,18 @@ mod tests {
     fn redraw(app: &mut App, terminal: &mut Terminal<TestBackend>) -> String {
         terminal.draw(|f| ui::draw(f, app)).unwrap();
         format!("{}", terminal.backend())
+    }
+
+    /// Lets the guard time of the popup's buttons pass.
+    fn wait_guard(app: &mut App) {
+        if let Some(Modal::Verify(popup)) = &mut app.modal {
+            popup.armed_at = Instant::now().checked_sub(GUARD).unwrap();
+        }
+    }
+
+    /// The user last typed long enough ago.
+    fn stop_typing(app: &mut App) {
+        app.verify.last_key = Instant::now().checked_sub(TYPING_PAUSE);
     }
 
     fn drain(commands: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>) -> Vec<String> {
@@ -341,14 +454,28 @@ mod tests {
         }
     }
 
+    fn set_up_popup(app: &App) -> &VerifyPopup {
+        match &app.modal {
+            Some(Modal::Verify(popup)) if popup.kind == PopupKind::SetUp => popup,
+            other => panic!("not the set-up popup: {other:?}"),
+        }
+    }
+
     #[test]
     fn incoming_request_full_flow_by_keyboard() {
         let (mut app, mut terminal, mut commands) = connected();
+        stop_typing(&mut app);
         app.on_matrix(update(1, VerifyStage::Requested));
         let screen = redraw(&mut app, &mut terminal);
         find(&screen, "Phone (ABCDEFGH)");
         find(&screen, "Accept");
-        // Enter presses the focused button: Accept.
+        // Right after it appeared, Enter counts for nothing; later it presses the
+        // focused button, which is Decline unless the user picks Accept.
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).is_empty());
+        assert!(matches!(app.modal, Some(Modal::Verify(_))));
+        wait_guard(&mut app);
+        app.on_event(key(KeyCode::Left));
         app.on_event(key(KeyCode::Enter));
         assert_eq!(drain(&mut commands), ["Verification(Answer(1, Accept))"]);
         app.on_matrix(update(1, VerifyStage::Starting));
@@ -370,9 +497,14 @@ mod tests {
         assert_eq!(emoji_row + 1, dog_row);
         assert!(dog.abs_diff(dog_emoji) <= 2);
         assert!(unicorn > dog);
-        // Tab moves to "They don't match", Shift-Tab back; Enter confirms.
-        app.on_event(key(KeyCode::Tab));
+        // The answers have just appeared: a quick Enter does nothing.
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).is_empty());
+        wait_guard(&mut app);
+        // The focus starts on "They don't match"; Space never answers.
         app.on_event(key(KeyCode::BackTab));
+        app.on_event(key(KeyCode::Char(' ')));
+        assert!(drain(&mut commands).is_empty());
         app.on_event(key(KeyCode::Enter));
         assert_eq!(drain(&mut commands), ["Verification(Answer(1, Match))"]);
         app.on_matrix(update(1, VerifyStage::Confirmed));
@@ -381,11 +513,74 @@ mod tests {
         app.on_matrix(update(1, VerifyStage::Done));
         let screen = redraw(&mut app, &mut terminal);
         find(&screen, "verified");
-        // Esc closes a finished verification without sending anything.
-        app.on_event(key(KeyCode::Esc));
+        // Enter closes a finished verification at once, without sending anything.
+        app.on_event(key(KeyCode::Enter));
         assert!(app.modal.is_none());
         assert!(app.verify.flow.is_none());
         assert!(drain(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn a_request_does_not_interrupt_typing() {
+        let (mut app, mut terminal, mut commands) = connected();
+        // The user is typing when the request arrives: no popup takes the keys.
+        for c in "hello".chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        app.on_matrix(update(1, VerifyStage::Requested));
+        assert!(app.modal.is_none());
+        app.on_event(key(KeyCode::Char(' ')));
+        app.on_event(key(KeyCode::Enter));
+        assert!(
+            drain(&mut commands)
+                .iter()
+                .all(|c| !c.contains("Verification"))
+        );
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "verification request");
+        // Still typing: it keeps waiting.
+        app.on_tick();
+        assert!(app.modal.is_none());
+        // A pause: now it opens, and even so the next keys need the guard time to pass.
+        stop_typing(&mut app);
+        app.on_tick();
+        assert!(matches!(app.modal, Some(Modal::Verify(_))));
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn they_match_needs_every_emoji_on_screen() {
+        let (mut app, _terminal, mut commands) = connected();
+        app.on_matrix(update(1, compare()));
+        // Too short a window: the comparison cannot be shown in full.
+        let mut short = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        let screen = redraw(&mut app, &mut short);
+        find(&screen, "too small");
+        assert!(!screen.contains("They match"), "{screen}");
+        assert!(!screen.contains("Elephant"), "{screen}");
+        wait_guard(&mut app);
+        app.perform(crate::action::Action::Verify(Button::Match));
+        assert!(drain(&mut commands).is_empty());
+        // Too narrow for the popup at all: the same.
+        let mut narrow = Terminal::new(TestBackend::new(20, 40)).unwrap();
+        let screen = redraw(&mut app, &mut narrow);
+        assert!(!screen.contains("They match"), "{screen}");
+        wait_guard(&mut app);
+        app.perform(crate::action::Action::Verify(Button::Match));
+        assert!(drain(&mut commands).is_empty());
+        // Big enough: the answers appear, after the guard time.
+        let mut big = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let screen = redraw(&mut app, &mut big);
+        find(&screen, "They match");
+        app.perform(crate::action::Action::Verify(Button::Match));
+        assert!(drain(&mut commands).is_empty());
+        wait_guard(&mut app);
+        app.perform(crate::action::Action::Verify(Button::Match));
+        assert_eq!(drain(&mut commands), ["Verification(Answer(1, Match))"]);
+        // Shrunk again: gone again.
+        let screen = redraw(&mut app, &mut short);
+        assert!(!screen.contains("They match"), "{screen}");
     }
 
     #[test]
@@ -393,6 +588,7 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected();
         app.on_matrix(update(4, VerifyStage::Requested));
         redraw(&mut app, &mut terminal);
+        // Esc needs no guard: it only ever says no.
         app.on_event(key(KeyCode::Esc));
         assert_eq!(drain(&mut commands), ["Verification(Answer(4, Cancel))"]);
         assert!(app.modal.is_none());
@@ -411,11 +607,15 @@ mod tests {
     }
 
     #[test]
-    fn buttons_work_by_mouse() {
+    fn buttons_work_by_mouse_after_the_guard_time() {
         let (mut app, mut terminal, mut commands) = connected();
         app.on_matrix(update(2, compare()));
         let screen = redraw(&mut app, &mut terminal);
         let (col, row) = find(&screen, "They don't match");
+        // A click meant for what was there a moment ago does not count.
+        app.on_event(click(col + 2, row));
+        assert!(drain(&mut commands).is_empty());
+        wait_guard(&mut app);
         app.on_event(click(col + 2, row));
         assert_eq!(drain(&mut commands), ["Verification(Answer(2, Mismatch))"]);
         app.on_matrix(update(
@@ -475,31 +675,21 @@ mod tests {
         assert!(matches!(app.modal, Some(Modal::Recovery(_))));
         assert!(drain(&mut commands).is_empty());
         app.modal = None;
-        // No cross-signing yet: offer to set it up, and do so only when asked.
+        // Neither a device nor a recovery key: explain, do not ask nobody.
         app.on_matrix(MatrixEvent::Security(Security {
-            identity: Identity::Missing,
+            other_devices: false,
+            recovery: RecoveryStatus::NotSetUp,
             ..unverified()
         }));
-        app.perform(crate::action::Action::StartVerification);
-        assert!(matches!(
-            app.modal,
-            Some(Modal::Verify(VerifyPopup {
-                kind: PopupKind::SetUp,
-                ..
-            }))
-        ));
-        assert!(drain(&mut commands).is_empty());
-        app.on_event(key(KeyCode::Enter));
         assert_eq!(
-            drain(&mut commands),
-            ["Verification(SetUp(password: false))"]
+            app.setting_value(crate::modal::Setting::Encryption),
+            "not verified, Enter for details"
         );
-        // Pressing again while it runs sends nothing more.
-        app.on_event(key(KeyCode::Enter));
+        app.perform(crate::action::Action::StartVerification);
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "No other device of yours can vouch");
         assert!(drain(&mut commands).is_empty());
-        app.on_matrix(MatrixEvent::CrossSigningSetUp(Ok(())));
-        assert!(app.modal.is_none());
-        assert!(!app.verify.setting_up);
+        app.on_event(key(KeyCode::Esc));
         // Verified already: nothing to do but show the status.
         app.on_matrix(MatrixEvent::Security(Security {
             device: DeviceTrust::Verified,
@@ -517,41 +707,129 @@ mod tests {
     }
 
     #[test]
-    fn asking_again_replaces_the_request_and_late_news_is_dropped() {
+    fn set_up_asks_for_the_password_only_when_the_server_wants_it() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::Security(Security {
+            identity: Identity::Missing,
+            ..unverified()
+        }));
+        assert_eq!(
+            app.setting_value(crate::modal::Setting::Encryption),
+            "not set up, Enter to set up"
+        );
+        app.perform(crate::action::Action::StartVerification);
+        assert_eq!(set_up_popup(&app).kind, PopupKind::SetUp);
+        assert!(drain(&mut commands).is_empty());
+        // Enter alone closes (the focus is on Close); Set up must be chosen.
+        wait_guard(&mut app);
+        app.on_event(key(KeyCode::Left));
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(
+            drain(&mut commands),
+            ["Verification(SetUp(password: false))"]
+        );
+        // Pressing again while it runs sends nothing more.
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).is_empty());
+
+        // The server wants the password: a masked field appears, with the focus.
+        app.on_matrix(MatrixEvent::CrossSigningSetUp(
+            SetUpOutcome::NeedsPassword { rejected: false },
+        ));
+        for c in "hunter".chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        app.on_paste("2");
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "asks for your account password");
+        find(&screen, "•••••••");
+        assert!(!screen.contains("hunter"));
+        assert!(!format!("{:?}", app.modal).contains("hunter"));
+        wait_guard(&mut app);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(
+            drain(&mut commands),
+            ["Verification(SetUp(password: true))"]
+        );
+        // Gone from the popup once sent.
+        assert_eq!(set_up_popup(&app).password.as_deref(), Some(""));
+
+        // Wrong: say so, let the user try again; Ctrl-U clears what was typed.
+        app.on_matrix(MatrixEvent::CrossSigningSetUp(
+            SetUpOutcome::NeedsPassword { rejected: true },
+        ));
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "not accepted");
+        app.on_event(key(KeyCode::Char('x')));
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(set_up_popup(&app).password.as_deref(), Some(""));
+        // An empty password is not sent.
+        wait_guard(&mut app);
+        app.on_event(key(KeyCode::Enter));
+        assert!(drain(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Char('y')));
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(
+            drain(&mut commands),
+            ["Verification(SetUp(password: true))"]
+        );
+        app.on_matrix(MatrixEvent::CrossSigningSetUp(SetUpOutcome::Done));
+        assert!(app.modal.is_none());
+        assert!(!app.verify.setting_up);
+    }
+
+    #[test]
+    fn asking_again_keeps_the_same_verification() {
         let (mut app, mut terminal, mut commands) = connected();
         app.on_matrix(MatrixEvent::Security(unverified()));
         app.perform(crate::action::Action::StartVerification);
         assert_eq!(drain(&mut commands), ["Verification(Request)"]);
         app.on_matrix(update(1, VerifyStage::Waiting));
         let screen = redraw(&mut app, &mut terminal);
-        find(&screen, "Ask again");
-        app.on_event(key(KeyCode::Enter));
-        assert_eq!(drain(&mut commands), ["Verification(Request)"]);
-        // The old request ends (cancelled by us): not shown.
-        app.on_matrix(update(
-            1,
-            VerifyStage::Cancelled {
-                reason: "You cancelled the verification".into(),
-            },
-        ));
-        assert_eq!(
-            app.verify.flow.as_ref().unwrap().stage,
-            VerifyStage::Waiting
-        );
+        let (col, row) = find(&screen, "Ask again");
+        wait_guard(&mut app);
+        app.on_event(click(col + 2, row));
+        assert_eq!(drain(&mut commands), ["Verification(Answer(1, Retry))"]);
+        assert!(matches!(app.modal, Some(Modal::Verify(_))));
+        app.on_matrix(update(1, compare()));
+        // Anything from an older verification that arrives late changes nothing.
         app.on_matrix(update(2, VerifyStage::Waiting));
-        app.on_matrix(update(2, compare()));
-        // Anything from the first request that arrives late changes nothing.
         app.on_matrix(update(1, VerifyStage::Done));
         let flow = app.verify.flow.as_ref().unwrap();
         assert_eq!(flow.flow, 2);
-        assert!(matches!(flow.stage, VerifyStage::Compare { .. }));
-        assert!(matches!(app.modal, Some(Modal::Verify(_))));
+    }
+
+    #[test]
+    fn news_from_an_ended_session_is_dropped() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::Security(unverified()));
+        // Logging out: what the old session still had queued must not come back.
+        app.reset_session();
+        app.on_matrix(update(1, VerifyStage::Requested));
+        app.on_matrix(MatrixEvent::Security(unverified()));
+        app.on_matrix(MatrixEvent::CrossSigningSetUp(SetUpOutcome::Done));
+        assert!(app.modal.is_none());
+        assert!(app.verify.flow.is_none());
+        assert!(app.verify.security.is_none());
+        assert!(app.toast.is_none());
+        let screen = redraw(&mut app, &mut terminal);
+        assert!(!screen.contains("verification"), "{screen}");
+        // The next login brings news again.
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@me:example.org".into(),
+        });
+        app.on_matrix(update(1, VerifyStage::Requested));
+        assert!(app.verify.flow.is_some());
+        drain(&mut commands);
     }
 
     #[test]
     fn requests_wait_behind_the_login_form() {
         let (mut app, mut terminal, _commands) = connected();
-        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        app.modal = Some(Modal::Login(crate::modal::LoginForm::new(None)));
         app.on_matrix(update(7, VerifyStage::Requested));
         assert!(matches!(app.modal, Some(Modal::Login(_))));
         // Once the form is gone, the status line offers to answer.

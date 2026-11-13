@@ -8,8 +8,8 @@ mod session;
 mod verify;
 
 pub use verify::{
-    Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, VerifyCmd, VerifyStage,
-    VerifyUpdate,
+    Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
+    VerifyStage, VerifyUpdate,
 };
 
 use std::time::Duration;
@@ -243,7 +243,7 @@ pub enum MatrixEvent {
     /// A device verification moved on.
     Verification(VerifyUpdate),
     /// Outcome of [`VerifyCmd::SetUp`].
-    CrossSigningSetUp(Result<(), String>),
+    CrossSigningSetUp(SetUpOutcome),
     /// Outcome of [`MatrixCmd::SaveFile`]: where the file is now, or what went wrong.
     FileSaved {
         key: String,
@@ -294,7 +294,7 @@ impl std::fmt::Debug for MatrixEvent {
                 write!(f, "Verification({}, {:?})", update.flow, update.stage)
             }
             Self::CrossSigningSetUp(result) => {
-                write!(f, "CrossSigningSetUp(ok: {})", result.is_ok())
+                write!(f, "CrossSigningSetUp({result:?})")
             }
             Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
         }
@@ -560,7 +560,7 @@ impl Worker {
                 },
             }
         };
-        verifier.stop();
+        verifier.stop().await;
         timelines.close();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;

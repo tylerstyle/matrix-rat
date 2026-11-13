@@ -9,10 +9,10 @@ expression: "render(&mut app, 44, 24)"
 "││ Compare with what your device “Element ││"
 "││ Desktop (QWERTYUIOP)” shows:           ││"
 "││                                        ││"
-"││       🐶          ☂️          🎧       ││" Hidden by multi-width symbols: [(10, " "), (22, " "), (34, " ")]
+"││       🐶          ☂           🎧       ││" Hidden by multi-width symbols: [(10, " "), (34, " ")]
 "││      Dog       Umbrella   Headphones   ││"
 "││                                        ││"
-"││       🦋          ☎️          🔒       ││" Hidden by multi-width symbols: [(10, " "), (22, " "), (34, " ")]
+"││       🦋          ☎           🔒       ││" Hidden by multi-width symbols: [(10, " "), (34, " ")]
 "││   Butterfly   Telephone      Lock      ││"
 "││                                        ││"
 "││                   📌                   ││" Hidden by multi-width symbols: [(22, " ")]

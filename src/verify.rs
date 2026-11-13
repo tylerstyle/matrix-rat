@@ -1,9 +1,20 @@
 //! What the UI knows about encryption: this device's status, a running device
 //! verification, and the state of the popup that shows it.
 
+use std::time::{Duration, Instant};
+
 use crate::matrix::{
     BackupStatus, DeviceTrust, Identity, RecoveryStatus, Security, VerifyStage, VerifyUpdate,
 };
+
+/// After the popup's buttons appear or change, clicks and Enter are ignored this long,
+/// so that a key or click meant for what was there before cannot answer what is there
+/// now (a "Cancel" click landing on "They match" as the comparison appears).
+pub const GUARD: Duration = Duration::from_millis(700);
+
+/// A verification request that arrives while the user types waits until they have
+/// paused this long, instead of taking over the keyboard mid-sentence.
+pub const TYPING_PAUSE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
 pub struct VerifyState {
@@ -17,6 +28,10 @@ pub struct VerifyState {
     pub newest: u64,
     /// Waiting for the outcome of setting up cross-signing.
     pub setting_up: bool,
+    /// When the user last pressed a key anywhere in the app.
+    pub last_key: Option<Instant>,
+    /// A request came in while the user was typing; its popup opens at the next pause.
+    pub deferred: bool,
 }
 
 /// What the status line suggests, if anything.
@@ -51,6 +66,36 @@ impl VerifyState {
             (Identity::Present, DeviceTrust::Unverified) => Some(Hint::Unverified),
             _ => None,
         }
+    }
+
+    /// The user is typing (pressed a key a moment ago).
+    pub fn typing(&self) -> bool {
+        self.last_key.is_some_and(|at| at.elapsed() < TYPING_PAUSE)
+    }
+}
+
+/// This device is unverified, and nothing can change that from here: no other device
+/// can vouch for it and there is no recovery key to enter.
+pub fn stuck(security: &Security) -> bool {
+    security.identity == Identity::Present
+        && security.device == DeviceTrust::Unverified
+        && !security.other_devices
+        && security.recovery != RecoveryStatus::NeedsKey
+}
+
+/// The value the settings menu shows on its encryption row.
+pub fn setting_text(security: Option<Security>) -> &'static str {
+    let Some(security) = security else {
+        return "unknown";
+    };
+    match (security.identity, security.device) {
+        (Identity::Missing, _) => "not set up, Enter to set up",
+        (_, DeviceTrust::Verified) => "this device is verified",
+        (Identity::Present, DeviceTrust::Unverified) if stuck(&security) => {
+            "not verified, Enter for details"
+        }
+        (Identity::Present, DeviceTrust::Unverified) => "not verified, Enter to verify",
+        _ => "checking…",
     }
 }
 
@@ -122,46 +167,94 @@ impl Button {
             Self::Retry => " Ask again ",
         }
     }
+
+    /// Says yes to something. Such a button never has the focus by default, so a
+    /// stray Enter cannot choose it.
+    pub fn affirmative(self) -> bool {
+        matches!(
+            self,
+            Self::Accept | Self::Start | Self::Match | Self::SetUp | Self::Retry
+        )
+    }
 }
 
-/// Which of two things the popup shows.
+/// Which of three things the popup shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupKind {
     /// The running verification (`VerifyState::flow`).
     Flow,
     /// An offer to create the account's cross-signing keys.
     SetUp,
-    /// The encryption status of a device with nothing left to do.
+    /// The encryption status, when there is nothing to verify (or no way to).
     Status,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct VerifyPopup {
     pub kind: PopupKind,
-    /// Index into [`VerifyPopup::buttons`].
-    pub focus: usize,
+    /// The button with the keyboard focus; `None` (or one that is not shown) means
+    /// the default, which is never an affirmative one.
+    pub focus: Option<Button>,
+    /// The password field has the focus (when it is shown).
+    pub field_focused: bool,
+    /// The account password, when the server asks for it to set up cross-signing.
+    /// `Some` shows the (masked) field.
+    pub password: Option<String>,
+    /// Why the last password did not work.
+    pub password_error: Option<&'static str>,
+    /// Set by the last draw: every emoji (or digit) of the comparison is on screen.
+    /// Until then "They match" is not offered.
+    pub compare_shown: bool,
+    /// When the buttons last appeared or changed; see [`GUARD`].
+    pub armed_at: Instant,
+}
+
+/// Never prints the password.
+impl std::fmt::Debug for VerifyPopup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifyPopup")
+            .field("kind", &self.kind)
+            .field("focus", &self.focus)
+            .field("password_field", &self.password.is_some())
+            .field("compare_shown", &self.compare_shown)
+            .finish_non_exhaustive()
+    }
 }
 
 impl VerifyPopup {
-    pub fn flow() -> Self {
+    fn new(kind: PopupKind) -> Self {
         Self {
-            kind: PopupKind::Flow,
-            focus: 0,
+            kind,
+            focus: None,
+            field_focused: false,
+            password: None,
+            password_error: None,
+            compare_shown: false,
+            armed_at: Instant::now(),
         }
+    }
+
+    pub fn flow() -> Self {
+        Self::new(PopupKind::Flow)
     }
 
     pub fn set_up() -> Self {
-        Self {
-            kind: PopupKind::SetUp,
-            focus: 0,
-        }
+        Self::new(PopupKind::SetUp)
     }
 
     pub fn status() -> Self {
-        Self {
-            kind: PopupKind::Status,
-            focus: 0,
-        }
+        Self::new(PopupKind::Status)
+    }
+
+    /// The buttons changed: start the guard time again and forget the focus.
+    pub fn rearm(&mut self) {
+        self.armed_at = Instant::now();
+        self.focus = None;
+    }
+
+    /// Clicks and Enter count (the guard time is over).
+    pub fn armed(&self) -> bool {
+        self.armed_at.elapsed() >= GUARD
     }
 
     /// The buttons shown right now, in order.
@@ -175,12 +268,19 @@ impl VerifyPopup {
                 None => &[B::Close],
                 Some(VerifyStage::Requested) => &[B::Accept, B::Decline],
                 Some(VerifyStage::Ready) => &[B::Start, B::Cancel],
-                Some(VerifyStage::Compare { .. }) => &[B::Match, B::Mismatch],
+                // Only once the user can see everything there is to compare.
+                Some(VerifyStage::Compare { .. }) if self.compare_shown => &[B::Match, B::Mismatch],
+                Some(VerifyStage::Compare { .. }) => &[B::Cancel],
                 Some(VerifyStage::Waiting) => &[B::Retry, B::Cancel],
                 Some(VerifyStage::Starting | VerifyStage::Confirmed) => &[B::Cancel],
                 Some(VerifyStage::Done | VerifyStage::Cancelled { .. }) => &[B::Close],
             },
         }
+    }
+
+    /// The password field is shown and can take the focus.
+    pub fn has_field(&self, state: &VerifyState) -> bool {
+        self.kind == PopupKind::SetUp && self.password.is_some() && !state.setting_up
     }
 
     /// What Esc does: decline, cancel or close, whichever fits.
@@ -192,15 +292,40 @@ impl VerifyPopup {
         }
     }
 
+    /// The button Enter would press: the chosen one if it is shown, else the first
+    /// one that does not say yes. `None` while the password field has the focus.
     pub fn focused(&self, state: &VerifyState) -> Option<Button> {
-        self.buttons(state).get(self.focus).copied()
+        if self.field_focused && self.has_field(state) {
+            return None;
+        }
+        let buttons = self.buttons(state);
+        match self.focus {
+            Some(button) if buttons.contains(&button) => Some(button),
+            _ => buttons.iter().copied().find(|b| !b.affirmative()),
+        }
     }
 
-    /// Moves the keyboard focus, wrapping around.
+    /// Moves the keyboard focus through the field (if shown) and the buttons,
+    /// wrapping around.
     pub fn step(&mut self, state: &VerifyState, delta: isize) {
-        let count = self.buttons(state).len() as isize;
-        if count > 0 {
-            self.focus = (self.focus as isize + delta).rem_euclid(count) as usize;
+        let mut slots: Vec<Option<Button>> = Vec::new();
+        if self.has_field(state) {
+            slots.push(None);
+        }
+        slots.extend(self.buttons(state).iter().map(|b| Some(*b)));
+        if slots.is_empty() {
+            return;
+        }
+        let current = if self.field_focused && self.has_field(state) {
+            None
+        } else {
+            self.focused(state)
+        };
+        let at = slots.iter().position(|s| *s == current).unwrap_or(0) as isize;
+        let next = slots[(at + delta).rem_euclid(slots.len() as isize) as usize];
+        self.field_focused = next.is_none();
+        if next.is_some() {
+            self.focus = next;
         }
     }
 }
@@ -208,7 +333,6 @@ impl VerifyPopup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matrix::RecoveryStatus;
 
     fn flow(stage: VerifyStage) -> VerifyState {
         VerifyState {
@@ -224,55 +348,96 @@ mod tests {
     }
 
     #[test]
-    fn buttons_follow_the_stage() {
-        let popup = VerifyPopup::flow();
+    fn buttons_follow_the_stage_and_default_to_no() {
+        let mut popup = VerifyPopup::flow();
         let state = flow(VerifyStage::Requested);
         assert_eq!(popup.buttons(&state), [Button::Accept, Button::Decline]);
+        assert_eq!(popup.focused(&state), Some(Button::Decline));
         assert_eq!(popup.escape(&state), Button::Decline);
+        popup.step(&state, 1);
+        assert_eq!(popup.focused(&state), Some(Button::Accept));
+
         let state = flow(VerifyStage::Compare {
             emoji: Vec::new(),
             decimals: (1, 2, 3),
         });
+        // Nothing drawn yet: only cancelling is possible.
+        let mut popup = VerifyPopup::flow();
+        assert_eq!(popup.buttons(&state), [Button::Cancel]);
+        popup.compare_shown = true;
         assert_eq!(popup.buttons(&state), [Button::Match, Button::Mismatch]);
+        assert_eq!(popup.focused(&state), Some(Button::Mismatch));
         assert_eq!(popup.escape(&state), Button::Cancel);
+
         let state = flow(VerifyStage::Cancelled {
             reason: "Timed out".into(),
         });
         assert_eq!(popup.buttons(&state), [Button::Close]);
+        assert_eq!(popup.focused(&state), Some(Button::Close));
         assert_eq!(popup.escape(&state), Button::Close);
-
-        let mut offer = VerifyPopup::set_up();
-        let mut state = VerifyState::default();
-        assert_eq!(offer.focused(&state), Some(Button::SetUp));
-        offer.step(&state, -1);
-        assert_eq!(offer.focused(&state), Some(Button::Close));
-        offer.step(&state, 1);
-        assert_eq!(offer.focused(&state), Some(Button::SetUp));
-        state.setting_up = true;
-        assert!(offer.buttons(&state).is_empty());
-        offer.step(&state, 1);
-        assert_eq!(offer.focused(&state), None);
     }
 
     #[test]
-    fn hints() {
+    fn set_up_focus_moves_through_the_password_field() {
+        let mut offer = VerifyPopup::set_up();
+        let mut state = VerifyState::default();
+        assert_eq!(offer.focused(&state), Some(Button::Close));
+        offer.step(&state, -1);
+        assert_eq!(offer.focused(&state), Some(Button::SetUp));
+        // The server wants the password: the field joins the cycle.
+        offer.password = Some(String::new());
+        offer.field_focused = true;
+        assert_eq!(offer.focused(&state), None);
+        offer.step(&state, 1);
+        assert_eq!(offer.focused(&state), Some(Button::SetUp));
+        offer.step(&state, 1);
+        assert_eq!(offer.focused(&state), Some(Button::Close));
+        offer.step(&state, 1);
+        assert!(offer.field_focused);
+        state.setting_up = true;
+        assert!(offer.buttons(&state).is_empty());
+        assert!(!offer.has_field(&state));
+        offer.step(&state, 1);
+        assert_eq!(offer.focused(&state), None);
+        offer.password = Some("hunter2".into());
+        assert!(!format!("{offer:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn hints_and_setting_text() {
         let mut state = VerifyState::default();
         // Nothing known yet (or demo mode): no hint.
         assert_eq!(state.hint(false), None);
+        assert_eq!(setting_text(None), "unknown");
         let mut security = Security {
             identity: Identity::Present,
             device: DeviceTrust::Unverified,
+            other_devices: true,
             recovery: RecoveryStatus::NeedsKey,
             ..Security::default()
         };
         state.security = Some(security);
         assert_eq!(state.hint(false), Some(Hint::Unverified));
+        assert_eq!(
+            setting_text(Some(security)),
+            "not verified, Enter to verify"
+        );
+        security.other_devices = false;
+        security.recovery = RecoveryStatus::NotSetUp;
+        assert!(stuck(&security));
+        assert_eq!(
+            setting_text(Some(security)),
+            "not verified, Enter for details"
+        );
         security.device = DeviceTrust::Verified;
         state.security = Some(security);
         assert_eq!(state.hint(false), None);
+        assert_eq!(setting_text(Some(security)), "this device is verified");
         security.identity = Identity::Missing;
+        security.device = DeviceTrust::Unverified;
         state.security = Some(security);
         assert_eq!(state.hint(false), Some(Hint::NotSetUp));
+        assert_eq!(setting_text(Some(security)), "not set up, Enter to set up");
         // A request waiting behind another popup comes first, unless its popup is open.
         state.flow = flow(VerifyStage::Requested).flow;
         assert_eq!(state.hint(false), Some(Hint::Pending { requested: true }));
