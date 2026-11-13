@@ -1,0 +1,250 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 924 612" font-family="ui-monospace, 'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="14">
+<rect width="100%" height="100%" rx="8" fill="#16161d"/>
+<text x="0.0" y="13.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">╭</text>
+<text x="8.4" y="13.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55"> 1 Rooms </text>
+<text x="84.0" y="13.5" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">──────────</text>
+<text x="168.0" y="13.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold" opacity="0.55"> + </text>
+<text x="193.2" y="13.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">╮╭</text>
+<text x="210.0" y="13.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55"> 2 #rust </text>
+<text x="285.6" y="13.5" textLength="638.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">───────────────────────────────────────────────────────────────────────────╮</text>
+<text x="0.0" y="31.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="8.4" y="31.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-style="italic" opacity="0.55"> Filter rooms…</text>
+<text x="193.2" y="31.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="915.6" y="31.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="49.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="8.4" y="49.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55"> Favourites</text>
+<text x="193.2" y="49.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="915.6" y="49.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="8.4" y="54.0" width="8.6" height="18" fill="#2a2a37"/>
+<rect x="16.8" y="54.0" width="33.8" height="18" fill="#ffa066"/>
+<rect x="50.4" y="54.0" width="143.0" height="18" fill="#2a2a37"/>
+<text x="0.0" y="67.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="8.4" y="67.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold" opacity="0.55">▌</text>
+<text x="16.8" y="67.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> R  </text>
+<text x="50.4" y="67.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold" opacity="0.55"> rust            </text>
+<text x="193.2" y="67.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="915.6" y="67.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="8.4" y="72.0" width="8.6" height="18" fill="#2a2a37"/>
+<rect x="16.8" y="72.0" width="33.8" height="18" fill="#ffa066"/>
+<rect x="50.4" y="72.0" width="143.0" height="18" fill="#2a2a37"/>
+<text x="0.0" y="85.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="8.4" y="85.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold" opacity="0.55">▌</text>
+<text x="58.8" y="85.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55">dave: Shipping…</text>
+<text x="193.2" y="85.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="915.6" y="85.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="90.0" width="33.8" height="18" fill="#957fb8"/>
+<text x="0.0" y="103.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="16.8" y="103.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> M  </text>
+<text x="50.4" y="103.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> matrix-rat      </text>
+<text x="193.2" y="103.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="915.6" y="103.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="108.0" width="33.8" height="18" fill="#957fb8"/>
+<text x="0.0" y="121.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="58.8" y="121.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">alice: Welcome…</text>
+<text x="193.2" y="121.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="210.0" y="121.5" textLength="697.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">──────────────────────────────────── Yesterday ────────────────────────────────────</text>
+<text x="915.6" y="121.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="139.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="8.4" y="139.5" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55"> People</text>
+<text x="193.2" y="139.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="210.0" y="139.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" opacity="0.55">● </text>
+<text x="226.8" y="139.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold" opacity="0.55">alice</text>
+<text x="285.6" y="139.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">21:40</text>
+<text x="915.6" y="139.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="144.0" width="33.8" height="18" fill="#d27e99"/>
+<rect x="159.6" y="144.0" width="17.0" height="18" fill="#7fb4ca"/>
+<text x="0.0" y="157.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="16.8" y="157.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> B  </text>
+<text x="58.8" y="157.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold" opacity="0.55">bob</text>
+<text x="159.6" y="157.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> 2</text>
+<text x="176.4" y="157.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">╭</text>
+<text x="184.8" y="157.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold"> Command palette </text>
+<text x="327.6" y="157.5" textLength="420.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">─────────────────────────────────────────────────╮</text>
+<text x="915.6" y="157.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="162.0" width="33.8" height="18" fill="#d27e99"/>
+<text x="0.0" y="175.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="58.8" y="175.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">I'll bring the</text>
+<text x="176.4" y="175.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="193.2" y="175.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">⌕ </text>
+<text x="210.0" y="175.5" textLength="529.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">th                                                             </text>
+<text x="739.2" y="175.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="175.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="180.0" width="33.8" height="18" fill="#957fb8"/>
+<text x="0.0" y="193.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="16.8" y="193.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> C  </text>
+<text x="50.4" y="193.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> carol         </text>
+<text x="176.4" y="193.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="193.2" y="193.5" textLength="487.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">──────────────────────────────────────────────────────────</text>
+<text x="680.4" y="193.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> 24/60</text>
+<text x="739.2" y="193.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="193.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="198.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="193.2" y="198.0" width="537.8" height="18" fill="#2a2a37"/>
+<text x="0.0" y="211.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="58.8" y="211.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">See you tomorr</text>
+<text x="176.4" y="211.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="193.2" y="211.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold">› </text>
+<text x="210.0" y="211.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="211.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold">This help</text>
+<text x="714.0" y="211.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">F1</text>
+<text x="739.2" y="211.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="747.6" y="211.5" textLength="168.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> disk.              </text>
+<text x="915.6" y="211.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="229.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="8.4" y="229.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55"> Rooms</text>
+<text x="176.4" y="229.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="229.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="229.5" textLength="428.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Next theme                                         </text>
+<text x="714.0" y="229.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">F3</text>
+<text x="739.2" y="229.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="229.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="234.0" width="33.8" height="18" fill="#7aa89f"/>
+<rect x="159.6" y="234.0" width="17.0" height="18" fill="#e46876"/>
+<text x="0.0" y="247.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="16.8" y="247.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> D  </text>
+<text x="58.8" y="247.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold" opacity="0.55">design</text>
+<text x="159.6" y="247.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> 5</text>
+<text x="176.4" y="247.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="247.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="247.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Find in this room                              </text>
+<text x="680.4" y="247.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Ctrl-F</text>
+<text x="739.2" y="247.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="747.6" y="247.5" textLength="168.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55">r large rooms like  </text>
+<text x="915.6" y="247.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="252.0" width="33.8" height="18" fill="#7aa89f"/>
+<text x="0.0" y="265.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="58.8" y="265.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">erin: @you can</text>
+<text x="176.4" y="265.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="265.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="265.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Suspend to the shell                           </text>
+<text x="680.4" y="265.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Ctrl-Z</text>
+<text x="739.2" y="265.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="747.6" y="265.5" textLength="168.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55">e server every      </text>
+<text x="915.6" y="265.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="270.0" width="33.8" height="18" fill="#957fb8"/>
+<text x="0.0" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="16.8" y="283.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> N  </text>
+<text x="50.4" y="283.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> nixos         </text>
+<text x="176.4" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="283.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="283.5" textLength="411.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Menu for what has the focus                      </text>
+<text x="697.2" y="283.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Menu</text>
+<text x="739.2" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="288.0" width="33.8" height="18" fill="#957fb8"/>
+<text x="0.0" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="58.8" y="301.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">frank: Unstabl</text>
+<text x="176.4" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="301.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="301.5" textLength="403.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Next space (then all rooms)                     </text>
+<text x="688.8" y="301.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Alt-S</text>
+<text x="739.2" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="747.6" y="301.5" textLength="159.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">───────────────────</text>
+<text x="915.6" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="306.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="151.2" y="306.0" width="25.4" height="18" fill="#7fb4ca"/>
+<text x="0.0" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="16.8" y="319.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> O  </text>
+<text x="58.8" y="319.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold" opacity="0.55">off-topic</text>
+<text x="151.2" y="319.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> 12</text>
+<text x="176.4" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="193.2" y="319.5" textLength="193.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">  Action   Close thread</text>
+<text x="739.2" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<rect x="16.8" y="324.0" width="33.8" height="18" fill="#957fb8"/>
+<text x="0.0" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="58.8" y="337.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">grace: Anyone </text>
+<text x="176.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="193.2" y="337.5" textLength="302.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">  Action   Open the message's thread</text>
+<text x="722.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">t</text>
+<text x="739.2" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="176.4" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="355.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
+<text x="285.6" y="355.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: tokyo-night                                    </text>
+<text x="739.2" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="176.4" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="373.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
+<text x="285.6" y="373.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: nord                                           </text>
+<text x="739.2" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="176.4" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="391.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
+<text x="285.6" y="391.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: dracula                                        </text>
+<text x="739.2" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="176.4" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="409.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
+<text x="285.6" y="409.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: rat-dark                                </text>
+<text x="680.4" y="409.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">active</text>
+<text x="739.2" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="176.4" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="427.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
+<text x="285.6" y="427.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: terminal                                       </text>
+<text x="739.2" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="176.4" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="210.0" y="445.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
+<text x="285.6" y="445.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: rose-pine                                      </text>
+<text x="739.2" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<text x="915.6" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="176.4" y="463.5" textLength="285.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">╰─────────────────────────────────</text>
+<text x="462.0" y="463.5" textLength="277.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> ↑↓ move · Enter run · Esc close </text>
+<text x="739.2" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">╯</text>
+<text x="915.6" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="193.2" y="481.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="915.6" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="499.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="193.2" y="499.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="210.0" y="499.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffa066" opacity="0.55">● </text>
+<text x="226.8" y="499.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ffa066" font-weight="bold" opacity="0.55">dave</text>
+<text x="277.2" y="499.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">10:02</text>
+<text x="915.6" y="499.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="517.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="193.2" y="517.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">││</text>
+<text x="210.0" y="517.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55">  Shipping a TUI client on top of it this week </text>
+<text x="604.8" y="517.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55">🐀</text>
+<text x="915.6" y="517.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="0.0" y="535.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="193.2" y="535.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│╰</text>
+<text x="210.0" y="535.5" textLength="151.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55"> carol is typing… </text>
+<text x="361.2" y="535.5" textLength="562.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">──────────────────────────────────────────────────────────────────╯</text>
+<text x="0.0" y="553.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="193.2" y="553.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="201.6" y="553.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" opacity="0.55">╭</text>
+<text x="210.0" y="553.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold" opacity="0.55"> 3 Message </text>
+<text x="302.4" y="553.5" textLength="621.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" opacity="0.55">─────────────────────────────────────────────────────────────────────────╮</text>
+<text x="0.0" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="193.2" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">│</text>
+<text x="201.6" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" opacity="0.55">│</text>
+<text x="218.4" y="571.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-style="italic" opacity="0.55">Type a message…</text>
+<text x="865.2" y="571.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">📎</text>
+<text x="890.4" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">☺</text>
+<text x="915.6" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" opacity="0.55">│</text>
+<text x="0.0" y="589.5" textLength="201.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d" opacity="0.55">╰──────────────────────╯</text>
+<text x="201.6" y="589.5" textLength="722.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" opacity="0.55">╰────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="0.0" y="607.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#98bb6c" opacity="0.55"> ● </text>
+<text x="25.2" y="607.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">demo data  </text>
+<text x="117.6" y="607.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold" opacity="0.55">Enter</text>
+<text x="159.6" y="607.5" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55"> send  </text>
+<text x="218.4" y="607.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold" opacity="0.55">Shift-Enter</text>
+<text x="310.8" y="607.5" textLength="109.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55"> line break  </text>
+<text x="420.0" y="607.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold" opacity="0.55">↑</text>
+<text x="428.4" y="607.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55"> select message  </text>
+<text x="630.0" y="607.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold" opacity="0.55"> F1</text>
+<text x="655.2" y="607.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55"> help </text>
+<text x="705.6" y="607.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold" opacity="0.55"> F2</text>
+<text x="730.8" y="607.5" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55"> settings </text>
+<text x="814.8" y="607.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold" opacity="0.55"> F3</text>
+<text x="840.0" y="607.5" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55"> rat-dark </text>
+</svg>

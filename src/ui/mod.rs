@@ -128,6 +128,174 @@ mod tests {
         format!("{}", terminal.backend())
     }
 
+    /// The screen as an SVG picture, for the README: every cell with its colours, so
+    /// it looks like the terminal without needing one.
+    fn svg(app: &mut App, width: u16, height: u16) -> String {
+        use ratatui::style::{Color, Modifier};
+        use std::fmt::Write as _;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| super::draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        const CELL_W: f32 = 8.4;
+        const CELL_H: f32 = 18.0;
+        let (base_bg, base_fg) = ("#16161d", "#dcd7ba");
+        let hex = |color: Color, base: &str| match color {
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            _ => base.to_owned(),
+        };
+        let (w, h) = (f32::from(width) * CELL_W, f32::from(height) * CELL_H);
+        let mut out = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w:.0} {h:.0}\" \
+             font-family=\"ui-monospace, 'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace\" \
+             font-size=\"14\">\n<rect width=\"100%\" height=\"100%\" rx=\"8\" fill=\"{base_bg}\"/>\n"
+        );
+        for y in 0..height {
+            // Backgrounds first, as runs of equal colour.
+            let mut x = 0;
+            while x < width {
+                let cell = &buffer[(x, y)];
+                let reversed = cell.modifier.contains(Modifier::REVERSED);
+                let bg = if reversed {
+                    hex(cell.fg, base_fg)
+                } else {
+                    hex(cell.bg, base_bg)
+                };
+                let start = x;
+                while x < width && {
+                    let c = &buffer[(x, y)];
+                    let r = c.modifier.contains(Modifier::REVERSED);
+                    (if r {
+                        hex(c.fg, base_fg)
+                    } else {
+                        hex(c.bg, base_bg)
+                    }) == bg
+                } {
+                    x += 1;
+                }
+                if bg != base_bg {
+                    let _ = writeln!(
+                        out,
+                        "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{CELL_H}\" fill=\"{bg}\"/>",
+                        f32::from(start) * CELL_W,
+                        f32::from(y) * CELL_H,
+                        f32::from(x - start) * CELL_W + 0.2,
+                    );
+                }
+            }
+            // Then the text, as runs of equal style; a run is stretched to exactly its
+            // cells, so columns line up whatever font the viewer has.
+            let mut x = 0;
+            while x < width {
+                let cell = &buffer[(x, y)];
+                let style = (cell.fg, cell.bg, cell.modifier);
+                let start = x;
+                let mut text = String::new();
+                let mut cells = 0u16;
+                while x < width {
+                    let c = &buffer[(x, y)];
+                    if (c.fg, c.bg, c.modifier) != style {
+                        break;
+                    }
+                    let symbol = c.symbol();
+                    let wide = crate::text::width(symbol) > 1;
+                    // A wide character stands alone, so it cannot shift its neighbours.
+                    if wide && !text.is_empty() {
+                        break;
+                    }
+                    text.push_str(symbol);
+                    let step = crate::text::width(symbol).max(1) as u16;
+                    cells += step;
+                    x += step;
+                    if wide {
+                        break;
+                    }
+                }
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let reversed = style.2.contains(Modifier::REVERSED);
+                let fg = if reversed {
+                    hex(style.1, base_bg)
+                } else {
+                    hex(style.0, base_fg)
+                };
+                let escaped = text
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                let weight = if style.2.contains(Modifier::BOLD) {
+                    " font-weight=\"bold\""
+                } else {
+                    ""
+                };
+                let slant = if style.2.contains(Modifier::ITALIC) {
+                    " font-style=\"italic\""
+                } else {
+                    ""
+                };
+                let opacity = if style.2.contains(Modifier::DIM) {
+                    " opacity=\"0.55\""
+                } else {
+                    ""
+                };
+                let _ = writeln!(
+                    out,
+                    "<text x=\"{:.1}\" y=\"{:.1}\" textLength=\"{:.1}\" lengthAdjust=\"spacingAndGlyphs\" \
+                     xml:space=\"preserve\" fill=\"{fg}\"{weight}{slant}{opacity}>{escaped}</text>",
+                    f32::from(start) * CELL_W,
+                    f32::from(y) * CELL_H + 13.5,
+                    f32::from(cells) * CELL_W,
+                );
+            }
+        }
+        out.push_str("</svg>\n");
+        out
+    }
+
+    /// Writes the pictures the README shows. Run after changing the look:
+    /// `cargo test write_screenshots -- --ignored`
+    #[test]
+    #[ignore = "writes docs/screenshots"]
+    fn write_screenshots() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/screenshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        // The main view, with room previews and a picture.
+        let mut app = App::demo();
+        app.room_previews = true;
+        let design = app.rooms.iter().position(|r| r.name == "design").unwrap();
+        render(&mut app, 110, 34);
+        app.perform(Action::OpenRoom(design));
+        std::fs::write(dir.join("chat.svg"), svg(&mut app, 110, 34)).unwrap();
+
+        // The command palette.
+        let mut app = App::demo();
+        app.room_previews = true;
+        render(&mut app, 110, 34);
+        app.perform(Action::OpenPalette);
+        for c in "th".chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        std::fs::write(dir.join("palette.svg"), svg(&mut app, 110, 34)).unwrap();
+
+        // A thread, in another theme.
+        let mut app = App::demo();
+        app.room_previews = true;
+        app.perform(Action::CycleTheme);
+        let rat = app
+            .rooms
+            .iter()
+            .position(|r| r.name == "matrix-rat")
+            .unwrap();
+        render(&mut app, 110, 34);
+        app.perform(Action::OpenRoom(rat));
+        render(&mut app, 110, 34);
+        app.on_event(key(KeyCode::Up));
+        std::fs::write(dir.join("theme.svg"), svg(&mut app, 110, 34)).unwrap();
+    }
+
     #[test]
     fn main_screen() {
         let mut app = App::demo();

@@ -213,6 +213,47 @@ fn markdown_message(text: &str, marks: &[MentionMark], preserve_empty: bool) -> 
     }
 }
 
+/// `|| like this ||` is meant as a spoiler just as `||like this||` is, but Markdown
+/// only takes delimiters that hug their text. Spaces just inside a pair of `||` are
+/// dropped before parsing; code and table rows are left alone.
+fn tighten_spoilers(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("||") {
+        return text.into();
+    }
+    let code = crate::complete::code_mask(text, false);
+    let mut out = String::with_capacity(text.len());
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        // A row of a table (it starts with a single bar) uses bars for its own
+        // purposes.
+        let lead = line.trim_start();
+        if lead.starts_with('|') && !lead.starts_with("||") {
+            out.push_str(line);
+            continue;
+        }
+        let marks: Vec<usize> = line
+            .match_indices("||")
+            .map(|(at, _)| at)
+            .filter(|at| !code[start + at])
+            .collect();
+        let mut copied = 0;
+        for &[open, close] in marks.as_chunks::<2>().0 {
+            let inner = &line[open + 2..close];
+            let hidden = inner.trim();
+            if hidden.is_empty() {
+                continue;
+            }
+            out.push_str(&line[copied..open + 2]);
+            out.push_str(hidden);
+            copied = close;
+        }
+        out.push_str(&line[copied..]);
+    }
+    out.into()
+}
+
 /// Renders Markdown to Matrix HTML. `None` when the text contains no formatting, so
 /// plain messages are sent without a redundant HTML copy.
 pub fn markdown_html(text: &str) -> Option<String> {
@@ -226,7 +267,8 @@ pub fn markdown_html(text: &str) -> Option<String> {
     // Raw HTML in the input is shown as text, never passed through.
     options.render.escape = true;
 
-    let html = comrak::markdown_to_html(text, &options);
+    let text = tighten_spoilers(text);
+    let html = comrak::markdown_to_html(&text, &options);
     let mut html = html.trim_end().to_owned();
     // Matrix marks spoilers with an attribute, not a class.
     html = html.replace("<span class=\"spoiler\">", "<span data-mx-spoiler>");
@@ -375,6 +417,35 @@ mod tests {
             panic!();
         };
         assert!(html.starts_with("<p>one</p>"), "{html}");
+    }
+
+    #[test]
+    fn spoilers_may_have_spaces_inside_the_bars() {
+        let spoiled = Some("the end: <span data-mx-spoiler>he dies</span>".to_owned());
+        for text in [
+            "the end: ||he dies||",
+            "the end: || he dies||",
+            "the end: ||he dies ||",
+            "the end: ||  he dies  ||",
+        ] {
+            assert_eq!(markdown_html(text), spoiled, "{text}");
+        }
+        // Two on a line, and formatting inside.
+        assert_eq!(
+            markdown_html("|| a || and || *b* ||").as_deref(),
+            Some("<span data-mx-spoiler>a</span> and <span data-mx-spoiler><em>b</em></span>")
+        );
+        // Not in code, not in a table row, not for empty or unpaired bars.
+        assert_eq!(tighten_spoilers("`|| a ||`"), "`|| a ||`");
+        assert_eq!(tighten_spoilers("| a || b |"), "| a || b |");
+        assert_eq!(tighten_spoilers("a || b"), "a || b");
+        assert_eq!(tighten_spoilers("||  ||"), "||  ||");
+        // The text sent as plain body stays as typed.
+        let Outgoing::Text { plain, html, .. } = parse("|| secret ||") else {
+            panic!("not text");
+        };
+        assert_eq!(plain, "|| secret ||");
+        assert_eq!(html.as_deref(), Some("<span data-mx-spoiler>secret</span>"));
     }
 
     #[test]
