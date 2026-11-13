@@ -1,96 +1,269 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 924 612" font-family="ui-monospace, 'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="14">
 <rect width="100%" height="100%" rx="8" fill="#16161d"/>
-<text x="0.0" y="13.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">╭</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 18.1 Q4.2 9.0 8.5 9.0" stroke-width="1" fill="none"/></g>
 <text x="8.4" y="13.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> 1 Rooms </text>
-<text x="84.0" y="13.5" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">──────────</text>
+<g fill="#54546d" stroke="#54546d"><path d="M83.9 9.0 L92.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M92.3 9.0 L100.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M100.7 9.0 L109.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M109.1 9.0 L117.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M117.5 9.0 L126.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M125.9 9.0 L134.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M134.3 9.0 L142.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M142.7 9.0 L151.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M151.1 9.0 L159.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M159.5 9.0 L168.1 9.0" stroke-width="1" fill="none"/></g>
 <text x="168.0" y="13.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold"> + </text>
-<text x="193.2" y="13.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">╮╭</text>
+<g fill="#54546d" stroke="#54546d"><path d="M193.1 9.0 Q197.4 9.0 197.4 18.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 18.1 Q205.8 9.0 210.1 9.0" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="13.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> 2 #design </text>
-<text x="302.4" y="13.5" textLength="621.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">─────────────────────────────────────────────────────────────────────────╮</text>
-<text x="0.0" y="31.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M302.3 9.0 L310.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M310.7 9.0 L319.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M319.1 9.0 L327.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M327.5 9.0 L336.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M335.9 9.0 L344.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M344.3 9.0 L352.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M352.7 9.0 L361.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M361.1 9.0 L369.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M369.5 9.0 L378.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M377.9 9.0 L386.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M386.3 9.0 L394.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M394.7 9.0 L403.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M403.1 9.0 L411.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M411.5 9.0 L420.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M419.9 9.0 L428.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M428.3 9.0 L436.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M436.7 9.0 L445.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M445.1 9.0 L453.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M453.5 9.0 L462.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M461.9 9.0 L470.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M470.3 9.0 L478.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M478.7 9.0 L487.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M487.1 9.0 L495.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M495.5 9.0 L504.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M503.9 9.0 L512.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M512.3 9.0 L520.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M520.7 9.0 L529.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M529.1 9.0 L537.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M537.5 9.0 L546.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M545.9 9.0 L554.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M554.3 9.0 L562.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M562.7 9.0 L571.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M571.1 9.0 L579.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M579.5 9.0 L588.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M587.9 9.0 L596.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M596.3 9.0 L604.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M604.7 9.0 L613.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M613.1 9.0 L621.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M621.5 9.0 L630.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M629.9 9.0 L638.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M638.3 9.0 L646.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M646.7 9.0 L655.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M655.1 9.0 L663.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M663.5 9.0 L672.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M671.9 9.0 L680.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M680.3 9.0 L688.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M688.7 9.0 L697.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M697.1 9.0 L705.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M705.5 9.0 L714.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M713.9 9.0 L722.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M722.3 9.0 L730.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M730.7 9.0 L739.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M739.1 9.0 L747.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M747.5 9.0 L756.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M755.9 9.0 L764.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M764.3 9.0 L772.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M772.7 9.0 L781.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M781.1 9.0 L789.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M789.5 9.0 L798.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M797.9 9.0 L806.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M806.3 9.0 L814.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M814.7 9.0 L823.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M823.1 9.0 L831.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M831.5 9.0 L840.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M839.9 9.0 L848.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M848.3 9.0 L856.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M856.7 9.0 L865.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M865.1 9.0 L873.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M873.5 9.0 L882.1 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M881.9 9.0 L890.5 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M890.3 9.0 L898.9 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M898.7 9.0 L907.3 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M907.1 9.0 L915.7 9.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M915.5 9.0 Q919.8 9.0 919.8 18.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 17.9 L4.2 36.1" stroke-width="1" fill="none"/></g>
 <text x="8.4" y="31.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-style="italic"> Filter rooms…</text>
-<text x="193.2" y="31.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="31.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="0.0" y="49.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 17.9 L197.4 36.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 17.9 L205.8 36.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 17.9 L919.8 36.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 35.9 L4.2 54.1" stroke-width="1" fill="none"/></g>
 <text x="8.4" y="49.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold"> Favourites</text>
-<text x="193.2" y="49.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="49.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 35.9 L197.4 54.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 35.9 L205.8 54.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 35.9 L919.8 54.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="54.0" width="33.8" height="18" fill="#ffa066"/>
-<text x="0.0" y="67.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 53.9 L4.2 72.1" stroke-width="1" fill="none"/></g>
 <text x="16.8" y="67.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> R  </text>
 <text x="50.4" y="67.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> rust            </text>
-<text x="193.2" y="67.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="67.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 53.9 L197.4 72.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 53.9 L205.8 72.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 53.9 L919.8 72.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="72.0" width="33.8" height="18" fill="#ffa066"/>
-<text x="0.0" y="85.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 71.9 L4.2 90.1" stroke-width="1" fill="none"/></g>
 <text x="58.8" y="85.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">dave: Shipping…</text>
-<text x="193.2" y="85.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="85.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 71.9 L197.4 90.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 71.9 L205.8 90.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 71.9 L919.8 90.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="90.0" width="33.8" height="18" fill="#957fb8"/>
-<text x="0.0" y="103.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 89.9 L4.2 108.1" stroke-width="1" fill="none"/></g>
 <text x="16.8" y="103.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> M  </text>
 <text x="50.4" y="103.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> matrix-rat      </text>
-<text x="193.2" y="103.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="103.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 89.9 L197.4 108.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 89.9 L205.8 108.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 89.9 L919.8 108.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="108.0" width="33.8" height="18" fill="#957fb8"/>
-<text x="0.0" y="121.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 107.9 L4.2 126.1" stroke-width="1" fill="none"/></g>
 <text x="58.8" y="121.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">alice: Welcome…</text>
-<text x="193.2" y="121.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="121.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="0.0" y="139.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 107.9 L197.4 126.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 107.9 L205.8 126.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 107.9 L919.8 126.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 125.9 L4.2 144.1" stroke-width="1" fill="none"/></g>
 <text x="8.4" y="139.5" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold"> People</text>
-<text x="193.2" y="139.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="139.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 125.9 L197.4 144.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 125.9 L205.8 144.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 125.9 L919.8 144.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="144.0" width="33.8" height="18" fill="#d27e99"/>
 <rect x="159.6" y="144.0" width="25.4" height="18" fill="#7fb4ca"/>
-<text x="0.0" y="157.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 143.9 L4.2 162.1" stroke-width="1" fill="none"/></g>
 <text x="16.8" y="157.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> B  </text>
 <text x="58.8" y="157.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold">bob</text>
 <text x="159.6" y="157.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> 2 </text>
-<text x="193.2" y="157.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="157.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 143.9 L197.4 162.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 143.9 L205.8 162.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 143.9 L919.8 162.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="162.0" width="33.8" height="18" fill="#d27e99"/>
-<text x="0.0" y="175.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 161.9 L4.2 180.1" stroke-width="1" fill="none"/></g>
 <text x="58.8" y="175.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">I'll bring the…</text>
-<text x="193.2" y="175.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="175.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 161.9 L197.4 180.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 161.9 L205.8 180.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 161.9 L919.8 180.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="180.0" width="33.8" height="18" fill="#957fb8"/>
-<text x="0.0" y="193.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 179.9 L4.2 198.1" stroke-width="1" fill="none"/></g>
 <text x="16.8" y="193.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> C  </text>
 <text x="50.4" y="193.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> carol           </text>
-<text x="193.2" y="193.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="193.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 179.9 L197.4 198.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 179.9 L205.8 198.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 179.9 L919.8 198.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="198.0" width="33.8" height="18" fill="#957fb8"/>
-<text x="0.0" y="211.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 197.9 L4.2 216.1" stroke-width="1" fill="none"/></g>
 <text x="58.8" y="211.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">See you tomorr…</text>
-<text x="193.2" y="211.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="915.6" y="211.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="0.0" y="229.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 197.9 L197.4 216.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 197.9 L205.8 216.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 197.9 L919.8 216.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 215.9 L4.2 234.1" stroke-width="1" fill="none"/></g>
 <text x="8.4" y="229.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold"> Rooms</text>
-<text x="193.2" y="229.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="210.0" y="229.5" textLength="697.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">────────────────────────────────────── Today ──────────────────────────────────────</text>
-<text x="915.6" y="229.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 215.9 L197.4 234.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 215.9 L205.8 234.1" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M209.9 225.0 L218.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M218.3 225.0 L226.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M226.7 225.0 L235.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M235.1 225.0 L243.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M243.5 225.0 L252.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M251.9 225.0 L260.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M260.3 225.0 L268.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M268.7 225.0 L277.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M277.1 225.0 L285.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M285.5 225.0 L294.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M293.9 225.0 L302.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M302.3 225.0 L310.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M310.7 225.0 L319.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M319.1 225.0 L327.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M327.5 225.0 L336.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M335.9 225.0 L344.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M344.3 225.0 L352.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M352.7 225.0 L361.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M361.1 225.0 L369.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M369.5 225.0 L378.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M377.9 225.0 L386.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M386.3 225.0 L394.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M394.7 225.0 L403.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M403.1 225.0 L411.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M411.5 225.0 L420.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M419.9 225.0 L428.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M428.3 225.0 L436.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M436.7 225.0 L445.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M445.1 225.0 L453.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M453.5 225.0 L462.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M461.9 225.0 L470.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M470.3 225.0 L478.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M478.7 225.0 L487.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M487.1 225.0 L495.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M495.5 225.0 L504.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M503.9 225.0 L512.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M512.3 225.0 L520.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M520.7 225.0 L529.3 225.0" stroke-width="1" fill="none"/></g>
+<text x="529.2" y="229.5" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> Today </text>
+<g fill="#727169" stroke="#727169"><path d="M587.9 225.0 L596.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M596.3 225.0 L604.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M604.7 225.0 L613.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M613.1 225.0 L621.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M621.5 225.0 L630.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M629.9 225.0 L638.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M638.3 225.0 L646.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M646.7 225.0 L655.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M655.1 225.0 L663.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M663.5 225.0 L672.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M671.9 225.0 L680.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M680.3 225.0 L688.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M688.7 225.0 L697.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M697.1 225.0 L705.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M705.5 225.0 L714.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M713.9 225.0 L722.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M722.3 225.0 L730.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M730.7 225.0 L739.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M739.1 225.0 L747.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M747.5 225.0 L756.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M755.9 225.0 L764.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M764.3 225.0 L772.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M772.7 225.0 L781.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M781.1 225.0 L789.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M789.5 225.0 L798.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M797.9 225.0 L806.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M806.3 225.0 L814.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M814.7 225.0 L823.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M823.1 225.0 L831.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M831.5 225.0 L840.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M839.9 225.0 L848.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M848.3 225.0 L856.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M856.7 225.0 L865.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M865.1 225.0 L873.7 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M873.5 225.0 L882.1 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M881.9 225.0 L890.5 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M890.3 225.0 L898.9 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#727169" stroke="#727169"><path d="M898.7 225.0 L907.3 225.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 215.9 L919.8 234.1" stroke-width="1" fill="none"/></g>
 <rect x="8.4" y="234.0" width="8.6" height="18" fill="#2a2a37"/>
 <rect x="16.8" y="234.0" width="33.8" height="18" fill="#7aa89f"/>
 <rect x="50.4" y="234.0" width="143.0" height="18" fill="#2a2a37"/>
-<text x="0.0" y="247.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="8.4" y="247.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold">▌</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 233.9 L4.2 252.1" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><rect x="8.4" y="234.0" width="4.2" height="18.0" stroke="none"/></g>
 <text x="16.8" y="247.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> D  </text>
 <text x="50.4" y="247.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold"> design          </text>
-<text x="193.2" y="247.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 233.9 L197.4 252.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 233.9 L205.8 252.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="247.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384">● </text>
 <text x="226.8" y="247.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">erin</text>
 <text x="277.2" y="247.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">07:55</text>
-<text x="915.6" y="247.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 233.9 L919.8 252.1" stroke-width="1" fill="none"/></g>
 <rect x="8.4" y="252.0" width="8.6" height="18" fill="#2a2a37"/>
 <rect x="16.8" y="252.0" width="33.8" height="18" fill="#7aa89f"/>
 <rect x="50.4" y="252.0" width="143.0" height="18" fill="#2a2a37"/>
-<text x="0.0" y="265.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="8.4" y="265.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold">▌</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 251.9 L4.2 270.1" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><rect x="8.4" y="252.0" width="4.2" height="18.0" stroke="none"/></g>
 <text x="58.8" y="265.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">erin: @you can…</text>
-<text x="193.2" y="265.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 251.9 L197.4 270.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 251.9 L205.8 270.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="265.5" textLength="705.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">  New palette is up for review.                                                     </text>
-<text x="915.6" y="265.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 251.9 L919.8 270.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="270.0" width="33.8" height="18" fill="#957fb8"/>
 <rect x="226.8" y="270.0" width="33.8" height="18" fill="#e7b298"/>
 <rect x="260.4" y="270.0" width="8.6" height="18" fill="#e7b798"/>
@@ -114,33 +287,52 @@
 <rect x="512.4" y="270.0" width="8.6" height="18" fill="#98d1e7"/>
 <rect x="520.8" y="270.0" width="8.6" height="18" fill="#98b5e7"/>
 <rect x="529.2" y="270.0" width="33.8" height="18" fill="#98b0e7"/>
-<text x="0.0" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 269.9 L4.2 288.1" stroke-width="1" fill="none"/></g>
 <text x="16.8" y="283.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> N  </text>
 <text x="50.4" y="283.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> nixos           </text>
-<text x="193.2" y="283.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="283.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e9b89f">▀▀▀▀</text>
-<text x="260.4" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e9bc9f">▀</text>
-<text x="268.8" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e9d69f">▀</text>
-<text x="277.2" y="283.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e9db9f">▀▀▀</text>
-<text x="302.4" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6dd9f">▀</text>
-<text x="310.8" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d6e79f">▀</text>
-<text x="319.2" y="283.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d3e99f">▀▀▀</text>
-<text x="344.4" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cfe99f">▀</text>
-<text x="352.8" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b5e99f">▀</text>
-<text x="361.2" y="283.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b0e99f">▀▀▀</text>
-<text x="386.4" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#aee9a2">▀</text>
-<text x="394.8" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a1e9af">▀</text>
-<text x="403.2" y="283.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fe9b2">▀▀▀</text>
-<text x="428.4" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fe9b6">▀</text>
-<text x="436.8" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fe9d0">▀</text>
-<text x="445.2" y="283.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fe9d5">▀▀▀</text>
-<text x="470.4" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fe7d7">▀</text>
-<text x="478.8" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fdbe6">▀</text>
-<text x="487.2" y="283.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fd9e9">▀▀▀</text>
-<text x="512.4" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fd5e9">▀</text>
-<text x="520.8" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fbbe9">▀</text>
-<text x="529.2" y="283.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fb6e9">▀▀▀▀</text>
-<text x="915.6" y="283.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 269.9 L197.4 288.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 269.9 L205.8 288.1" stroke-width="1" fill="none"/></g>
+<g fill="#e9b89f" stroke="#e9b89f"><rect x="226.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e9b89f" stroke="#e9b89f"><rect x="235.2" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e9b89f" stroke="#e9b89f"><rect x="243.6" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e9b89f" stroke="#e9b89f"><rect x="252.0" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e9bc9f" stroke="#e9bc9f"><rect x="260.4" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e9d69f" stroke="#e9d69f"><rect x="268.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e9db9f" stroke="#e9db9f"><rect x="277.2" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e9db9f" stroke="#e9db9f"><rect x="285.6" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e9db9f" stroke="#e9db9f"><rect x="294.0" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e6dd9f" stroke="#e6dd9f"><rect x="302.4" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d6e79f" stroke="#d6e79f"><rect x="310.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d3e99f" stroke="#d3e99f"><rect x="319.2" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d3e99f" stroke="#d3e99f"><rect x="327.6" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d3e99f" stroke="#d3e99f"><rect x="336.0" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#cfe99f" stroke="#cfe99f"><rect x="344.4" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b5e99f" stroke="#b5e99f"><rect x="352.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b0e99f" stroke="#b0e99f"><rect x="361.2" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b0e99f" stroke="#b0e99f"><rect x="369.6" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b0e99f" stroke="#b0e99f"><rect x="378.0" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#aee9a2" stroke="#aee9a2"><rect x="386.4" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a1e9af" stroke="#a1e9af"><rect x="394.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fe9b2" stroke="#9fe9b2"><rect x="403.2" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fe9b2" stroke="#9fe9b2"><rect x="411.6" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fe9b2" stroke="#9fe9b2"><rect x="420.0" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fe9b6" stroke="#9fe9b6"><rect x="428.4" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fe9d0" stroke="#9fe9d0"><rect x="436.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fe9d5" stroke="#9fe9d5"><rect x="445.2" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fe9d5" stroke="#9fe9d5"><rect x="453.6" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fe9d5" stroke="#9fe9d5"><rect x="462.0" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fe7d7" stroke="#9fe7d7"><rect x="470.4" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fdbe6" stroke="#9fdbe6"><rect x="478.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fd9e9" stroke="#9fd9e9"><rect x="487.2" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fd9e9" stroke="#9fd9e9"><rect x="495.6" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fd9e9" stroke="#9fd9e9"><rect x="504.0" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fd5e9" stroke="#9fd5e9"><rect x="512.4" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fbbe9" stroke="#9fbbe9"><rect x="520.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fb6e9" stroke="#9fb6e9"><rect x="529.2" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fb6e9" stroke="#9fb6e9"><rect x="537.6" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fb6e9" stroke="#9fb6e9"><rect x="546.0" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fb6e9" stroke="#9fb6e9"><rect x="554.4" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 269.9 L919.8 288.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="288.0" width="33.8" height="18" fill="#957fb8"/>
 <rect x="226.8" y="288.0" width="33.8" height="18" fill="#e3a586"/>
 <rect x="260.4" y="288.0" width="8.6" height="18" fill="#e3ab86"/>
@@ -164,32 +356,51 @@
 <rect x="512.4" y="288.0" width="8.6" height="18" fill="#86cae3"/>
 <rect x="520.8" y="288.0" width="8.6" height="18" fill="#86a9e3"/>
 <rect x="529.2" y="288.0" width="33.8" height="18" fill="#86a3e3"/>
-<text x="0.0" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 287.9 L4.2 306.1" stroke-width="1" fill="none"/></g>
 <text x="58.8" y="301.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">frank: Unstabl…</text>
-<text x="193.2" y="301.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="301.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e5ac8f">▀▀▀▀</text>
-<text x="260.4" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e5b18f">▀</text>
-<text x="268.8" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e5d08f">▀</text>
-<text x="277.2" y="301.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e5d58f">▀▀▀</text>
-<text x="302.4" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e2d78f">▀</text>
-<text x="310.8" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cfe38f">▀</text>
-<text x="319.2" y="301.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cce58f">▀▀▀</text>
-<text x="344.4" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#c7e58f">▀</text>
-<text x="352.8" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a8e58f">▀</text>
-<text x="361.2" y="301.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a3e58f">▀▀▀</text>
-<text x="386.4" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a0e592">▀</text>
-<text x="394.8" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#91e5a2">▀</text>
-<text x="403.2" y="301.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8fe5a4">▀▀▀</text>
-<text x="428.4" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8fe5aa">▀</text>
-<text x="436.8" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8fe5c8">▀</text>
-<text x="445.2" y="301.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8fe5cd">▀▀▀</text>
-<text x="470.4" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8fe2d0">▀</text>
-<text x="478.8" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8fd5e2">▀</text>
-<text x="487.2" y="301.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8fd3e5">▀▀▀</text>
-<text x="512.4" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8fcee5">▀</text>
-<text x="520.8" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8fafe5">▀</text>
-<text x="529.2" y="301.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8faae5">▀▀▀▀</text>
-<text x="915.6" y="301.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 287.9 L197.4 306.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 287.9 L205.8 306.1" stroke-width="1" fill="none"/></g>
+<g fill="#e5ac8f" stroke="#e5ac8f"><rect x="226.8" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e5ac8f" stroke="#e5ac8f"><rect x="235.2" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e5ac8f" stroke="#e5ac8f"><rect x="243.6" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e5ac8f" stroke="#e5ac8f"><rect x="252.0" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e5b18f" stroke="#e5b18f"><rect x="260.4" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e5d08f" stroke="#e5d08f"><rect x="268.8" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e5d58f" stroke="#e5d58f"><rect x="277.2" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e5d58f" stroke="#e5d58f"><rect x="285.6" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e5d58f" stroke="#e5d58f"><rect x="294.0" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e2d78f" stroke="#e2d78f"><rect x="302.4" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#cfe38f" stroke="#cfe38f"><rect x="310.8" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#cce58f" stroke="#cce58f"><rect x="319.2" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#cce58f" stroke="#cce58f"><rect x="327.6" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#cce58f" stroke="#cce58f"><rect x="336.0" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c7e58f" stroke="#c7e58f"><rect x="344.4" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a8e58f" stroke="#a8e58f"><rect x="352.8" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a3e58f" stroke="#a3e58f"><rect x="361.2" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a3e58f" stroke="#a3e58f"><rect x="369.6" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a3e58f" stroke="#a3e58f"><rect x="378.0" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a0e592" stroke="#a0e592"><rect x="386.4" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#91e5a2" stroke="#91e5a2"><rect x="394.8" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fe5a4" stroke="#8fe5a4"><rect x="403.2" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fe5a4" stroke="#8fe5a4"><rect x="411.6" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fe5a4" stroke="#8fe5a4"><rect x="420.0" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fe5aa" stroke="#8fe5aa"><rect x="428.4" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fe5c8" stroke="#8fe5c8"><rect x="436.8" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fe5cd" stroke="#8fe5cd"><rect x="445.2" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fe5cd" stroke="#8fe5cd"><rect x="453.6" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fe5cd" stroke="#8fe5cd"><rect x="462.0" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fe2d0" stroke="#8fe2d0"><rect x="470.4" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fd5e2" stroke="#8fd5e2"><rect x="478.8" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fd3e5" stroke="#8fd3e5"><rect x="487.2" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fd3e5" stroke="#8fd3e5"><rect x="495.6" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fd3e5" stroke="#8fd3e5"><rect x="504.0" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fcee5" stroke="#8fcee5"><rect x="512.4" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8fafe5" stroke="#8fafe5"><rect x="520.8" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8faae5" stroke="#8faae5"><rect x="529.2" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8faae5" stroke="#8faae5"><rect x="537.6" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8faae5" stroke="#8faae5"><rect x="546.0" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8faae5" stroke="#8faae5"><rect x="554.4" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 287.9 L919.8 306.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="306.0" width="33.8" height="18" fill="#957fb8"/>
 <rect x="151.2" y="306.0" width="33.8" height="18" fill="#7fb4ca"/>
 <rect x="226.8" y="306.0" width="33.8" height="18" fill="#df9875"/>
@@ -214,34 +425,53 @@
 <rect x="512.4" y="306.0" width="8.6" height="18" fill="#75c2df"/>
 <rect x="520.8" y="306.0" width="8.6" height="18" fill="#759cdf"/>
 <rect x="529.2" y="306.0" width="33.8" height="18" fill="#7596df"/>
-<text x="0.0" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 305.9 L4.2 324.1" stroke-width="1" fill="none"/></g>
 <text x="16.8" y="319.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> O  </text>
 <text x="58.8" y="319.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold">off-topic</text>
 <text x="151.2" y="319.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> 12 </text>
-<text x="193.2" y="319.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="319.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e19f7e">▀▀▀▀</text>
-<text x="260.4" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e1a57e">▀</text>
-<text x="268.8" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e1c87e">▀</text>
-<text x="277.2" y="319.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e1ce7e">▀▀▀</text>
-<text x="302.4" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ddd07e">▀</text>
-<text x="310.8" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#c7de7e">▀</text>
-<text x="319.2" y="319.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#c4e17e">▀▀▀</text>
-<text x="344.4" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#bee17e">▀</text>
-<text x="352.8" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9ae17e">▀</text>
-<text x="361.2" y="319.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#94e17e">▀▀▀</text>
-<text x="386.4" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#92e181">▀</text>
-<text x="394.8" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#81e193">▀</text>
-<text x="403.2" y="319.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7ee196">▀▀▀</text>
-<text x="428.4" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7ee19c">▀</text>
-<text x="436.8" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7ee1c0">▀</text>
-<text x="445.2" y="319.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7ee1c6">▀▀▀</text>
-<text x="470.4" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7edec9">▀</text>
-<text x="478.8" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7ecfdd">▀</text>
-<text x="487.2" y="319.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7ecce1">▀▀▀</text>
-<text x="512.4" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7ec6e1">▀</text>
-<text x="520.8" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7ea3e1">▀</text>
-<text x="529.2" y="319.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7e9de1">▀▀▀▀</text>
-<text x="915.6" y="319.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 305.9 L197.4 324.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 305.9 L205.8 324.1" stroke-width="1" fill="none"/></g>
+<g fill="#e19f7e" stroke="#e19f7e"><rect x="226.8" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e19f7e" stroke="#e19f7e"><rect x="235.2" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e19f7e" stroke="#e19f7e"><rect x="243.6" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e19f7e" stroke="#e19f7e"><rect x="252.0" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e1a57e" stroke="#e1a57e"><rect x="260.4" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e1c87e" stroke="#e1c87e"><rect x="268.8" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e1ce7e" stroke="#e1ce7e"><rect x="277.2" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e1ce7e" stroke="#e1ce7e"><rect x="285.6" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#e1ce7e" stroke="#e1ce7e"><rect x="294.0" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#ddd07e" stroke="#ddd07e"><rect x="302.4" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c7de7e" stroke="#c7de7e"><rect x="310.8" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c4e17e" stroke="#c4e17e"><rect x="319.2" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c4e17e" stroke="#c4e17e"><rect x="327.6" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c4e17e" stroke="#c4e17e"><rect x="336.0" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#bee17e" stroke="#bee17e"><rect x="344.4" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9ae17e" stroke="#9ae17e"><rect x="352.8" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#94e17e" stroke="#94e17e"><rect x="361.2" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#94e17e" stroke="#94e17e"><rect x="369.6" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#94e17e" stroke="#94e17e"><rect x="378.0" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#92e181" stroke="#92e181"><rect x="386.4" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#81e193" stroke="#81e193"><rect x="394.8" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ee196" stroke="#7ee196"><rect x="403.2" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ee196" stroke="#7ee196"><rect x="411.6" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ee196" stroke="#7ee196"><rect x="420.0" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ee19c" stroke="#7ee19c"><rect x="428.4" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ee1c0" stroke="#7ee1c0"><rect x="436.8" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ee1c6" stroke="#7ee1c6"><rect x="445.2" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ee1c6" stroke="#7ee1c6"><rect x="453.6" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ee1c6" stroke="#7ee1c6"><rect x="462.0" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7edec9" stroke="#7edec9"><rect x="470.4" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ecfdd" stroke="#7ecfdd"><rect x="478.8" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ecce1" stroke="#7ecce1"><rect x="487.2" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ecce1" stroke="#7ecce1"><rect x="495.6" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ecce1" stroke="#7ecce1"><rect x="504.0" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ec6e1" stroke="#7ec6e1"><rect x="512.4" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7ea3e1" stroke="#7ea3e1"><rect x="520.8" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7e9de1" stroke="#7e9de1"><rect x="529.2" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7e9de1" stroke="#7e9de1"><rect x="537.6" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7e9de1" stroke="#7e9de1"><rect x="546.0" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7e9de1" stroke="#7e9de1"><rect x="554.4" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 305.9 L919.8 324.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="324.0" width="33.8" height="18" fill="#957fb8"/>
 <rect x="226.8" y="324.0" width="33.8" height="18" fill="#db8b64"/>
 <rect x="260.4" y="324.0" width="8.6" height="18" fill="#db9364"/>
@@ -265,32 +495,51 @@
 <rect x="512.4" y="324.0" width="8.6" height="18" fill="#64bbdb"/>
 <rect x="520.8" y="324.0" width="8.6" height="18" fill="#6490db"/>
 <rect x="529.2" y="324.0" width="33.8" height="18" fill="#6489db"/>
-<text x="0.0" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 323.9 L4.2 342.1" stroke-width="1" fill="none"/></g>
 <text x="58.8" y="337.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">grace: Anyone …</text>
-<text x="193.2" y="337.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="337.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dd926d">▀▀▀▀</text>
-<text x="260.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dd996d">▀</text>
-<text x="268.8" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ddc16d">▀</text>
-<text x="277.2" y="337.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#ddc86d">▀▀▀</text>
-<text x="302.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d9ca6d">▀</text>
-<text x="310.8" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#c0da6d">▀</text>
-<text x="319.2" y="337.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#bcdd6d">▀▀▀</text>
-<text x="344.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b5dd6d">▀</text>
-<text x="352.8" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8ddd6d">▀</text>
-<text x="361.2" y="337.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#86dd6d">▀▀▀</text>
-<text x="386.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#83dd70">▀</text>
-<text x="394.8" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#70dd85">▀</text>
-<text x="403.2" y="337.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6ddd89">▀▀▀</text>
-<text x="428.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6ddd8f">▀</text>
-<text x="436.8" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6dddb8">▀</text>
-<text x="445.2" y="337.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6dddbe">▀▀▀</text>
-<text x="470.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6ddac2">▀</text>
-<text x="478.8" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6dc8d9">▀</text>
-<text x="487.2" y="337.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6dc5dd">▀▀▀</text>
-<text x="512.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6dbfdd">▀</text>
-<text x="520.8" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6d96dd">▀</text>
-<text x="529.2" y="337.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6d90dd">▀▀▀▀</text>
-<text x="915.6" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 323.9 L197.4 342.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 323.9 L205.8 342.1" stroke-width="1" fill="none"/></g>
+<g fill="#dd926d" stroke="#dd926d"><rect x="226.8" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#dd926d" stroke="#dd926d"><rect x="235.2" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#dd926d" stroke="#dd926d"><rect x="243.6" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#dd926d" stroke="#dd926d"><rect x="252.0" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#dd996d" stroke="#dd996d"><rect x="260.4" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#ddc16d" stroke="#ddc16d"><rect x="268.8" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#ddc86d" stroke="#ddc86d"><rect x="277.2" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#ddc86d" stroke="#ddc86d"><rect x="285.6" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#ddc86d" stroke="#ddc86d"><rect x="294.0" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d9ca6d" stroke="#d9ca6d"><rect x="302.4" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c0da6d" stroke="#c0da6d"><rect x="310.8" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#bcdd6d" stroke="#bcdd6d"><rect x="319.2" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#bcdd6d" stroke="#bcdd6d"><rect x="327.6" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#bcdd6d" stroke="#bcdd6d"><rect x="336.0" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b5dd6d" stroke="#b5dd6d"><rect x="344.4" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8ddd6d" stroke="#8ddd6d"><rect x="352.8" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#86dd6d" stroke="#86dd6d"><rect x="361.2" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#86dd6d" stroke="#86dd6d"><rect x="369.6" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#86dd6d" stroke="#86dd6d"><rect x="378.0" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#83dd70" stroke="#83dd70"><rect x="386.4" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#70dd85" stroke="#70dd85"><rect x="394.8" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6ddd89" stroke="#6ddd89"><rect x="403.2" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6ddd89" stroke="#6ddd89"><rect x="411.6" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6ddd89" stroke="#6ddd89"><rect x="420.0" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6ddd8f" stroke="#6ddd8f"><rect x="428.4" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6dddb8" stroke="#6dddb8"><rect x="436.8" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6dddbe" stroke="#6dddbe"><rect x="445.2" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6dddbe" stroke="#6dddbe"><rect x="453.6" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6dddbe" stroke="#6dddbe"><rect x="462.0" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6ddac2" stroke="#6ddac2"><rect x="470.4" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6dc8d9" stroke="#6dc8d9"><rect x="478.8" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6dc5dd" stroke="#6dc5dd"><rect x="487.2" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6dc5dd" stroke="#6dc5dd"><rect x="495.6" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6dc5dd" stroke="#6dc5dd"><rect x="504.0" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6dbfdd" stroke="#6dbfdd"><rect x="512.4" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6d96dd" stroke="#6d96dd"><rect x="520.8" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6d90dd" stroke="#6d90dd"><rect x="529.2" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6d90dd" stroke="#6d90dd"><rect x="537.6" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6d90dd" stroke="#6d90dd"><rect x="546.0" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6d90dd" stroke="#6d90dd"><rect x="554.4" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 323.9 L919.8 342.1" stroke-width="1" fill="none"/></g>
 <rect x="226.8" y="342.0" width="33.8" height="18" fill="#d77f53"/>
 <rect x="260.4" y="342.0" width="8.6" height="18" fill="#d78753"/>
 <rect x="268.8" y="342.0" width="8.6" height="18" fill="#d7b653"/>
@@ -313,31 +562,50 @@
 <rect x="512.4" y="342.0" width="8.6" height="18" fill="#53b3d7"/>
 <rect x="520.8" y="342.0" width="8.6" height="18" fill="#5384d7"/>
 <rect x="529.2" y="342.0" width="33.8" height="18" fill="#537cd7"/>
-<text x="0.0" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="355.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="355.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d9855b">▀▀▀▀</text>
-<text x="260.4" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d98d5b">▀</text>
-<text x="268.8" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d9ba5b">▀</text>
-<text x="277.2" y="355.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d9c15b">▀▀▀</text>
-<text x="302.4" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d4c45b">▀</text>
-<text x="310.8" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b9d65b">▀</text>
-<text x="319.2" y="355.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b4d95b">▀▀▀</text>
-<text x="344.4" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#add95b">▀</text>
-<text x="352.8" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#80d95b">▀</text>
-<text x="361.2" y="355.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#78d95b">▀▀▀</text>
-<text x="386.4" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#74d95f">▀</text>
-<text x="394.8" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5fd977">▀</text>
-<text x="403.2" y="355.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5bd97b">▀▀▀</text>
-<text x="428.4" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5bd982">▀</text>
-<text x="436.8" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5bd9af">▀</text>
-<text x="445.2" y="355.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5bd9b7">▀▀▀</text>
-<text x="470.4" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5bd5bb">▀</text>
-<text x="478.8" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5bc2d4">▀</text>
-<text x="487.2" y="355.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5bbfd9">▀▀▀</text>
-<text x="512.4" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5bb7d9">▀</text>
-<text x="520.8" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5b8ad9">▀</text>
-<text x="529.2" y="355.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5b82d9">▀▀▀▀</text>
-<text x="915.6" y="355.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 341.9 L4.2 360.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 341.9 L197.4 360.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 341.9 L205.8 360.1" stroke-width="1" fill="none"/></g>
+<g fill="#d9855b" stroke="#d9855b"><rect x="226.8" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d9855b" stroke="#d9855b"><rect x="235.2" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d9855b" stroke="#d9855b"><rect x="243.6" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d9855b" stroke="#d9855b"><rect x="252.0" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d98d5b" stroke="#d98d5b"><rect x="260.4" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d9ba5b" stroke="#d9ba5b"><rect x="268.8" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d9c15b" stroke="#d9c15b"><rect x="277.2" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d9c15b" stroke="#d9c15b"><rect x="285.6" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d9c15b" stroke="#d9c15b"><rect x="294.0" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d4c45b" stroke="#d4c45b"><rect x="302.4" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b9d65b" stroke="#b9d65b"><rect x="310.8" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b4d95b" stroke="#b4d95b"><rect x="319.2" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b4d95b" stroke="#b4d95b"><rect x="327.6" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b4d95b" stroke="#b4d95b"><rect x="336.0" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#add95b" stroke="#add95b"><rect x="344.4" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#80d95b" stroke="#80d95b"><rect x="352.8" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#78d95b" stroke="#78d95b"><rect x="361.2" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#78d95b" stroke="#78d95b"><rect x="369.6" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#78d95b" stroke="#78d95b"><rect x="378.0" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#74d95f" stroke="#74d95f"><rect x="386.4" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5fd977" stroke="#5fd977"><rect x="394.8" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bd97b" stroke="#5bd97b"><rect x="403.2" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bd97b" stroke="#5bd97b"><rect x="411.6" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bd97b" stroke="#5bd97b"><rect x="420.0" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bd982" stroke="#5bd982"><rect x="428.4" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bd9af" stroke="#5bd9af"><rect x="436.8" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bd9b7" stroke="#5bd9b7"><rect x="445.2" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bd9b7" stroke="#5bd9b7"><rect x="453.6" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bd9b7" stroke="#5bd9b7"><rect x="462.0" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bd5bb" stroke="#5bd5bb"><rect x="470.4" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bc2d4" stroke="#5bc2d4"><rect x="478.8" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bbfd9" stroke="#5bbfd9"><rect x="487.2" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bbfd9" stroke="#5bbfd9"><rect x="495.6" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bbfd9" stroke="#5bbfd9"><rect x="504.0" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5bb7d9" stroke="#5bb7d9"><rect x="512.4" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5b8ad9" stroke="#5b8ad9"><rect x="520.8" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5b82d9" stroke="#5b82d9"><rect x="529.2" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5b82d9" stroke="#5b82d9"><rect x="537.6" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5b82d9" stroke="#5b82d9"><rect x="546.0" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5b82d9" stroke="#5b82d9"><rect x="554.4" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 341.9 L919.8 360.1" stroke-width="1" fill="none"/></g>
 <rect x="226.8" y="360.0" width="33.8" height="18" fill="#d37241"/>
 <rect x="260.4" y="360.0" width="8.6" height="18" fill="#d37b41"/>
 <rect x="268.8" y="360.0" width="8.6" height="18" fill="#d3af41"/>
@@ -360,31 +628,50 @@
 <rect x="512.4" y="360.0" width="8.6" height="18" fill="#41acd3"/>
 <rect x="520.8" y="360.0" width="8.6" height="18" fill="#4178d3"/>
 <rect x="529.2" y="360.0" width="33.8" height="18" fill="#416fd3"/>
-<text x="0.0" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="373.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="373.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d5784a">▀▀▀▀</text>
-<text x="260.4" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d5814a">▀</text>
-<text x="268.8" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d5b24a">▀</text>
-<text x="277.2" y="373.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d5bb4a">▀▀▀</text>
-<text x="302.4" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d0be4a">▀</text>
-<text x="310.8" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b1d14a">▀</text>
-<text x="319.2" y="373.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#acd54a">▀▀▀</text>
-<text x="344.4" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a4d54a">▀</text>
-<text x="352.8" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#72d54a">▀</text>
-<text x="361.2" y="373.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6ad54a">▀▀▀</text>
-<text x="386.4" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#66d54e">▀</text>
-<text x="394.8" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4ed568">▀</text>
-<text x="403.2" y="373.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4ad56d">▀▀▀</text>
-<text x="428.4" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4ad575">▀</text>
-<text x="436.8" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4ad5a7">▀</text>
-<text x="445.2" y="373.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4ad5af">▀▀▀</text>
-<text x="470.4" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4ad1b4">▀</text>
-<text x="478.8" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4abbd0">▀</text>
-<text x="487.2" y="373.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4ab8d5">▀▀▀</text>
-<text x="512.4" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4aafd5">▀</text>
-<text x="520.8" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4a7ed5">▀</text>
-<text x="529.2" y="373.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4a75d5">▀▀▀▀</text>
-<text x="915.6" y="373.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 359.9 L4.2 378.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 359.9 L197.4 378.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 359.9 L205.8 378.1" stroke-width="1" fill="none"/></g>
+<g fill="#d5784a" stroke="#d5784a"><rect x="226.8" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d5784a" stroke="#d5784a"><rect x="235.2" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d5784a" stroke="#d5784a"><rect x="243.6" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d5784a" stroke="#d5784a"><rect x="252.0" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d5814a" stroke="#d5814a"><rect x="260.4" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d5b24a" stroke="#d5b24a"><rect x="268.8" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d5bb4a" stroke="#d5bb4a"><rect x="277.2" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d5bb4a" stroke="#d5bb4a"><rect x="285.6" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d5bb4a" stroke="#d5bb4a"><rect x="294.0" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d0be4a" stroke="#d0be4a"><rect x="302.4" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b1d14a" stroke="#b1d14a"><rect x="310.8" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#acd54a" stroke="#acd54a"><rect x="319.2" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#acd54a" stroke="#acd54a"><rect x="327.6" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#acd54a" stroke="#acd54a"><rect x="336.0" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a4d54a" stroke="#a4d54a"><rect x="344.4" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#72d54a" stroke="#72d54a"><rect x="352.8" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6ad54a" stroke="#6ad54a"><rect x="361.2" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6ad54a" stroke="#6ad54a"><rect x="369.6" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6ad54a" stroke="#6ad54a"><rect x="378.0" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#66d54e" stroke="#66d54e"><rect x="386.4" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ed568" stroke="#4ed568"><rect x="394.8" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ad56d" stroke="#4ad56d"><rect x="403.2" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ad56d" stroke="#4ad56d"><rect x="411.6" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ad56d" stroke="#4ad56d"><rect x="420.0" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ad575" stroke="#4ad575"><rect x="428.4" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ad5a7" stroke="#4ad5a7"><rect x="436.8" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ad5af" stroke="#4ad5af"><rect x="445.2" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ad5af" stroke="#4ad5af"><rect x="453.6" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ad5af" stroke="#4ad5af"><rect x="462.0" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ad1b4" stroke="#4ad1b4"><rect x="470.4" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4abbd0" stroke="#4abbd0"><rect x="478.8" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ab8d5" stroke="#4ab8d5"><rect x="487.2" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ab8d5" stroke="#4ab8d5"><rect x="495.6" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ab8d5" stroke="#4ab8d5"><rect x="504.0" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4aafd5" stroke="#4aafd5"><rect x="512.4" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4a7ed5" stroke="#4a7ed5"><rect x="520.8" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4a75d5" stroke="#4a75d5"><rect x="529.2" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4a75d5" stroke="#4a75d5"><rect x="537.6" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4a75d5" stroke="#4a75d5"><rect x="546.0" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4a75d5" stroke="#4a75d5"><rect x="554.4" y="360.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 359.9 L919.8 378.1" stroke-width="1" fill="none"/></g>
 <rect x="226.8" y="378.0" width="33.8" height="18" fill="#cd6531"/>
 <rect x="260.4" y="378.0" width="8.6" height="18" fill="#cd6f31"/>
 <rect x="268.8" y="378.0" width="8.6" height="18" fill="#cda731"/>
@@ -407,31 +694,50 @@
 <rect x="512.4" y="378.0" width="8.6" height="18" fill="#31a4cd"/>
 <rect x="520.8" y="378.0" width="8.6" height="18" fill="#316ccd"/>
 <rect x="529.2" y="378.0" width="33.8" height="18" fill="#3162cd"/>
-<text x="0.0" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="391.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="391.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d16c39">▀▀▀▀</text>
-<text x="260.4" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d17539">▀</text>
-<text x="268.8" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d1ab39">▀</text>
-<text x="277.2" y="391.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#d1b439">▀▀▀</text>
-<text x="302.4" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#cbb839">▀</text>
-<text x="310.8" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#aacd39">▀</text>
-<text x="319.2" y="391.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a4d139">▀▀▀</text>
-<text x="344.4" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9bd139">▀</text>
-<text x="352.8" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#65d139">▀</text>
-<text x="361.2" y="391.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5cd139">▀▀▀</text>
-<text x="386.4" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#57d13e">▀</text>
-<text x="394.8" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3dd15a">▀</text>
-<text x="403.2" y="391.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39d15f">▀▀▀</text>
-<text x="428.4" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39d168">▀</text>
-<text x="436.8" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39d19e">▀</text>
-<text x="445.2" y="391.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39d1a8">▀▀▀</text>
-<text x="470.4" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39cdad">▀</text>
-<text x="478.8" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39b5cb">▀</text>
-<text x="487.2" y="391.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39b1d1">▀▀▀</text>
-<text x="512.4" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#39a8d1">▀</text>
-<text x="520.8" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3971d1">▀</text>
-<text x="529.2" y="391.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3968d1">▀▀▀▀</text>
-<text x="915.6" y="391.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 377.9 L4.2 396.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 377.9 L197.4 396.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 377.9 L205.8 396.1" stroke-width="1" fill="none"/></g>
+<g fill="#d16c39" stroke="#d16c39"><rect x="226.8" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d16c39" stroke="#d16c39"><rect x="235.2" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d16c39" stroke="#d16c39"><rect x="243.6" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d16c39" stroke="#d16c39"><rect x="252.0" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d17539" stroke="#d17539"><rect x="260.4" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d1ab39" stroke="#d1ab39"><rect x="268.8" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d1b439" stroke="#d1b439"><rect x="277.2" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d1b439" stroke="#d1b439"><rect x="285.6" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#d1b439" stroke="#d1b439"><rect x="294.0" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#cbb839" stroke="#cbb839"><rect x="302.4" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#aacd39" stroke="#aacd39"><rect x="310.8" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a4d139" stroke="#a4d139"><rect x="319.2" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a4d139" stroke="#a4d139"><rect x="327.6" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a4d139" stroke="#a4d139"><rect x="336.0" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9bd139" stroke="#9bd139"><rect x="344.4" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#65d139" stroke="#65d139"><rect x="352.8" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5cd139" stroke="#5cd139"><rect x="361.2" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5cd139" stroke="#5cd139"><rect x="369.6" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5cd139" stroke="#5cd139"><rect x="378.0" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#57d13e" stroke="#57d13e"><rect x="386.4" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3dd15a" stroke="#3dd15a"><rect x="394.8" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39d15f" stroke="#39d15f"><rect x="403.2" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39d15f" stroke="#39d15f"><rect x="411.6" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39d15f" stroke="#39d15f"><rect x="420.0" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39d168" stroke="#39d168"><rect x="428.4" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39d19e" stroke="#39d19e"><rect x="436.8" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39d1a8" stroke="#39d1a8"><rect x="445.2" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39d1a8" stroke="#39d1a8"><rect x="453.6" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39d1a8" stroke="#39d1a8"><rect x="462.0" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39cdad" stroke="#39cdad"><rect x="470.4" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39b5cb" stroke="#39b5cb"><rect x="478.8" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39b1d1" stroke="#39b1d1"><rect x="487.2" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39b1d1" stroke="#39b1d1"><rect x="495.6" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39b1d1" stroke="#39b1d1"><rect x="504.0" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#39a8d1" stroke="#39a8d1"><rect x="512.4" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3971d1" stroke="#3971d1"><rect x="520.8" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3968d1" stroke="#3968d1"><rect x="529.2" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3968d1" stroke="#3968d1"><rect x="537.6" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3968d1" stroke="#3968d1"><rect x="546.0" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3968d1" stroke="#3968d1"><rect x="554.4" y="378.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 377.9 L919.8 396.1" stroke-width="1" fill="none"/></g>
 <rect x="226.8" y="396.0" width="33.8" height="18" fill="#bd5d2c"/>
 <rect x="260.4" y="396.0" width="8.6" height="18" fill="#bd652c"/>
 <rect x="268.8" y="396.0" width="8.6" height="18" fill="#bd992c"/>
@@ -454,31 +760,50 @@
 <rect x="512.4" y="396.0" width="8.6" height="18" fill="#2c96bd"/>
 <rect x="520.8" y="396.0" width="8.6" height="18" fill="#2c62bd"/>
 <rect x="529.2" y="396.0" width="33.8" height="18" fill="#2c5abd"/>
-<text x="0.0" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="409.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="409.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#c6612e">▀▀▀▀</text>
-<text x="260.4" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#c66a2e">▀</text>
-<text x="268.8" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#c6a02e">▀</text>
-<text x="277.2" y="409.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#c6a92e">▀▀▀</text>
-<text x="302.4" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#c0ad2e">▀</text>
-<text x="310.8" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9fc22e">▀</text>
-<text x="319.2" y="409.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9ac62e">▀▀▀</text>
-<text x="344.4" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#91c62e">▀</text>
-<text x="352.8" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5ac62e">▀</text>
-<text x="361.2" y="409.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#51c62e">▀▀▀</text>
-<text x="386.4" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4dc633">▀</text>
-<text x="394.8" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#33c64f">▀</text>
-<text x="403.2" y="409.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ec654">▀▀▀</text>
-<text x="428.4" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ec65d">▀</text>
-<text x="436.8" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ec694">▀</text>
-<text x="445.2" y="409.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ec69d">▀▀▀</text>
-<text x="470.4" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ec2a2">▀</text>
-<text x="478.8" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2eaac1">▀</text>
-<text x="487.2" y="409.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ea6c6">▀▀▀</text>
-<text x="512.4" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2e9dc6">▀</text>
-<text x="520.8" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2e67c6">▀</text>
-<text x="529.2" y="409.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2e5ec6">▀▀▀▀</text>
-<text x="915.6" y="409.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 395.9 L4.2 414.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 395.9 L197.4 414.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 395.9 L205.8 414.1" stroke-width="1" fill="none"/></g>
+<g fill="#c6612e" stroke="#c6612e"><rect x="226.8" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c6612e" stroke="#c6612e"><rect x="235.2" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c6612e" stroke="#c6612e"><rect x="243.6" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c6612e" stroke="#c6612e"><rect x="252.0" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c66a2e" stroke="#c66a2e"><rect x="260.4" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c6a02e" stroke="#c6a02e"><rect x="268.8" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c6a92e" stroke="#c6a92e"><rect x="277.2" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c6a92e" stroke="#c6a92e"><rect x="285.6" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c6a92e" stroke="#c6a92e"><rect x="294.0" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#c0ad2e" stroke="#c0ad2e"><rect x="302.4" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9fc22e" stroke="#9fc22e"><rect x="310.8" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9ac62e" stroke="#9ac62e"><rect x="319.2" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9ac62e" stroke="#9ac62e"><rect x="327.6" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9ac62e" stroke="#9ac62e"><rect x="336.0" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#91c62e" stroke="#91c62e"><rect x="344.4" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5ac62e" stroke="#5ac62e"><rect x="352.8" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#51c62e" stroke="#51c62e"><rect x="361.2" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#51c62e" stroke="#51c62e"><rect x="369.6" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#51c62e" stroke="#51c62e"><rect x="378.0" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4dc633" stroke="#4dc633"><rect x="386.4" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#33c64f" stroke="#33c64f"><rect x="394.8" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ec654" stroke="#2ec654"><rect x="403.2" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ec654" stroke="#2ec654"><rect x="411.6" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ec654" stroke="#2ec654"><rect x="420.0" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ec65d" stroke="#2ec65d"><rect x="428.4" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ec694" stroke="#2ec694"><rect x="436.8" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ec69d" stroke="#2ec69d"><rect x="445.2" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ec69d" stroke="#2ec69d"><rect x="453.6" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ec69d" stroke="#2ec69d"><rect x="462.0" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ec2a2" stroke="#2ec2a2"><rect x="470.4" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2eaac1" stroke="#2eaac1"><rect x="478.8" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ea6c6" stroke="#2ea6c6"><rect x="487.2" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ea6c6" stroke="#2ea6c6"><rect x="495.6" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ea6c6" stroke="#2ea6c6"><rect x="504.0" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2e9dc6" stroke="#2e9dc6"><rect x="512.4" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2e67c6" stroke="#2e67c6"><rect x="520.8" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2e5ec6" stroke="#2e5ec6"><rect x="529.2" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2e5ec6" stroke="#2e5ec6"><rect x="537.6" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2e5ec6" stroke="#2e5ec6"><rect x="546.0" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2e5ec6" stroke="#2e5ec6"><rect x="554.4" y="396.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 395.9 L919.8 414.1" stroke-width="1" fill="none"/></g>
 <rect x="226.8" y="414.0" width="33.8" height="18" fill="#ac5428"/>
 <rect x="260.4" y="414.0" width="8.6" height="18" fill="#ac5c28"/>
 <rect x="268.8" y="414.0" width="8.6" height="18" fill="#ac8b28"/>
@@ -501,31 +826,50 @@
 <rect x="512.4" y="414.0" width="8.6" height="18" fill="#2889ac"/>
 <rect x="520.8" y="414.0" width="8.6" height="18" fill="#2859ac"/>
 <rect x="529.2" y="414.0" width="33.8" height="18" fill="#2851ac"/>
-<text x="0.0" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="427.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="427.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b5582a">▀▀▀▀</text>
-<text x="260.4" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b5612a">▀</text>
-<text x="268.8" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b5922a">▀</text>
-<text x="277.2" y="427.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b59b2a">▀▀▀</text>
-<text x="302.4" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#b09e2a">▀</text>
-<text x="310.8" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#91b12a">▀</text>
-<text x="319.2" y="427.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8cb52a">▀▀▀</text>
-<text x="344.4" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#84b52a">▀</text>
-<text x="352.8" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#52b52a">▀</text>
-<text x="361.2" y="427.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4ab52a">▀▀▀</text>
-<text x="386.4" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#46b52f">▀</text>
-<text x="394.8" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2eb549">▀</text>
-<text x="403.2" y="427.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ab54d">▀▀▀</text>
-<text x="428.4" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ab555">▀</text>
-<text x="436.8" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ab587">▀</text>
-<text x="445.2" y="427.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ab58f">▀▀▀</text>
-<text x="470.4" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2ab194">▀</text>
-<text x="478.8" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2a9bb0">▀</text>
-<text x="487.2" y="427.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2a98b5">▀▀▀</text>
-<text x="512.4" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2a90b5">▀</text>
-<text x="520.8" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2a5eb5">▀</text>
-<text x="529.2" y="427.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2a56b5">▀▀▀▀</text>
-<text x="915.6" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 413.9 L4.2 432.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 413.9 L197.4 432.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 413.9 L205.8 432.1" stroke-width="1" fill="none"/></g>
+<g fill="#b5582a" stroke="#b5582a"><rect x="226.8" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b5582a" stroke="#b5582a"><rect x="235.2" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b5582a" stroke="#b5582a"><rect x="243.6" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b5582a" stroke="#b5582a"><rect x="252.0" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b5612a" stroke="#b5612a"><rect x="260.4" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b5922a" stroke="#b5922a"><rect x="268.8" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b59b2a" stroke="#b59b2a"><rect x="277.2" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b59b2a" stroke="#b59b2a"><rect x="285.6" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b59b2a" stroke="#b59b2a"><rect x="294.0" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#b09e2a" stroke="#b09e2a"><rect x="302.4" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#91b12a" stroke="#91b12a"><rect x="310.8" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8cb52a" stroke="#8cb52a"><rect x="319.2" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8cb52a" stroke="#8cb52a"><rect x="327.6" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8cb52a" stroke="#8cb52a"><rect x="336.0" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#84b52a" stroke="#84b52a"><rect x="344.4" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#52b52a" stroke="#52b52a"><rect x="352.8" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ab52a" stroke="#4ab52a"><rect x="361.2" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ab52a" stroke="#4ab52a"><rect x="369.6" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4ab52a" stroke="#4ab52a"><rect x="378.0" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#46b52f" stroke="#46b52f"><rect x="386.4" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2eb549" stroke="#2eb549"><rect x="394.8" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ab54d" stroke="#2ab54d"><rect x="403.2" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ab54d" stroke="#2ab54d"><rect x="411.6" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ab54d" stroke="#2ab54d"><rect x="420.0" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ab555" stroke="#2ab555"><rect x="428.4" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ab587" stroke="#2ab587"><rect x="436.8" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ab58f" stroke="#2ab58f"><rect x="445.2" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ab58f" stroke="#2ab58f"><rect x="453.6" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ab58f" stroke="#2ab58f"><rect x="462.0" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2ab194" stroke="#2ab194"><rect x="470.4" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a9bb0" stroke="#2a9bb0"><rect x="478.8" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a98b5" stroke="#2a98b5"><rect x="487.2" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a98b5" stroke="#2a98b5"><rect x="495.6" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a98b5" stroke="#2a98b5"><rect x="504.0" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a90b5" stroke="#2a90b5"><rect x="512.4" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a5eb5" stroke="#2a5eb5"><rect x="520.8" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a56b5" stroke="#2a56b5"><rect x="529.2" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a56b5" stroke="#2a56b5"><rect x="537.6" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a56b5" stroke="#2a56b5"><rect x="546.0" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2a56b5" stroke="#2a56b5"><rect x="554.4" y="414.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 413.9 L919.8 432.1" stroke-width="1" fill="none"/></g>
 <rect x="226.8" y="432.0" width="33.8" height="18" fill="#9b4c24"/>
 <rect x="260.4" y="432.0" width="8.6" height="18" fill="#9b5324"/>
 <rect x="268.8" y="432.0" width="8.6" height="18" fill="#9b7d24"/>
@@ -548,31 +892,50 @@
 <rect x="512.4" y="432.0" width="8.6" height="18" fill="#247b9b"/>
 <rect x="520.8" y="432.0" width="8.6" height="18" fill="#24509b"/>
 <rect x="529.2" y="432.0" width="33.8" height="18" fill="#24499b"/>
-<text x="0.0" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="445.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="445.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a35026">▀▀▀▀</text>
-<text x="260.4" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a35726">▀</text>
-<text x="268.8" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a38426">▀</text>
-<text x="277.2" y="445.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#a38c26">▀▀▀</text>
-<text x="302.4" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#9f8f26">▀</text>
-<text x="310.8" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#83a026">▀</text>
-<text x="319.2" y="445.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fa326">▀▀▀</text>
-<text x="344.4" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#77a326">▀</text>
-<text x="352.8" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#4aa326">▀</text>
-<text x="361.2" y="445.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#43a326">▀▀▀</text>
-<text x="386.4" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3fa32a">▀</text>
-<text x="394.8" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2aa342">▀</text>
-<text x="403.2" y="445.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#26a346">▀▀▀</text>
-<text x="428.4" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#26a34d">▀</text>
-<text x="436.8" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#26a37a">▀</text>
-<text x="445.2" y="445.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#26a381">▀▀▀</text>
-<text x="470.4" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#26a086">▀</text>
-<text x="478.8" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#268d9f">▀</text>
-<text x="487.2" y="445.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2689a3">▀▀▀</text>
-<text x="512.4" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2682a3">▀</text>
-<text x="520.8" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#2655a3">▀</text>
-<text x="529.2" y="445.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#264da3">▀▀▀▀</text>
-<text x="915.6" y="445.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 431.9 L4.2 450.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 431.9 L197.4 450.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 431.9 L205.8 450.1" stroke-width="1" fill="none"/></g>
+<g fill="#a35026" stroke="#a35026"><rect x="226.8" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a35026" stroke="#a35026"><rect x="235.2" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a35026" stroke="#a35026"><rect x="243.6" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a35026" stroke="#a35026"><rect x="252.0" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a35726" stroke="#a35726"><rect x="260.4" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a38426" stroke="#a38426"><rect x="268.8" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a38c26" stroke="#a38c26"><rect x="277.2" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a38c26" stroke="#a38c26"><rect x="285.6" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#a38c26" stroke="#a38c26"><rect x="294.0" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#9f8f26" stroke="#9f8f26"><rect x="302.4" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#83a026" stroke="#83a026"><rect x="310.8" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7fa326" stroke="#7fa326"><rect x="319.2" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7fa326" stroke="#7fa326"><rect x="327.6" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7fa326" stroke="#7fa326"><rect x="336.0" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#77a326" stroke="#77a326"><rect x="344.4" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#4aa326" stroke="#4aa326"><rect x="352.8" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#43a326" stroke="#43a326"><rect x="361.2" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#43a326" stroke="#43a326"><rect x="369.6" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#43a326" stroke="#43a326"><rect x="378.0" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3fa32a" stroke="#3fa32a"><rect x="386.4" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2aa342" stroke="#2aa342"><rect x="394.8" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#26a346" stroke="#26a346"><rect x="403.2" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#26a346" stroke="#26a346"><rect x="411.6" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#26a346" stroke="#26a346"><rect x="420.0" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#26a34d" stroke="#26a34d"><rect x="428.4" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#26a37a" stroke="#26a37a"><rect x="436.8" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#26a381" stroke="#26a381"><rect x="445.2" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#26a381" stroke="#26a381"><rect x="453.6" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#26a381" stroke="#26a381"><rect x="462.0" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#26a086" stroke="#26a086"><rect x="470.4" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#268d9f" stroke="#268d9f"><rect x="478.8" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2689a3" stroke="#2689a3"><rect x="487.2" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2689a3" stroke="#2689a3"><rect x="495.6" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2689a3" stroke="#2689a3"><rect x="504.0" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2682a3" stroke="#2682a3"><rect x="512.4" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#2655a3" stroke="#2655a3"><rect x="520.8" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#264da3" stroke="#264da3"><rect x="529.2" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#264da3" stroke="#264da3"><rect x="537.6" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#264da3" stroke="#264da3"><rect x="546.0" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#264da3" stroke="#264da3"><rect x="554.4" y="432.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 431.9 L919.8 450.1" stroke-width="1" fill="none"/></g>
 <rect x="226.8" y="450.0" width="33.8" height="18" fill="#8a4320"/>
 <rect x="260.4" y="450.0" width="8.6" height="18" fill="#8a4a20"/>
 <rect x="268.8" y="450.0" width="8.6" height="18" fill="#8a6f20"/>
@@ -595,31 +958,50 @@
 <rect x="512.4" y="450.0" width="8.6" height="18" fill="#206d8a"/>
 <rect x="520.8" y="450.0" width="8.6" height="18" fill="#20478a"/>
 <rect x="529.2" y="450.0" width="33.8" height="18" fill="#20418a"/>
-<text x="0.0" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="463.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="463.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#924822">▀▀▀▀</text>
-<text x="260.4" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#924e22">▀</text>
-<text x="268.8" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#927722">▀</text>
-<text x="277.2" y="463.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#927d22">▀▀▀</text>
-<text x="302.4" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#8e8022">▀</text>
-<text x="310.8" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#769022">▀</text>
-<text x="319.2" y="463.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#729222">▀▀▀</text>
-<text x="344.4" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#6b9222">▀</text>
-<text x="352.8" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#439222">▀</text>
-<text x="361.2" y="463.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3c9222">▀▀▀</text>
-<text x="386.4" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#399226">▀</text>
-<text x="394.8" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#25923b">▀</text>
-<text x="403.2" y="463.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#22923e">▀▀▀</text>
-<text x="428.4" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#229245">▀</text>
-<text x="436.8" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#22926d">▀</text>
-<text x="445.2" y="463.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#229274">▀▀▀</text>
-<text x="470.4" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#228f78">▀</text>
-<text x="478.8" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#227e8e">▀</text>
-<text x="487.2" y="463.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#227b92">▀▀▀</text>
-<text x="512.4" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#227492">▀</text>
-<text x="520.8" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#224c92">▀</text>
-<text x="529.2" y="463.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#224592">▀▀▀▀</text>
-<text x="915.6" y="463.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 449.9 L4.2 468.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 449.9 L197.4 468.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 449.9 L205.8 468.1" stroke-width="1" fill="none"/></g>
+<g fill="#924822" stroke="#924822"><rect x="226.8" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#924822" stroke="#924822"><rect x="235.2" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#924822" stroke="#924822"><rect x="243.6" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#924822" stroke="#924822"><rect x="252.0" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#924e22" stroke="#924e22"><rect x="260.4" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#927722" stroke="#927722"><rect x="268.8" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#927d22" stroke="#927d22"><rect x="277.2" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#927d22" stroke="#927d22"><rect x="285.6" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#927d22" stroke="#927d22"><rect x="294.0" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#8e8022" stroke="#8e8022"><rect x="302.4" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#769022" stroke="#769022"><rect x="310.8" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#729222" stroke="#729222"><rect x="319.2" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#729222" stroke="#729222"><rect x="327.6" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#729222" stroke="#729222"><rect x="336.0" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#6b9222" stroke="#6b9222"><rect x="344.4" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#439222" stroke="#439222"><rect x="352.8" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3c9222" stroke="#3c9222"><rect x="361.2" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3c9222" stroke="#3c9222"><rect x="369.6" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3c9222" stroke="#3c9222"><rect x="378.0" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#399226" stroke="#399226"><rect x="386.4" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#25923b" stroke="#25923b"><rect x="394.8" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#22923e" stroke="#22923e"><rect x="403.2" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#22923e" stroke="#22923e"><rect x="411.6" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#22923e" stroke="#22923e"><rect x="420.0" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#229245" stroke="#229245"><rect x="428.4" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#22926d" stroke="#22926d"><rect x="436.8" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#229274" stroke="#229274"><rect x="445.2" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#229274" stroke="#229274"><rect x="453.6" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#229274" stroke="#229274"><rect x="462.0" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#228f78" stroke="#228f78"><rect x="470.4" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#227e8e" stroke="#227e8e"><rect x="478.8" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#227b92" stroke="#227b92"><rect x="487.2" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#227b92" stroke="#227b92"><rect x="495.6" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#227b92" stroke="#227b92"><rect x="504.0" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#227492" stroke="#227492"><rect x="512.4" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#224c92" stroke="#224c92"><rect x="520.8" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#224592" stroke="#224592"><rect x="529.2" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#224592" stroke="#224592"><rect x="537.6" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#224592" stroke="#224592"><rect x="546.0" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#224592" stroke="#224592"><rect x="554.4" y="450.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 449.9 L919.8 468.1" stroke-width="1" fill="none"/></g>
 <rect x="226.8" y="468.0" width="33.8" height="18" fill="#793b1c"/>
 <rect x="260.4" y="468.0" width="8.6" height="18" fill="#79411c"/>
 <rect x="268.8" y="468.0" width="8.6" height="18" fill="#79621c"/>
@@ -642,55 +1024,343 @@
 <rect x="512.4" y="468.0" width="8.6" height="18" fill="#1c6079"/>
 <rect x="520.8" y="468.0" width="8.6" height="18" fill="#1c3f79"/>
 <rect x="529.2" y="468.0" width="33.8" height="18" fill="#1c3979"/>
-<text x="0.0" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="481.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
-<text x="226.8" y="481.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#813f1e">▀▀▀▀</text>
-<text x="260.4" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#81451e">▀</text>
-<text x="268.8" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#81691e">▀</text>
-<text x="277.2" y="481.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#816f1e">▀▀▀</text>
-<text x="302.4" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7d711e">▀</text>
-<text x="310.8" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#687f1e">▀</text>
-<text x="319.2" y="481.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#64811e">▀▀▀</text>
-<text x="344.4" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#5e811e">▀</text>
-<text x="352.8" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#3b811e">▀</text>
-<text x="361.2" y="481.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#35811e">▀▀▀</text>
-<text x="386.4" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#328121">▀</text>
-<text x="394.8" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#218134">▀</text>
-<text x="403.2" y="481.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e8137">▀▀▀</text>
-<text x="428.4" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e813d">▀</text>
-<text x="436.8" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e8160">▀</text>
-<text x="445.2" y="481.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e8166">▀▀▀</text>
-<text x="470.4" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e7e6a">▀</text>
-<text x="478.8" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e6f7e">▀</text>
-<text x="487.2" y="481.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e6c81">▀▀▀</text>
-<text x="512.4" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e6781">▀</text>
-<text x="520.8" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e4381">▀</text>
-<text x="529.2" y="481.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#1e3d81">▀▀▀▀</text>
-<text x="915.6" y="481.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="0.0" y="499.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="499.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 467.9 L4.2 486.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 467.9 L197.4 486.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 467.9 L205.8 486.1" stroke-width="1" fill="none"/></g>
+<g fill="#813f1e" stroke="#813f1e"><rect x="226.8" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#813f1e" stroke="#813f1e"><rect x="235.2" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#813f1e" stroke="#813f1e"><rect x="243.6" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#813f1e" stroke="#813f1e"><rect x="252.0" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#81451e" stroke="#81451e"><rect x="260.4" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#81691e" stroke="#81691e"><rect x="268.8" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#816f1e" stroke="#816f1e"><rect x="277.2" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#816f1e" stroke="#816f1e"><rect x="285.6" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#816f1e" stroke="#816f1e"><rect x="294.0" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#7d711e" stroke="#7d711e"><rect x="302.4" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#687f1e" stroke="#687f1e"><rect x="310.8" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#64811e" stroke="#64811e"><rect x="319.2" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#64811e" stroke="#64811e"><rect x="327.6" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#64811e" stroke="#64811e"><rect x="336.0" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#5e811e" stroke="#5e811e"><rect x="344.4" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#3b811e" stroke="#3b811e"><rect x="352.8" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#35811e" stroke="#35811e"><rect x="361.2" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#35811e" stroke="#35811e"><rect x="369.6" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#35811e" stroke="#35811e"><rect x="378.0" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#328121" stroke="#328121"><rect x="386.4" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#218134" stroke="#218134"><rect x="394.8" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e8137" stroke="#1e8137"><rect x="403.2" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e8137" stroke="#1e8137"><rect x="411.6" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e8137" stroke="#1e8137"><rect x="420.0" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e813d" stroke="#1e813d"><rect x="428.4" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e8160" stroke="#1e8160"><rect x="436.8" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e8166" stroke="#1e8166"><rect x="445.2" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e8166" stroke="#1e8166"><rect x="453.6" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e8166" stroke="#1e8166"><rect x="462.0" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e7e6a" stroke="#1e7e6a"><rect x="470.4" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e6f7e" stroke="#1e6f7e"><rect x="478.8" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e6c81" stroke="#1e6c81"><rect x="487.2" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e6c81" stroke="#1e6c81"><rect x="495.6" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e6c81" stroke="#1e6c81"><rect x="504.0" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e6781" stroke="#1e6781"><rect x="512.4" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e4381" stroke="#1e4381"><rect x="520.8" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e3d81" stroke="#1e3d81"><rect x="529.2" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e3d81" stroke="#1e3d81"><rect x="537.6" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e3d81" stroke="#1e3d81"><rect x="546.0" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#1e3d81" stroke="#1e3d81"><rect x="554.4" y="468.0" width="8.6" height="9.0" stroke="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 467.9 L919.8 486.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 485.9 L4.2 504.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 485.9 L197.4 504.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 485.9 L205.8 504.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="499.5" textLength="705.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">  Warm to cool, light at the top.                                                   </text>
-<text x="915.6" y="499.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="0.0" y="517.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="517.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">││</text>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 485.9 L919.8 504.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 503.9 L4.2 522.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 503.9 L197.4 522.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 503.9 L205.8 522.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="517.5" textLength="705.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">  @you can you check the contrast of the unread badge?                              </text>
-<text x="915.6" y="517.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="0.0" y="535.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="535.5" textLength="730.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│╰────────────────────────────────────────────────────────────────────────────────────╯</text>
-<text x="0.0" y="553.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="553.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="201.6" y="553.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">╭</text>
+<g fill="#54546d" stroke="#54546d"><path d="M919.8 503.9 L919.8 522.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 521.9 L4.2 540.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 521.9 L197.4 540.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M205.8 521.9 Q205.8 531.0 210.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M209.9 531.0 L218.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M218.3 531.0 L226.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M226.7 531.0 L235.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M235.1 531.0 L243.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M243.5 531.0 L252.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M251.9 531.0 L260.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M260.3 531.0 L268.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M268.7 531.0 L277.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M277.1 531.0 L285.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M285.5 531.0 L294.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M293.9 531.0 L302.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M302.3 531.0 L310.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M310.7 531.0 L319.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M319.1 531.0 L327.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M327.5 531.0 L336.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M335.9 531.0 L344.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M344.3 531.0 L352.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M352.7 531.0 L361.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M361.1 531.0 L369.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M369.5 531.0 L378.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M377.9 531.0 L386.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M386.3 531.0 L394.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M394.7 531.0 L403.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M403.1 531.0 L411.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M411.5 531.0 L420.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M419.9 531.0 L428.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M428.3 531.0 L436.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M436.7 531.0 L445.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M445.1 531.0 L453.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M453.5 531.0 L462.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M461.9 531.0 L470.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M470.3 531.0 L478.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M478.7 531.0 L487.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M487.1 531.0 L495.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M495.5 531.0 L504.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M503.9 531.0 L512.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M512.3 531.0 L520.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M520.7 531.0 L529.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M529.1 531.0 L537.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M537.5 531.0 L546.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M545.9 531.0 L554.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M554.3 531.0 L562.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M562.7 531.0 L571.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M571.1 531.0 L579.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M579.5 531.0 L588.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M587.9 531.0 L596.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M596.3 531.0 L604.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M604.7 531.0 L613.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M613.1 531.0 L621.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M621.5 531.0 L630.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M629.9 531.0 L638.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M638.3 531.0 L646.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M646.7 531.0 L655.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M655.1 531.0 L663.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M663.5 531.0 L672.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M671.9 531.0 L680.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M680.3 531.0 L688.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M688.7 531.0 L697.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M697.1 531.0 L705.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M705.5 531.0 L714.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M713.9 531.0 L722.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M722.3 531.0 L730.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M730.7 531.0 L739.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M739.1 531.0 L747.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M747.5 531.0 L756.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M755.9 531.0 L764.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M764.3 531.0 L772.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M772.7 531.0 L781.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M781.1 531.0 L789.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M789.5 531.0 L798.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M797.9 531.0 L806.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M806.3 531.0 L814.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M814.7 531.0 L823.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M823.1 531.0 L831.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M831.5 531.0 L840.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M839.9 531.0 L848.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M848.3 531.0 L856.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M856.7 531.0 L865.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M865.1 531.0 L873.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M873.5 531.0 L882.1 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M881.9 531.0 L890.5 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M890.3 531.0 L898.9 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M898.7 531.0 L907.3 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M907.1 531.0 L915.7 531.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M915.5 531.0 Q919.8 531.0 919.8 521.9" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 539.9 L4.2 558.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 539.9 L197.4 558.1" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M205.8 558.1 Q205.8 549.0 210.1 549.0" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="553.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold"> 3 Message </text>
-<text x="302.4" y="553.5" textLength="621.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">─────────────────────────────────────────────────────────────────────────╮</text>
-<text x="0.0" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="193.2" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">│</text>
-<text x="201.6" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M302.3 549.0 L310.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M310.7 549.0 L319.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M319.1 549.0 L327.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M327.5 549.0 L336.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M335.9 549.0 L344.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M344.3 549.0 L352.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M352.7 549.0 L361.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M361.1 549.0 L369.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M369.5 549.0 L378.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M377.9 549.0 L386.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M386.3 549.0 L394.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M394.7 549.0 L403.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M403.1 549.0 L411.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M411.5 549.0 L420.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M419.9 549.0 L428.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M428.3 549.0 L436.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M436.7 549.0 L445.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M445.1 549.0 L453.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M453.5 549.0 L462.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M461.9 549.0 L470.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M470.3 549.0 L478.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M478.7 549.0 L487.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M487.1 549.0 L495.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M495.5 549.0 L504.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M503.9 549.0 L512.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M512.3 549.0 L520.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M520.7 549.0 L529.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M529.1 549.0 L537.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M537.5 549.0 L546.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M545.9 549.0 L554.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M554.3 549.0 L562.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M562.7 549.0 L571.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M571.1 549.0 L579.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M579.5 549.0 L588.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M587.9 549.0 L596.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M596.3 549.0 L604.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M604.7 549.0 L613.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M613.1 549.0 L621.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M621.5 549.0 L630.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M629.9 549.0 L638.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M638.3 549.0 L646.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M646.7 549.0 L655.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M655.1 549.0 L663.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M663.5 549.0 L672.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M671.9 549.0 L680.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M680.3 549.0 L688.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M688.7 549.0 L697.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M697.1 549.0 L705.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M705.5 549.0 L714.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M713.9 549.0 L722.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M722.3 549.0 L730.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M730.7 549.0 L739.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M739.1 549.0 L747.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M747.5 549.0 L756.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M755.9 549.0 L764.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M764.3 549.0 L772.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M772.7 549.0 L781.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M781.1 549.0 L789.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M789.5 549.0 L798.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M797.9 549.0 L806.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M806.3 549.0 L814.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M814.7 549.0 L823.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M823.1 549.0 L831.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M831.5 549.0 L840.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M839.9 549.0 L848.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M848.3 549.0 L856.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M856.7 549.0 L865.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M865.1 549.0 L873.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M873.5 549.0 L882.1 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M881.9 549.0 L890.5 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M890.3 549.0 L898.9 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M898.7 549.0 L907.3 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M907.1 549.0 L915.7 549.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M915.5 549.0 Q919.8 549.0 919.8 558.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 557.9 L4.2 576.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M197.4 557.9 L197.4 576.1" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M205.8 557.9 L205.8 576.1" stroke-width="1" fill="none"/></g>
 <text x="218.4" y="571.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-style="italic">Type a message…</text>
 <text x="865.2" y="571.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">📎</text>
 <text x="890.4" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">☺</text>
-<text x="915.6" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">│</text>
-<text x="0.0" y="589.5" textLength="201.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#54546d">╰──────────────────────╯</text>
-<text x="201.6" y="589.5" textLength="722.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca">╰────────────────────────────────────────────────────────────────────────────────────╯</text>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M919.8 557.9 L919.8 576.1" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M4.2 575.9 Q4.2 585.0 8.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M8.3 585.0 L16.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M16.7 585.0 L25.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M25.1 585.0 L33.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M33.5 585.0 L42.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M41.9 585.0 L50.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M50.3 585.0 L58.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M58.7 585.0 L67.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M67.1 585.0 L75.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M75.5 585.0 L84.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M83.9 585.0 L92.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M92.3 585.0 L100.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M100.7 585.0 L109.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M109.1 585.0 L117.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M117.5 585.0 L126.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M125.9 585.0 L134.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M134.3 585.0 L142.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M142.7 585.0 L151.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M151.1 585.0 L159.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M159.5 585.0 L168.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M167.9 585.0 L176.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M176.3 585.0 L184.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M184.7 585.0 L193.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#54546d" stroke="#54546d"><path d="M193.1 585.0 Q197.4 585.0 197.4 575.9" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M205.8 575.9 Q205.8 585.0 210.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M209.9 585.0 L218.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M218.3 585.0 L226.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M226.7 585.0 L235.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M235.1 585.0 L243.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M243.5 585.0 L252.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M251.9 585.0 L260.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M260.3 585.0 L268.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M268.7 585.0 L277.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M277.1 585.0 L285.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M285.5 585.0 L294.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M293.9 585.0 L302.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M302.3 585.0 L310.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M310.7 585.0 L319.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M319.1 585.0 L327.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M327.5 585.0 L336.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M335.9 585.0 L344.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M344.3 585.0 L352.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M352.7 585.0 L361.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M361.1 585.0 L369.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M369.5 585.0 L378.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M377.9 585.0 L386.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M386.3 585.0 L394.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M394.7 585.0 L403.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M403.1 585.0 L411.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M411.5 585.0 L420.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M419.9 585.0 L428.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M428.3 585.0 L436.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M436.7 585.0 L445.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M445.1 585.0 L453.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M453.5 585.0 L462.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M461.9 585.0 L470.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M470.3 585.0 L478.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M478.7 585.0 L487.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M487.1 585.0 L495.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M495.5 585.0 L504.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M503.9 585.0 L512.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M512.3 585.0 L520.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M520.7 585.0 L529.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M529.1 585.0 L537.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M537.5 585.0 L546.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M545.9 585.0 L554.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M554.3 585.0 L562.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M562.7 585.0 L571.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M571.1 585.0 L579.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M579.5 585.0 L588.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M587.9 585.0 L596.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M596.3 585.0 L604.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M604.7 585.0 L613.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M613.1 585.0 L621.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M621.5 585.0 L630.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M629.9 585.0 L638.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M638.3 585.0 L646.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M646.7 585.0 L655.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M655.1 585.0 L663.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M663.5 585.0 L672.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M671.9 585.0 L680.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M680.3 585.0 L688.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M688.7 585.0 L697.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M697.1 585.0 L705.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M705.5 585.0 L714.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M713.9 585.0 L722.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M722.3 585.0 L730.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M730.7 585.0 L739.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M739.1 585.0 L747.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M747.5 585.0 L756.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M755.9 585.0 L764.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M764.3 585.0 L772.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M772.7 585.0 L781.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M781.1 585.0 L789.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M789.5 585.0 L798.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M797.9 585.0 L806.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M806.3 585.0 L814.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M814.7 585.0 L823.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M823.1 585.0 L831.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M831.5 585.0 L840.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M839.9 585.0 L848.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M848.3 585.0 L856.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M856.7 585.0 L865.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M865.1 585.0 L873.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M873.5 585.0 L882.1 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M881.9 585.0 L890.5 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M890.3 585.0 L898.9 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M898.7 585.0 L907.3 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M907.1 585.0 L915.7 585.0" stroke-width="1" fill="none"/></g>
+<g fill="#7fb4ca" stroke="#7fb4ca"><path d="M915.5 585.0 Q919.8 585.0 919.8 575.9" stroke-width="1" fill="none"/></g>
 <text x="0.0" y="607.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#98bb6c"> ● </text>
 <text x="25.2" y="607.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">demo data  </text>
 <text x="117.6" y="607.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Enter</text>

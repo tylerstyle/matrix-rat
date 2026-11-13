@@ -197,6 +197,29 @@ mod tests {
                         break;
                     }
                     let symbol = c.symbol();
+                    // Lines and blocks are drawn, not typed: fonts differ too much.
+                    if let Some(drawn) = shape(symbol, f32::from(x) * CELL_W, f32::from(y) * CELL_H)
+                    {
+                        if !text.is_empty() {
+                            break;
+                        }
+                        let reversed = c.modifier.contains(Modifier::REVERSED);
+                        let fg = if reversed {
+                            hex(c.bg, base_bg)
+                        } else {
+                            hex(c.fg, base_fg)
+                        };
+                        let opacity = if c.modifier.contains(Modifier::DIM) {
+                            " opacity=\"0.55\""
+                        } else {
+                            ""
+                        };
+                        let _ =
+                            writeln!(out, "<g fill=\"{fg}\" stroke=\"{fg}\"{opacity}>{drawn}</g>");
+                        x += 1;
+                        cells = 0;
+                        break;
+                    }
                     let wide = crate::text::width(symbol) > 1;
                     // A wide character stands alone, so it cannot shift its neighbours.
                     if wide && !text.is_empty() {
@@ -250,6 +273,48 @@ mod tests {
         }
         out.push_str("</svg>\n");
         out
+    }
+
+    /// Box-drawing and block characters as SVG shapes within their cell.
+    fn shape(symbol: &str, x: f32, y: f32) -> Option<String> {
+        const W: f32 = 8.4;
+        const H: f32 = 18.0;
+        let (cx, cy) = (x + W / 2.0, y + H / 2.0);
+        let (l, r, t, b) = (x - 0.1, x + W + 0.1, y - 0.1, y + H + 0.1);
+        let line = |x1: f32, y1: f32, x2: f32, y2: f32, width: f32| {
+            format!(
+                "<path d=\"M{x1:.1} {y1:.1} L{x2:.1} {y2:.1}\" stroke-width=\"{width}\" fill=\"none\"/>"
+            )
+        };
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            format!(
+                "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{w:.1}\" height=\"{h:.1}\" stroke=\"none\"/>"
+            )
+        };
+        // A rounded corner: from one edge's middle to the centre region and on.
+        let corner = |from: (f32, f32), to: (f32, f32)| {
+            format!(
+                "<path d=\"M{:.1} {:.1} Q{cx:.1} {cy:.1} {:.1} {:.1}\" stroke-width=\"1\" fill=\"none\"/>",
+                from.0, from.1, to.0, to.1
+            )
+        };
+        Some(match symbol {
+            "─" => line(l, cy, r, cy, 1.0),
+            "│" => line(cx, t, cx, b, 1.0),
+            "┃" => line(cx, t, cx, b, 2.2),
+            "╭" | "┌" => corner((cx, b), (r, cy)),
+            "╮" | "┐" => corner((l, cy), (cx, b)),
+            "╰" | "└" => corner((cx, t), (r, cy)),
+            "╯" | "┘" => corner((l, cy), (cx, t)),
+            "├" => format!("{}{}", line(cx, t, cx, b, 1.0), line(cx, cy, r, cy, 1.0)),
+            "┤" => format!("{}{}", line(cx, t, cx, b, 1.0), line(l, cy, cx, cy, 1.0)),
+            "▌" => rect(x, y, W / 2.0, H),
+            "▐" => rect(x + W / 2.0, y, W / 2.0, H),
+            "▀" => rect(x, y, W + 0.2, H / 2.0),
+            "▄" => rect(x, y + H / 2.0, W + 0.2, H / 2.0),
+            "█" => rect(x, y, W + 0.2, H),
+            _ => return None,
+        })
     }
 
     /// Writes the pictures the README shows. Run after changing the look:
