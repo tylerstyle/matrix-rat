@@ -29,6 +29,6 @@ expression: "render(&mut app, 64, 30)"
 "│                      ││  A link and a secret.                │"
 "│                      │╰──────────────────────────────────────╯"
 "│                      │╭ 3 Message ───────────────────────────╮"
-"│                      ││ Click here or press Alt-3 to writ ☺  │"
+"│                      ││ Click here or press Alt-3 to w 📎 ☺  │" Hidden by multi-width symbols: [(58, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────╯"
 " ● demo data  Enter reply     F1 help  F2 settings  F3 rat-dark "

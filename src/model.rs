@@ -87,6 +87,38 @@ pub struct Message {
     pub image: Option<ImageInfo>,
     /// Set for file, audio and video messages.
     pub file: Option<Attachment>,
+    /// Set for a message that started a thread.
+    pub thread: Option<ThreadSummary>,
+    /// Bytes sent and bytes in all, while a file of ours is on its way to the server.
+    pub upload: Option<(u64, u64)>,
+    /// Why sending failed, in a few words.
+    pub send_error: Option<String>,
+}
+
+/// The one line under a message that started a thread.
+#[derive(Debug, Clone, Default)]
+pub struct ThreadSummary {
+    pub replies: u32,
+    /// Sender and start of the newest reply, when known.
+    pub latest: Option<(String, String)>,
+    /// There are replies the user has not read.
+    pub unread: bool,
+    /// The replies themselves, for the demo only; with an account they are loaded
+    /// when the thread is opened.
+    pub demo_replies: Vec<Message>,
+}
+
+impl ThreadSummary {
+    /// The summary of a thread whose replies are all at hand (the demo).
+    pub fn of(replies: Vec<Message>) -> Option<Self> {
+        let latest = replies.last()?;
+        Some(Self {
+            replies: replies.len() as u32,
+            latest: Some((latest.sender.clone(), latest.body.clone())),
+            unread: false,
+            demo_replies: replies,
+        })
+    }
 }
 
 /// Something that can be saved to disk: a file, or the original of a picture.
@@ -165,6 +197,25 @@ impl ImageInfo {
 }
 
 impl Message {
+    /// What is shown after a message of ours that is on its way.
+    pub fn sending_label(&self) -> String {
+        match self.upload {
+            Some((sent, total)) if total > 0 => {
+                format!("◌ uploading {}%", sent.min(total) * 100 / total)
+            }
+            _ if self.file.is_some() || self.image.is_some() => "◌ uploading…".to_owned(),
+            _ => "◌ sending".to_owned(),
+        }
+    }
+
+    /// What is shown after a message of ours that could not be sent.
+    pub fn failed_label(&self) -> String {
+        match &self.send_error {
+            Some(reason) => format!("✕ not sent: {reason}"),
+            None => "✕ not sent".to_owned(),
+        }
+    }
+
     /// What saving this message would write to disk, if anything.
     pub fn attachment(&self) -> Option<Attachment> {
         if let Some(file) = &self.file {
@@ -202,6 +253,8 @@ pub struct Room {
     pub draft: String,
     /// `mxc://` address of the room's picture.
     pub avatar: Option<String>,
+    /// The server's notification count as last seen, to notice when it rises.
+    pub server_count: u64,
 }
 
 pub const OWN_NAME: &str = "you";
@@ -242,6 +295,7 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         messages,
         draft: String::new(),
         avatar: None,
+        server_count: 0,
     }
 }
 
@@ -356,19 +410,30 @@ pub fn demo_rooms() -> Vec<Room> {
         size: None,
     });
 
+    let mut welcome = room(
+        "matrix-rat",
+        RoomKind::Favourite,
+        0,
+        vec![msg(
+            "alice",
+            "Today",
+            "10:30",
+            "Welcome to the demo. Click a room, type, press Enter.",
+        )],
+    );
+    welcome.messages[0].thread = ThreadSummary::of(vec![
+        msg("bob", "Today", "10:32", "Threads work too."),
+        msg(
+            "carol",
+            "Today",
+            "10:35",
+            "Press t on a message to open its thread, or click the line under it.",
+        ),
+    ]);
+
     vec![
         rust,
-        room(
-            "matrix-rat",
-            RoomKind::Favourite,
-            0,
-            vec![msg(
-                "alice",
-                "Today",
-                "10:30",
-                "Welcome to the demo. Click a room, type, press Enter.",
-            )],
-        ),
+        welcome,
         bob,
         room(
             "carol",

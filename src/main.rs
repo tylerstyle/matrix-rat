@@ -15,6 +15,7 @@ mod logging;
 mod matrix;
 mod modal;
 mod model;
+mod notify;
 mod palette;
 mod paths;
 mod rich;
@@ -23,6 +24,7 @@ mod termquery;
 mod text;
 mod theme;
 mod ui;
+mod upload;
 mod verify;
 mod watch;
 

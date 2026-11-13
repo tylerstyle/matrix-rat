@@ -42,7 +42,7 @@ pub fn convert(items: &Vector<Arc<TimelineItem>>, own: &UserId) -> Vec<Message> 
         .collect()
 }
 
-fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) -> String {
+pub(super) fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) -> String {
     match profile {
         TimelineDetails::Ready(Profile {
             display_name: Some(name),
@@ -95,9 +95,22 @@ fn event_message(
         sender: sender.clone(),
         ..Message::default()
     };
+    match event.send_state() {
+        Some(EventSendState::NotSentYet {
+            progress: Some(upload),
+        }) => {
+            let progress = upload.progress;
+            message.upload = Some((progress.current as u64, progress.total as u64));
+        }
+        Some(EventSendState::SendingFailed { error, .. }) => {
+            message.send_error = Some(super::upload::failure_reason(error));
+        }
+        _ => {}
+    }
 
     match event.content() {
         TimelineItemContent::MsgLike(content) => {
+            message.thread = super::threads::summary(content);
             message.reactions = content
                 .reactions
                 .iter()

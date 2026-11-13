@@ -69,6 +69,12 @@ pub enum Action {
     Save,
     /// A control of the device verification popup.
     Verify(crate::verify::Button),
+    /// Show the selected message's thread (or start one) in the messages pane.
+    OpenThread,
+    /// Leave the thread and return to the room.
+    CloseThread,
+    /// Start attaching a file: puts `/upload ` into the composer.
+    Attach,
     /// Open the command palette.
     OpenPalette,
     /// Open a room by its index in `App::rooms`.

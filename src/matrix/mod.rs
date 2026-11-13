@@ -3,10 +3,14 @@
 
 mod convert;
 mod media;
+mod notify;
 mod rooms;
 mod session;
+mod threads;
+mod upload;
 mod verify;
 
+pub use notify::Notice;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
     VerifyStage, VerifyUpdate,
@@ -123,6 +127,29 @@ pub enum MatrixCmd {
         /// Its `mxc://` address.
         url: String,
     },
+    /// Like [`MatrixCmd::OpenRoom`], for the thread that starts at the event `root`
+    /// (which may have no replies yet).
+    OpenThread {
+        room_id: String,
+        root: String,
+        generation: u64,
+    },
+    /// A command about messages (send, edit, react, delete, retry, load older, mark
+    /// read) that is meant for the thread starting at `root`, not for the room.
+    InThread {
+        root: String,
+        command: Box<MatrixCmd>,
+    },
+    /// Send files from disk, in order. They show up in the timeline at once and upload
+    /// in the background.
+    SendFiles {
+        room_id: String,
+        files: Vec<std::path::PathBuf>,
+        /// Text that goes with the first file.
+        caption: Option<Outgoing>,
+        /// Event id of the message being replied to (by the first file).
+        reply_to: Option<String>,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -156,6 +183,13 @@ impl std::fmt::Debug for MatrixCmd {
             Self::FetchAvatar { .. } => f.write_str("FetchAvatar"),
             Self::Verification(command) => write!(f, "Verification({command:?})"),
             Self::SaveFile { open, .. } => write!(f, "SaveFile(open: {open})"),
+            Self::OpenThread { room_id, root, .. } => write!(f, "OpenThread({room_id}, {root})"),
+            // The inner command prints no content either.
+            Self::InThread { root, command } => write!(f, "InThread({root}, {command:?})"),
+            // Paths can say a lot about the user; the caption is message text.
+            Self::SendFiles { room_id, files, .. } => {
+                write!(f, "SendFiles({room_id}, {} files)", files.len())
+            }
         }
     }
 }
@@ -253,6 +287,8 @@ pub enum MatrixEvent {
     Verification(VerifyUpdate),
     /// Outcome of [`VerifyCmd::SetUp`].
     CrossSigningSetUp(SetUpOutcome),
+    /// A message the account's notification rules consider worth a notification.
+    Notice(Notice),
     /// Outcome of [`MatrixCmd::SaveFile`]: where the file is now, or what went wrong.
     FileSaved {
         key: String,
@@ -264,6 +300,8 @@ pub enum MatrixEvent {
         url: String,
         result: Result<crate::images::Decoded, String>,
     },
+    /// The largest file the server accepts, in bytes.
+    UploadLimit(u64),
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -311,7 +349,9 @@ impl std::fmt::Debug for MatrixEvent {
             Self::CrossSigningSetUp(result) => {
                 write!(f, "CrossSigningSetUp({result:?})")
             }
+            Self::Notice(notice) => write!(f, "{notice:?}"),
             Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
+            Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
         }
     }
 }
@@ -505,6 +545,7 @@ impl Worker {
         // the user out at the next start. Listening begins before the first request
         // (the very first sync usually refreshes), in a task of its own so that no slow
         // step of the main loop can delay a save.
+        let _notices = notify::watch(client, self.events.clone()).await;
         let mut session_changes = client.subscribe_to_session_changes();
         let token_saver = {
             let mut changes = client.subscribe_to_session_changes();
@@ -556,6 +597,7 @@ impl Worker {
 
         let mut rooms: Vector<RoomListItem> = Vector::new();
         let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
+        let mut own_members = notify::OwnMembers::default();
         let mut verifier = verify::Verifier::start(client, self.events.clone());
         let end = loop {
             tokio::select! {
@@ -564,6 +606,7 @@ impl Worker {
                     for diff in diffs {
                         diff.apply(&mut rooms);
                     }
+                    own_members.ensure(&rooms).await;
                     self.emit(MatrixEvent::Rooms(summarize(&rooms).await));
                 }
                 Some(state) = sync_state.next() => {

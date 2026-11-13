@@ -72,6 +72,7 @@ pub struct MessageCaps {
     pub can_copy: bool,
     pub can_save: bool,
     pub can_open: bool,
+    pub can_open_thread: bool,
     pub failed_retry: bool,
 }
 
@@ -81,14 +82,15 @@ pub struct PaletteContext {
     pub focus: Pane,
     pub compose_mode: ComposeMode,
     pub in_invite: bool,
+    pub thread_open: bool,
     pub has_room: bool,
     pub has_messages: bool,
-    pub room_count: usize,
     pub connected: bool,
     pub user_id: Option<String>,
     pub mouse: bool,
     pub typing_notices: bool,
     pub read_receipts: bool,
+    pub notifications: bool,
     pub download_dir: String,
     pub verify_status: &'static str,
     pub wanted_theme: String,
@@ -322,6 +324,19 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         ),
         ComposeMode::Normal => {}
     }
+    // Thread closing is bound via Esc/back when a thread is open rather than its own entry in
+    // keymap::DEFAULT, so expose it here with state-based availability.
+    push_entry(
+        out,
+        Target::Action(Action::CloseThread),
+        Category::Action,
+        "Close thread",
+        Some("Esc".to_owned()),
+        "Close thread",
+        &["back to room", "leave thread", "exit thread"],
+        ctx.thread_open,
+        0,
+    );
 
     let mut seen: Vec<Action> = Vec::new();
     for binding in keymap::DEFAULT {
@@ -347,6 +362,8 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             }
             Action::FocusRoomFilter => (binding.description, &["filter rooms", "alt-r"]),
             Action::Open => (binding.description, &["view picture"]),
+            Action::OpenThread => (binding.description, &["thread", "replies"]),
+            Action::Attach => (binding.description, &["upload", "send file", "attach"]),
             Action::ToggleHelp => (binding.description, &["key bindings", "shortcuts", "help"]),
             _ => (binding.description, &[]),
         };
@@ -380,8 +397,8 @@ enum ActionInclusion {
 
 fn include_keymap_action(action: Action) -> ActionInclusion {
     match action {
-        // Movement, line-by-line cursor stepping, raw compose keys, and the palette
-        // itself do not make sense to trigger from inside the command palette.
+        // Movement, line-by-line cursor stepping, raw compose keys, room-list stepping,
+        // and the palette itself do not make sense to trigger from inside the command palette.
         Action::OpenPalette
         | Action::FocusNext
         | Action::FocusPrev
@@ -394,6 +411,8 @@ fn include_keymap_action(action: Action) -> ActionInclusion {
         | Action::SidebarOpen
         | Action::SelectOlder
         | Action::SelectNewer
+        | Action::RoomPrev
+        | Action::RoomNext
         | Action::Send
         | Action::Newline => ActionInclusion::Skip,
         _ => ActionInclusion::Include,
@@ -410,8 +429,12 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Copy => sel.can_copy,
         Action::Save => sel.can_save,
         Action::Open => sel.can_open,
+        Action::OpenThread => sel.can_open_thread,
+        Action::CloseThread => ctx.thread_open,
+        Action::Attach => {
+            ctx.has_room && !ctx.in_invite && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
+        }
         Action::JumpToNewest => ctx.has_room && ctx.has_messages,
-        Action::RoomPrev | Action::RoomNext => ctx.room_count > 1,
         Action::AcceptInvite | Action::DeclineInvite => ctx.in_invite,
         _ => true,
     }
@@ -428,13 +451,14 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::Copy
                 | Action::Save
                 | Action::Open
+                | Action::OpenThread
                 | Action::JumpToNewest
         ),
-        Pane::Sidebar => matches!(
+        Pane::Sidebar => action == Action::FocusRoomFilter,
+        Pane::Composer => matches!(
             action,
-            Action::FocusRoomFilter | Action::RoomPrev | Action::RoomNext
+            Action::OpenEmoji | Action::Attach | Action::FocusRoomFilter
         ),
-        Pane::Composer => matches!(action, Action::OpenEmoji | Action::FocusRoomFilter),
     }
 }
 
@@ -492,6 +516,18 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             title: Setting::ReadReceipts.label(),
             hint: Some(switch(ctx.read_receipts)),
             aliases: &["toggle read receipts", "setting"],
+            enabled: true,
+        },
+        SettingItem {
+            target: Target::Action(Action::Setting(Setting::Notifications)),
+            title: Setting::Notifications.label(),
+            hint: Some(switch(ctx.notifications)),
+            aliases: &[
+                "toggle notifications",
+                "alerts",
+                "desktop notifications",
+                "setting",
+            ],
             enabled: true,
         },
         SettingItem {
@@ -630,14 +666,15 @@ mod tests {
             focus: Pane::Composer,
             compose_mode: ComposeMode::Normal,
             in_invite: false,
+            thread_open: false,
             has_room: true,
             has_messages: true,
-            room_count: 4,
             connected: false,
             user_id: None,
             mouse: true,
             typing_notices: true,
             read_receipts: true,
+            notifications: true,
             download_dir: "~/Downloads".to_owned(),
             verify_status: "unknown",
             wanted_theme: "rat-dark".to_owned(),
@@ -684,7 +721,7 @@ mod tests {
         assert!(titles.contains(&"Settings"));
         assert!(titles.contains(&"Find a room"));
         assert!(titles.contains(&"Reply to selected message"));
-        // Movement/cursor noise is excluded.
+        // Movement/cursor noise and room-stepping actions are excluded.
         assert!(!p.entries.iter().any(|e| matches!(
             e.target,
             Target::Action(
@@ -695,6 +732,8 @@ mod tests {
                     | Action::PageUp
                     | Action::SidebarUp
                     | Action::SelectOlder
+                    | Action::RoomPrev
+                    | Action::RoomNext
                     | Action::Send
                     | Action::Newline
             )
@@ -721,12 +760,16 @@ mod tests {
                 .count(),
             1
         );
-        // Rooms, settings, themes
+        // Thread, attach, rooms, settings, themes
+        assert!(titles.contains(&"Open the message's thread"));
+        assert!(titles.contains(&"Close thread"));
+        assert!(titles.contains(&"Attach a file"));
         assert!(titles.contains(&"Go to bob"));
         assert!(titles.contains(&"Theme: nord"));
         assert!(titles.contains(&"Mouse"));
         assert!(titles.contains(&"Typing notices"));
         assert!(titles.contains(&"Read receipts"));
+        assert!(titles.contains(&"Notifications"));
         assert!(titles.contains(&"Download folder"));
         assert!(titles.contains(&"Key bindings"));
         assert!(titles.contains(&"Encryption / Verify device"));
@@ -744,6 +787,7 @@ mod tests {
             can_copy: true,
             can_save: false,
             can_open: false,
+            can_open_thread: true,
             failed_retry: false,
         };
         let p = Palette::open(ctx);
@@ -758,13 +802,57 @@ mod tests {
                 .all(|&i| !p.entries[i].enabled)
         );
         // Contextual enabled Timeline actions come first.
-        let top_titles: Vec<&str> = p.filtered[..4]
+        let top_titles: Vec<&str> = p.filtered[..5]
             .iter()
             .map(|&i| p.entries[i].title.as_str())
             .collect();
         assert!(top_titles.contains(&"Reply to selected message"));
         assert!(top_titles.contains(&"React with an emoji"));
         assert!(top_titles.contains(&"Copy text"));
+        assert!(top_titles.contains(&"Open the message's thread"));
+    }
+
+    #[test]
+    fn thread_attach_and_save_availability_follow_context() {
+        let enabled = |p: &Palette, action: Action| -> bool {
+            p.entries
+                .iter()
+                .find(|e| e.target == Target::Action(action))
+                .expect("entry present")
+                .enabled
+        };
+
+        let mut ctx = sample_context();
+        let p = Palette::open(ctx.clone());
+        assert!(!enabled(&p, Action::CloseThread));
+        assert!(!enabled(&p, Action::OpenThread));
+        assert!(!enabled(&p, Action::Save));
+        assert!(enabled(&p, Action::Attach));
+
+        // Inside a thread: CloseThread is enabled and ranked at top; OpenThread is disabled.
+        ctx.thread_open = true;
+        ctx.selection.has_selection = true;
+        ctx.selection.can_save = true;
+        ctx.selection.can_open_thread = false;
+        let p = Palette::open(ctx.clone());
+        assert!(enabled(&p, Action::CloseThread));
+        assert!(!enabled(&p, Action::OpenThread));
+        assert!(enabled(&p, Action::Save));
+        assert_eq!(
+            p.entry_at(0).map(|e| &e.target),
+            Some(&Target::Action(Action::CloseThread))
+        );
+
+        // Editing disables Attach; invite rooms also disable Attach.
+        ctx.thread_open = false;
+        ctx.compose_mode = ComposeMode::Edit(0);
+        let p = Palette::open(ctx.clone());
+        assert!(!enabled(&p, Action::Attach));
+
+        ctx.compose_mode = ComposeMode::Normal;
+        ctx.in_invite = true;
+        let p = Palette::open(ctx);
+        assert!(!enabled(&p, Action::Attach));
     }
 
     #[test]

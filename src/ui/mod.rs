@@ -1,5 +1,6 @@
 //! Drawing. Each frame also rebuilds the hit map used for mouse handling.
 
+mod attach;
 mod composer;
 mod help;
 pub mod hit;

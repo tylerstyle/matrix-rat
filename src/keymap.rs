@@ -175,6 +175,14 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        Char('a'),
+        ALT,
+        Action::Attach,
+        "Alt-A",
+        "Attach a file",
+    ),
+    bind(
+        Global,
         KeyCode::F(1),
         NONE,
         Action::ToggleHelp,
@@ -335,6 +343,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::Open,
         "o",
         "Open link, picture or file",
+    ),
+    bind(
+        Timeline,
+        Char('t'),
+        NONE,
+        Action::OpenThread,
+        "t",
+        "Open the message's thread",
     ),
     bind(
         Timeline,

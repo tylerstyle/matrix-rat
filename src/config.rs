@@ -21,6 +21,10 @@ pub struct Config {
     /// Let others see how far you have read. When off, the server still learns it
     /// (so unread counts clear on your other devices) but tells nobody.
     pub read_receipts: bool,
+    /// Notifications for new messages: "auto", "desktop", "terminal" or "off".
+    pub notifications: crate::notify::NotifyMode,
+    /// Show the text of the message in notifications.
+    pub notification_preview: bool,
     /// Where saved attachments go. Empty: the desktop's download folder.
     pub download_dir: String,
     /// How pictures are shown: "auto", "halfblocks" or "off".
@@ -47,6 +51,8 @@ impl Default for Config {
             mouse: true,
             typing_notices: true,
             read_receipts: true,
+            notifications: crate::notify::NotifyMode::Auto,
+            notification_preview: true,
             download_dir: String::new(),
             images: ImageMode::Auto,
         }
