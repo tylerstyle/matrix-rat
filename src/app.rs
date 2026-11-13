@@ -156,6 +156,11 @@ pub struct App {
     /// detailed one arrives for the same room; and when each room last got one.
     count_notices: Vec<(Instant, crate::matrix::Notice)>,
     detailed_notices: std::collections::HashMap<String, Instant>,
+    /// The user's spaces, and the one the room list is narrowed to (by id).
+    pub spaces: Vec<crate::matrix::SpaceSummary>,
+    pub space: Option<String>,
+    /// Rooms of the selected space, sub-spaces included.
+    space_rooms: std::collections::HashSet<String>,
     /// When and for which room notifications were shown lately, to limit bursts.
     shown_notices: Vec<(Instant, String)>,
     /// Ask the event loop to draw the whole screen afresh instead of only what
@@ -281,6 +286,9 @@ impl App {
             notification_preview: true,
             count_notices: Vec::new(),
             detailed_notices: Default::default(),
+            spaces: Vec::new(),
+            space: None,
+            space_rooms: Default::default(),
             shown_notices: Vec::new(),
             repaint: false,
             logged_out: false,
@@ -327,6 +335,12 @@ impl App {
                     .iter()
                     .enumerate()
                     .filter(|(_, room)| room.kind == *kind)
+                    // Invitations are shown in every space: they belong to none yet.
+                    .filter(|(_, room)| {
+                        self.space.is_none()
+                            || room.kind == RoomKind::Invite
+                            || self.space_rooms.contains(&room.id)
+                    })
                     .filter(|(_, room)| room.name.to_lowercase().contains(&needle))
                     .map(|(i, _)| i)
                     .collect::<Vec<_>>()
@@ -636,6 +650,9 @@ impl App {
         self.recovery_prompted = false;
         self.verify = Default::default();
         self.logged_out = true;
+        self.spaces.clear();
+        self.space = None;
+        self.space_rooms.clear();
         self.session_started = None;
         self.pending_notices.clear();
         self.count_notices.clear();
@@ -707,6 +724,65 @@ impl App {
         self.sidebar.filter.clear();
         self.request_timeline();
         self.set_focus(Pane::Composer);
+    }
+
+    /// The name of the selected space, for the room list's header.
+    pub fn space_name(&self) -> Option<&str> {
+        let id = self.space.as_ref()?;
+        self.spaces
+            .iter()
+            .find(|space| space.id == *id)
+            .map(|space| space.name.as_str())
+    }
+
+    /// Narrows the room list to a space (`None`: all rooms).
+    pub fn select_space(&mut self, id: Option<String>) {
+        self.space_rooms.clear();
+        self.space = None;
+        if let Some(at) = id.and_then(|id| self.spaces.iter().position(|s| s.id == id)) {
+            let space = &self.spaces[at];
+            self.space_rooms.extend(space.rooms.iter().cloned());
+            // A top-level space lists only what is directly in it; the rooms of the
+            // spaces inside it follow in the list and belong to the view as well.
+            if space.level == 0 {
+                for inner in self.spaces[at + 1..].iter().take_while(|s| s.level > 0) {
+                    self.space_rooms.extend(inner.rooms.iter().cloned());
+                }
+            }
+            self.space = Some(space.id.clone());
+        }
+        self.sidebar.cursor = 0;
+        self.sidebar.scroll = 0;
+        self.sidebar.reveal_cursor = true;
+    }
+
+    /// Alt-S and the arrows in the room list: all rooms, then each space in turn.
+    fn step_space(&mut self, delta: isize) {
+        if self.spaces.is_empty() {
+            self.show_toast("You are not in any space");
+            return;
+        }
+        // Position 0 is "all rooms".
+        let count = self.spaces.len() as isize + 1;
+        let at = self
+            .space
+            .as_ref()
+            .and_then(|id| self.spaces.iter().position(|s| s.id == *id))
+            .map_or(0, |i| i as isize + 1);
+        let next = (at + delta).rem_euclid(count);
+        let id = (next > 0).then(|| self.spaces[next as usize - 1].id.clone());
+        self.select_space(id);
+    }
+
+    fn apply_spaces(&mut self, spaces: Vec<crate::matrix::SpaceSummary>) {
+        self.spaces = spaces;
+        // Refresh the selected space's rooms; a space that is gone means all rooms.
+        let selected = self.space.take();
+        let (cursor, scroll) = (self.sidebar.cursor, self.sidebar.scroll);
+        self.select_space(selected);
+        if self.space.is_some() {
+            (self.sidebar.cursor, self.sidebar.scroll) = (cursor, scroll);
+        }
     }
 
     /// Ctrl-↑/↓: opens the neighbouring room in the list, wrapping at the ends, and
@@ -1377,6 +1453,8 @@ impl App {
                     self.open_modal(Modal::Settings(SettingsMenu::default()));
                 }
             }
+            Action::SpaceNext => self.step_space(1),
+            Action::SpacePrev => self.step_space(-1),
             Action::RoomPrev => self.step_room(-1),
             Action::RoomNext => self.step_room(1),
             Action::Save => {
@@ -1728,6 +1806,8 @@ impl App {
                 self.images.on_loaded(&key, full, result);
             }
             MatrixEvent::Avatar { url, result } => self.images.on_avatar(&url, result),
+            MatrixEvent::Spaces(_) if self.logged_out => {}
+            MatrixEvent::Spaces(spaces) => self.apply_spaces(spaces),
             MatrixEvent::Notice(notice) => {
                 self.detailed_notices
                     .insert(notice.room_id.clone(), Instant::now());
@@ -3782,6 +3862,60 @@ mod tests {
         app.notify_mode = NotifyMode::Off;
         app.on_matrix(notice("!b"));
         assert!(app.pending_notices.is_empty());
+    }
+
+    #[test]
+    fn spaces_narrow_the_room_list() {
+        use crate::matrix::SpaceSummary;
+        let (mut app, mut terminal, _commands) = connected();
+        let space = |id: &str, name: &str, level: u8, rooms: &[&str]| SpaceSummary {
+            id: id.into(),
+            name: name.into(),
+            level,
+            rooms: rooms.iter().map(|r| (*r).to_owned()).collect(),
+        };
+        // No spaces: no header line, and the key says so.
+        app.on_event(key_mod(KeyCode::Char('s'), KeyModifiers::ALT));
+        assert!(app.space.is_none() && app.toast.is_some());
+        app.on_matrix(MatrixEvent::Spaces(vec![
+            space("!work", "Work", 0, &["!team"]),
+            space("!team", "Team", 1, &["!a"]),
+            space("!fun", "Fun", 0, &["!b"]),
+        ]));
+        let names = |app: &App| -> Vec<String> {
+            app.visible_rooms()
+                .into_iter()
+                .map(|i| app.rooms[i].name.clone())
+                .collect()
+        };
+        assert_eq!(names(&app), ["Invited", "Alpha", "Beta"]);
+        // A top-level space shows the rooms of the spaces inside it too; invitations
+        // stay visible everywhere.
+        app.on_event(key_mod(KeyCode::Char('s'), KeyModifiers::ALT));
+        assert_eq!(app.space_name(), Some("Work"));
+        assert_eq!(names(&app), ["Invited", "Alpha"]);
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "▸");
+        // The arrow in the list steps on: Team, then Fun, then all rooms again.
+        app.on_event(click(col, row));
+        assert_eq!(app.space_name(), Some("Team"));
+        app.on_event(key_mod(KeyCode::Char('s'), KeyModifiers::ALT));
+        assert_eq!(
+            (app.space_name(), names(&app)),
+            (Some("Fun"), vec!["Invited".to_owned(), "Beta".to_owned()])
+        );
+        app.on_event(key_mod(KeyCode::Char('s'), KeyModifiers::ALT));
+        assert!(app.space.is_none());
+        // A space that disappears while selected gives the whole list back.
+        app.select_space(Some("!fun".into()));
+        app.on_matrix(MatrixEvent::Spaces(vec![space(
+            "!work",
+            "Work",
+            0,
+            &["!a"],
+        )]));
+        assert!(app.space.is_none());
+        assert_eq!(names(&app).len(), 3);
     }
 
     #[test]

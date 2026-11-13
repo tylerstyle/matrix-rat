@@ -59,11 +59,43 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(&filter, filter_area);
     app.hits.add(filter_area, HitId::RoomFilter);
 
+    // With spaces: one line that says which one the list is narrowed to, with arrows
+    // to step through them.
+    let mut top = 1;
+    if !app.spaces.is_empty() && inner.height > 3 && inner.width >= 8 {
+        let area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        let name = app.space_name().unwrap_or("All rooms");
+        let label = truncate(name, (inner.width as usize).saturating_sub(6));
+        let role = if app.space.is_some() {
+            Role::TitleFocused
+        } else {
+            Role::Muted
+        };
+        let arrow = theme.style(Role::StatusKey);
+        let line = Line::from(vec![
+            Span::styled(" ◂ ", arrow),
+            Span::styled(label.clone(), theme.style(role)),
+            Span::styled(" ▸", arrow),
+        ]);
+        frame.render_widget(&line, area);
+        let next_x = area.x + 3 + width(&label) as u16;
+        app.hits
+            .add(area, HitId::Do(crate::action::Action::SpaceNext));
+        app.hits.add(
+            Rect::new(area.x, area.y, 3, 1),
+            HitId::Do(crate::action::Action::SpacePrev),
+        );
+        app.hits.add(
+            Rect::new(next_x, area.y, 2, 1),
+            HitId::Do(crate::action::Action::SpaceNext),
+        );
+        top = 2;
+    }
     let list = Rect::new(
         inner.x,
-        inner.y + 1,
+        inner.y + top,
         inner.width,
-        inner.height.saturating_sub(1),
+        inner.height.saturating_sub(top),
     );
     let rows = app.sidebar_rows();
     let cursor_room = app.cursor_room();

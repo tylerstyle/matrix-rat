@@ -6,11 +6,13 @@ mod media;
 mod notify;
 mod rooms;
 mod session;
+mod spaces;
 mod threads;
 mod upload;
 mod verify;
 
 pub use notify::Notice;
+pub use spaces::SpaceSummary;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
     VerifyStage, VerifyUpdate,
@@ -289,6 +291,8 @@ pub enum MatrixEvent {
     Verification(VerifyUpdate),
     /// Outcome of [`VerifyCmd::SetUp`].
     CrossSigningSetUp(SetUpOutcome),
+    /// The spaces the user is in, with the rooms in each. Replaces the previous list.
+    Spaces(Vec<SpaceSummary>),
     /// A message the account's notification rules consider worth a notification.
     Notice(Notice),
     /// Outcome of [`MatrixCmd::SaveFile`]: where the file is now, or what went wrong.
@@ -354,6 +358,7 @@ impl std::fmt::Debug for MatrixEvent {
             Self::CrossSigningSetUp(result) => {
                 write!(f, "CrossSigningSetUp({result:?})")
             }
+            Self::Spaces(spaces) => write!(f, "Spaces({})", spaces.len()),
             Self::Notice(notice) => write!(f, "{notice:?}"),
             Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
             Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
@@ -606,8 +611,20 @@ impl Worker {
         let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
         let mut own_members = notify::OwnMembers::default();
         let mut verifier = verify::Verifier::start(client, self.events.clone());
+        // Kept alive for the session: it follows the space hierarchy by itself.
+        let space_service = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
+        let (mut space_filters, space_changes) = space_service.subscribe_to_space_filters().await;
+        pin_mut!(space_changes);
+        self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
+
         let end = loop {
             tokio::select! {
+                Some(diffs) = space_changes.next() => {
+                    for diff in diffs {
+                        diff.apply(&mut space_filters);
+                    }
+                    self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
+                }
                 incoming = verifier.next_incoming() => verifier.on_incoming(incoming).await,
                 Some(diffs) = entries.next() => {
                     for diff in diffs {

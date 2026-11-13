@@ -207,6 +207,14 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        Char('s'),
+        ALT,
+        Action::SpaceNext,
+        "Alt-S",
+        "Next space (then all rooms)",
+    ),
+    bind(
+        Global,
         Char('k'),
         CTRL,
         Action::FocusRoomFilter,
