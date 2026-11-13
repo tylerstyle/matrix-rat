@@ -118,6 +118,11 @@ pub enum MatrixCmd {
         /// Open it with the desktop's program for it afterwards.
         open: bool,
     },
+    /// Fetch the small picture of a room; answered with [`MatrixEvent::Avatar`].
+    FetchAvatar {
+        /// Its `mxc://` address.
+        url: String,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -148,6 +153,7 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Shutdown => f.write_str("Shutdown"),
             // The source of an encrypted file carries its key.
             Self::FetchImage { full, .. } => write!(f, "FetchImage(full: {full})"),
+            Self::FetchAvatar { .. } => f.write_str("FetchAvatar"),
             Self::Verification(command) => write!(f, "Verification({command:?})"),
             Self::SaveFile { open, .. } => write!(f, "SaveFile(open: {open})"),
         }
@@ -193,6 +199,9 @@ pub struct RoomSummary {
     pub mention: bool,
     /// Has unread messages, even if they do not notify.
     pub unread: bool,
+    /// `mxc://` address of the room's picture (for a chat with one person without
+    /// a picture of its own: that person's).
+    pub avatar: Option<String>,
 }
 
 pub enum MatrixEvent {
@@ -250,6 +259,11 @@ pub enum MatrixEvent {
         open: bool,
         result: Result<std::path::PathBuf, String>,
     },
+    /// Outcome of [`MatrixCmd::FetchAvatar`].
+    Avatar {
+        url: String,
+        result: Result<crate::images::Decoded, String>,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -289,6 +303,7 @@ impl std::fmt::Debug for MatrixEvent {
             Self::Image { full, result, .. } => {
                 write!(f, "Image(full: {full}, ok: {})", result.is_ok())
             }
+            Self::Avatar { result, .. } => write!(f, "Avatar(ok: {})", result.is_ok()),
             Self::Security(security) => write!(f, "Security({security:?})"),
             Self::Verification(update) => {
                 write!(f, "Verification({}, {:?})", update.flow, update.stage)
@@ -611,6 +626,14 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
                 .map(|name| name.to_string())
                 .unwrap_or_else(|_| room.room_id().to_string()),
         };
+        let avatar = room.avatar_url().or_else(|| {
+            // Known from the room's summary, no members have to be loaded for it.
+            let info = (category == RoomCategory::Person).then(|| room.clone_info())?;
+            match info.heroes() {
+                [other] => other.avatar_url.clone(),
+                _ => None,
+            }
+        });
         let notifications = room.num_unread_notifications();
         summaries.push(RoomSummary {
             id: room.room_id().to_string(),
@@ -619,6 +642,9 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
             notifications,
             mention: room.num_unread_mentions() > 0,
             unread: notifications > 0 || room.num_unread_messages() > 0 || room.is_marked_unread(),
+            avatar: avatar
+                .map(|uri| crate::text::sanitize_line(uri.as_str()))
+                .filter(|uri| uri.starts_with("mxc://")),
         });
     }
     summaries

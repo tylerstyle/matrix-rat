@@ -32,6 +32,9 @@ impl App {
                 full: request.full,
             });
         }
+        for url in self.images.take_avatar_requests() {
+            self.send_matrix(MatrixCmd::FetchAvatar { url });
+        }
     }
 
     /// Tells the terminal to free the pictures that are no longer shown (`all`: every
@@ -745,6 +748,175 @@ mod tests {
         app.images.begin_frame();
         app.images.request(&info);
         assert_eq!(app.images.take_requests().len(), 1);
+    }
+
+    /// An app connected to a fake worker with `count` rooms, each with a picture.
+    fn app_with_rooms(
+        graphics: Graphics,
+        count: usize,
+    ) -> (App, Terminal<TestBackend>, UnboundedReceiver<MatrixCmd>) {
+        let (mut app, mut terminal, commands) = app_with(graphics, Vec::new());
+        let rooms = (0..count)
+            .map(|n| RoomSummary {
+                id: format!("!r{n}"),
+                name: format!("Room {n:02}"),
+                category: RoomCategory::Room,
+                notifications: 0,
+                mention: false,
+                unread: false,
+                avatar: Some(format!("mxc://example.org/avatar{n}")),
+            })
+            .collect();
+        app.on_matrix(MatrixEvent::Rooms(rooms));
+        frame(&mut app, &mut terminal);
+        (app, terminal, commands)
+    }
+
+    fn avatar_fetches(commands: &mut UnboundedReceiver<MatrixCmd>) -> Vec<String> {
+        let mut seen = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let MatrixCmd::FetchAvatar { url } = command {
+                seen.push(url);
+            }
+        }
+        seen
+    }
+
+    fn avatar(n: usize, ok: bool) -> MatrixEvent {
+        MatrixEvent::Avatar {
+            url: format!("mxc://example.org/avatar{n}"),
+            result: if ok {
+                Ok(decoded(96, 96))
+            } else {
+                Err("could not be loaded".into())
+            },
+        }
+    }
+
+    #[test]
+    fn room_pictures_replace_the_tile_for_visible_rows_only() {
+        let (mut app, mut terminal, mut commands) = app_with_rooms(kitty(), 60);
+        // Asked for once, and only for the rooms on screen: 26 rows of list below
+        // the filter line, one of them the section title.
+        let wanted = avatar_fetches(&mut commands);
+        assert_eq!(wanted.len(), 25, "{wanted:?}");
+        assert!(wanted.contains(&"mxc://example.org/avatar0".to_owned()));
+        assert!(!wanted.contains(&"mxc://example.org/avatar40".to_owned()));
+        frame(&mut app, &mut terminal);
+        assert!(avatar_fetches(&mut commands).is_empty());
+
+        // Until it is there, the tile with the initial.
+        let row = row_of(&terminal, "Room 03") as u16;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(2, row)].symbol(), "R");
+        assert!(kitty_cells(buffer).is_empty());
+
+        app.on_matrix(avatar(3, true));
+        frame(&mut app, &mut terminal);
+        let cells = kitty_cells(terminal.backend().buffer());
+        // Exactly the tile's two cells, the picture itself travelling in the first.
+        assert_eq!(cells.len(), 2);
+        assert_eq!((cells[0].0, cells[0].1), (2, row));
+        assert_eq!((cells[1].0, cells[1].1), (3, row));
+        assert!(cells[0].2.starts_with("\x1b_G"));
+        // The row is otherwise as before, and the others keep their tiles.
+        assert!(screen(&terminal).contains("Room 03"));
+        assert_eq!(terminal.backend().buffer()[(2, row + 1)].symbol(), "R");
+        frame(&mut app, &mut terminal);
+        let cells = kitty_cells(terminal.backend().buffer());
+        assert_eq!(cells.len(), 2);
+        assert!(!cells[0].2.contains('\x1b'));
+
+        // A failure keeps the tile and says nothing.
+        app.on_matrix(avatar(4, false));
+        frame(&mut app, &mut terminal);
+        assert_eq!(kitty_cells(terminal.backend().buffer()).len(), 2);
+        assert!(!screen(&terminal).contains("could not"));
+        assert_eq!(terminal.backend().buffer()[(2, row + 1)].symbol(), "R");
+        assert!(avatar_fetches(&mut commands).is_empty());
+
+        // Scrolled: the picture moves with its row or leaves with it, and the rows
+        // that come into view are asked for.
+        app.sidebar.scroll = 2;
+        frame(&mut app, &mut terminal);
+        let cells = kitty_cells(terminal.backend().buffer());
+        assert_eq!((cells.len(), cells[0].1), (2, row - 2));
+        assert_eq!(avatar_fetches(&mut commands).len(), 2);
+        app.sidebar.scroll = 30;
+        frame(&mut app, &mut terminal);
+        assert!(kitty_cells(terminal.backend().buffer()).is_empty());
+
+        // Filtered down to that room, it is shown again without being sent again.
+        app.sidebar.scroll = 0;
+        app.sidebar.filter = "Room 03".into();
+        frame(&mut app, &mut terminal);
+        let cells = kitty_cells(terminal.backend().buffer());
+        assert_eq!(cells.len(), 2);
+        assert!(!cells[0].2.contains('\x1b'));
+        app.sidebar.filter.clear();
+        avatar_fetches(&mut commands);
+
+        // The room list hidden in a narrow window: nothing of it stays.
+        terminal.backend_mut().resize(50, 20);
+        app.on_event(Event::Resize(50, 20));
+        frame(&mut app, &mut terminal);
+        assert!(kitty_cells(terminal.backend().buffer()).is_empty());
+        // Back: after a resize it is sent to the terminal again.
+        terminal.backend_mut().resize(80, 30);
+        app.on_event(Event::Resize(80, 30));
+        frame(&mut app, &mut terminal);
+        let cells = kitty_cells(terminal.backend().buffer());
+        assert_eq!(cells.len(), 2);
+        assert!(cells[0].2.starts_with("\x1b_G"));
+        app.images.cleanup_sequence(false);
+
+        // Logging out forgets them and has the terminal free its copy.
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert_eq!(
+            app.images
+                .cleanup_sequence(false)
+                .matches("a=d,d=I")
+                .count(),
+            1
+        );
+        // One that was still on its way is ignored.
+        app.on_matrix(avatar(5, true));
+        assert!(app.images.take_avatar_requests().is_empty());
+    }
+
+    #[test]
+    fn a_room_picture_arriving_under_a_popup_waits_for_it_to_close() {
+        let (mut app, mut terminal, _commands) = app_with_rooms(kitty(), 3);
+        app.perform(Action::ToggleHelp);
+        app.on_matrix(avatar(0, true));
+        frame(&mut app, &mut terminal);
+        assert!(kitty_cells(terminal.backend().buffer()).is_empty());
+        app.perform(Action::ToggleHelp);
+        frame(&mut app, &mut terminal);
+        let cells = kitty_cells(terminal.backend().buffer());
+        assert_eq!(cells.len(), 2);
+        assert!(cells[0].2.starts_with("\x1b_G"));
+        // The highlight of the open room is still there around the picture.
+        let row = cells[0].1;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(1, row)].bg, buffer[(8, row)].bg);
+        assert_eq!(
+            buffer[(1, row)].bg,
+            app.theme.style(crate::theme::Role::RoomActive).bg.unwrap()
+        );
+    }
+
+    #[test]
+    fn without_real_graphics_rooms_keep_their_tiles() {
+        for graphics in [Graphics::halfblocks(), Graphics::off()] {
+            let (mut app, mut terminal, mut commands) = app_with_rooms(graphics, 5);
+            assert!(avatar_fetches(&mut commands).is_empty());
+            app.on_matrix(avatar(0, true));
+            frame(&mut app, &mut terminal);
+            let row = row_of(&terminal, "Room 01") as u16;
+            assert_eq!(terminal.backend().buffer()[(2, row)].symbol(), "R");
+            assert!(picture_cells(terminal.backend().buffer()).is_empty());
+        }
     }
 
     #[test]

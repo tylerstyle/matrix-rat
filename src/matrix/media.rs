@@ -11,6 +11,7 @@ use matrix_sdk::Client;
 use matrix_sdk::encryption::MediaEncryptionInfo;
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings};
 use matrix_sdk::reqwest::{self, StatusCode};
+use matrix_sdk::ruma::api::client::media::get_content_thumbnail::v3::Method;
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::{MxcUri, UInt};
 use matrix_sdk_base::crypto::AttachmentDecryptor;
@@ -22,7 +23,9 @@ use url::Url;
 
 use super::MatrixEvent;
 use crate::files;
-use crate::images::{self, Decoded, FULL_PIXELS, MAX_DOWNLOAD, THUMBNAIL_PIXELS, human_size};
+use crate::images::{
+    self, AVATAR_PIXELS, Decoded, FULL_PIXELS, MAX_DOWNLOAD, THUMBNAIL_PIXELS, human_size,
+};
 use crate::model::{Attachment, MediaRef};
 
 /// Downloads running at the same time.
@@ -35,6 +38,8 @@ const SAVE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SMALL_FILE: u64 = 256 * 1024;
 /// How much is read of a file that was said to be small before giving that up.
 const SMALL_FILE_LIMIT: u64 = 1024 * 1024;
+/// An avatar larger than this is not worth showing in two cells.
+const AVATAR_DOWNLOAD: u64 = 2 * 1024 * 1024;
 /// Why a picture is not shown when the details are of no use to the user.
 const FAILED: &str = "could not be loaded";
 
@@ -94,6 +99,33 @@ impl Media {
 }
 
 impl Media {
+    /// Fetches the small square picture of a room or person; the outcome arrives as
+    /// [`MatrixEvent::Avatar`]. `url` is its `mxc://` address.
+    pub fn fetch_avatar(&self, url: String) {
+        let id = (format!("avatar {url}"), false);
+        if !self.busy.lock().expect("not poisoned").insert(id.clone()) {
+            return;
+        }
+        let client = self.client.clone();
+        let events = self.events.clone();
+        let busy = self.busy.clone();
+        let slots = self.slots.clone();
+        let mut fetches = self.fetches.lock().expect("not poisoned");
+        while fetches.try_join_next().is_some() {}
+        fetches.spawn(async move {
+            let result = async {
+                let _slot = slots.acquire().await.map_err(|_| FAILED.to_owned())?;
+                match tokio::time::timeout(TIMEOUT, load_avatar(&client, &url)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(FAILED.to_owned()),
+                }
+            }
+            .await;
+            busy.lock().expect("not poisoned").remove(&id);
+            let _ = events.send(MatrixEvent::Avatar { url, result });
+        });
+    }
+
     /// Downloads a file (decrypting it if needed) and writes it into `dir` under a
     /// name that is free there. The outcome arrives as [`MatrixEvent::FileSaved`].
     pub fn save(&self, file: Attachment, dir: PathBuf, open: bool) {
@@ -156,6 +188,21 @@ async fn load(
             tracing::warn!(%err, "image decoder crashed");
             FAILED.to_owned()
         })?
+}
+
+/// A square thumbnail from the server; the file itself where the server has none.
+async fn load_avatar(client: &Client, url: &str) -> Result<Decoded, String> {
+    let source = MediaSource::Plain(<&MxcUri>::from(url).to_owned());
+    let thumb = Some(Thumb::crop(AVATAR_PIXELS));
+    let bytes = match get(client, &source, thumb, AVATAR_DOWNLOAD).await {
+        Ok(bytes) => bytes,
+        Err(_) => get(client, &source, None, AVATAR_DOWNLOAD)
+            .await
+            .map_err(|refused| refused.reason())?,
+    };
+    tokio::task::spawn_blocking(move || images::decode_avatar(&bytes))
+        .await
+        .map_err(|_| FAILED.to_owned())?
 }
 
 /// Why a download was given up.
@@ -236,7 +283,7 @@ async fn bounded_get(
 fn media_url(
     client: &Client,
     uri: &MxcUri,
-    thumbnail: Option<(u32, u32)>,
+    thumbnail: Option<Thumb>,
     authenticated: bool,
 ) -> Result<Url, Refused> {
     let (server, id) = uri.parts().map_err(|_| Refused::Failed)?;
@@ -257,13 +304,40 @@ fn media_url(
         .extend(prefix)
         .extend([kind, server.as_str(), id]);
     url.set_query(None);
-    if let Some((width, height)) = thumbnail {
+    if let Some(thumb) = thumbnail {
         url.query_pairs_mut()
-            .append_pair("width", &width.to_string())
-            .append_pair("height", &height.to_string())
-            .append_pair("method", "scale");
+            .append_pair("width", &thumb.width.to_string())
+            .append_pair("height", &thumb.height.to_string())
+            .append_pair("method", if thumb.crop { "crop" } else { "scale" });
     }
     Ok(url)
+}
+
+/// A smaller version of a file, made by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Thumb {
+    width: u32,
+    height: u32,
+    /// Cut to exactly this shape instead of fitting inside it.
+    crop: bool,
+}
+
+impl Thumb {
+    fn scale((width, height): (u32, u32)) -> Self {
+        Self {
+            width,
+            height,
+            crop: false,
+        }
+    }
+
+    fn crop((width, height): (u32, u32)) -> Self {
+        Self {
+            width,
+            height,
+            crop: true,
+        }
+    }
 }
 
 /// Fetches a file (or, for an unencrypted one, a thumbnail of `thumbnail` pixels) of
@@ -273,15 +347,20 @@ fn media_url(
 async fn get(
     client: &Client,
     source: &MediaSource,
-    thumbnail: Option<(u32, u32)>,
+    thumbnail: Option<Thumb>,
     limit: u64,
 ) -> Result<Vec<u8>, Refused> {
     let request = MediaRequestParameters {
         source: source.clone(),
         format: match thumbnail {
-            Some((width, height)) => MediaFormat::Thumbnail(MediaThumbnailSettings::new(
-                UInt::from(width),
-                UInt::from(height),
+            Some(thumb) => MediaFormat::Thumbnail(MediaThumbnailSettings::with_method(
+                if thumb.crop {
+                    Method::Crop
+                } else {
+                    Method::Scale
+                },
+                UInt::from(thumb.width),
+                UInt::from(thumb.height),
             )),
             None => MediaFormat::File,
         },
@@ -362,7 +441,7 @@ async fn download(
             }
             // The server can scale an unencrypted file down for us.
             (None, MediaSource::Plain(_)) => {
-                let pixels = Some(THUMBNAIL_PIXELS);
+                let pixels = Some(Thumb::scale(THUMBNAIL_PIXELS));
                 if let Ok(bytes) = get(client, &media.full, pixels, MAX_DOWNLOAD).await {
                     return Ok(bytes);
                 }
@@ -571,7 +650,7 @@ mod tests {
         // what was refused for its size never reaches the cache.
         let small = MediaSource::Plain(mxc_uri!("mxc://example.org/small").to_owned());
         assert_eq!(
-            get(&client, &small, Some((640, 480)), 100).await,
+            get(&client, &small, Some(Thumb::scale((640, 480))), 100).await,
             Ok(b"hello".to_vec())
         );
         assert_eq!(kept(&small).await, None);
@@ -608,8 +687,12 @@ mod tests {
             "https://example.org/base/_matrix/media/v3/download/other.org/AbC123"
         );
         assert_eq!(
-            url(Some((640, 480)), true),
+            url(Some(Thumb::scale((640, 480))), true),
             "https://example.org/base/_matrix/client/v1/media/thumbnail/other.org/AbC123?width=640&height=480&method=scale"
+        );
+        assert_eq!(
+            url(Some(Thumb::crop((96, 96))), false),
+            "https://example.org/base/_matrix/media/v3/thumbnail/other.org/AbC123?width=96&height=96&method=crop"
         );
         // Not an mxc address at all.
         let bad = <&MxcUri>::from("https://evil.example/x");
@@ -754,6 +837,103 @@ mod tests {
         // The saved file is the upload, byte for byte, under its own name.
         assert_eq!(saved, downloads.join(&name));
         assert_eq!(std::fs::read(&saved).unwrap(), uploaded);
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Gives an unencrypted room of the test user a picture, then checks that the
+    /// room list reports it and that the worker fetches it as a small square.
+    /// Setup as for the other end-to-end tests.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn room_avatar_is_reported_and_fetched() {
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let username = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+
+        let uploader = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .unwrap();
+        uploader
+            .matrix_auth()
+            .login_username(&username, &password)
+            .initial_device_display_name("matrix-rat avatar test")
+            .send()
+            .await
+            .unwrap();
+        uploader.sync_once(SyncSettings::default()).await.unwrap();
+        let mut png = Vec::new();
+        images::demo_picture(300, 200)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        // The first room where the test user is allowed to.
+        let mut room_id = None;
+        for room in uploader.joined_rooms() {
+            if !room.encryption_state().is_encrypted()
+                && room
+                    .upload_avatar(&mime::IMAGE_PNG, png.clone(), None)
+                    .await
+                    .is_ok()
+            {
+                room_id = Some(room.room_id().to_string());
+                break;
+            }
+        }
+        let room_id = room_id.expect("an unencrypted room whose picture the test user may set");
+
+        let root = std::env::temp_dir().join(format!("matrix-rat-avatar-{}", std::process::id()));
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password,
+        });
+        let wait = async {
+            let mut asked = None;
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) if asked.is_none() => {
+                        let avatar = rooms
+                            .iter()
+                            .find(|room| room.id == room_id)
+                            .and_then(|room| room.avatar.clone());
+                        if let Some(url) = avatar {
+                            assert!(url.starts_with("mxc://"));
+                            // Opening a room is what gets the worker's room machinery
+                            // going in the app; the fetch itself needs no open room.
+                            handle.send(MatrixCmd::FetchAvatar { url: url.clone() });
+                            handle.send(MatrixCmd::FetchAvatar { url: url.clone() });
+                            asked = Some(url);
+                        }
+                    }
+                    MatrixEvent::Avatar { url, result } => {
+                        assert_eq!(Some(&url), asked.as_ref());
+                        return result.expect("avatar could not be loaded");
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let avatar = tokio::time::timeout(Duration::from_secs(60), wait)
+            .await
+            .expect("timed out waiting for the avatar");
+        // A square, whatever the shape of the upload, and no larger than kept.
+        let (width, height) = (avatar.pixels.width(), avatar.pixels.height());
+        assert_eq!(width, height);
+        assert!(width > 0 && width <= AVATAR_PIXELS.0, "{width}");
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);

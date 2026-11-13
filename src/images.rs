@@ -41,6 +41,13 @@ const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 /// Memory the cache may hold before the pictures unused for longest are dropped.
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 256;
+/// Room pictures are kept as squares of this size; they are shown in
+/// [`AVATAR_CELLS`], which is some 20 to 40 pixels each way.
+pub const AVATAR_PIXELS: (u32, u32) = (96, 96);
+/// Columns and rows a room picture takes in the room list.
+pub const AVATAR_CELLS: (u16, u16) = (2, 1);
+/// Room pictures kept; at 96x96 each that is some 20 MB at the very most.
+const AVATAR_ENTRIES: usize = 512;
 /// Sizes remembered for pictures whose message did not state one.
 const LEARNED_ENTRIES: usize = 4096;
 /// A request the worker never answered (it restarted) may be made again after this.
@@ -321,6 +328,73 @@ fn encode(
     }
 }
 
+/// A room picture for its two cells in the room list: cut to the shape of those cells
+/// around its middle, so that it fills them without being squeezed.
+fn encode_avatar(pixels: &DynamicImage, graphics: Graphics, kitty_id: u32) -> Option<Encoded> {
+    let Some(Protocol::Kitty { .. }) = graphics.protocol else {
+        return None;
+    };
+    let (cols, rows) = AVATAR_CELLS;
+    let width = u32::from(cols) * u32::from(graphics.font.0.max(1));
+    let height = u32::from(rows) * u32::from(graphics.font.1.max(1));
+    let (crop_width, crop_height) = cover_crop((pixels.width(), pixels.height()), (width, height));
+    let fitted = pixels
+        .crop_imm(
+            (pixels.width() - crop_width) / 2,
+            (pixels.height() - crop_height) / 2,
+            crop_width,
+            crop_height,
+        )
+        .resize_exact(width, height, FilterType::Triangle);
+    let bytes = fitted.as_bytes().len() / 3 * 4;
+    let kitty = Kitty::new(fitted, Size::new(cols, rows), kitty_id, false, false).ok()?;
+    Some(Encoded {
+        size: AVATAR_CELLS,
+        protocol: SlicedProtocol::Kitty(kitty),
+        kitty_id: Some(kitty_id),
+        shown: false,
+        bytes,
+    })
+}
+
+/// The largest part of a picture of `source` pixels that has the shape of `target`.
+fn cover_crop(source: (u32, u32), target: (u32, u32)) -> (u32, u32) {
+    let (width, height) = (u64::from(source.0.max(1)), u64::from(source.1.max(1)));
+    let (target_width, target_height) = (u64::from(target.0.max(1)), u64::from(target.1.max(1)));
+    if width * target_height > height * target_width {
+        // Too wide: full height, part of the width.
+        (
+            ((height * target_width / target_height).max(1)) as u32,
+            height as u32,
+        )
+    } else {
+        (
+            width as u32,
+            ((width * target_height / target_width).max(1)) as u32,
+        )
+    }
+}
+
+/// Decodes a room picture and makes it a small square, cut from the middle.
+pub fn decode_avatar(bytes: &[u8]) -> Result<Decoded, String> {
+    // Larger than it is kept at, to leave enough of a non-square one for cutting.
+    let decoded = decode(bytes, (AVATAR_PIXELS.0 * 4, AVATAR_PIXELS.1 * 4))?;
+    let (width, height) = (decoded.pixels.width(), decoded.pixels.height());
+    let side = width.min(height);
+    let square = decoded
+        .pixels
+        .crop_imm((width - side) / 2, (height - side) / 2, side, side);
+    let square = if side > AVATAR_PIXELS.0 {
+        square.resize_exact(AVATAR_PIXELS.0, AVATAR_PIXELS.1, FilterType::Triangle)
+    } else {
+        square
+    };
+    Ok(Decoded {
+        pixels: Arc::new(square),
+        original: decoded.original,
+    })
+}
+
 /// A picture the worker should fetch.
 pub struct Request {
     pub key: String,
@@ -409,6 +483,26 @@ pub struct EncodeDone {
 enum Target {
     Inline(String),
     Viewer,
+    Avatar(String),
+}
+
+/// The small picture of a room, shown in the room list.
+struct Avatar {
+    state: AvatarState,
+    /// The frame it was last drawn in.
+    used: u64,
+}
+
+enum AvatarState {
+    Loading {
+        since: Instant,
+    },
+    /// The list shows the coloured tile instead, without a word.
+    Failed,
+    Ready {
+        pixels: Pixels,
+        encoded: Option<Encoded>,
+    },
 }
 
 pub struct ImageStore {
@@ -433,6 +527,10 @@ pub struct ImageStore {
     next_id: u32,
     /// Where finished viewer encodings go. Without it they are done on the spot.
     encoder: Option<UnboundedSender<EncodeDone>>,
+    /// Room pictures by their `mxc://` address. They are tiny and have their own
+    /// limit, apart from the pictures in messages.
+    avatars: HashMap<String, Avatar>,
+    avatar_requests: Vec<String>,
 }
 
 impl std::fmt::Debug for ImageStore {
@@ -466,6 +564,8 @@ impl ImageStore {
             garbage: Vec::new(),
             next_id: seed,
             encoder: None,
+            avatars: HashMap::new(),
+            avatar_requests: Vec::new(),
         }
     }
 
@@ -651,7 +751,105 @@ impl ImageStore {
         self.learned.clear();
         self.requests.clear();
         self.unverified.clear();
+        self.avatars.clear();
+        self.avatar_requests.clear();
         self.layout_rev += 1;
+    }
+
+    // ----- room pictures -------------------------------------------------------------
+
+    /// The picture of a room ready to draw into its two cells, if there is one yet.
+    /// Asks for it otherwise. Only with real graphics: two cells of half blocks are
+    /// four pixels. `covered` as for [`ImageStore::inline`].
+    pub fn avatar(&mut self, url: &str, covered: bool) -> Option<&mut Encoded> {
+        if !self.is_kitty() {
+            return None;
+        }
+        let graphics = self.graphics;
+        let frame = self.frame;
+        let wanted = match self.avatars.get(url).map(|avatar| &avatar.state) {
+            None => true,
+            Some(AvatarState::Loading { since }) => since.elapsed() >= REQUEST_TIMEOUT,
+            _ => false,
+        };
+        if wanted {
+            let state = AvatarState::Loading {
+                since: Instant::now(),
+            };
+            self.avatars
+                .insert(url.to_owned(), Avatar { state, used: frame });
+            self.avatar_requests.push(url.to_owned());
+            self.evict_avatars();
+            return None;
+        }
+        let missing = matches!(
+            self.avatars.get(url)?.state,
+            AvatarState::Ready { encoded: None, .. }
+        );
+        let id = if missing && !covered {
+            self.fresh_id()
+        } else {
+            0
+        };
+        let avatar = self.avatars.get_mut(url)?;
+        avatar.used = frame;
+        let AvatarState::Ready { pixels, encoded } = &mut avatar.state else {
+            return None;
+        };
+        if missing {
+            if covered {
+                return None;
+            }
+            *encoded = encode_avatar(pixels, graphics, id);
+        }
+        encoded.as_mut().filter(|encoded| encoded.shown || !covered)
+    }
+
+    /// The addresses asked for since the last call, for the worker.
+    pub fn take_avatar_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.avatar_requests)
+    }
+
+    /// The worker fetched (or failed to fetch) a room's picture.
+    pub fn on_avatar(&mut self, url: &str, result: Result<Decoded, String>) {
+        // Not asked for (any more), such as after logging out.
+        let Some(avatar) = self.avatars.get_mut(url) else {
+            return;
+        };
+        if !matches!(avatar.state, AvatarState::Loading { .. }) {
+            return;
+        }
+        avatar.state = match result {
+            Ok(decoded) => AvatarState::Ready {
+                pixels: decoded.pixels,
+                encoded: None,
+            },
+            Err(_) => AvatarState::Failed,
+        };
+    }
+
+    pub fn sent_avatar(&mut self, url: &str, x: u16, y: u16) {
+        self.unverified.push((Target::Avatar(url.to_owned()), x, y));
+    }
+
+    /// Keeps the room pictures within their limit, dropping those unseen for longest.
+    fn evict_avatars(&mut self) {
+        while self.avatars.len() > AVATAR_ENTRIES {
+            let oldest = self
+                .avatars
+                .iter()
+                .filter(|(_, avatar)| avatar.used < self.frame)
+                .min_by_key(|(_, avatar)| avatar.used)
+                .map(|(url, _)| url.clone());
+            let Some(url) = oldest else { return };
+            if let Some(Avatar {
+                state: AvatarState::Ready { encoded, .. },
+                ..
+            }) = self.avatars.remove(&url)
+            {
+                Self::discard(&mut self.garbage, encoded);
+            }
+        }
     }
 
     /// The worker fetched (or failed to fetch) a picture.
@@ -803,6 +1001,13 @@ impl ImageStore {
                     Some(viewer) => &mut viewer.encoded,
                     None => continue,
                 },
+                Target::Avatar(url) => match self.avatars.get_mut(url) {
+                    Some(Avatar {
+                        state: AvatarState::Ready { encoded, .. },
+                        ..
+                    }) => encoded,
+                    _ => continue,
+                },
             };
             if intact(x, y) {
                 if let Some(encoded) = slot {
@@ -819,6 +1024,11 @@ impl ImageStore {
     pub fn forget_encoded(&mut self) {
         for entry in self.entries.values_mut() {
             if let State::Ready { encoded, .. } = &mut entry.state {
+                Self::discard(&mut self.garbage, encoded.take());
+            }
+        }
+        for avatar in self.avatars.values_mut() {
+            if let AvatarState::Ready { encoded, .. } = &mut avatar.state {
                 Self::discard(&mut self.garbage, encoded.take());
             }
         }
@@ -1182,6 +1392,57 @@ mod tests {
             Graphics::from_reply(Reply::default(), Some((7, 14))),
             Graphics::halfblocks()
         );
+    }
+
+    #[test]
+    fn room_pictures_are_cut_to_fill_their_cells() {
+        // The part of the picture with the shape of the cells, as large as possible.
+        assert_eq!(cover_crop((96, 96), (20, 20)), (96, 96));
+        assert_eq!(cover_crop((96, 96), (16, 20)), (76, 96));
+        assert_eq!(cover_crop((96, 96), (24, 20)), (96, 80));
+        assert_eq!(cover_crop((200, 50), (20, 20)), (50, 50));
+        assert_eq!(cover_crop((0, 0), (0, 0)), (1, 1));
+
+        // Any shape of file becomes a square of the kept size, cut from the middle.
+        let mut wide = Vec::new();
+        demo_picture(400, 100)
+            .write_to(&mut Cursor::new(&mut wide), image::ImageFormat::Png)
+            .unwrap();
+        let avatar = decode_avatar(&wide).unwrap();
+        assert_eq!((avatar.pixels.width(), avatar.pixels.height()), (96, 96));
+        assert_eq!(avatar.original, (400, 100));
+        // A small one is not blown up.
+        let mut small = Vec::new();
+        demo_picture(30, 40)
+            .write_to(&mut Cursor::new(&mut small), image::ImageFormat::Png)
+            .unwrap();
+        let avatar = decode_avatar(&small).unwrap();
+        assert_eq!((avatar.pixels.width(), avatar.pixels.height()), (30, 30));
+        assert!(decode_avatar(b"junk").is_err());
+
+        // Encoded for two cells at this font: 2x10 by 20 pixels.
+        let encoded = encode_avatar(&avatar.pixels, kitty(), 7).unwrap();
+        assert_eq!(encoded.size, (2, 1));
+        assert!(encode_avatar(&avatar.pixels, Graphics::halfblocks(), 7).is_none());
+    }
+
+    #[test]
+    fn room_pictures_have_their_own_limit() {
+        let mut store = ImageStore::new(kitty());
+        for n in 0..AVATAR_ENTRIES + 50 {
+            store.begin_frame();
+            let url = format!("mxc://x/{n}");
+            assert!(store.avatar(&url, false).is_none());
+            store.on_avatar(&url, Ok(decoded(96, 96)));
+            assert!(store.avatar(&url, false).is_some());
+        }
+        assert_eq!(store.avatars.len(), AVATAR_ENTRIES);
+        // The oldest are gone, their copies in the terminal are freed, and the
+        // pictures in messages are not touched by any of it.
+        assert!(!store.avatars.contains_key("mxc://x/0"));
+        assert_eq!(store.cleanup_sequence(false).matches("a=d,d=I").count(), 50);
+        assert!(store.entries.is_empty());
+        assert_eq!(store.take_avatar_requests().len(), AVATAR_ENTRIES + 50);
     }
 
     #[test]

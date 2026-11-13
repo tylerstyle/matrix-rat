@@ -294,6 +294,7 @@ impl Timelines {
                 }),
                 Err(err) => self.fail("Could not leave", err),
             },
+            MatrixCmd::FetchAvatar { url } => self.media.fetch_avatar(url),
             MatrixCmd::FetchImage {
                 key,
                 media,
