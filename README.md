@@ -222,5 +222,5 @@ log of every code review are in [docs/PLAN.md](docs/PLAN.md); the reviews themse
 ## Licence and credits
 
 Apache-2.0. Built on [ratatui](https://ratatui.rs) and
-[matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk). Parts are adapted from
-[iamb](https://github.com/ulyssa/iamb) (Apache-2.0); see `NOTICE`.
+[matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk). The design draws on
+[iamb](https://github.com/ulyssa/iamb); see `NOTICE`.

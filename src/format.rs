@@ -254,6 +254,11 @@ fn tighten_spoilers(text: &str) -> std::borrow::Cow<'_, str> {
     for (n, line) in lines.iter().enumerate() {
         let start = offset;
         offset += line.len();
+        // Indented code (outside a fence; inside one the fence decides).
+        if fence.is_none() && (line.starts_with("    ") || line.starts_with('\t')) {
+            out.push_str(line);
+            continue;
+        }
         // Fenced code, also when it sits in a quote or a list.
         let inner = content(line);
         let inner = inner.trim_start_matches(['-', '*', '+', ' ']);
@@ -277,9 +282,8 @@ fn tighten_spoilers(text: &str) -> std::borrow::Cow<'_, str> {
             }
             (None, None) => {}
         }
-        // Indented code, and rows of a table.
-        let indented = line.starts_with("    ") || line.starts_with('\t');
-        if indented || in_table[n] {
+        // Rows of a table.
+        if in_table[n] {
             out.push_str(line);
             continue;
         }
