@@ -27,14 +27,32 @@ pub struct SearchBar {
     pub digging: u8,
     /// Shown instead of the count: "no older matches" and the like.
     pub note: Option<&'static str>,
+    /// Where the hit was in the message list when last seen, to stay near it should
+    /// the message disappear.
+    at: usize,
+    /// Selection and scroll position when the bar was opened, to go back to when the
+    /// search ends without a match.
+    origin: (Option<usize>, usize),
+    /// The room the search is in; the bar closes if another one is shown.
+    room: String,
 }
 
 impl App {
     pub(super) fn open_search(&mut self) {
-        if self.modal.is_some() || self.images.viewer_open() || self.room().is_none() {
+        let Some(room) = self.room().filter(|room| room.kind != RoomKind::Invite) else {
+            return;
+        };
+        // Too small to draw the bar: an invisible bar would only swallow keys.
+        let fits = self.screen.width >= 18 && self.screen.height >= 5;
+        if self.modal.is_some() || self.images.viewer_open() || !fits {
             return;
         }
-        self.open_modal(Modal::Search(SearchBar::default()));
+        let bar = SearchBar {
+            origin: (self.timeline.selected, self.timeline.scroll),
+            room: room.id.clone(),
+            ..SearchBar::default()
+        };
+        self.open_modal(Modal::Search(bar));
     }
 
     /// Indexes of the messages that contain `needle`, oldest first.
@@ -62,6 +80,7 @@ impl App {
         self.timeline.reveal_selected = true;
         if let Some(Modal::Search(bar)) = &mut self.modal {
             bar.hit = id;
+            bar.at = message;
             bar.total = matches.len();
             bar.position = matches.len() - index;
             bar.digging = 0;
@@ -79,11 +98,15 @@ impl App {
             self.search_go(&matches, last);
         } else if let Some(Modal::Search(bar)) = &mut self.modal {
             let empty = bar.query.trim().is_empty();
-            *bar = SearchBar {
-                query: std::mem::take(&mut bar.query),
-                note: (!empty).then_some("not in the loaded messages · Enter looks further back"),
-                ..SearchBar::default()
-            };
+            bar.hit = None;
+            bar.position = 0;
+            bar.total = 0;
+            bar.digging = 0;
+            bar.note = (!empty).then_some("not in the loaded messages · Enter looks further back");
+            // Nothing found: the view goes back to where the search started.
+            let (selected, scroll) = bar.origin;
+            self.timeline.selected = selected.filter(|i| *i < self.messages().len());
+            self.timeline.scroll = scroll;
         }
     }
 
@@ -149,6 +172,69 @@ impl App {
         }
     }
 
+    /// The messages changed under the open bar (history arrived, a message came in or
+    /// was deleted): keep the count right, drop a hit that is gone, and take up a
+    /// match that has only now appeared.
+    pub(super) fn search_sync(&mut self) {
+        let Some(Modal::Search(bar)) = &self.modal else {
+            return;
+        };
+        if bar.query.trim().is_empty() {
+            return;
+        }
+        let matches = self.search_matches(&bar.query);
+        let at = bar
+            .hit
+            .as_ref()
+            .and_then(|id| self.messages().iter().position(|m| m.id == *id))
+            .and_then(|message| matches.iter().position(|i| *i == message));
+        let had_hit = bar.hit.is_some();
+        let was_at = bar.at;
+        match at {
+            // Still there: only the numbers may have changed.
+            Some(index) => {
+                let message = matches[index];
+                if let Some(Modal::Search(bar)) = &mut self.modal {
+                    bar.at = message;
+                    bar.total = matches.len();
+                    bar.position = matches.len() - index;
+                }
+            }
+            // The hit is gone, or there was none and now there are matches.
+            None if !matches.is_empty() && (had_hit || !self.timeline.loading_older) => {
+                // A hit that disappeared: the next older match from where it was, the
+                // way the search was heading. No hit before: the newest.
+                let index = if had_hit {
+                    matches
+                        .iter()
+                        .rposition(|i| *i < was_at)
+                        .or_else(|| matches.iter().position(|i| *i >= was_at))
+                        .unwrap_or(0)
+                } else {
+                    matches.len() - 1
+                };
+                self.search_go(&matches, index);
+            }
+            None => {
+                if let Some(Modal::Search(bar)) = &mut self.modal {
+                    bar.hit = None;
+                    bar.total = matches.len();
+                    bar.position = 0;
+                }
+            }
+        }
+    }
+
+    /// The open room changed (it was left, or another was opened): the search was
+    /// about the old one.
+    pub(super) fn search_check_room(&mut self) {
+        if let Some(Modal::Search(bar)) = &self.modal
+            && self.room().is_none_or(|room| room.id != bar.room)
+        {
+            self.modal = None;
+        }
+    }
+
     /// Older history arrived (or there is none): carry on with a search that was
     /// waiting for it.
     pub(super) fn search_after_load(&mut self) {
@@ -189,7 +275,10 @@ impl App {
                 bar.query.pop();
                 self.search_restart();
             }
-            (KeyCode::Char(c), _) if plain => {
+            // Nothing that could reach the terminal as a control sequence.
+            (KeyCode::Char(c), _)
+                if plain && !crate::text::sanitize_line(c.encode_utf8(&mut [0; 4])).is_empty() =>
+            {
                 bar.query.push(c);
                 self.search_restart();
             }
@@ -211,10 +300,18 @@ impl App {
         }
     }
 
-    /// Closing leaves the found message selected, ready to reply to or open.
+    /// Closing leaves the found message selected, ready to reply to or open. Without
+    /// a match the view is as it was before the search.
     pub(super) fn close_search(&mut self) {
-        let found = matches!(&self.modal, Some(Modal::Search(bar)) if bar.hit.is_some());
-        self.modal = None;
+        let Some(Modal::Search(bar)) = self.modal.take() else {
+            return;
+        };
+        let found = bar.hit.is_some();
+        if !found {
+            let (selected, scroll) = bar.origin;
+            self.timeline.selected = selected.filter(|i| *i < self.messages().len());
+            self.timeline.scroll = scroll;
+        }
         if found {
             let selected = self.timeline.selected;
             self.set_focus(Pane::Timeline);
@@ -259,6 +356,7 @@ mod tests {
             .collect();
         app.rooms = vec![room];
         app.active = 0;
+        app.screen = ratatui::layout::Rect::new(0, 0, 100, 30);
         (app, commands)
     }
 
@@ -365,6 +463,75 @@ mod tests {
     }
 
     #[test]
+    fn the_bar_follows_what_happens_to_the_messages() {
+        let (mut app, mut commands) = app_with(&["x", "rat one", "y", "rat two"]);
+        let update = |app: &mut App, messages: Vec<Message>| {
+            app.on_matrix(MatrixEvent::Timeline {
+                room_id: "!a".into(),
+                generation: app.generation,
+                messages,
+                reached_start: false,
+            });
+        };
+        app.perform(Action::Search);
+        type_text(&mut app, "rat");
+        assert_eq!((app.timeline.selected, bar(&app).total), (Some(3), 2));
+        // A new match comes in: the count follows, the hit stays.
+        let mut messages = app.rooms[0].messages.clone();
+        messages.push(message("new", "another rat"));
+        update(&mut app, messages.clone());
+        assert_eq!((bar(&app).position, bar(&app).total), (2, 3));
+        assert_eq!(app.timeline.selected, Some(3));
+        // The hit is deleted: the search moves to the nearest older match instead of
+        // jumping to the newest.
+        messages.remove(3);
+        update(&mut app, messages.clone());
+        assert_eq!(bar(&app).hit.as_deref(), Some("1"));
+        assert_eq!(bar(&app).total, 2);
+
+        // History that answers a "look further back" may arrive after the worker said
+        // it was done; the match is still taken up.
+        type_text(&mut app, "zzz");
+        assert!(bar(&app).hit.is_none());
+        app.on_event(key(KeyCode::Enter));
+        while commands.try_recv().is_ok() {}
+        for _ in 0..MAX_DIG {
+            app.on_matrix(MatrixEvent::Paginated {
+                generation: app.generation,
+                reached_start: false,
+            });
+        }
+        assert_eq!(bar(&app).digging, 0);
+        let mut older = vec![message("old", "ratzzz at last")];
+        older.extend(messages.clone());
+        update(&mut app, older);
+        assert_eq!(bar(&app).hit.as_deref(), Some("old"));
+
+        // A failed request for history does not leave the search waiting forever.
+        type_text(&mut app, "q");
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.timeline.loading_older);
+        app.on_matrix(MatrixEvent::Paginated {
+            generation: app.generation,
+            reached_start: true,
+        });
+        assert!(!app.timeline.loading_older);
+        assert_eq!(bar(&app).note, Some("no older matches"));
+
+        // Without a match, closing puts the view back where the search began; and a
+        // click outside closes like Esc.
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert_eq!(app.timeline.selected, None);
+        // The room goes away under an open bar: the bar goes too.
+        app.perform(Action::Search);
+        type_text(&mut app, "rat");
+        app.rooms[0].id = "!other".into();
+        app.search_check_room();
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
     fn search_needs_a_room_and_matches_names_too() {
         let (mut app, _commands) = app_with(&["hello"]);
         app.perform(Action::Search);
@@ -372,7 +539,15 @@ mod tests {
         assert_eq!(bar(&app).total, 1);
         app.on_event(Event::Paste("\u{1b}[31m x\nsecond".into()));
         assert_eq!(bar(&app).query, "ANN[31m x");
+        // Typed control characters never get into the text.
+        app.on_event(key(KeyCode::Char('\u{202e}')));
+        app.on_event(key(KeyCode::Char('\u{9b}')));
+        assert_eq!(bar(&app).query, "ANN[31m x");
         app.on_event(key(KeyCode::Esc));
+        // Not on an invitation, not without a room.
+        app.rooms[0].kind = RoomKind::Invite;
+        app.perform(Action::Search);
+        assert!(app.modal.is_none());
         app.rooms.clear();
         app.perform(Action::Search);
         assert!(app.modal.is_none());

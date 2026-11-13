@@ -642,8 +642,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             let first = rows.iter().position(|r| r.msg == Some(selected));
             let last = rows.iter().rposition(|r| r.msg == Some(selected));
             if let (Some(first), Some(last)) = (first, last) {
-                if first < top {
-                    top = first;
+                // The find bar lies over the top rows; a found message goes below it.
+                let covered = if matches!(app.modal, Some(crate::modal::Modal::Search(_))) {
+                    4.min(height.saturating_sub(1))
+                } else {
+                    0
+                };
+                if first < top + covered {
+                    top = first.saturating_sub(covered);
                 } else if last >= top + height {
                     top = (last + 1 - height).min(first);
                 }

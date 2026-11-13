@@ -231,7 +231,14 @@ impl Timelines {
                             });
                         }));
                     }
-                    Err(err) => self.fail("Could not load older messages", format!("{err:#}")),
+                    Err(err) => {
+                        self.fail("Could not load older messages", format!("{err:#}"));
+                        // The UI waits for an answer to every request.
+                        let _ = self.events.send(MatrixEvent::Paginated {
+                            generation,
+                            reached_start: true,
+                        });
+                    }
                 }
             }
             MatrixCmd::Send {

@@ -55,20 +55,30 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, bar: &SearchBar) {
     let status = truncate(&status, room.saturating_sub(8));
     let text_room = room.saturating_sub(width(&status) + 1);
     // The end of a long text, where typing happens.
-    let mut shown = bar.query.clone();
-    while width(&shown) > text_room && !shown.is_empty() {
-        shown.remove(0);
+    let mut shown = bar.query.as_str();
+    {
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut starts = bar.query.grapheme_indices(true).map(|(at, _)| at);
+        while width(shown) > text_room {
+            match starts.next() {
+                Some(at) => shown = &bar.query[at..],
+                None => break,
+            }
+        }
+        if width(shown) > text_room {
+            shown = "";
+        }
     }
-    let gap = room.saturating_sub(width(&shown) + width(&status));
+    let gap = room.saturating_sub(width(shown) + width(&status));
     let line = Line::from(vec![
         Span::styled(" ⌕ ", theme.style(Role::StatusKey)),
-        Span::raw(shown.clone()),
+        Span::raw(shown.to_owned()),
         Span::raw(" ".repeat(gap)),
         Span::styled(status, theme.style(Role::Muted)),
     ]);
     frame.render_widget(line, inner);
     frame.set_cursor_position(Position::new(
-        (inner.x + 3 + width(&shown) as u16).min(inner.right().saturating_sub(1)),
+        (inner.x + 3 + width(shown) as u16).min(inner.right().saturating_sub(1)),
         inner.y,
     ));
 }

@@ -1825,6 +1825,7 @@ impl App {
                 self.apply_rooms(rooms);
                 // A room that was just joined or created is opened when it is listed.
                 self.open_pending_room();
+                self.search_check_room();
             }
             MatrixEvent::Recovery(status) => {
                 // Takes precedence over the emoji picker, never over the login form.
@@ -1856,6 +1857,7 @@ impl App {
                 if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
+                    self.search_sync();
                     self.timeline.reached_start |= reached_start;
                 }
             }
@@ -1868,6 +1870,7 @@ impl App {
                     view.loading_older = false;
                     view.reached_start |= reached_start;
                     // Did this request bring anything to show?
+                    // (The messages on screen: a thread's while one is open.)
                     let grew = self.rooms.get(self.active).map_or(0, |r| r.messages.len())
                         > view.count_at_request;
                     view.empty_batches = if grew { 0 } else { view.empty_batches + 1 };
@@ -2316,14 +2319,12 @@ impl App {
                         self.help_open = false;
                         if matches!(
                             self.modal,
-                            Some(
-                                Modal::Emoji(_)
-                                    | Modal::Settings(_)
-                                    | Modal::Palette(_)
-                                    | Modal::Search(_)
-                            )
+                            Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_))
                         ) {
                             self.modal = None;
+                        }
+                        if matches!(self.modal, Some(Modal::Search(_))) {
+                            self.close_search();
                         }
                         self.close_manage();
                     }

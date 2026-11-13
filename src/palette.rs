@@ -438,6 +438,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::JumpToNewest => ctx.has_room && ctx.has_messages,
         Action::AcceptInvite | Action::DeclineInvite => ctx.in_invite,
         Action::RoomInfo => ctx.has_room,
+        Action::Search => ctx.has_room && !ctx.in_invite,
         _ => true,
     }
 }
