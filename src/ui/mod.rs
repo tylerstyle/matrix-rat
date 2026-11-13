@@ -341,6 +341,60 @@ mod tests {
     }
 
     #[test]
+    fn every_key_in_the_help_can_be_reached() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let last = crate::keymap::DEFAULT.last().unwrap().description;
+        // At the size the overlay was made for, everything is there at once.
+        let mut app = App::demo();
+        app.perform(Action::ToggleHelp);
+        let text = render(&mut app, 100, 30);
+        for binding in crate::keymap::DEFAULT {
+            assert!(
+                text.contains(binding.description),
+                "{}",
+                binding.description
+            );
+        }
+        assert!(text.contains("Ctrl-Q      Quit"));
+        assert!(!text.contains("scroll"));
+        // In smaller windows what does not fit is a few presses away, in both
+        // layouts, and the way back as well.
+        for (w, h) in [(100, 24), (80, 24), (60, 12)] {
+            let mut app = App::demo();
+            app.perform(Action::ToggleHelp);
+            let text = render(&mut app, w, h);
+            assert!(text.contains("↑↓ scroll"), "{w}x{h}");
+            assert!(!text.contains(last), "{w}x{h}");
+            let mut seen = text;
+            for _ in 0..80 {
+                app.on_event(key(KeyCode::Down));
+                seen.push_str(&render(&mut app, w, h));
+            }
+            for binding in crate::keymap::DEFAULT {
+                assert!(
+                    seen.contains(binding.description),
+                    "{w}x{h}: {}",
+                    binding.description
+                );
+            }
+            assert!(render(&mut app, w, h).contains(last), "{w}x{h}");
+            // Not scrolled past the end: one step up changes the view.
+            let bottom = render(&mut app, w, h);
+            app.on_event(key(KeyCode::Up));
+            assert_ne!(render(&mut app, w, h), bottom, "{w}x{h}");
+            app.on_event(key(KeyCode::Home));
+            assert!(render(&mut app, w, h).contains("Next pane"), "{w}x{h}");
+            // Opened again, it starts at the top.
+            app.on_event(key(KeyCode::End));
+            app.on_event(key(KeyCode::Esc));
+            assert!(!app.help_open);
+            app.perform(Action::ToggleHelp);
+            assert_eq!(app.help_scroll, 0);
+        }
+    }
+
+    #[test]
     fn tiny_sizes_do_not_panic() {
         use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, SettingsMenu};
         let mut with_palette = App::demo();

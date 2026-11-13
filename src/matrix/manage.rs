@@ -4,41 +4,59 @@
 use std::time::{Duration, Instant};
 
 use matrix_sdk::notification_settings::RoomNotificationMode;
+use matrix_sdk::ruma::api::client::membership::get_member_events;
 use matrix_sdk::ruma::api::client::room::create_room::v3::{Request as CreateRequest, RoomPreset};
 use matrix_sdk::ruma::api::error::{ErrorBody, ErrorKind};
 use matrix_sdk::ruma::events::InitialStateEvent;
 use matrix_sdk::ruma::events::StateEventType;
+use matrix_sdk::ruma::events::direct::DirectUserIdentifier;
 use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
 use matrix_sdk::ruma::events::room::member::MembershipState;
-use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
-use matrix_sdk::ruma::{Int, OwnedServerName, RoomId, RoomOrAliasId, ServerName, UserId};
-use matrix_sdk::{Client, Room, RoomMemberships, RoomState};
+use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, UserPowerLevel};
+use matrix_sdk::ruma::{
+    Int, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId, ServerName,
+    UserId,
+};
+use matrix_sdk::{Client, NotificationSettingsError, Room, RoomMemberships, RoomState};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
 use super::MatrixEvent;
 use crate::text::{sanitize, sanitize_line, truncate};
 
-/// Above this many members, the list is fetched again at most this often while the room
-/// info is open: the request is a big one.
+/// Above this many members, the list is asked for again at most this often while the
+/// room info is open: the request is a big one.
 const LARGE_ROOM: u64 = 1000;
 const LARGE_ROOM_REFETCH: Duration = Duration::from_secs(60);
+/// Rooms with more members than this are not asked for their complete list at all;
+/// the view shows the members known here and says so.
+const MAX_MEMBERS: u64 = 20_000;
+/// How long the server gets to send a member list.
+const MEMBERS_TIMEOUT: Duration = Duration::from_secs(60);
 /// The longest piece of a server's own words that is passed on to the user.
 const SERVER_TEXT: usize = 160;
+/// Servers named in a join request; more only make it longer.
+const VIA_MAX: usize = 5;
 
 pub enum ManageCmd {
     /// Join by `#alias:server` or `!id:server`. Answered with [`ManageEvent::Opened`].
     Join {
+        /// Comes back with the answer, so that it reaches who asked and nobody else.
+        request: u64,
         target: String,
         via: Vec<String>,
     },
-    /// Open the direct chat with this user, creating it if there is none.
-    /// Answered with [`ManageEvent::Opened`].
+    /// Open the direct chat with this user. Answered with [`ManageEvent::Opened`], or
+    /// with [`ManageEvent::NoDirectChat`] if there is none and `create` is off.
     DirectChat {
+        request: u64,
         user_id: String,
+        /// Make a new chat (a room and an invitation) if there is none.
+        create: bool,
     },
     /// Create a room. Answered with [`ManageEvent::Opened`].
     Create {
+        request: u64,
         name: String,
         topic: Option<String>,
         /// The part of the address before the colon; makes the room public.
@@ -89,7 +107,7 @@ impl std::fmt::Debug for ManageCmd {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Join { via, .. } => write!(f, "Join(via {} servers)", via.len()),
-            Self::DirectChat { .. } => f.write_str("DirectChat"),
+            Self::DirectChat { create, .. } => write!(f, "DirectChat(create: {create})"),
             Self::Create { alias, .. } => write!(f, "Create(public: {})", alias.is_some()),
             Self::Leave { room_id } => write!(f, "Leave({room_id})"),
             Self::Info { room_id } => write!(f, "Info({room_id})"),
@@ -118,7 +136,12 @@ pub enum Change {
 pub enum ManageEvent {
     /// A join, a direct chat or a new room: the id of the room to show, or what went
     /// wrong, in words for the user.
-    Opened(Result<String, String>),
+    Opened {
+        request: u64,
+        result: Result<String, String>,
+    },
+    /// There is no direct chat with this user, and none was to be made.
+    NoDirectChat { request: u64, user_id: String },
     Left {
         room_id: String,
         result: Result<(), String>,
@@ -137,7 +160,10 @@ pub enum ManageEvent {
 impl std::fmt::Debug for ManageEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Opened(result) => write!(f, "Opened(ok: {})", result.is_ok()),
+            Self::Opened { request, result } => {
+                write!(f, "Opened(request {request}, ok: {})", result.is_ok())
+            }
+            Self::NoDirectChat { request, .. } => write!(f, "NoDirectChat(request {request})"),
             Self::Left { room_id, result } => write!(f, "Left({room_id}, ok: {})", result.is_ok()),
             Self::Done {
                 room_id,
@@ -208,6 +234,11 @@ pub struct RoomDetails {
     pub members: Vec<RoomMember>,
     /// The member list is still being fetched.
     pub members_loading: bool,
+    /// The list is known to be incomplete and will stay so (the room is too large to
+    /// ask for all of it).
+    pub members_partial: bool,
+    /// Why the list could not be brought up to date; what is shown is the last known.
+    pub members_error: Option<String>,
 }
 
 /// Counts only: names and topics do not belong in a log.
@@ -253,17 +284,37 @@ impl Manager {
             let _ = events.send(MatrixEvent::Manage(event));
         };
         match command {
-            ManageCmd::Join { target, via } => {
+            ManageCmd::Join {
+                request,
+                target,
+                via,
+            } => {
                 tokio::spawn(async move {
-                    emit(ManageEvent::Opened(join(&client, &target, &via).await));
+                    let result = join(&client, &target, &via).await;
+                    emit(ManageEvent::Opened { request, result });
                 });
             }
-            ManageCmd::DirectChat { user_id } => {
+            ManageCmd::DirectChat {
+                request,
+                user_id,
+                create,
+            } => {
                 tokio::spawn(async move {
-                    emit(ManageEvent::Opened(direct_chat(&client, &user_id).await));
+                    emit(match direct_chat(&client, &user_id, create).await {
+                        Ok(Some(room_id)) => ManageEvent::Opened {
+                            request,
+                            result: Ok(room_id),
+                        },
+                        Ok(None) => ManageEvent::NoDirectChat { request, user_id },
+                        Err(error) => ManageEvent::Opened {
+                            request,
+                            result: Err(error),
+                        },
+                    });
                 });
             }
             ManageCmd::Create {
+                request,
                 name,
                 topic,
                 alias,
@@ -271,7 +322,7 @@ impl Manager {
             } => {
                 tokio::spawn(async move {
                     let result = create(&client, name, topic, alias, encrypted).await;
-                    emit(ManageEvent::Opened(result));
+                    emit(ManageEvent::Opened { request, result });
                 });
             }
             ManageCmd::Leave { room_id } => {
@@ -317,7 +368,7 @@ impl Manager {
                 tokio::spawn(async move {
                     let result = match room(&client, &room_id) {
                         Ok(room) => room
-                            .set_name(name)
+                            .set_name(sanitize_line(&name))
                             .await
                             .map(|_| ())
                             .map_err(|err| failed("rename the room", &err)),
@@ -334,7 +385,7 @@ impl Manager {
                 tokio::spawn(async move {
                     let result = match room(&client, &room_id) {
                         Ok(room) => room
-                            .set_room_topic(&topic)
+                            .set_room_topic(&sanitize(&topic))
                             .await
                             .map(|_| ())
                             .map_err(|err| failed("change the topic", &err)),
@@ -386,7 +437,8 @@ fn room(client: &Client, room_id: &str) -> Result<Room, String> {
 
 /// "Could not join: …", with the reason in words a person can act on.
 fn failed(what: &str, err: &matrix_sdk::Error) -> String {
-    tracing::warn!(%err, "could not {what}");
+    // The error's own text can name people, rooms and servers; its kind says enough.
+    tracing::warn!(kind = ?err.client_api_error_kind(), "could not {what}");
     format!("Could not {what}: {}", explain(err))
 }
 
@@ -400,12 +452,27 @@ fn server_text(err: &matrix_sdk::Error) -> Option<String> {
 }
 
 fn explain(err: &matrix_sdk::Error) -> String {
-    let said = server_text(err);
+    explain_kind(
+        err.client_api_error_kind(),
+        server_text(err),
+        matches!(err, matrix_sdk::Error::Http(http) if http.as_ruma_api_error().is_none()),
+        || truncate(&sanitize_line(&err.to_string()), SERVER_TEXT),
+    )
+}
+
+/// `said`: the server's words; `unreachable`: no answer came from a server at all;
+/// `other`: the last resort for errors that are neither.
+fn explain_kind(
+    kind: Option<&ErrorKind>,
+    said: Option<String>,
+    unreachable: bool,
+    other: impl FnOnce() -> String,
+) -> String {
     let with = |ours: &str| match &said {
         Some(said) => format!("{ours} ({said})"),
         None => ours.to_owned(),
     };
-    match err.client_api_error_kind() {
+    match kind {
         Some(ErrorKind::NotFound) => with("not found"),
         Some(
             ErrorKind::Forbidden
@@ -422,22 +489,34 @@ fn explain(err: &matrix_sdk::Error) -> String {
             with("the server did not accept it")
         }
         Some(_) => said.unwrap_or_else(|| "the server refused".to_owned()),
-        None => match err {
-            matrix_sdk::Error::Http(http) if http.as_ruma_api_error().is_none() => {
-                "the server could not be reached".to_owned()
-            }
-            other => truncate(&sanitize_line(&other.to_string()), SERVER_TEXT),
-        },
+        None if unreachable => "the server could not be reached".to_owned(),
+        None => other(),
+    }
+}
+
+/// Notification settings fail without saying why; none of it is worth quoting.
+fn explain_notify(err: &NotificationSettingsError) -> &'static str {
+    match err {
+        NotificationSettingsError::UnableToAddPushRule
+        | NotificationSettingsError::UnableToRemovePushRule
+        | NotificationSettingsError::UnableToUpdatePushRule
+        | NotificationSettingsError::UnableToSavePushRules => {
+            "the server did not take the change; try again in a moment"
+        }
+        _ => "this room's notification rules could not be read",
     }
 }
 
 async fn join(client: &Client, target: &str, via: &[String]) -> Result<String, String> {
     let not_an_address = || "Could not join: that is not a room address.".to_owned();
     let target = RoomOrAliasId::parse(target).map_err(|_| not_an_address())?;
-    let mut via: Vec<OwnedServerName> = via
-        .iter()
-        .filter_map(|name| ServerName::parse(name).ok())
-        .collect();
+    let names = via_names(via);
+    let mut via: Vec<OwnedServerName> = Vec::new();
+    for name in names {
+        if let Ok(server) = ServerName::parse(name) {
+            via.push(server);
+        }
+    }
     // Where does it lead? A room we are in already is simply shown.
     let room_id = match <&RoomId>::try_from(&*target) {
         Ok(room_id) => room_id.to_owned(),
@@ -447,7 +526,7 @@ async fn join(client: &Client, target: &str, via: &[String]) -> Result<String, S
                 .await
                 .map_err(|err| failed("join", &err.into()))?;
             for server in found.servers {
-                if !via.contains(&server) {
+                if via.len() < VIA_MAX && !via.contains(&server) {
                     via.push(server);
                 }
             }
@@ -460,8 +539,8 @@ async fn join(client: &Client, target: &str, via: &[String]) -> Result<String, S
     {
         return Ok(room_id.to_string());
     }
-    // More than a few servers only make the request longer.
-    via.truncate(5);
+    // By its id: the address has been looked up once already.
+    let target: OwnedRoomOrAliasId = room_id.into();
     let joined = client
         .join_room_by_id_or_alias(&target, &via)
         .await
@@ -469,21 +548,56 @@ async fn join(client: &Client, target: &str, via: &[String]) -> Result<String, S
     Ok(joined.room_id().to_string())
 }
 
-async fn direct_chat(client: &Client, user_id: &str) -> Result<String, String> {
+/// The first few distinct names.
+fn via_names(via: &[String]) -> Vec<&str> {
+    let mut names: Vec<&str> = Vec::new();
+    for name in via {
+        if names.len() < VIA_MAX && !names.contains(&name.as_str()) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The room of the direct chat with `user_id`; `None` if there is none and none was
+/// to be made.
+async fn direct_chat(
+    client: &Client,
+    user_id: &str,
+    create: bool,
+) -> Result<Option<String>, String> {
     let user = UserId::parse(user_id)
         .map_err(|_| "Could not start the chat: that is not a user ID.".to_owned())?;
     if client.user_id() == Some(&*user) {
         return Err("That is your own user ID.".to_owned());
     }
     if let Some(existing) = client.get_dm_room(&user) {
-        return Ok(existing.room_id().to_string());
+        return Ok(Some(existing.room_id().to_string()));
+    }
+    // A chat they have invited us to is the chat with them as well: opening it (where
+    // it can be accepted) beats making a second one.
+    for invited in client.invited_rooms() {
+        let marked = invited
+            .direct_targets()
+            .contains(<&DirectUserIdentifier>::from(&*user));
+        let from_them = invited.is_direct().await.unwrap_or(false)
+            && invited
+                .invite_details()
+                .await
+                .is_ok_and(|invite| invite.inviter_id == user);
+        if marked || from_them {
+            return Ok(Some(invited.room_id().to_string()));
+        }
+    }
+    if !create {
+        return Ok(None);
     }
     // Encrypted, marked as direct, and the other person is invited.
     let created = client
         .create_dm(&user)
         .await
         .map_err(|err| failed("start the chat", &err))?;
-    Ok(created.room_id().to_string())
+    Ok(Some(created.room_id().to_string()))
 }
 
 async fn create(
@@ -494,8 +608,8 @@ async fn create(
     encrypted: bool,
 ) -> Result<String, String> {
     let mut request = CreateRequest::new();
-    request.name = Some(name);
-    request.topic = topic;
+    request.name = Some(sanitize_line(&name));
+    request.topic = topic.map(|topic| sanitize(&topic));
     match alias {
         // Anyone may join by the address. Not listed in the server's directory:
         // publishing a room there is a decision of its own.
@@ -535,7 +649,10 @@ async fn leave(client: &Client, room_id: &str) -> Result<(), String> {
     if matches!(room.state(), RoomState::Left | RoomState::Banned)
         && let Err(err) = room.forget().await
     {
-        tracing::warn!(%err, "could not forget the room after leaving");
+        tracing::warn!(
+            kind = ?err.client_api_error_kind(),
+            "could not forget the room after leaving"
+        );
     }
     Ok(())
 }
@@ -569,90 +686,63 @@ async fn set_notify(client: &Client, room_id: &str, level: NotifyLevel) -> Resul
         .set_room_notification_mode(room.room_id(), mode)
         .await
         .map_err(|err| {
-            tracing::warn!(%err, "could not change the room's notifications");
+            tracing::warn!("could not change the room's notifications");
             format!(
                 "Could not change the notifications: {}",
-                truncate(&sanitize_line(&err.to_string()), SERVER_TEXT)
+                explain_notify(&err)
             )
         })
 }
 
-/// Sends the room's details: at once from what is known, again with the complete
-/// member list, and then whenever the room changes.
-async fn watch(client: Client, room_id: String, events: UnboundedSender<MatrixEvent>) {
-    let emit = |result: Result<RoomDetails, String>| {
-        events
-            .send(MatrixEvent::Manage(ManageEvent::Info {
-                room_id: room_id.clone(),
-                result: result.map(Box::new),
-            }))
-            .is_ok()
-    };
-    let room = match room(&client, &room_id) {
-        Ok(room) => room,
-        Err(err) => {
-            emit(Err(err));
-            return;
+// ----- the details of a room ---------------------------------------------------------
+
+/// One person in the room, before roles are worked out.
+#[derive(Clone, PartialEq, Eq)]
+struct Entry {
+    user: OwnedUserId,
+    name: String,
+    invited: bool,
+}
+
+/// The member list as the watcher holds it between looks at the room.
+#[derive(Default)]
+struct MemberList {
+    entries: Vec<Entry>,
+    /// The room's counts when `entries` was last read from the store.
+    counts: Option<(u64, u64)>,
+    /// Counts the server's own list did not match either (or could not be had for):
+    /// no use asking again until they change.
+    gave_up: Option<(u64, u64)>,
+    asked: Option<Instant>,
+    error: Option<String>,
+    /// `entries` with roles, sorted, and what it was made from.
+    shown: Vec<RoomMember>,
+    shown_from: Option<(Vec<Entry>, String)>,
+}
+
+impl MemberList {
+    fn agrees(&self, (joined, invited): (u64, u64)) -> bool {
+        entries_agree(&self.entries, (joined, invited))
+    }
+
+    /// The list for the screen. Roles and sorting are only redone when the people or
+    /// the power levels changed.
+    fn present(&mut self, levels: Option<&RoomPowerLevels>, own: &UserId) -> Vec<RoomMember> {
+        let key = format!("{levels:?}");
+        let fresh =
+            matches!(&self.shown_from, Some((entries, k)) if *entries == self.entries && *k == key);
+        if !fresh {
+            self.shown = present(&self.entries, levels, own);
+            self.shown_from = Some((self.entries.clone(), key));
         }
-    };
-    let mut changes = room.subscribe_info();
-    let joined = room.state() == RoomState::Joined;
-    let mut current = details(&room, false, joined && !room.are_members_synced()).await;
-    let mut sent: Option<RoomDetails> = None;
-    // Counts that asking the server could not bring in line with the list: no use
-    // asking again until they change.
-    let mut gave_up = None;
-    let mut fetched: Option<Instant> = None;
-    loop {
-        // The sync only brings the members it thinks are needed, so the list here can
-        // be behind (someone joined, left or was removed). The room's own counts say so.
-        let behind = joined
-            && (current.members_loading || !counts_agree(&current))
-            && gave_up != Some((current.joined, current.invited))
-            && fetched.is_none_or(|at| {
-                current.joined <= LARGE_ROOM || at.elapsed() >= LARGE_ROOM_REFETCH
-            });
-        current.members_loading = behind;
-        if sent.as_ref() != Some(&current) {
-            if !emit(Ok(current.clone())) {
-                return;
-            }
-            sent = Some(current.clone());
-        }
-        if behind {
-            // Asks the server for the list; large rooms take a moment.
-            room.mark_members_missing();
-            current = details(&room, true, false).await;
-            fetched = Some(Instant::now());
-            if !counts_agree(&current) {
-                gave_up = Some((current.joined, current.invited));
-            }
-            if !emit(Ok(current.clone())) {
-                return;
-            }
-            sent = Some(current);
-        }
-        if changes.next().await.is_none() {
-            return;
-        }
-        // Changes come in bursts (a sync brings several); one look afterwards is enough.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        while futures::FutureExt::now_or_never(changes.next())
-            .flatten()
-            .is_some()
-        {}
-        if room.state() == RoomState::Left {
-            return;
-        }
-        current = details(&room, false, false).await;
+        self.shown.clone()
     }
 }
 
-/// Whether the member list has as many people as the room says it has.
-fn counts_agree(details: &RoomDetails) -> bool {
-    let invited = details.members.iter().filter(|m| m.invited).count() as u64;
-    let joined = details.members.len() as u64 - invited;
-    joined == details.joined && invited == details.invited
+/// Whether a list has as many people as the room says it has.
+fn entries_agree(entries: &[Entry], (joined, invited): (u64, u64)) -> bool {
+    let listed_invited = entries.iter().filter(|entry| entry.invited).count() as u64;
+    entries.len() as u64 - listed_invited == joined && listed_invited == invited
 }
 
 fn role(level: UserPowerLevel) -> MemberRole {
@@ -664,60 +754,91 @@ fn role(level: UserPowerLevel) -> MemberRole {
     }
 }
 
-/// `fetch`: ask the server for the member list if it is not complete here.
-async fn details(room: &Room, fetch: bool, members_loading: bool) -> RoomDetails {
-    let joined = room.state() == RoomState::Joined;
-    let own = room.own_user_id().to_owned();
-    let wanted = RoomMemberships::JOIN | RoomMemberships::INVITE;
-    let listed = if !joined {
-        // An invitation: who is in there is not ours to ask yet.
-        Ok(Vec::new())
-    } else if fetch {
-        room.members(wanted).await
-    } else {
-        room.members_no_sync(wanted).await
-    };
-    let listed = listed.unwrap_or_else(|err| {
-        tracing::warn!(%err, "could not list the room's members");
-        Vec::new()
-    });
-    let levels = if joined {
-        room.power_levels().await.ok()
-    } else {
-        None
-    };
-    let can =
-        |check: &dyn Fn(&matrix_sdk::ruma::events::room::power_levels::RoomPowerLevels) -> bool| {
-            levels.as_ref().is_some_and(check)
-        };
-    let mut members: Vec<RoomMember> = listed
+/// Roles and order: joined before invited, the highest role first, then by name.
+fn present(entries: &[Entry], levels: Option<&RoomPowerLevels>, own: &UserId) -> Vec<RoomMember> {
+    let mut members: Vec<RoomMember> = entries
         .iter()
-        .map(|member| {
-            let user = member.user_id();
-            RoomMember {
-                user_id: sanitize_line(user.as_str()),
-                name: sanitize_line(member.name()),
-                role: role(member.power_level()),
-                invited: *member.membership() == MembershipState::Invite,
-                own: user == own,
-                removable: user != own && can(&|levels| levels.user_can_kick_user(&own, user)),
-            }
+        .map(|entry| RoomMember {
+            user_id: sanitize_line(entry.user.as_str()),
+            name: sanitize_line(&entry.name),
+            role: levels.map_or(MemberRole::User, |levels| {
+                role(levels.for_user(&entry.user))
+            }),
+            invited: entry.invited,
+            own: entry.user == own,
+            removable: entry.user != own
+                && levels.is_some_and(|levels| levels.user_can_kick_user(own, &entry.user)),
         })
         .collect();
-    members.sort_by(|a, b| {
+    members.sort_by_cached_key(|member| {
         (
-            a.invited,
-            std::cmp::Reverse(a.role),
-            a.name.to_lowercase(),
-            &a.user_id,
+            member.invited,
+            std::cmp::Reverse(member.role),
+            member.name.to_lowercase(),
+            member.user_id.clone(),
         )
-            .cmp(&(
-                b.invited,
-                std::cmp::Reverse(b.role),
-                b.name.to_lowercase(),
-                &b.user_id,
-            ))
     });
+    members
+}
+
+/// The members the store knows. The sync only brings the ones it thinks are needed,
+/// so this can be behind the room's own counts.
+async fn stored_members(room: &Room) -> Result<Vec<Entry>, String> {
+    let wanted = RoomMemberships::JOIN | RoomMemberships::INVITE;
+    let members = room.members_no_sync(wanted).await.map_err(|err| {
+        tracing::warn!(%err, "could not read the room's members");
+        "The member list could not be read.".to_owned()
+    })?;
+    Ok(members
+        .iter()
+        .map(|member| Entry {
+            user: member.user_id().to_owned(),
+            name: member.name().to_owned(),
+            invited: *member.membership() == MembershipState::Invite,
+        })
+        .collect())
+}
+
+/// The member list as the server has it now. Asked for directly and kept out of the
+/// SDK's store on purpose: a full reload there makes the SDK throw away the room's
+/// outgoing encryption session, which is too high a price for looking at a list.
+async fn server_members(client: &Client, room: &Room) -> Result<Vec<Entry>, String> {
+    let request = get_member_events::v3::Request::new(room.room_id().to_owned());
+    let response = tokio::time::timeout(MEMBERS_TIMEOUT, client.send(request))
+        .await
+        .map_err(|_| "The member list took too long to arrive.".to_owned())?
+        .map_err(|err| failed("load the member list", &err.into()))?;
+    let mut entries = Vec::new();
+    for raw in response.chunk {
+        // One event the server got wrong does not cost the rest of the list.
+        let Ok(event) = raw.deserialize() else {
+            continue;
+        };
+        let invited = match event.membership() {
+            MembershipState::Join => false,
+            MembershipState::Invite => true,
+            _ => continue,
+        };
+        let user = event.state_key().to_owned();
+        let name = event
+            .as_original()
+            .and_then(|event| event.content.displayname.clone())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| user.localpart().to_owned());
+        entries.push(Entry {
+            user,
+            name,
+            invited,
+        });
+    }
+    Ok(entries)
+}
+
+/// Everything about the room but its members.
+async fn head(room: &Room, levels: Option<&RoomPowerLevels>) -> RoomDetails {
+    let joined = room.state() == RoomState::Joined;
+    let own = room.own_user_id();
+    let can = |check: &dyn Fn(&RoomPowerLevels) -> bool| levels.is_some_and(check);
     let name = match room.cached_display_name() {
         Some(name) => name.to_string(),
         None => room
@@ -753,11 +874,168 @@ async fn details(room: &Room, fetch: bool, members_loading: bool) -> RoomDetails
         invited: room.invited_members_count(),
         favourite: room.is_favourite(),
         notify,
-        can_rename: can(&|levels| levels.user_can_send_state(&own, StateEventType::RoomName)),
-        can_set_topic: can(&|levels| levels.user_can_send_state(&own, StateEventType::RoomTopic)),
-        can_invite: can(&|levels| levels.user_can_invite(&own)),
-        members,
-        members_loading,
+        can_rename: can(&|levels| levels.user_can_send_state(own, StateEventType::RoomName)),
+        can_set_topic: can(&|levels| levels.user_can_send_state(own, StateEventType::RoomTopic)),
+        can_invite: can(&|levels| levels.user_can_invite(own)),
+        ..RoomDetails::default()
+    }
+}
+
+/// What to do about the member list, given the room's counts.
+#[derive(Debug, PartialEq, Eq)]
+enum Plan {
+    /// The list is as long as the room says.
+    Fine,
+    /// Ask the server now.
+    Ask,
+    /// Ask the server, but not before this much time has passed.
+    Wait(Duration),
+    /// Too many to ask for; what is known here has to do.
+    TooLarge,
+    /// Asking did not help for these counts.
+    GaveUp,
+}
+
+fn plan(
+    agrees: bool,
+    counts: (u64, u64),
+    gave_up: Option<(u64, u64)>,
+    since_asked: Option<Duration>,
+) -> Plan {
+    let total = counts.0 + counts.1;
+    if agrees {
+        Plan::Fine
+    } else if total > MAX_MEMBERS {
+        Plan::TooLarge
+    } else if gave_up == Some(counts) {
+        Plan::GaveUp
+    } else {
+        match since_asked {
+            Some(since) if total > LARGE_ROOM && since < LARGE_ROOM_REFETCH => {
+                Plan::Wait(LARGE_ROOM_REFETCH - since)
+            }
+            _ => Plan::Ask,
+        }
+    }
+}
+
+/// Sends the room's details: at once from what is known here, again when the member
+/// list had to be asked for, and then whenever something that is shown changes.
+async fn watch(client: Client, room_id: String, events: UnboundedSender<MatrixEvent>) {
+    let emit = |result: Result<RoomDetails, String>| {
+        events
+            .send(MatrixEvent::Manage(ManageEvent::Info {
+                room_id: room_id.clone(),
+                result: result.map(Box::new),
+            }))
+            .is_ok()
+    };
+    let room = match room(&client, &room_id) {
+        Ok(room) => room,
+        Err(err) => {
+            emit(Err(err));
+            return;
+        }
+    };
+    let own = room.own_user_id().to_owned();
+    let mut changes = room.subscribe_info();
+    let mut list = MemberList::default();
+    let mut sent: Option<RoomDetails> = None;
+    loop {
+        // Looked at afresh every time: an invitation may have been accepted meanwhile.
+        let joined = match room.state() {
+            RoomState::Left | RoomState::Banned => return,
+            state => state == RoomState::Joined,
+        };
+        let levels = if joined {
+            Some(room.power_levels_or_default().await)
+        } else {
+            None
+        };
+        let mut current = head(&room, levels.as_ref()).await;
+        let counts = (current.joined, current.invited);
+        let mut wait = None;
+        if joined {
+            // The room's info changes with every message. The members are only read
+            // again when their number did, and never in rooms too large to list.
+            let unread = list.counts.is_none();
+            let too_large = counts.0 + counts.1 > MAX_MEMBERS;
+            if unread || (list.counts != Some(counts) && !too_large) {
+                list.counts = Some(counts);
+                match stored_members(&room).await {
+                    // A list that is behind does not replace one that was right.
+                    Ok(entries) if unread || entries_agree(&entries, counts) => {
+                        list.entries = entries;
+                        list.error = None;
+                    }
+                    Ok(_) => {}
+                    Err(error) => list.error = Some(error),
+                }
+            }
+            let since = list.asked.map(|at| at.elapsed());
+            match plan(list.agrees(counts), counts, list.gave_up, since) {
+                Plan::Fine => list.error = None,
+                Plan::GaveUp => {}
+                Plan::TooLarge => current.members_partial = true,
+                Plan::Wait(time) => wait = Some(time),
+                Plan::Ask => current.members_loading = true,
+            }
+        } else {
+            list = MemberList::default();
+        }
+        current.members = list.present(levels.as_ref(), &own);
+        current.members_error.clone_from(&list.error);
+        let ask = current.members_loading;
+        if sent.as_ref() != Some(&current) {
+            if !emit(Ok(current.clone())) {
+                return;
+            }
+            sent = Some(current.clone());
+        }
+        if ask {
+            list.asked = Some(Instant::now());
+            match server_members(&client, &room).await {
+                Ok(entries) => {
+                    list.entries = entries;
+                    list.error = None;
+                    if !list.agrees(counts) {
+                        list.gave_up = Some(counts);
+                    }
+                }
+                // What is shown stays; the reason goes next to it.
+                Err(error) => {
+                    list.error = Some(error);
+                    list.gave_up = Some(counts);
+                }
+            }
+            current.members_loading = false;
+            current.members = list.present(levels.as_ref(), &own);
+            current.members_error.clone_from(&list.error);
+            if !emit(Ok(current.clone())) {
+                return;
+            }
+            sent = Some(current);
+        }
+        // Until the room changes, or until a postponed look at the members is due.
+        match wait {
+            Some(time) => {
+                tokio::select! {
+                    change = changes.next() => if change.is_none() { return },
+                    () = tokio::time::sleep(time) => {}
+                }
+            }
+            None => {
+                if changes.next().await.is_none() {
+                    return;
+                }
+            }
+        }
+        // Changes come in bursts (a sync brings several); one look afterwards is enough.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while futures::FutureExt::now_or_never(changes.next())
+            .flatten()
+            .is_some()
+        {}
     }
 }
 
@@ -782,6 +1060,7 @@ mod tests {
     #[test]
     fn debug_output_names_nobody() {
         let command = ManageCmd::Create {
+            request: 0,
             name: "Secret plans".into(),
             topic: Some("the heist".into()),
             alias: None,
@@ -795,6 +1074,7 @@ mod tests {
         };
         assert!(!format!("{command:?}").contains("bob"));
         let command = ManageCmd::Join {
+            request: 0,
             target: "#secret:example.org".into(),
             via: Vec::new(),
         };
@@ -810,7 +1090,10 @@ mod tests {
         };
         let text = format!("{event:?}");
         assert!(!text.contains("Secret") && !text.contains("heist"));
-        let event = ManageEvent::Opened(Err("Could not join #secret:example.org".into()));
+        let event = ManageEvent::Opened {
+            request: 1,
+            result: Err("Could not join #secret:example.org".into()),
+        };
         assert!(!format!("{event:?}").contains("secret"));
     }
 
@@ -831,8 +1114,36 @@ mod tests {
 
     async fn opened(events: &mut UnboundedReceiver<MatrixEvent>) -> Result<String, String> {
         loop {
-            if let ManageEvent::Opened(result) = next_manage(events).await {
+            if let ManageEvent::Opened { result, .. } = next_manage(events).await {
                 return result;
+            }
+        }
+    }
+
+    /// The answer to a request for a direct chat that was not to be made: the room
+    /// of the chat there is, or `None`.
+    async fn looked_for_chat(
+        events: &mut UnboundedReceiver<MatrixEvent>,
+        wanted: u64,
+    ) -> Option<String> {
+        loop {
+            match next_manage(events).await {
+                ManageEvent::NoDirectChat { request, .. } if request == wanted => return None,
+                ManageEvent::Opened { request, result } if request == wanted => {
+                    return Some(result.unwrap());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn left(events: &mut UnboundedReceiver<MatrixEvent>, wanted: &str) {
+        loop {
+            if let ManageEvent::Left { room_id, result } = next_manage(events).await
+                && room_id == wanted
+            {
+                result.unwrap();
+                return;
             }
         }
     }
@@ -922,12 +1233,15 @@ mod tests {
         // Readable errors: a room that does not exist, a user id that is our own.
         let server = own.split_once(':').unwrap().1.to_owned();
         manage(ManageCmd::Join {
+            request: 0,
             target: format!("#matrix-rat-no-such-room-{}:{server}", std::process::id()),
             via: Vec::new(),
         });
         let err = opened(&mut events).await.unwrap_err();
         assert!(err.starts_with("Could not join: not found"), "{err}");
         manage(ManageCmd::DirectChat {
+            request: 0,
+            create: true,
             user_id: own.clone(),
         });
         assert!(opened(&mut events).await.unwrap_err().contains("your own"));
@@ -935,6 +1249,7 @@ mod tests {
         // A private room: encrypted, and we are its admin (or owner).
         let tag = std::process::id();
         manage(ManageCmd::Create {
+            request: 0,
             name: format!("matrix-rat manage test {tag}"),
             topic: Some("made by a test\u{1b}[31m".into()),
             alias: None,
@@ -1031,13 +1346,74 @@ mod tests {
 
         // Joining a room we are in already just shows it.
         manage(ManageCmd::Join {
+            request: 0,
             target: room_id.clone(),
             via: Vec::new(),
         });
         assert_eq!(opened(&mut events).await.unwrap(), room_id);
 
+        // Looking for a chat makes none: nothing with a stranger, and with bob only
+        // what earlier runs may have left behind (invitations of his are declined
+        // here, so that the rest starts from nothing).
+        manage(ManageCmd::DirectChat {
+            request: 41,
+            create: false,
+            user_id: format!("@matrix-rat-nobody-{tag}:{server}"),
+        });
+        assert!(looked_for_chat(&mut events, 41).await.is_none());
+        for _ in 0..20 {
+            manage(ManageCmd::DirectChat {
+                request: 42,
+                create: false,
+                user_id: bob_id.clone(),
+            });
+            let Some(stale) = looked_for_chat(&mut events, 42).await else {
+                break;
+            };
+            manage(ManageCmd::Leave {
+                room_id: stale.clone(),
+            });
+            left(&mut events, &stale).await;
+        }
+        // Bob invites us to a chat: that is the chat with him, not a reason for a
+        // second one. It is found without being asked to make anything.
+        let own_id = UserId::parse(&own).unwrap();
+        let from_bob = bob.create_dm(&own_id).await.unwrap();
+        let wait = async {
+            loop {
+                manage(ManageCmd::DirectChat {
+                    request: 43,
+                    create: false,
+                    user_id: bob_id.clone(),
+                });
+                if let Some(found) = looked_for_chat(&mut events, 43).await {
+                    return found;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        };
+        let found = tokio::time::timeout(Duration::from_secs(30), wait)
+            .await
+            .expect("the invitation from bob was not found");
+        assert_eq!(found, from_bob.room_id().as_str());
+        // Declined; then there is no chat again.
+        manage(ManageCmd::Leave {
+            room_id: found.clone(),
+        });
+        left(&mut events, &found).await;
+        let _ = from_bob.leave().await;
+        let _ = from_bob.forget().await;
+        manage(ManageCmd::DirectChat {
+            request: 44,
+            create: false,
+            user_id: bob_id.clone(),
+        });
+        assert!(looked_for_chat(&mut events, 44).await.is_none());
+
         // A direct chat with bob: created once (encrypted, direct), reused afterwards.
         manage(ManageCmd::DirectChat {
+            request: 0,
+            create: true,
             user_id: bob_id.clone(),
         });
         let chat = opened(&mut events).await.unwrap();
@@ -1048,13 +1424,16 @@ mod tests {
         let details = info(&mut events, &chat, |d| d.direct).await;
         assert_eq!(details.encrypted, Some(true));
         manage(ManageCmd::DirectChat {
+            request: 45,
+            create: false,
             user_id: bob_id.clone(),
         });
-        assert_eq!(opened(&mut events).await.unwrap(), chat);
+        assert_eq!(looked_for_chat(&mut events, 45).await, Some(chat.clone()));
 
         // A public room is found and joined by its address.
         let alias = format!("matrix-rat-manage-{tag}");
         manage(ManageCmd::Create {
+            request: 0,
             name: format!("matrix-rat public test {tag}"),
             topic: None,
             alias: Some(alias.clone()),
@@ -1075,6 +1454,7 @@ mod tests {
         assert_eq!(details.encrypted, Some(false));
         // The address is taken now.
         manage(ManageCmd::Create {
+            request: 0,
             name: "matrix-rat duplicate".into(),
             topic: None,
             alias: Some(alias.clone()),
@@ -1132,5 +1512,144 @@ mod tests {
         while events.recv().await.is_some() {}
         let _ = bob.matrix_auth().logout().await;
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn entry(name: &str, invited: bool) -> Entry {
+        Entry {
+            user: UserId::parse(format!("@{}:example.org", name.to_lowercase())).unwrap(),
+            name: name.to_owned(),
+            invited,
+        }
+    }
+
+    #[test]
+    fn the_member_list_is_only_asked_for_when_it_helps() {
+        let minute = Some(Duration::from_secs(1));
+        // As long as the room says: nothing to do, whatever happened before.
+        assert_eq!(plan(true, (5, 1), Some((5, 1)), minute), Plan::Fine);
+        // Behind: ask, at once in a small room, also right after having asked.
+        assert_eq!(plan(false, (5, 1), None, None), Plan::Ask);
+        assert_eq!(plan(false, (5, 1), None, minute), Plan::Ask);
+        // Asking did not help for these counts: not again until they change.
+        assert_eq!(plan(false, (5, 1), Some((5, 1)), None), Plan::GaveUp);
+        assert_eq!(plan(false, (6, 1), Some((5, 1)), None), Plan::Ask);
+        // A large room: the first time at once, then spaced out, with the rest of
+        // the wait handed back so that the look is not forgotten.
+        assert_eq!(plan(false, (LARGE_ROOM + 1, 0), None, None), Plan::Ask);
+        assert_eq!(
+            plan(
+                false,
+                (LARGE_ROOM + 1, 0),
+                None,
+                Some(Duration::from_secs(20))
+            ),
+            Plan::Wait(LARGE_ROOM_REFETCH - Duration::from_secs(20))
+        );
+        assert_eq!(
+            plan(false, (LARGE_ROOM + 1, 0), None, Some(LARGE_ROOM_REFETCH)),
+            Plan::Ask
+        );
+        // Too many to list: never asked for.
+        assert_eq!(plan(false, (MAX_MEMBERS, 1), None, None), Plan::TooLarge);
+        assert_eq!(plan(false, (MAX_MEMBERS, 0), None, None), Plan::Ask);
+    }
+
+    #[test]
+    fn lists_are_compared_with_the_rooms_counts() {
+        let entries = [entry("a", false), entry("b", false), entry("c", true)];
+        assert!(entries_agree(&entries, (2, 1)));
+        assert!(!entries_agree(&entries, (3, 0)));
+        assert!(!entries_agree(&entries, (2, 0)));
+        assert!(entries_agree(&[], (0, 0)));
+    }
+
+    #[test]
+    fn members_are_ordered_and_made_safe() {
+        let own = UserId::parse("@me:example.org").unwrap();
+        let mut entries = vec![
+            entry("zed", true),
+            entry("Bob", false),
+            entry("alice", false),
+            entry("Me", false),
+        ];
+        entries[1].name = "Bob\u{1b}[31m".into();
+        // No power levels known: everyone is an ordinary member, nobody removable.
+        let shown = present(&entries, None, &own);
+        let names: Vec<&str> = shown.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["alice", "Bob[31m", "Me", "zed"]);
+        assert!(shown[3].invited && shown[2].own);
+        assert!(
+            shown
+                .iter()
+                .all(|m| !m.removable && m.role == MemberRole::User)
+        );
+
+        // The list for the screen is only rebuilt when the people changed.
+        let mut list = MemberList {
+            entries,
+            ..MemberList::default()
+        };
+        assert!(list.present(None, &own) == shown);
+        list.shown[0].name = "kept".into();
+        assert_eq!(list.present(None, &own)[0].name, "kept");
+        list.entries.pop();
+        assert_eq!(list.present(None, &own).len(), 3);
+        assert!(list.agrees((2, 1)));
+    }
+
+    #[test]
+    fn errors_in_words() {
+        let other = || "something else".to_owned();
+        let said = || Some("You are not invited".to_owned());
+        assert_eq!(
+            explain_kind(Some(&ErrorKind::NotFound), None, false, other),
+            "not found"
+        );
+        assert_eq!(
+            explain_kind(Some(&ErrorKind::Forbidden), said(), false, other),
+            "not allowed (You are not invited)"
+        );
+        assert_eq!(
+            explain_kind(Some(&ErrorKind::RoomInUse), said(), false, other),
+            "that address is already taken"
+        );
+        assert_eq!(
+            explain_kind(Some(&ErrorKind::Unknown), None, false, other),
+            "the server refused"
+        );
+        assert_eq!(
+            explain_kind(Some(&ErrorKind::Unknown), said(), false, other),
+            "You are not invited"
+        );
+        assert_eq!(
+            explain_kind(None, None, true, other),
+            "the server could not be reached"
+        );
+        assert_eq!(explain_kind(None, None, false, other), "something else");
+        // Notification settings: words of our own, nothing quoted.
+        for err in [
+            NotificationSettingsError::UnableToSavePushRules,
+            NotificationSettingsError::UnableToUpdatePushRule,
+            NotificationSettingsError::RuleNotFound("!secret:example.org".into()),
+            NotificationSettingsError::InvalidParameter("!secret:example.org".into()),
+        ] {
+            let text = explain_notify(&err);
+            assert!(!text.contains("secret") && !text.contains('`'), "{text}");
+        }
+    }
+
+    #[test]
+    fn servers_in_a_join_request() {
+        let via: Vec<String> = [
+            "a.org", "a.org", "b.org", "c.org", "d.org", "e.org", "f.org",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        assert_eq!(
+            via_names(&via),
+            ["a.org", "b.org", "c.org", "d.org", "e.org"]
+        );
+        assert_eq!(VIA_MAX, crate::manage::VIA_MAX);
     }
 }

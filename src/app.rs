@@ -129,6 +129,8 @@ pub struct App {
     pub compose_mode: ComposeMode,
     pub composer_view: ComposerView,
     pub help_open: bool,
+    /// Lines the help is scrolled down by, where it does not fit the window.
+    pub help_scroll: usize,
     /// A popup that takes all input while it is open.
     pub modal: Option<Modal>,
     /// `None` in demo mode.
@@ -277,6 +279,7 @@ impl App {
                 ..ComposerView::default()
             },
             help_open: false,
+            help_scroll: 0,
             modal: None,
             matrix: None,
             sync: None,
@@ -1331,7 +1334,10 @@ impl App {
                 self.sidebar.filter.clear();
                 self.sidebar.cursor = 0;
             }
-            Action::ToggleHelp => self.help_open = !self.help_open,
+            Action::ToggleHelp => {
+                self.help_open = !self.help_open;
+                self.help_scroll = 0;
+            }
             Action::CycleTheme => {
                 self.step_theme(1);
             }
@@ -2138,6 +2144,11 @@ impl App {
             match (code, mods) {
                 (KeyCode::Esc | KeyCode::F(1) | KeyCode::Enter, _)
                 | (KeyCode::Char('?' | 'q'), KeyModifiers::NONE) => self.help_open = false,
+                // The drawing keeps this within what there is to scroll.
+                (KeyCode::Up, _) => self.help_scroll = self.help_scroll.saturating_sub(1),
+                (KeyCode::Down, _) => self.help_scroll += 1,
+                (KeyCode::PageUp | KeyCode::Home, _) => self.help_scroll = 0,
+                (KeyCode::PageDown | KeyCode::End, _) => self.help_scroll += 10,
                 _ => {}
             }
             return;
@@ -2445,6 +2456,16 @@ impl App {
                     Some(Modal::RoomInfo(_)) => self.manage_scroll(delta),
                     _ => {}
                 }
+                self.dirty = true;
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if self.help_open && self.modal.is_none() =>
+            {
+                self.help_scroll = if mouse.kind == MouseEventKind::ScrollUp {
+                    self.help_scroll.saturating_sub(2)
+                } else {
+                    self.help_scroll + 2
+                };
                 self.dirty = true;
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown

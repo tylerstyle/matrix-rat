@@ -8,8 +8,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use super::App;
 use crate::action::{Action, Pane};
 use crate::manage::{
-    Address, Click, Confirm, InfoPopup, InfoRow, NewPopup, Stage, parse_address, parse_alias_local,
-    parse_user,
+    Address, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NewPopup, Pending, Stage, clean_input,
+    parse_address, parse_alias_local, parse_user,
 };
 use crate::matrix::{
     Change, ManageCmd, ManageEvent, MatrixCmd, MemberRole, NotifyLevel, RoomDetails, RoomMember,
@@ -28,17 +28,38 @@ const NAME_MAX: usize = 255;
 pub struct ManageState {
     /// The room to open as soon as the room list has it, and since when.
     pending_open: Option<(String, Instant)>,
+    /// Numbers the requests whose answers have to find the popup that asked.
+    requests: u64,
+}
+
+/// Adds `text` to a one-line input: nothing that could steer the terminal or reorder
+/// the line gets in, and the field stays within bounds.
+fn push_clean(field: &mut String, text: &str) {
+    for c in clean_input(text).chars() {
+        if field.len() + c.len_utf8() > FIELD_MAX {
+            break;
+        }
+        field.push(c);
+    }
 }
 
 impl App {
     /// The room that room-level commands are about: the one under the cursor while
-    /// the room list has the focus, otherwise the open one.
+    /// the room list has the focus, otherwise the open one. The command palette
+    /// describes its entries by the same rule.
     fn target_room(&self) -> Option<usize> {
         if self.focus == Pane::Sidebar {
             self.cursor_room()
         } else {
             (self.active < self.rooms.len()).then_some(self.active)
         }
+    }
+
+    /// Name of the room the room-level commands would act on now, and whether it is
+    /// an invitation.
+    pub(super) fn manage_target(&self) -> Option<(String, bool)> {
+        let room = self.rooms.get(self.target_room()?)?;
+        Some((room.name.clone(), room.kind == RoomKind::Invite))
     }
 
     /// Sends a command to the worker; false in the demo, which has none.
@@ -50,12 +71,17 @@ impl App {
         true
     }
 
+    fn next_request(&mut self) -> u64 {
+        self.manage.requests += 1;
+        self.manage.requests
+    }
+
     pub(super) fn perform_manage(&mut self, action: Action) {
         match action {
             Action::NewRoom => self.open_new(Stage::Choose),
             Action::InviteUser => self.open_new(Stage::Invite),
-            Action::RoomInfo => self.open_info(None),
-            Action::LeaveRoom => self.open_info(Some(InfoRow::Leave)),
+            Action::RoomInfo => self.open_info(self.target_room(), None),
+            Action::LeaveRoom => self.open_info(self.target_room(), Some(InfoRow::Leave)),
             Action::Manage(click) => self.manage_click(click),
             _ => {}
         }
@@ -103,6 +129,7 @@ impl App {
 
     fn submit_new(&mut self) {
         let own = self.user_id.clone();
+        let request = self.next_request();
         let Some(Modal::New(popup)) = &mut self.modal else {
             return;
         };
@@ -114,19 +141,32 @@ impl App {
             Some(own) if own == user => Err("That is your own user ID.".to_owned()),
             _ => Ok(()),
         };
+        // Typed into the form on purpose: a chat that does not exist yet is made.
+        let chat = |user_id: String| ManageCmd::DirectChat {
+            request,
+            user_id,
+            create: true,
+        };
         let prepared: Result<(ManageCmd, &'static str), String> = match popup.stage {
             Stage::Choose => return,
             Stage::Join => parse_address(&popup.address).and_then(|address| match address {
-                Address::Room { target, via } => Ok((ManageCmd::Join { target, via }, "Joining…")),
+                Address::Room { target, via } => Ok((
+                    ManageCmd::Join {
+                        request,
+                        target,
+                        via,
+                    },
+                    "Joining…",
+                )),
                 // A link to a person: a chat with them is what can be opened.
                 Address::User(user_id) => {
                     not_yourself(&user_id)?;
-                    Ok((ManageCmd::DirectChat { user_id }, "Opening the chat…"))
+                    Ok((chat(user_id), "Opening the chat…"))
                 }
             }),
             Stage::Direct => parse_user(&popup.user).and_then(|user_id| {
                 not_yourself(&user_id)?;
-                Ok((ManageCmd::DirectChat { user_id }, "Opening the chat…"))
+                Ok((chat(user_id), "Opening the chat…"))
             }),
             Stage::Invite => parse_user(&popup.user).and_then(|user_id| {
                 not_yourself(&user_id)?;
@@ -135,7 +175,8 @@ impl App {
                 Ok((ManageCmd::Invite { room_id, user_id }, "Inviting…"))
             }),
             Stage::Create => (|| {
-                let name = popup.name.trim();
+                // Nothing that is not text goes to the server as a name or topic.
+                let name = clean_input(popup.name.trim());
                 if name.is_empty() {
                     return Err("Give the room a name.".to_owned());
                 }
@@ -147,11 +188,12 @@ impl App {
                 } else {
                     None
                 };
-                let topic = popup.topic.trim();
+                let topic = clean_input(popup.topic.trim());
                 Ok((
                     ManageCmd::Create {
-                        name: name.to_owned(),
-                        topic: (!topic.is_empty()).then(|| topic.to_owned()),
+                        request,
+                        name,
+                        topic: (!topic.is_empty()).then_some(topic),
                         encrypted: alias.is_none() && popup.encrypted,
                         alias,
                     },
@@ -162,10 +204,12 @@ impl App {
         match prepared {
             Ok((command, busy)) => {
                 popup.busy = Some(busy);
+                popup.request = Some(request);
                 if !self.manage(command)
                     && let Some(Modal::New(popup)) = &mut self.modal
                 {
                     popup.busy = None;
+                    popup.request = None;
                     popup.error = Some(NO_ACCOUNT.to_owned());
                 }
             }
@@ -213,7 +257,7 @@ impl App {
             }
             KeyCode::Char(c) if plain => match popup.field_mut() {
                 Some(field) => {
-                    field.push(c);
+                    push_clean(field, c.encode_utf8(&mut [0; 4]));
                     popup.error = None;
                 }
                 None if c == ' ' => {
@@ -227,11 +271,12 @@ impl App {
 
     // ----- room info -----------------------------------------------------------------
 
-    fn open_info(&mut self, select: Option<InfoRow>) {
+    /// Shows the room info for the room at `index`, with `select` selected.
+    fn open_info(&mut self, index: Option<usize>, select: Option<InfoRow>) {
         if self.modal.is_some() || self.images.viewer_open() {
             return;
         }
-        let Some(room) = self.target_room().and_then(|index| self.rooms.get(index)) else {
+        let Some(room) = index.and_then(|index| self.rooms.get(index)) else {
             self.show_toast("No room is open");
             return;
         };
@@ -300,14 +345,15 @@ impl App {
         match &mut self.modal {
             Some(Modal::New(popup)) if popup.busy.is_none() => {
                 if let Some(field) = popup.field_mut() {
-                    field.push_str(first_line);
+                    push_clean(field, first_line);
                     popup.error = None;
                 }
             }
             Some(Modal::RoomInfo(info)) => match &mut info.editing {
-                Some((_, text)) => text.push_str(first_line),
+                Some((_, text)) => push_clean(text, first_line),
                 None => {
-                    let filter = format!("{}{first_line}", info.filter);
+                    let mut filter = std::mem::take(&mut info.filter);
+                    push_clean(&mut filter, first_line);
                     info.set_filter(filter);
                 }
             },
@@ -339,7 +385,7 @@ impl App {
                 KeyCode::Backspace => {
                     text.pop();
                 }
-                KeyCode::Char(c) if plain => text.push(c),
+                KeyCode::Char(c) if plain => push_clean(text, c.encode_utf8(&mut [0; 4])),
                 _ => {}
             }
             return;
@@ -347,12 +393,17 @@ impl App {
         let page = info.page.saturating_sub(1).max(1) as isize;
         let row = info.current();
         match code {
-            KeyCode::F(4) => self.close_manage(),
+            KeyCode::F(4) if mods.is_empty() => self.close_manage(),
             KeyCode::Up | KeyCode::BackTab => info.step(-1),
             KeyCode::Down | KeyCode::Tab => info.step(1),
             KeyCode::PageUp => info.step(-page),
             KeyCode::PageDown => info.step(page),
-            KeyCode::Home => info.step(isize::MIN / 2),
+            KeyCode::Home => {
+                // All the way: the first row, and what stands above it.
+                info.step(-(isize::MAX / 2));
+                info.scroll = 0;
+                info.reveal = false;
+            }
             KeyCode::End => info.step(isize::MAX / 2),
             KeyCode::Left | KeyCode::Right if row == Some(InfoRow::Notify) => {
                 self.info_activate(InfoRow::Notify, if code == KeyCode::Left { -1 } else { 1 });
@@ -370,7 +421,7 @@ impl App {
             }
             KeyCode::Char(c) if plain => {
                 let mut filter = std::mem::take(&mut info.filter);
-                filter.push(c);
+                push_clean(&mut filter, c.encode_utf8(&mut [0; 4]));
                 info.set_filter(filter);
             }
             _ => {}
@@ -402,10 +453,12 @@ impl App {
                 }
             }
             Click::Submit => {
-                if let Some(Modal::New(popup)) = &mut self.modal {
+                if let Some(Modal::New(popup)) = &mut self.modal
+                    && popup.busy.is_none()
+                {
                     popup.focus = popup.slots() - 1;
+                    self.submit_new();
                 }
-                self.submit_new();
             }
             Click::Row(index) | Click::Step(index, _) | Click::Select(index) => {
                 let Some(Modal::RoomInfo(info)) = &mut self.modal else {
@@ -450,6 +503,11 @@ impl App {
                     self.show_toast(NO_ACCOUNT);
                 }
             }
+            // The name above the messages is the open room's, wherever the focus is.
+            Click::OpenInfo => {
+                let open = (self.active < self.rooms.len()).then_some(self.active);
+                self.open_info(open, None);
+            }
         }
     }
 
@@ -457,6 +515,8 @@ impl App {
     /// change; 0 for Enter or a click.
     fn info_activate(&mut self, row: InfoRow, step: i8) {
         let own = self.user_id.clone();
+        let connected = self.matrix.is_some();
+        let request = self.next_request();
         let Some(Modal::RoomInfo(info)) = &mut self.modal else {
             return;
         };
@@ -466,7 +526,14 @@ impl App {
         info.error = None;
         let room_id = info.room_id.clone();
         let confirmed = std::mem::take(&mut info.confirm);
-        let (command, busy) = match row {
+        // Nothing is changed, shown as changed or asked about where there is no
+        // account to do it with.
+        let sends = !matches!(row, InfoRow::Name | InfoRow::Topic | InfoRow::Invite);
+        if sends && !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        let (command, pending, busy) = match row {
             InfoRow::Favourite => {
                 let on = !info
                     .details
@@ -478,7 +545,11 @@ impl App {
                 if let Some(details) = &mut info.details {
                     details.favourite = on;
                 }
-                (ManageCmd::SetFavourite { room_id, on }, "Saving…")
+                (
+                    ManageCmd::SetFavourite { room_id, on },
+                    Pending::Change(Change::Favourite(on)),
+                    "Saving…",
+                )
             }
             InfoRow::Notify => {
                 let Some(details) = &mut info.details else {
@@ -492,7 +563,11 @@ impl App {
                 let step = if step < 0 { -1 } else { 1 };
                 let level = levels[(at + step).rem_euclid(levels.len() as isize) as usize];
                 details.notify = Some(level);
-                (ManageCmd::SetNotify { room_id, level }, "Saving…")
+                (
+                    ManageCmd::SetNotify { room_id, level },
+                    Pending::Change(Change::Notify),
+                    "Saving…",
+                )
             }
             InfoRow::Name | InfoRow::Topic => {
                 let current = info.details.as_ref().map_or(String::new(), |details| {
@@ -511,7 +586,7 @@ impl App {
                     info.confirm = Some(Confirm::Leave);
                     return;
                 }
-                (ManageCmd::Leave { room_id }, "Leaving…")
+                (ManageCmd::Leave { room_id }, Pending::Leave, "Leaving…")
             }
             InfoRow::Member(_) => {
                 let Some(member) = info.member(row) else {
@@ -522,20 +597,31 @@ impl App {
                     return;
                 }
                 let user_id = member.user_id.clone();
-                (ManageCmd::DirectChat { user_id }, "Opening the chat…")
+                // The first Enter only opens a chat that exists. Making one (a room,
+                // and an invitation to that person) takes a second, after the question.
+                let create = confirmed == Some(Confirm::NewChat(user_id.clone()));
+                (
+                    ManageCmd::DirectChat {
+                        request,
+                        user_id,
+                        create,
+                    },
+                    Pending::Chat(request),
+                    if create {
+                        "Starting the chat…"
+                    } else {
+                        "Opening the chat…"
+                    },
+                )
             }
         };
-        info.busy = Some(busy);
-        if !self.manage(command)
-            && let Some(Modal::RoomInfo(info)) = &mut self.modal
-        {
-            info.busy = None;
-            info.error = Some(NO_ACCOUNT.to_owned());
-        }
+        info.wait_for(pending, busy);
+        self.manage(command);
     }
 
     /// Del on a member: asks first, removes on the second press.
     fn remove_member(&mut self) {
+        let connected = self.matrix.is_some();
         let Some(Modal::RoomInfo(info)) = &mut self.modal else {
             return;
         };
@@ -561,25 +647,25 @@ impl App {
             return;
         }
         info.confirm = None;
-        info.busy = Some("Removing…");
-        let room_id = info.room_id.clone();
-        if !self.manage(ManageCmd::Kick { room_id, user_id })
-            && let Some(Modal::RoomInfo(info)) = &mut self.modal
-        {
-            info.busy = None;
+        if !connected {
             info.error = Some(NO_ACCOUNT.to_owned());
+            return;
         }
+        info.wait_for(Pending::Change(Change::Kick), "Removing…");
+        let room_id = info.room_id.clone();
+        self.manage(ManageCmd::Kick { room_id, user_id });
     }
 
     /// Enter while the name or topic is being typed.
     fn submit_edit(&mut self) {
+        let connected = self.matrix.is_some();
         let Some(Modal::RoomInfo(info)) = &mut self.modal else {
             return;
         };
         let Some((row, text)) = info.editing.clone() else {
             return;
         };
-        let text = text.trim().to_owned();
+        let text = clean_input(text.trim());
         let room_id = info.room_id.clone();
         let unchanged = info.details.as_ref().is_some_and(|details| match row {
             InfoRow::Name => details.name == text,
@@ -589,7 +675,7 @@ impl App {
             info.editing = None;
             return;
         }
-        let command = match row {
+        let (command, change) = match row {
             InfoRow::Name if text.is_empty() => {
                 info.error = Some("A room needs a name.".to_owned());
                 return;
@@ -598,57 +684,86 @@ impl App {
                 info.error = Some("That name is too long.".to_owned());
                 return;
             }
-            InfoRow::Name => ManageCmd::SetName {
-                room_id,
-                name: text,
-            },
-            _ => ManageCmd::SetTopic {
-                room_id,
-                topic: text,
-            },
+            InfoRow::Name => (
+                ManageCmd::SetName {
+                    room_id,
+                    name: text,
+                },
+                Change::Name,
+            ),
+            _ => (
+                ManageCmd::SetTopic {
+                    room_id,
+                    topic: text,
+                },
+                Change::Topic,
+            ),
         };
         info.editing = None;
-        info.error = None;
-        info.busy = Some("Saving…");
-        if !self.manage(command)
-            && let Some(Modal::RoomInfo(info)) = &mut self.modal
-        {
-            info.busy = None;
+        if !connected {
             info.error = Some(NO_ACCOUNT.to_owned());
+            return;
         }
+        info.error = None;
+        info.wait_for(Pending::Change(change), "Saving…");
+        self.manage(command);
     }
 
     // ----- answers from the worker ---------------------------------------------------
 
     pub(super) fn on_manage(&mut self, event: ManageEvent) {
         match event {
-            ManageEvent::Opened(Ok(room_id)) => {
-                // Only a popup that was waiting for this makes way for the room.
-                let waiting = match &self.modal {
-                    Some(Modal::New(popup)) => popup.busy.is_some(),
-                    Some(Modal::RoomInfo(info)) => info.busy.is_some(),
+            ManageEvent::Opened { request, result } => {
+                // Only the popup that asked for exactly this is touched by the answer.
+                let asked = match &mut self.modal {
+                    Some(Modal::New(popup)) if popup.request == Some(request) => {
+                        popup.request = None;
+                        popup.busy = None;
+                        true
+                    }
+                    Some(Modal::RoomInfo(info)) => info.answered(Pending::Chat(request)),
                     _ => false,
                 };
-                if waiting {
-                    self.close_manage();
+                match (result, asked) {
+                    (Ok(room_id), true) => {
+                        self.close_manage();
+                        self.manage.pending_open = Some((room_id, Instant::now()));
+                        self.open_pending_room();
+                    }
+                    // Whoever asked has closed the form and moved on: the room is
+                    // there, but nothing jumps to it or closes what is open now.
+                    (Ok(_), false) => self.show_toast("Done: the room is in your room list"),
+                    (Err(error), true) => match &mut self.modal {
+                        Some(Modal::New(popup)) => popup.error = Some(error),
+                        Some(Modal::RoomInfo(info)) => info.error = Some(error),
+                        _ => {}
+                    },
+                    (Err(error), false) => self.show_toast(error),
                 }
-                self.manage.pending_open = Some((room_id, Instant::now()));
-                self.open_pending_room();
             }
-            ManageEvent::Opened(Err(error)) => match &mut self.modal {
-                Some(Modal::New(popup)) if popup.busy.is_some() => {
-                    popup.busy = None;
-                    popup.error = Some(error);
+            ManageEvent::NoDirectChat { request, user_id } => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.answered(Pending::Chat(request))
+                {
+                    // The question belongs to that person's row, wherever the
+                    // selection went meanwhile. Gone from the list: nothing to ask.
+                    let row = info.rows().into_iter().find(
+                        |row| matches!(info.member(*row), Some(member) if member.user_id == user_id),
+                    );
+                    if let Some(row) = row {
+                        info.select(row);
+                        info.confirm = Some(Confirm::NewChat(user_id));
+                    }
                 }
-                Some(Modal::RoomInfo(info)) if info.busy.is_some() => {
-                    info.busy = None;
-                    info.error = Some(error);
-                }
-                _ => self.show_toast(error),
-            },
+            }
             ManageEvent::Left { room_id, result } => {
-                let shown =
-                    matches!(&self.modal, Some(Modal::RoomInfo(info)) if info.room_id == room_id);
+                let shown = match &mut self.modal {
+                    Some(Modal::RoomInfo(info)) if info.room_id == room_id => {
+                        info.answered(Pending::Leave);
+                        true
+                    }
+                    _ => false,
+                };
                 match result {
                     Ok(()) => {
                         // The room list may have dropped the room already.
@@ -669,10 +784,7 @@ impl App {
                         });
                     }
                     Err(error) => match &mut self.modal {
-                        Some(Modal::RoomInfo(info)) if shown => {
-                            info.busy = None;
-                            info.error = Some(error);
-                        }
+                        Some(Modal::RoomInfo(info)) if shown => info.error = Some(error),
                         _ => self.show_toast(error),
                     },
                 }
@@ -688,8 +800,8 @@ impl App {
                 {
                     match result {
                         Ok(details) => info.set_details(*details),
-                        Err(error) if info.details.is_none() => info.error = Some(error),
-                        Err(_) => {}
+                        // What is shown stays, with the reason it may be out of date.
+                        Err(error) => info.error = Some(error),
                     }
                 }
             }
@@ -710,6 +822,7 @@ impl App {
             Some(Modal::New(popup))
                 if change == Change::Invite
                     && popup.stage == Stage::Invite
+                    && popup.busy.is_some()
                     && popup.room.as_ref().is_some_and(|(id, _)| id == room_id) =>
             {
                 match result {
@@ -723,8 +836,11 @@ impl App {
                     }
                 }
             }
-            Some(Modal::RoomInfo(info)) if info.room_id == room_id => {
-                info.busy = None;
+            // The change this view is waiting for; any other answer is not its own.
+            Some(Modal::RoomInfo(info))
+                if info.room_id == room_id && info.pending == Some(Pending::Change(change)) =>
+            {
+                info.answered(Pending::Change(change));
                 match result {
                     Ok(()) => {
                         if !done.is_empty() {
@@ -747,9 +863,45 @@ impl App {
         }
     }
 
+    /// Keeps the room popups in step with the room list: an accepted invitation shows
+    /// what a room offers, a room that is gone takes its popup with it.
+    fn follow_room_list(&mut self) {
+        let (room_id, leaving) = match &self.modal {
+            Some(Modal::RoomInfo(info)) => {
+                (info.room_id.clone(), info.pending == Some(Pending::Leave))
+            }
+            Some(Modal::New(popup)) if popup.stage == Stage::Invite => match &popup.room {
+                Some((id, _)) => (id.clone(), false),
+                None => return,
+            },
+            _ => return,
+        };
+        let listed = self
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .map(|room| (room.kind, room.name.clone()));
+        match (listed, &mut self.modal) {
+            (Some((kind, name)), Some(Modal::RoomInfo(info))) => {
+                if info.details.is_none() {
+                    info.name = name;
+                }
+                info.set_kind(kind);
+            }
+            (Some(_), _) => {}
+            // Our own leaving closes the view when its answer is there.
+            (None, _) if leaving => {}
+            (None, _) => {
+                self.close_manage();
+                self.show_toast("You are no longer in that room");
+            }
+        }
+    }
+
     /// Opens the room that was just joined or created, once the room list has it.
     /// Called when the answer arrives and after every update of the list.
     pub(super) fn open_pending_room(&mut self) {
+        self.follow_room_list();
         let Some((room_id, since)) = &self.manage.pending_open else {
             return;
         };
@@ -808,7 +960,7 @@ fn demo_details(room: &crate::model::Room) -> RoomDetails {
         can_set_topic: false,
         can_invite: false,
         members,
-        members_loading: false,
+        ..RoomDetails::default()
     }
 }
 
@@ -905,6 +1057,12 @@ mod tests {
         out
     }
 
+    /// The answer to the request made last.
+    fn answer_opened(app: &mut App, result: Result<String, String>) {
+        let request = app.manage.requests;
+        answer(app, ManageEvent::Opened { request, result });
+    }
+
     fn answer(app: &mut App, event: ManageEvent) {
         app.on_matrix(MatrixEvent::Manage(event));
     }
@@ -942,7 +1100,7 @@ mod tests {
                 member("bob", MemberRole::User, false),
                 member("dave", MemberRole::User, true),
             ],
-            members_loading: false,
+            ..RoomDetails::default()
         }
     }
 
@@ -1018,7 +1176,7 @@ mod tests {
         assert!(new_popup(&app).error.is_none());
         app.on_event(key(KeyCode::Enter));
         match sent(&mut commands).as_slice() {
-            [ManageCmd::Join { target, via }] => {
+            [ManageCmd::Join { target, via, .. }] => {
                 assert_eq!(target, "#new:example.org");
                 assert_eq!(via, &["example.org"]);
             }
@@ -1031,10 +1189,7 @@ mod tests {
         type_text(&mut app, "x");
         assert!(sent(&mut commands).is_empty());
         // The server's refusal is shown in the form, made safe.
-        answer(
-            &mut app,
-            ManageEvent::Opened(Err("Could not join: not found".into())),
-        );
+        answer_opened(&mut app, Err("Could not join: not found".into()));
         assert!(new_popup(&app).busy.is_none());
         find(
             &screen(&mut app, &mut terminal),
@@ -1043,7 +1198,7 @@ mod tests {
         // Again; this time it works. The room is opened when the list has it.
         app.on_event(key(KeyCode::Enter));
         assert_eq!(sent(&mut commands).len(), 1);
-        answer(&mut app, ManageEvent::Opened(Ok("!new:example.org".into())));
+        answer_opened(&mut app, Ok("!new:example.org".into()));
         assert!(app.modal.is_none());
         assert_eq!(app.room().unwrap().id, ROOM);
         app.on_matrix(MatrixEvent::Rooms(vec![
@@ -1070,7 +1225,7 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(
             sent(&mut commands).as_slice(),
-            [ManageCmd::DirectChat { user_id }] if user_id == "@carol:example.org"
+            [ManageCmd::DirectChat { user_id, .. }] if user_id == "@carol:example.org"
         ));
     }
 
@@ -1092,10 +1247,10 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(
             sent(&mut commands).as_slice(),
-            [ManageCmd::DirectChat { user_id }] if user_id == "@bob:example.org"
+            [ManageCmd::DirectChat { user_id, .. }] if user_id == "@bob:example.org"
         ));
         // The worker found the existing chat: it is in the list already and opens.
-        answer(&mut app, ManageEvent::Opened(Ok(CHAT.into())));
+        answer_opened(&mut app, Ok(CHAT.into()));
         assert!(app.modal.is_none());
         assert_eq!(app.room().unwrap().id, CHAT);
         app.perform(Action::Manage(Click::Stage(Stage::Direct)));
@@ -1129,6 +1284,7 @@ mod tests {
                     topic,
                     alias: None,
                     encrypted: true,
+                    ..
                 },
             ] => {
                 assert_eq!(name, "Rat plans");
@@ -1136,9 +1292,9 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        answer(
+        answer_opened(
             &mut app,
-            ManageEvent::Opened(Err("Could not create the room: not allowed".into())),
+            Err("Could not create the room: not allowed".into()),
         );
         // Public: needs an address, and only its first part.
         app.on_event(key(KeyCode::Up));
@@ -1170,7 +1326,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // Switching a private room's encryption off is possible, by the switch.
-        answer(&mut app, ManageEvent::Opened(Err("no".into())));
+        answer_opened(&mut app, Err("no".into()));
         click_on(&mut app, &mut terminal, "Public");
         assert!(!new_popup(&app).public);
         click_on(&mut app, &mut terminal, "Encryption");
@@ -1391,9 +1547,9 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(
             sent(&mut commands).as_slice(),
-            [ManageCmd::DirectChat { user_id }] if user_id == "@carol:example.org"
+            [ManageCmd::DirectChat { user_id, .. }] if user_id == "@carol:example.org"
         ));
-        answer(&mut app, ManageEvent::Opened(Ok(CHAT.into())));
+        answer_opened(&mut app, Ok(CHAT.into()));
         assert!(app.modal.is_none());
         assert_eq!(app.room().unwrap().id, CHAT);
     }
@@ -1672,16 +1828,18 @@ mod tests {
         app.on_event(key(KeyCode::Esc));
         assert!(app.modal.is_none());
         sent(&mut commands);
-        answer(
-            &mut app,
-            ManageEvent::Opened(Err("Could not join: not allowed".into())),
-        );
+        answer_opened(&mut app, Err("Could not join: not allowed".into()));
         assert_eq!(app.toast.as_ref().unwrap().0, "Could not join: not allowed");
         // Another popup is not closed by a late answer.
         app.perform(Action::OpenSettings);
-        answer(&mut app, ManageEvent::Opened(Ok(CHAT.into())));
+        answer_opened(&mut app, Ok(CHAT.into()));
         assert!(matches!(app.modal, Some(Modal::Settings(_))));
-        assert_eq!(app.room().unwrap().id, CHAT);
+        // Nor does it take the user anywhere: the form was closed.
+        assert_eq!(app.room().unwrap().id, ROOM);
+        assert_eq!(
+            app.toast.as_ref().unwrap().0,
+            "Done: the room is in your room list"
+        );
         // Nor does one popup open over another.
         app.perform(Action::NewRoom);
         app.perform(Action::RoomInfo);
@@ -1735,5 +1893,697 @@ mod tests {
         insta::assert_snapshot!("room_info_filtered", screen(&mut app, &mut terminal));
         let mut small = Terminal::new(TestBackend::new(46, 14)).unwrap();
         insta::assert_snapshot!("room_info_small", screen(&mut app, &mut small));
+    }
+
+    fn chat_request(command: &ManageCmd) -> (u64, String, bool) {
+        match command {
+            ManageCmd::DirectChat {
+                request,
+                user_id,
+                create,
+            } => (*request, user_id.clone(), *create),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_new_chat_from_a_member_row_asks_first() {
+        let (mut app, mut terminal, mut commands) = connected();
+        with_info(&mut app, &mut commands);
+        type_text(&mut app, "carol");
+        // What Enter does is on the border and on the bottom line.
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Enter chat");
+        find(&text, "Enter: open your chat with them");
+        // The first Enter only looks for a chat that exists.
+        app.on_event(key(KeyCode::Enter));
+        let asked = sent(&mut commands);
+        let (request, user, create) = chat_request(&asked[0]);
+        assert_eq!((user.as_str(), create), ("@carol:example.org", false));
+        // There is none: nothing was made, and the question is on screen.
+        answer(
+            &mut app,
+            ManageEvent::NoDirectChat {
+                request,
+                user_id: user.clone(),
+            },
+        );
+        assert_eq!(info(&app).confirm, Some(Confirm::NewChat(user.clone())));
+        assert!(info(&app).busy.is_none());
+        find(
+            &screen(&mut app, &mut terminal),
+            "Enter again to start one, Esc to stay",
+        );
+        assert!(sent(&mut commands).is_empty());
+        // Esc, or walking away, withdraws it: the next Enter asks afresh.
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(info(&app).confirm, None);
+        app.on_event(key(KeyCode::Enter));
+        let (request, _, create) = chat_request(&sent(&mut commands)[0]);
+        assert!(!create);
+        answer(
+            &mut app,
+            ManageEvent::NoDirectChat {
+                request,
+                user_id: user.clone(),
+            },
+        );
+        // The second Enter makes the chat.
+        app.on_event(key(KeyCode::Enter));
+        let (_, made_for, create) = chat_request(&sent(&mut commands)[0]);
+        assert!(create && made_for == user);
+        find(&screen(&mut app, &mut terminal), "Starting the chat…");
+        answer_opened(&mut app, Ok(CHAT.into()));
+        assert!(app.modal.is_none());
+        assert_eq!(app.room().unwrap().id, CHAT);
+    }
+
+    #[test]
+    fn the_chat_button_asks_first_too_and_the_question_finds_its_row() {
+        let (mut app, mut terminal, mut commands) = connected();
+        with_info(&mut app, &mut commands);
+        click_on(&mut app, &mut terminal, "@bob:example.org");
+        click_on(&mut app, &mut terminal, " chat ");
+        let (request, user, create) = chat_request(&sent(&mut commands)[0]);
+        assert!(!create);
+        // The selection wanders off while the answer is on its way.
+        app.on_event(key(KeyCode::Up));
+        answer(
+            &mut app,
+            ManageEvent::NoDirectChat {
+                request,
+                user_id: user.clone(),
+            },
+        );
+        assert_eq!(info(&app).selected_member().unwrap().user_id, user);
+        click_on(&mut app, &mut terminal, " chat ");
+        assert!(chat_request(&sent(&mut commands)[0]).2);
+        // An answer about someone who is no longer listed asks nothing.
+        answer_opened(
+            &mut app,
+            Err("Could not start the chat: not allowed".into()),
+        );
+        app.on_event(key(KeyCode::Enter));
+        let (request, _, _) = chat_request(&sent(&mut commands)[0]);
+        answer(
+            &mut app,
+            ManageEvent::NoDirectChat {
+                request,
+                user_id: "@gone:example.org".into(),
+            },
+        );
+        assert_eq!(info(&app).confirm, None);
+        assert!(info(&app).busy.is_none());
+    }
+
+    #[test]
+    fn late_answers_touch_only_who_asked() {
+        let (mut app, _terminal, mut commands) = connected();
+        // A slow join whose form was closed.
+        app.perform(Action::Manage(Click::Stage(Stage::Join)));
+        type_text(&mut app, "#slow:example.org");
+        app.on_event(key(KeyCode::Enter));
+        let old = app.manage.requests;
+        app.on_event(key(KeyCode::Esc));
+        sent(&mut commands);
+        // Meanwhile the room info is busy with something else.
+        with_info(&mut app, &mut commands);
+        type_text(&mut app, "bob");
+        app.on_event(key(KeyCode::Delete));
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(info(&app).busy, Some("Removing…"));
+        // The join comes through: nothing closes, nothing jumps, the wait goes on.
+        answer(
+            &mut app,
+            ManageEvent::Opened {
+                request: old,
+                result: Ok("!slow:example.org".into()),
+            },
+        );
+        assert_eq!(info(&app).busy, Some("Removing…"));
+        assert!(app.manage.pending_open.is_none());
+        // Or it fails: said in passing, not in the view of another room.
+        answer(
+            &mut app,
+            ManageEvent::Opened {
+                request: old,
+                result: Err("Could not join: not allowed".into()),
+            },
+        );
+        assert!(info(&app).error.is_none() && info(&app).busy.is_some());
+        assert_eq!(app.toast.as_ref().unwrap().0, "Could not join: not allowed");
+        // Answers about other changes or other rooms are not the one awaited.
+        for (room_id, change) in [(ROOM, Change::Name), (CHAT, Change::Kick)] {
+            answer(
+                &mut app,
+                ManageEvent::Done {
+                    room_id: room_id.into(),
+                    change,
+                    result: Err("no".into()),
+                },
+            );
+            assert!(info(&app).busy.is_some() && info(&app).error.is_none());
+        }
+        answer(
+            &mut app,
+            ManageEvent::Left {
+                room_id: CHAT.into(),
+                result: Ok(()),
+            },
+        );
+        assert_eq!(info(&app).busy, Some("Removing…"));
+        answer(
+            &mut app,
+            ManageEvent::Done {
+                room_id: ROOM.into(),
+                change: Change::Kick,
+                result: Ok(()),
+            },
+        );
+        assert!(info(&app).busy.is_none());
+        // A second form does not take the first one's answer for its own.
+        app.on_event(key(KeyCode::F(4)));
+        app.perform(Action::Manage(Click::Stage(Stage::Join)));
+        type_text(&mut app, "#other:example.org");
+        app.on_event(key(KeyCode::Enter));
+        answer(
+            &mut app,
+            ManageEvent::Opened {
+                request: old,
+                result: Err("Could not join: not found".into()),
+            },
+        );
+        assert!(new_popup(&app).busy.is_some() && new_popup(&app).error.is_none());
+        answer_opened(&mut app, Err("Could not join: not found".into()));
+        assert!(new_popup(&app).busy.is_none() && new_popup(&app).error.is_some());
+    }
+
+    fn with_invite(app: &mut App) {
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Rats", RoomCategory::Room),
+            summary(CHAT, "bob", RoomCategory::Person),
+            summary("!inv:example.org", "Party", RoomCategory::Invite),
+        ]));
+    }
+
+    /// Title and whether it can be run, of the palette entry starting with `start`.
+    fn entry(app: &App, start: &str) -> (String, bool) {
+        let Some(Modal::Palette(palette)) = &app.modal else {
+            panic!("the palette is not open");
+        };
+        let entry = palette
+            .entries
+            .iter()
+            .find(|entry| entry.title.starts_with(start))
+            .unwrap_or_else(|| panic!("no entry starts with {start:?}"));
+        (entry.title.clone(), entry.enabled)
+    }
+
+    #[test]
+    fn the_palette_names_the_room_its_entries_act_on() {
+        let (mut app, _terminal, mut commands) = connected();
+        with_invite(&mut app);
+        // Rats is open; the cursor of the focused room list is on the invitation.
+        app.perform(Action::Focus(Pane::Sidebar));
+        while app.cursor_room().map(|i| app.rooms[i].id.as_str()) != Some("!inv:example.org") {
+            app.perform(Action::SidebarUp);
+        }
+        assert_eq!(app.room().unwrap().id, ROOM);
+        app.on_event(ctrl('p'));
+        assert_eq!(
+            entry(&app, "Decline"),
+            ("Decline the invitation to Party…".to_owned(), true)
+        );
+        assert!(!entry(&app, "Invite someone to Party").1);
+        assert!(!entry(&app, "Favourite on/off for Party").1);
+        assert!(entry(&app, "Room info").1);
+        // Running it acts on that room, as it says.
+        type_text(&mut app, "decline the invitation");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(info(&app).room_id, "!inv:example.org");
+        assert_eq!(info(&app).current(), Some(InfoRow::Leave));
+        app.on_event(key(KeyCode::Esc));
+        sent(&mut commands);
+
+        // The other way round: an invitation is open, the cursor is on a room.
+        app.perform(Action::SidebarOpen);
+        assert_eq!(app.room().unwrap().id, "!inv:example.org");
+        app.perform(Action::Focus(Pane::Sidebar));
+        app.perform(Action::SidebarDown);
+        let under_cursor = app.rooms[app.cursor_room().unwrap()].clone();
+        assert_ne!(under_cursor.id, "!inv:example.org");
+        app.on_event(ctrl('p'));
+        let (title, enabled) = entry(&app, "Leave");
+        assert_eq!(title, format!("Leave {}…", under_cursor.name));
+        assert!(enabled && entry(&app, "Invite someone to").1);
+        type_text(&mut app, "leave room");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(info(&app).room_id, under_cursor.id);
+        app.on_event(key(KeyCode::Esc));
+
+        // With the composer focused it is the open room, by name.
+        app.perform(Action::OpenRoom(
+            app.rooms.iter().position(|r| r.id == ROOM).unwrap(),
+        ));
+        app.on_event(ctrl('p'));
+        assert_eq!(entry(&app, "Leave"), ("Leave Rats…".to_owned(), true));
+        assert_eq!(
+            entry(&app, "Invite someone"),
+            ("Invite someone to Rats…".to_owned(), true)
+        );
+        app.on_event(key(KeyCode::Esc));
+
+        // A room list filtered down to nothing has no room to act on: the entries
+        // say so by being off, instead of failing when run.
+        app.perform(Action::FocusRoomFilter);
+        type_text(&mut app, "zzzz");
+        assert!(app.cursor_room().is_none());
+        app.on_event(ctrl('p'));
+        for start in ["Leave", "Invite someone", "Favourite on/off", "Room info"] {
+            assert!(!entry(&app, start).1, "{start}");
+        }
+        type_text(&mut app, "room info");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Palette(_))));
+    }
+
+    #[test]
+    fn the_title_opens_the_open_rooms_info_whatever_has_the_focus() {
+        let (mut app, mut terminal, mut commands) = connected();
+        with_invite(&mut app);
+        app.perform(Action::Focus(Pane::Sidebar));
+        while app.cursor_room().map(|i| app.rooms[i].id.as_str()) != Some("!inv:example.org") {
+            app.perform(Action::SidebarUp);
+        }
+        let text = screen(&mut app, &mut terminal);
+        let (column, row) = find(&text, "#Rats");
+        app.on_event(click(column, row));
+        assert_eq!(info(&app).room_id, ROOM);
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::Info { room_id }] if room_id == ROOM
+        ));
+        app.on_event(key(KeyCode::Esc));
+        // F4 in the room list is about the room under the cursor.
+        app.on_event(key(KeyCode::F(4)));
+        assert_eq!(info(&app).room_id, "!inv:example.org");
+    }
+
+    #[test]
+    fn room_info_follows_the_room_list() {
+        let (mut app, mut terminal, mut commands) = connected();
+        with_invite(&mut app);
+        app.perform(Action::Focus(Pane::Sidebar));
+        while app.cursor_room().map(|i| app.rooms[i].id.as_str()) != Some("!inv:example.org") {
+            app.perform(Action::SidebarUp);
+        }
+        app.on_event(key(KeyCode::F(4)));
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(info(&app).confirm, Some(Confirm::Leave));
+        find(&screen(&mut app, &mut terminal), "Decline invitation");
+        // Accepted elsewhere: it is a room now, and nothing stays armed.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Rats", RoomCategory::Room),
+            summary(CHAT, "bob", RoomCategory::Person),
+            summary("!inv:example.org", "Party", RoomCategory::Room),
+        ]));
+        assert_eq!(info(&app).confirm, None);
+        assert_eq!(info(&app).rows(), [InfoRow::Favourite, InfoRow::Leave]);
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Leave room");
+        assert!(!text.contains("Decline invitation"));
+        // Gone from the list (left on another device, or removed): the view goes too.
+        sent(&mut commands);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Rats", RoomCategory::Room),
+            summary(CHAT, "bob", RoomCategory::Person),
+        ]));
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.toast.as_ref().unwrap().0,
+            "You are no longer in that room"
+        );
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::StopInfo]
+        ));
+        // While we are leaving ourselves, the answer closes it, with the name.
+        app.perform(Action::OpenRoom(0));
+        app.perform(Action::LeaveRoom);
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Enter));
+        let leaving = info(&app).room_id.clone();
+        let name = info(&app).name.clone();
+        let rest: Vec<RoomSummary> = [
+            summary(ROOM, "Rats", RoomCategory::Room),
+            summary(CHAT, "bob", RoomCategory::Person),
+        ]
+        .into_iter()
+        .filter(|room| room.id != leaving)
+        .collect();
+        app.on_matrix(MatrixEvent::Rooms(rest));
+        assert!(matches!(app.modal, Some(Modal::RoomInfo(_))));
+        answer(
+            &mut app,
+            ManageEvent::Left {
+                room_id: leaving,
+                result: Ok(()),
+            },
+        );
+        assert!(app.modal.is_none());
+        assert_eq!(app.toast.as_ref().unwrap().0, format!("Left {name}"));
+        // The invite form goes with its room as well.
+        app.perform(Action::InviteUser);
+        assert_eq!(new_popup(&app).stage, Stage::Invite);
+        app.on_matrix(MatrixEvent::Rooms(Vec::new()));
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn rights_lost_and_failed_updates_show_while_the_view_is_open() {
+        let (mut app, mut terminal, mut commands) = connected();
+        with_info(&mut app, &mut commands);
+        // In the middle of renaming, the right to do so is taken away.
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        type_text(&mut app, "!");
+        assert!(info(&app).editing.is_some());
+        let mut plain = details();
+        plain.can_rename = false;
+        answer(
+            &mut app,
+            ManageEvent::Info {
+                room_id: ROOM.into(),
+                result: Ok(Box::new(plain)),
+            },
+        );
+        assert!(info(&app).editing.is_none());
+        find(&screen(&mut app, &mut terminal), "no longer allowed");
+        // Typing goes to the member filter again, and Enter sends no rename.
+        app.on_event(key(KeyCode::Enter));
+        assert!(
+            sent(&mut commands)
+                .iter()
+                .all(|c| !matches!(c, ManageCmd::SetName { .. }))
+        );
+        // A failed update keeps what was shown and says so.
+        answer(
+            &mut app,
+            ManageEvent::Info {
+                room_id: ROOM.into(),
+                result: Err("This room is not known yet.".into()),
+            },
+        );
+        assert_eq!(info(&app).details.as_ref().unwrap().members.len(), 4);
+        find(
+            &screen(&mut app, &mut terminal),
+            "This room is not known yet.",
+        );
+        // A member list that could not be brought up to date is flagged, not emptied.
+        app.on_event(key(KeyCode::Esc));
+        let mut stale = details();
+        stale.members_error = Some("Could not load the member list: not allowed".into());
+        answer(
+            &mut app,
+            ManageEvent::Info {
+                room_id: ROOM.into(),
+                result: Ok(Box::new(stale)),
+            },
+        );
+        info_mut(&mut app).error = None;
+        type_text(&mut app, "bob");
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "may be out of date");
+        find(&text, "Could not load the member list");
+        find(&text, "@bob:example.org");
+        // Too large to list completely: said next to the heading.
+        let mut partial = details();
+        partial.members_partial = true;
+        answer(
+            &mut app,
+            ManageEvent::Info {
+                room_id: ROOM.into(),
+                result: Ok(Box::new(partial)),
+            },
+        );
+        find(&screen(&mut app, &mut terminal), "only the 4 known here");
+    }
+
+    fn info_mut(app: &mut App) -> &mut InfoPopup {
+        match &mut app.modal {
+            Some(Modal::RoomInfo(info)) => info,
+            _ => panic!("room info is not open"),
+        }
+    }
+
+    #[test]
+    fn the_demo_changes_nothing_ahead_of_an_answer_that_cannot_come() {
+        let mut app = App::demo();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        app.perform(Action::RoomInfo);
+        let before = info(&app).details.clone().unwrap();
+        // Favourite, then the notifications in both directions, then leaving.
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Right));
+        app.on_event(key(KeyCode::Left));
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Enter));
+        assert!(info(&app).details.as_ref() == Some(&before));
+        assert!(info(&app).busy.is_none() && info(&app).confirm.is_none());
+        assert_eq!(info(&app).error.as_deref(), Some(NO_ACCOUNT));
+        find(&screen(&mut app, &mut terminal), NO_ACCOUNT);
+    }
+
+    #[test]
+    fn typed_and_pasted_text_is_made_safe_on_the_way_in() {
+        let nasty = "a\u{1b}[31mb\u{7}\u{202e}c\u{9b}d\te";
+        let clean = "a[31mbcd    e";
+        let (mut app, mut terminal, mut commands) = connected();
+        // Every one-line input of the forms, by paste and by key.
+        for stage in [Stage::Join, Stage::Direct, Stage::Create] {
+            app.perform(Action::Manage(Click::Stage(stage)));
+            app.on_event(Event::Paste(format!("{nasty}\nsecond line")));
+            for c in nasty.chars() {
+                app.on_event(key(KeyCode::Char(c)));
+            }
+            let popup = new_popup(&app);
+            let field = match stage {
+                Stage::Join => &popup.address,
+                Stage::Direct => &popup.user,
+                _ => &popup.name,
+            };
+            assert_eq!(*field, format!("{clean}{clean}"), "{stage:?}");
+            // Before Enter, as it is typed: nothing raw reaches the screen.
+            let text = screen(&mut app, &mut terminal);
+            assert!(
+                !text.contains(['\u{1b}', '\u{7}', '\u{202e}', '\u{9b}']),
+                "{stage:?}"
+            );
+            app.on_event(key(KeyCode::Esc));
+        }
+        // What is sent as a name and topic is text as well.
+        app.perform(Action::Manage(Click::Stage(Stage::Create)));
+        {
+            let Some(Modal::New(popup)) = &mut app.modal else {
+                panic!()
+            };
+            // However it got into the form.
+            popup.name = " Rat\u{1b}[2J plans\u{202e} ".into();
+            popup.topic = "what\u{7} next".into();
+            popup.focus = NewPopup::BUTTON;
+        }
+        app.on_event(key(KeyCode::Enter));
+        match sent(&mut commands).as_slice() {
+            [ManageCmd::Create { name, topic, .. }] => {
+                assert_eq!(name, "Rat[2J plans");
+                assert_eq!(topic.as_deref(), Some("what next"));
+            }
+            other => panic!("{other:?}"),
+        }
+        app.on_event(key(KeyCode::Esc));
+
+        // The room info: the member filter and the name while it is edited.
+        with_info(&mut app, &mut commands);
+        app.on_event(Event::Paste(nasty.into()));
+        assert_eq!(info(&app).filter, clean);
+        app.on_event(ctrl('u'));
+        info_mut(&mut app).select(InfoRow::Name);
+        assert_eq!(info(&app).current(), Some(InfoRow::Name));
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(Event::Paste(nasty.into()));
+        for c in nasty.chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            info(&app).editing.as_ref().unwrap().1,
+            format!("Rats{clean}{clean}")
+        );
+        let text = screen(&mut app, &mut terminal);
+        assert!(!text.contains(['\u{1b}', '\u{7}', '\u{202e}', '\u{9b}']));
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetName { name, .. }] if *name == format!("Rats{clean}{clean}")
+        ));
+        // No input grows without bound.
+        app.on_event(key(KeyCode::Esc));
+        app.on_event(key(KeyCode::Esc));
+        app.perform(Action::Manage(Click::Stage(Stage::Join)));
+        for _ in 0..40 {
+            app.on_event(Event::Paste("x".repeat(100)));
+        }
+        assert_eq!(new_popup(&app).address.len(), FIELD_MAX);
+    }
+
+    #[test]
+    fn a_hostile_room_id_is_not_drawn_raw() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let id = "!bad\u{1b}[31m\u{202e}id:example.org";
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            id,
+            "Odd",
+            RoomCategory::Room,
+        )]));
+        app.on_event(key(KeyCode::F(4)));
+        sent(&mut commands);
+        for with_details in [false, true] {
+            if with_details {
+                answer(
+                    &mut app,
+                    ManageEvent::Info {
+                        room_id: id.into(),
+                        result: Ok(Box::new(details())),
+                    },
+                );
+            }
+            let text = screen(&mut app, &mut terminal);
+            find(&text, "!bad[31mid:example.org");
+            assert!(!text.contains(['\u{1b}', '\u{202e}']));
+        }
+    }
+
+    #[test]
+    fn a_low_window_can_be_scrolled_back_to_the_top() {
+        let (mut app, _terminal, mut commands) = connected();
+        with_info(&mut app, &mut commands);
+        let mut small = Terminal::new(TestBackend::new(46, 14)).unwrap();
+        // Down into the members and all the way back up.
+        for _ in 0..9 {
+            app.on_event(key(KeyCode::Down));
+        }
+        let text = screen(&mut app, &mut small);
+        assert!(!text.contains("Address"));
+        for _ in 0..9 {
+            app.on_event(key(KeyCode::Up));
+        }
+        assert_eq!(info(&app).selected, 0);
+        let text = screen(&mut app, &mut small);
+        // The first row is selected, but what stands above it is still out of view…
+        assert!(!text.contains("│ Rats "), "{text}");
+        // …until Up is pressed further.
+        for _ in 0..12 {
+            app.on_event(key(KeyCode::Up));
+        }
+        let text = screen(&mut app, &mut small);
+        find(&text, "│ Rats ");
+        find(&text, "Address");
+        assert_eq!(info(&app).scroll, 0);
+        // Home does it in one, from anywhere; Down brings the selection back in.
+        app.on_event(key(KeyCode::End));
+        screen(&mut app, &mut small);
+        app.on_event(key(KeyCode::Home));
+        find(&screen(&mut app, &mut small), "│ Rats ");
+        app.on_event(key(KeyCode::Down));
+        find(&screen(&mut app, &mut small), "› Notifications");
+    }
+
+    #[test]
+    fn a_question_that_cannot_be_read_is_not_open() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.perform(Action::LeaveRoom);
+        sent(&mut commands);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(info(&app).confirm, Some(Confirm::Leave));
+        // Says what else leaving does.
+        find(
+            &screen(&mut app, &mut terminal),
+            "this device forgets the room",
+        );
+        // Too low for the line the question stands on: withdrawn, so that a second
+        // Enter is a first one again.
+        let mut low = Terminal::new(TestBackend::new(60, 7)).unwrap();
+        screen(&mut app, &mut low);
+        assert_eq!(info(&app).confirm, None);
+        app.on_event(key(KeyCode::Enter));
+        screen(&mut app, &mut low);
+        app.on_event(key(KeyCode::Enter));
+        screen(&mut app, &mut low);
+        assert!(sent(&mut commands).is_empty());
+        // Too narrow for the keys of the question: the same.
+        let mut narrow = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        app.on_event(key(KeyCode::Enter));
+        screen(&mut app, &mut narrow);
+        assert_eq!(info(&app).confirm, None);
+        // Narrow, but the keys fit: the explanation is what gets cut.
+        let mut tight = Terminal::new(TestBackend::new(46, 20)).unwrap();
+        app.on_event(key(KeyCode::Enter));
+        let text = screen(&mut app, &mut tight);
+        find(&text, "Enter again to leave, Esc to stay");
+        assert_eq!(info(&app).confirm, Some(Confirm::Leave));
+        // An error that arrives meanwhile does not push the question off the screen.
+        answer(
+            &mut app,
+            ManageEvent::Info {
+                room_id: ROOM.into(),
+                result: Err("This room is not known yet.".into()),
+            },
+        );
+        find(
+            &screen(&mut app, &mut tight),
+            "Enter again to leave, Esc to stay",
+        );
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(sent(&mut commands).len(), 1);
+    }
+
+    #[test]
+    fn long_filters_and_narrow_rows_stay_inside_the_popup() {
+        let (mut app, _terminal, mut commands) = connected();
+        with_info(&mut app, &mut commands);
+        let mut list = details();
+        list.members[1].invited = true;
+        list.topic = "x".repeat(74 * 9);
+        answer(
+            &mut app,
+            ManageEvent::Info {
+                room_id: ROOM.into(),
+                result: Ok(Box::new(list)),
+            },
+        );
+        for (width, height) in [(100, 30), (46, 14), (30, 12), (22, 8)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            app.on_event(ctrl('u'));
+            let text = screen(&mut app, &mut terminal);
+            // A cut topic ends in one sign, not two.
+            assert!(!text.contains("……"), "{width}x{height}");
+            type_text(&mut app, &"é".repeat(90));
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            let popup = width.min(74 + 2);
+            let (left, right) = ((width - popup.min(width)) / 2, (width + popup) / 2);
+            assert!(
+                cursor.x >= left && cursor.x < right.min(width),
+                "{width}x{height}: cursor at {}",
+                cursor.x
+            );
+            // The end of the filter is what shows, with the cursor right behind it.
+            let text = format!("{}", terminal.backend());
+            let line = text.lines().nth(cursor.y as usize).unwrap_or_default();
+            assert!(line.contains("éé"), "{width}x{height}: {line}");
+        }
     }
 }

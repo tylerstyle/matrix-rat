@@ -4,10 +4,11 @@ A mouse-friendly, themeable Matrix client for the terminal, built with
 [ratatui](https://ratatui.rs) and [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk).
 
 **Status: early development.** It can log in (password or browser), sync, read and send
-messages (replies, edits, reactions, Markdown, formatted messages, spoilers), show pictures
-inline (kitty graphics, coloured blocks elsewhere), send and save files, follow threads,
-notify about new messages, and verify devices by emoji comparison. See
-[docs/PLAN.md](docs/PLAN.md) for the roadmap.
+messages (replies, edits, reactions, mentions, Markdown, spoilers), show pictures inline
+(kitty graphics, coloured blocks elsewhere), send and save files, follow threads, search a
+room, narrow the room list to a space, join, create and manage rooms, notify about new
+messages, and verify devices by emoji comparison. See [docs/PLAN.md](docs/PLAN.md) for the
+roadmap.
 
 ```sh
 cargo run             # log in to your account
@@ -18,6 +19,8 @@ cargo run -- --demo   # try the interface on built-in demo data
 picker, `Ctrl-Q` quits.
 `Ctrl-P` opens the command palette (actions, rooms, themes, settings), `Ctrl-↑`/`Ctrl-↓` switch
 rooms, `Alt-A` attaches a file (or drop one into the terminal).
+`Ctrl-F` finds text in the open room, `Alt-S` steps through your spaces; in the composer `@`,
+`:`, `#` and `/` offer names, emoji, rooms and commands (Tab accepts).
 `Ctrl-N` joins a room by its address, starts a direct chat or creates a room; `F4` shows the
 room's details and members, and is where you invite people, rename, mute, favourite or leave.
 On a selected message: `t` opens its thread, `Enter` replies, `e` edits, `r` reacts, `o` opens a link, picture or
