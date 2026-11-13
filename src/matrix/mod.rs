@@ -2,6 +2,7 @@
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
 mod convert;
+mod media;
 mod rooms;
 mod session;
 
@@ -93,6 +94,15 @@ pub enum MatrixCmd {
     /// End the session on the server and go back to the login form.
     Logout,
     Shutdown,
+    /// Fetch and decode a picture; answered with [`MatrixEvent::Image`].
+    FetchImage {
+        key: String,
+        media: Box<crate::model::MediaRef>,
+        /// File size as stated by the sender.
+        size: Option<u64>,
+        /// The whole file, not a small version.
+        full: bool,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -121,6 +131,8 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Leave { room_id } => write!(f, "Leave({room_id})"),
             Self::Logout => f.write_str("Logout"),
             Self::Shutdown => f.write_str("Shutdown"),
+            // The source of an encrypted file carries its key.
+            Self::FetchImage { full, .. } => write!(f, "FetchImage(full: {full})"),
         }
     }
 }
@@ -203,6 +215,12 @@ pub enum MatrixEvent {
     /// Something the user did could not be carried out.
     ActionFailed(String),
     Error(String),
+    /// Outcome of [`MatrixCmd::FetchImage`]: the pixels, or a short reason for the user.
+    Image {
+        key: String,
+        full: bool,
+        result: Result<crate::images::Decoded, String>,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -239,6 +257,9 @@ impl std::fmt::Debug for MatrixEvent {
             }
             Self::ActionFailed(error) => write!(f, "ActionFailed({error})"),
             Self::Error(error) => write!(f, "Error({error})"),
+            Self::Image { full, result, .. } => {
+                write!(f, "Image(full: {full}, ok: {})", result.is_ok())
+            }
         }
     }
 }

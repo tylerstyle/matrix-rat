@@ -38,11 +38,13 @@ pub struct Timelines {
     forwarder: Option<JoinHandle<()>>,
     /// The running request for older messages, if any.
     paginator: Option<JoinHandle<()>>,
+    media: super::media::Media,
 }
 
 impl Timelines {
     pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
         Self {
+            media: super::media::Media::new(client.clone(), events.clone()),
             client,
             events,
             cache: VecDeque::new(),
@@ -287,6 +289,12 @@ impl Timelines {
                 }),
                 Err(err) => self.fail("Could not leave", err),
             },
+            MatrixCmd::FetchImage {
+                key,
+                media,
+                size,
+                full,
+            } => self.media.fetch(key, *media, size, full),
             // Handled by the session loop.
             MatrixCmd::LoginPassword { .. }
             | MatrixCmd::LoginBrowser { .. }

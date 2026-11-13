@@ -3,6 +3,7 @@
 mod composer;
 mod help;
 pub mod hit;
+mod image;
 mod modal;
 mod sidebar;
 mod status;
@@ -26,6 +27,7 @@ pub const SIDEBAR_MIN: u16 = 16;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.hits.clear();
+    app.images.begin_frame();
     let area = frame.area();
     app.screen = area;
     frame
@@ -69,10 +71,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         composer::draw(frame, app, composer_area);
     }
     status::draw(frame, app, status_area);
+    image::draw_viewer(frame, app, area);
     if app.help_open {
         help::draw(frame, app, area);
     }
     modal::draw(frame, app, area);
+    image::verify(frame, app);
 }
 
 pub fn max_sidebar(screen_width: u16) -> u16 {

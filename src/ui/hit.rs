@@ -40,6 +40,8 @@ pub enum HitId {
     /// The dimmed area around an overlay; clicking it closes the overlay.
     Backdrop,
     Overlay,
+    /// The picture of the message at this index.
+    Image(usize),
 }
 
 #[derive(Debug, Default)]

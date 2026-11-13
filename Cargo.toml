@@ -40,9 +40,12 @@ comrak = { version = "0.59.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 notify = "8"
 toml_edit = "0.25.19"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 
 [dev-dependencies]
 insta = "1"
+mime = "0.3"
 
 [profile.dev.package."*"]
 opt-level = 1

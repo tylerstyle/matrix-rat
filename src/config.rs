@@ -21,6 +21,20 @@ pub struct Config {
     /// Let others see how far you have read. When off, the server still learns it
     /// (so unread counts clear on your other devices) but tells nobody.
     pub read_receipts: bool,
+    /// How pictures are shown: "auto", "halfblocks" or "off".
+    pub images: ImageMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageMode {
+    /// Real graphics where the terminal supports them well, coloured blocks elsewhere.
+    #[default]
+    Auto,
+    /// Always coloured blocks.
+    Halfblocks,
+    /// Only the file name.
+    Off,
 }
 
 impl Default for Config {
@@ -31,6 +45,7 @@ impl Default for Config {
             mouse: true,
             typing_notices: true,
             read_receipts: true,
+            images: ImageMode::Auto,
         }
     }
 }
@@ -84,6 +99,7 @@ mod tests {
         assert_eq!(config.sidebar_width, 24);
         assert!(config.mouse);
         assert!(config.read_receipts);
+        assert_eq!(config.images, ImageMode::Auto);
     }
 
     #[test]
@@ -113,5 +129,18 @@ mod tests {
         assert!(save_setting(&path, "mouse", true).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = [");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_modes() {
+        for (text, mode) in [
+            ("auto", ImageMode::Auto),
+            ("halfblocks", ImageMode::Halfblocks),
+            ("off", ImageMode::Off),
+        ] {
+            let config: Config = toml::from_str(&format!("images = \"{text}\"")).unwrap();
+            assert_eq!(config.images, mode);
+        }
+        assert!(toml::from_str::<Config>("images = \"sixel\"").is_err());
     }
 }

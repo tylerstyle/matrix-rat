@@ -7,6 +7,7 @@ mod composer;
 mod config;
 mod emoji;
 mod format;
+mod images;
 mod keymap;
 mod lock;
 mod logging;

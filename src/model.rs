@@ -83,6 +83,49 @@ pub struct Message {
     /// Sender and text of the message this one replies to.
     pub reply_to: Option<(String, String)>,
     pub reactions: Vec<Reaction>,
+    /// Set for picture messages; `body` then holds the text shown when pictures are off.
+    pub image: Option<ImageInfo>,
+}
+
+/// A picture attached to a message.
+#[derive(Debug, Clone)]
+pub struct ImageInfo {
+    /// Identifies the picture in the image cache (its `mxc://` address).
+    pub key: String,
+    pub source: ImageSource,
+    /// File name, safe to show.
+    pub name: String,
+    /// Text the sender wrote under the picture.
+    pub caption: Option<String>,
+    /// Pixel size as stated by the sender; not to be trusted beyond layout.
+    pub dimensions: Option<(u32, u32)>,
+    /// File size in bytes, as stated by the sender.
+    pub size: Option<u64>,
+}
+
+#[derive(Clone)]
+pub enum ImageSource {
+    /// A picture made up by the app itself, for the demo.
+    Demo,
+    Matrix(Box<MediaRef>),
+}
+
+/// Where the Matrix worker finds a picture.
+#[derive(Clone)]
+pub struct MediaRef {
+    pub full: matrix_sdk::ruma::events::room::MediaSource,
+    /// A smaller version provided by the sender, with its size in bytes if stated.
+    pub thumbnail: Option<(matrix_sdk::ruma::events::room::MediaSource, Option<u64>)>,
+}
+
+/// Hand-written: an encrypted source carries the key of the file.
+impl std::fmt::Debug for ImageSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Demo => "Demo",
+            Self::Matrix(_) => "Matrix",
+        })
+    }
 }
 
 impl Message {
@@ -116,6 +159,8 @@ pub struct Room {
 }
 
 pub const OWN_NAME: &str = "you";
+/// Cache key of the picture in the demo data.
+pub const DEMO_IMAGE: &str = "demo:palette";
 
 fn msg(sender: &str, day: &str, time: &str, body: &str) -> Message {
     Message {
@@ -243,12 +288,26 @@ pub fn demo_rooms() -> Vec<Room> {
             msg(
                 "erin",
                 "Today",
+                "07:55",
+                "🖼  palette.png\nWarm to cool, light at the top.",
+            ),
+            msg(
+                "erin",
+                "Today",
                 "07:56",
                 "@you can you check the contrast of the unread badge?",
             ),
         ],
     );
     design.mention = true;
+    design.messages[1].image = Some(ImageInfo {
+        key: DEMO_IMAGE.into(),
+        source: ImageSource::Demo,
+        name: "palette.png".into(),
+        caption: Some("Warm to cool, light at the top.".into()),
+        dimensions: Some((480, 270)),
+        size: None,
+    });
 
     vec![
         rust,
