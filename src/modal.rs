@@ -233,7 +233,9 @@ impl Setting {
             Setting::DownloadDir => {
                 "Where s saves files and pictures. Enter to change; empty for the default."
             }
-            Setting::Keys => "Show all key bindings (F1).",
+            Setting::Keys => {
+                "Edit key bindings or switch presets (F1 still opens the key overview)."
+            }
             Setting::Encryption => {
                 "Verify this device with another of your devices, or see its status."
             }
@@ -279,6 +281,8 @@ pub enum Modal {
     /// Join a room, start a direct chat, create a room, or invite someone.
     New(crate::manage::NewPopup),
     RoomInfo(crate::manage::InfoPopup),
+    /// Configure key bindings and preset.
+    Keybinds(crate::keymap::Editor),
 }
 
 #[cfg(test)]

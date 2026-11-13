@@ -80,6 +80,7 @@ impl App {
             rooms,
             selection,
             target: self.manage_target(),
+            keymap: self.keymap.clone(),
         };
         self.open_modal(Modal::Palette(Palette::open(ctx)));
     }

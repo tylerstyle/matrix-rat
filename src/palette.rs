@@ -101,6 +101,8 @@ pub struct PaletteContext {
     /// act on, by the rule they follow themselves: its name, and whether it is an
     /// invitation. Not always the open room; `None` if there is none.
     pub target: Option<(String, bool)>,
+    /// Effective keymap for displaying dynamic shortcuts.
+    pub keymap: keymap::Keymap,
 }
 
 /// State for the command palette popup (`Ctrl-P`).
@@ -304,13 +306,18 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             0,
         );
     }
+    let cancel_hint = ctx
+        .keymap
+        .label_in(keymap::Context::Composer, Action::CancelCompose)
+        .or_else(|| ctx.keymap.label_in(keymap::Context::Composer, Action::Back))
+        .map(str::to_owned);
     match ctx.compose_mode {
         ComposeMode::Reply(_) => push_entry(
             out,
             Target::Action(Action::CancelCompose),
             Category::Action,
             "Cancel reply",
-            Some("Esc".to_owned()),
+            cancel_hint.clone(),
             "Cancel reply",
             &[],
             true,
@@ -321,7 +328,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             Target::Action(Action::CancelCompose),
             Category::Action,
             "Cancel edit",
-            Some("Esc".to_owned()),
+            cancel_hint,
             "Cancel edit",
             &[],
             true,
@@ -330,30 +337,47 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         ComposeMode::Normal => {}
     }
     // Thread closing is bound via Esc/back when a thread is open rather than its own entry in
-    // keymap::DEFAULT, so expose it here with state-based availability.
+    // DEFAULT, so expose it here with state-based availability.
+    let close_thread_hint = ctx
+        .keymap
+        .label_for(Action::CloseThread)
+        .or_else(|| ctx.keymap.label_in(keymap::Context::Timeline, Action::Back))
+        .map(str::to_owned);
     push_entry(
         out,
         Target::Action(Action::CloseThread),
         Category::Action,
         "Close thread",
-        Some("Esc".to_owned()),
+        close_thread_hint,
         "Close thread",
         &["back to room", "leave thread", "exit thread"],
         ctx.thread_open,
         0,
     );
 
+    let active_bindings = ctx.keymap.bindings();
+    let multi_filter = active_bindings
+        .iter()
+        .filter(|b| b.action == Action::FocusRoomFilter)
+        .count()
+        > 1;
+    let multi_open = active_bindings
+        .iter()
+        .filter(|b| b.action == Action::Open)
+        .count()
+        > 1;
+
     let mut seen: Vec<Action> = Vec::new();
-    for binding in keymap::DEFAULT {
+    for binding in active_bindings {
         if include_keymap_action(binding.action) == ActionInclusion::Skip {
             continue;
         }
-        // Prefer the clearer binding when two keys share an action: Ctrl-K over Alt-R for
-        // finding/filtering rooms, and `o` over `v` for opening links/pictures/files.
-        if binding.action == Action::FocusRoomFilter && binding.label == "Alt-R" {
+        // Prefer the clearer binding when two default keys share an action: Ctrl-K over Alt-R
+        // for finding/filtering rooms, and `o` over `v` for opening links/pictures/files.
+        if binding.action == Action::FocusRoomFilter && binding.label == "Alt-R" && multi_filter {
             continue;
         }
-        if binding.action == Action::Open && binding.label == "v" {
+        if binding.action == Action::Open && binding.label == "v" && multi_open {
             continue;
         }
         if seen.contains(&binding.action) {
@@ -385,9 +409,36 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             Target::Action(binding.action),
             Category::Action,
             title,
-            Some(binding.label.to_owned()),
+            Some(binding.label.to_string()),
             title,
             aliases,
+            enabled,
+            group,
+        );
+    }
+
+    // Keep core actions reachable in the palette even if their keys were unbound.
+    for binding in keymap::DEFAULT {
+        if include_keymap_action(binding.action) == ActionInclusion::Skip
+            || seen.contains(&binding.action)
+        {
+            continue;
+        }
+        seen.push(binding.action);
+        let enabled = action_enabled(binding.action, ctx);
+        let group = if action_contextual(binding.action, ctx) {
+            0
+        } else {
+            1
+        };
+        push_entry(
+            out,
+            Target::Action(binding.action),
+            Category::Action,
+            binding.description,
+            None,
+            binding.description,
+            &[],
             enabled,
             group,
         );
@@ -413,6 +464,8 @@ fn include_keymap_action(action: Action) -> ActionInclusion {
         | Action::Back
         | Action::SidebarUp
         | Action::SidebarDown
+        | Action::SidebarTop
+        | Action::SidebarBottom
         | Action::SidebarOpen
         | Action::SelectOlder
         | Action::SelectNewer
@@ -439,7 +492,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Attach => {
             ctx.has_room && !ctx.in_invite && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
-        Action::JumpToNewest => ctx.has_room && ctx.has_messages,
+        Action::JumpToNewest | Action::JumpToOldest => ctx.has_room && ctx.has_messages,
         Action::AcceptInvite | Action::DeclineInvite => ctx.in_invite,
         Action::RoomInfo => ctx.target.is_some(),
         Action::Search => ctx.has_room && !ctx.in_invite,
@@ -460,6 +513,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::Open
                 | Action::OpenThread
                 | Action::JumpToNewest
+                | Action::JumpToOldest
         ),
         Pane::Sidebar => action == Action::FocusRoomFilter,
         Pane::Composer => matches!(
@@ -624,8 +678,8 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         SettingItem {
             target: Target::Action(Action::Setting(Setting::Keys)),
             title: Setting::Keys.label(),
-            hint: Some("F1".to_owned()),
-            aliases: &["shortcuts", "help", "setting"],
+            hint: Some(ctx.keymap.preset_summary()),
+            aliases: &["shortcuts", "key bindings", "vim", "preset", "setting"],
             enabled: true,
         },
         SettingItem {
@@ -795,6 +849,7 @@ mod tests {
                 },
             ],
             selection: MessageCaps::default(),
+            keymap: keymap::Keymap::default(),
         }
     }
 
