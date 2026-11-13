@@ -38,7 +38,8 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
-    /// Profile to use; each profile has its own account, config and store.
+    /// Profile to use; each profile has its own account, message store and log. The
+    /// configuration and themes are shared between profiles.
     #[arg(long, default_value = "default")]
     profile: String,
 

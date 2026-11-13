@@ -54,7 +54,7 @@ impl NotifyMode {
         if self != NotifyMode::Auto {
             return self;
         }
-        let remote = std::env::var_os("SSH_CONNECTION").is_some();
+        let remote = crate::portal::in_ssh_session();
         let bus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
         if bus && !remote {
             NotifyMode::Desktop

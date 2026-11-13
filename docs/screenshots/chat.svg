@@ -1,5 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 924 612" font-family="ui-monospace, 'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace" font-size="14">
-<rect width="100%" height="100%" rx="8" fill="#16161d"/>
+<clipPath id="screen"><rect width="924" height="612" rx="8"/></clipPath>
+<g clip-path="url(#screen)">
+<rect width="100%" height="100%" fill="#16161d"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 18.1 Q4.2 9.0 8.5 9.0" stroke-width="1" fill="none"/></g>
 <text x="8.4" y="13.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> 1 Rooms </text>
 <g fill="#54546d" stroke="#54546d"><path d="M83.9 9.0 L92.5 9.0" stroke-width="1" fill="none"/></g>
@@ -1375,4 +1377,5 @@
 <text x="730.8" y="607.5" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> settings </text>
 <text x="814.8" y="607.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold"> F3</text>
 <text x="840.0" y="607.5" textLength="84.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> rat-dark </text>
+</g>
 </svg>

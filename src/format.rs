@@ -215,39 +215,100 @@ fn markdown_message(text: &str, marks: &[MentionMark], preserve_empty: bool) -> 
 
 /// `|| like this ||` is meant as a spoiler just as `||like this||` is, but Markdown
 /// only takes delimiters that hug their text. Spaces just inside a pair of `||` are
-/// dropped before parsing; code and table rows are left alone.
+/// dropped before parsing. Left alone: code (spans, fenced and indented blocks, also
+/// inside quotes), tables, escaped bars, and bars glued to the end of a word (as in an
+/// address). As in other chat apps, `a || b || c` does hide the `b`.
 fn tighten_spoilers(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains("||") {
         return text.into();
     }
     let code = crate::complete::code_mask(text, false);
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    // Lines of a table: every line of a block that has a delimiter row (|---|---|).
+    let content = |line: &str| -> String { line.trim().trim_start_matches(['>', ' ']).to_owned() };
+    let is_delimiter_row = |line: &str| {
+        let row = content(line);
+        row.contains('-')
+            && row.contains('|')
+            && row.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+    };
+    let mut in_table = vec![false; lines.len()];
+    for (n, line) in lines.iter().enumerate() {
+        if is_delimiter_row(line) {
+            let blank = |i: usize| content(lines[i]).is_empty();
+            let mut first = n;
+            while first > 0 && !blank(first - 1) {
+                first -= 1;
+            }
+            let mut last = n;
+            while last + 1 < lines.len() && !blank(last + 1) {
+                last += 1;
+            }
+            in_table[first..=last].fill(true);
+        }
+    }
+
     let mut out = String::with_capacity(text.len());
     let mut offset = 0;
-    for line in text.split_inclusive('\n') {
+    let mut fence: Option<char> = None;
+    for (n, line) in lines.iter().enumerate() {
         let start = offset;
         offset += line.len();
-        // A row of a table (it starts with a single bar) uses bars for its own
-        // purposes.
-        let lead = line.trim_start();
-        if lead.starts_with('|') && !lead.starts_with("||") {
+        // Fenced code, also when it sits in a quote or a list.
+        let inner = content(line);
+        let inner = inner.trim_start_matches(['-', '*', '+', ' ']);
+        let fence_mark = ['`', '~']
+            .into_iter()
+            .find(|c| inner.starts_with(&c.to_string().repeat(3)));
+        match (fence, fence_mark) {
+            (None, Some(mark)) => {
+                fence = Some(mark);
+                out.push_str(line);
+                continue;
+            }
+            (Some(open), Some(mark)) if open == mark => {
+                fence = None;
+                out.push_str(line);
+                continue;
+            }
+            (Some(_), _) => {
+                out.push_str(line);
+                continue;
+            }
+            (None, None) => {}
+        }
+        // Indented code, and rows of a table.
+        let indented = line.starts_with("    ") || line.starts_with('\t');
+        if indented || in_table[n] {
             out.push_str(line);
             continue;
         }
+        let bytes = line.as_bytes();
+        let free = |at: usize| !code[start + at] && (at == 0 || bytes[at - 1] != b'\\');
         let marks: Vec<usize> = line
             .match_indices("||")
             .map(|(at, _)| at)
-            .filter(|at| !code[start + at])
+            .filter(|at| free(*at))
             .collect();
         let mut copied = 0;
-        for &[open, close] in marks.as_chunks::<2>().0 {
-            let inner = &line[open + 2..close];
-            let hidden = inner.trim();
-            if hidden.is_empty() {
+        let mut k = 0;
+        while k + 1 < marks.len() {
+            let (open, close) = (marks[k], marks[k + 1]);
+            // An opening pair starts a word: bars that end one (an address, `a||`)
+            // open nothing.
+            let opens = line[..open]
+                .chars()
+                .next_back()
+                .is_none_or(|c| c.is_whitespace() || "([{\"'".contains(c));
+            let hidden = line[open + 2..close].trim();
+            if !opens || hidden.is_empty() {
+                k += 1;
                 continue;
             }
             out.push_str(&line[copied..open + 2]);
             out.push_str(hidden);
             copied = close;
+            k += 2;
         }
         out.push_str(&line[copied..]);
     }
@@ -435,11 +496,30 @@ mod tests {
             markdown_html("|| a || and || *b* ||").as_deref(),
             Some("<span data-mx-spoiler>a</span> and <span data-mx-spoiler><em>b</em></span>")
         );
-        // Not in code, not in a table row, not for empty or unpaired bars.
-        assert_eq!(tighten_spoilers("`|| a ||`"), "`|| a ||`");
-        assert_eq!(tighten_spoilers("| a || b |"), "| a || b |");
-        assert_eq!(tighten_spoilers("a || b"), "a || b");
-        assert_eq!(tighten_spoilers("||  ||"), "||  ||");
+        // Left as typed: code of every kind, tables, escaped bars, bars at the end
+        // of a word, empty and unpaired bars.
+        for text in [
+            "`|| a ||`",
+            "```\n|| a ||\n```",
+            "> ```\n> || a ||\n> ```",
+            "- ~~~\n  || a ||\n  ~~~",
+            "    || a ||",
+            "| x | y |\n|---|---|\n| a || b || c |",
+            "x | y\n--|--\na || b || c",
+            "\\|| a \\||",
+            "see http://example.org/a|| b ||",
+            "a || b",
+            "||  ||",
+        ] {
+            assert_eq!(tighten_spoilers(text), text, "{text}");
+        }
+        // After a fence has closed, and in a quote, it works again.
+        assert_eq!(
+            tighten_spoilers("```\ncode\n```\n> || a ||"),
+            "```\ncode\n```\n> ||a||"
+        );
+        // As in other chat apps, this hides the middle.
+        assert_eq!(tighten_spoilers("a || b || c"), "a ||b|| c");
         // The text sent as plain body stays as typed.
         let Outgoing::Text { plain, html, .. } = parse("|| secret ||") else {
             panic!("not text");

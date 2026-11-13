@@ -2939,7 +2939,11 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
         (Some(handle), Some(events))
     };
     let mut app = App::new_in_scheme(config, paths.themes_dir(), matrix.clone(), initial_scheme);
-    app.config_file = Some(paths.config_file());
+    // The demo is for looking around: what is changed there is not written into the
+    // real configuration.
+    if !demo {
+        app.config_file = Some(paths.config_file());
+    }
     let notify_icons = Arc::new(crate::notify::IconCache::new(paths.notify_icons_dir()));
     struct NotifyCacheGuard(Arc<crate::notify::IconCache>);
     impl Drop for NotifyCacheGuard {

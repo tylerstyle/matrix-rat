@@ -138,16 +138,22 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
         const CELL_W: f32 = 8.4;
         const CELL_H: f32 = 18.0;
-        let (base_bg, base_fg) = ("#16161d", "#dcd7ba");
         let hex = |color: Color, base: &str| match color {
             Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
             _ => base.to_owned(),
         };
+        // The theme's own background and text colour stand in wherever a cell
+        // leaves them unset.
+        let text = app.theme.style(crate::theme::Role::Text);
+        let base_bg = hex(text.bg.unwrap_or(Color::Reset), "#16161d");
+        let base_fg = hex(text.fg.unwrap_or(Color::Reset), "#dcd7ba");
+        let (base_bg, base_fg) = (base_bg.as_str(), base_fg.as_str());
         let (w, h) = (f32::from(width) * CELL_W, f32::from(height) * CELL_H);
         let mut out = format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w:.0} {h:.0}\" \
              font-family=\"ui-monospace, 'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace\" \
-             font-size=\"14\">\n<rect width=\"100%\" height=\"100%\" rx=\"8\" fill=\"{base_bg}\"/>\n"
+             font-size=\"14\">\n<clipPath id=\"screen\"><rect width=\"{w:.0}\" height=\"{h:.0}\" rx=\"8\"/></clipPath>\n\
+             <g clip-path=\"url(#screen)\">\n<rect width=\"100%\" height=\"100%\" fill=\"{base_bg}\"/>\n"
         );
         for y in 0..height {
             // Backgrounds first, as runs of equal colour.
@@ -261,17 +267,24 @@ mod tests {
                 } else {
                     ""
                 };
+                let decoration = if style.2.contains(Modifier::CROSSED_OUT) {
+                    " text-decoration=\"line-through\""
+                } else if style.2.contains(Modifier::UNDERLINED) {
+                    " text-decoration=\"underline\""
+                } else {
+                    ""
+                };
                 let _ = writeln!(
                     out,
                     "<text x=\"{:.1}\" y=\"{:.1}\" textLength=\"{:.1}\" lengthAdjust=\"spacingAndGlyphs\" \
-                     xml:space=\"preserve\" fill=\"{fg}\"{weight}{slant}{opacity}>{escaped}</text>",
+                     xml:space=\"preserve\" fill=\"{fg}\"{weight}{slant}{opacity}{decoration}>{escaped}</text>",
                     f32::from(start) * CELL_W,
                     f32::from(y) * CELL_H + 13.5,
                     f32::from(cells) * CELL_W,
                 );
             }
         }
-        out.push_str("</svg>\n");
+        out.push_str("</g>\n</svg>\n");
         out
     }
 
@@ -357,7 +370,19 @@ mod tests {
         render(&mut app, 110, 34);
         app.perform(Action::OpenRoom(rat));
         render(&mut app, 110, 34);
-        app.on_event(key(KeyCode::Up));
+        // Up selects the newest message; walk up to the one that started a thread.
+        for _ in 0..12 {
+            app.on_event(key(KeyCode::Up));
+            let selected = app
+                .timeline
+                .selected
+                .and_then(|i| app.rooms[rat].messages.get(i));
+            if selected.is_some_and(|m| m.thread.is_some()) {
+                break;
+            }
+        }
+        app.on_event(key(KeyCode::Char('t')));
+        assert!(app.threads.open.is_some(), "the demo has a thread to show");
         std::fs::write(dir.join("theme.svg"), svg(&mut app, 110, 34)).unwrap();
     }
 

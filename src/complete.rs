@@ -895,7 +895,11 @@ fn markdown_link(label: &str, uri: &str) -> String {
 fn escape_link_label(label: &str) -> String {
     let mut out = String::with_capacity(label.len());
     for ch in label.chars() {
-        if matches!(ch, '\\' | '[' | ']' | '*' | '_' | '`' | '~' | '<' | '>') {
+        // (A bar too: a name with `||` in it must not start a spoiler.)
+        if matches!(
+            ch,
+            '\\' | '[' | ']' | '*' | '_' | '`' | '~' | '<' | '>' | '|'
+        ) {
             out.push('\\');
         }
         out.push(ch);
