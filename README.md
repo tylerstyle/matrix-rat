@@ -1,34 +1,62 @@
 # matrix-rat
 
-A mouse-friendly, themeable Matrix client for the terminal, built with
+A mouse-friendly, themeable [Matrix](https://matrix.org) client for the terminal, built with
 [ratatui](https://ratatui.rs) and [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk).
 
-**Status: early development.** It can log in (password or browser), sync, read and send
-messages (replies, edits, reactions, mentions, Markdown, spoilers), show pictures inline
-(kitty graphics, coloured blocks elsewhere), send and save files, follow threads, search a
-room, narrow the room list to a space, join, create and manage rooms, notify about new
-messages, and verify devices by emoji comparison. See [docs/PLAN.md](docs/PLAN.md) for the
-roadmap.
+Room list on the left, messages in the middle, composer at the bottom. Click anything to
+focus it, or stay on the keyboard: you are in the composer by default, `Enter` sends, `↑`
+walks into the messages.
+
+**Status: early development.** Usable day to day by its author, tested against a local
+homeserver and matrix.org-style accounts, but young: expect rough edges and keep another
+client at hand.
 
 ```sh
 cargo run             # log in to your account
 cargo run -- --demo   # try the interface on built-in demo data
 ```
 
-`F1` shows all keys, `F2` opens the settings, `F3` cycles themes, `Alt-E` opens the emoji
-picker, `Ctrl-Q` quits.
-`Ctrl-P` opens the command palette (actions, rooms, themes, settings), `Ctrl-↑`/`Ctrl-↓` switch
-rooms, `Alt-A` attaches a file (or drop one into the terminal).
-`Ctrl-F` finds text in the open room, `Alt-S` steps through your spaces; in the composer `@`,
-`:`, `#` and `/` offer names, emoji, rooms and commands (Tab accepts).
-`Ctrl-N` joins a room by its address, starts a direct chat or creates a room; `F4` shows the
-room's details and members, and is where you invite people, rename, mute, favourite or leave.
-On a selected message: `t` opens its thread, `Enter` replies, `e` edits, `r` reacts, `o` opens a link, picture or
-file, `s` saves a file or picture to the download folder (set it in the settings).
-A right click opens a menu of what can be done with the message, link, room or draft under the
-pointer; `m` (or the menu key) opens the same menu for the selected message.
-Messages say who has read up to them: `✓ read` in a chat with one person, initials in a room
-("Read by…" in the menu lists the names). `read_markers = false`, or the settings, turn that off.
+## What it does
+
+- **Accounts:** password or browser (single sign-on) login, end-to-end encryption, device
+  verification by emoji comparison, recovery key, message shields.
+- **Messages:** replies, edits, reactions, deletion, read receipts and typing notices;
+  Markdown as you type (`**bold**`, `` `code` ``, `||spoiler||`, lists, quotes) and slash
+  commands (`/me`, `/spoiler`, `/plain`, `/html`, `/shrug`, `/upload`…); threads; who has read
+  up to where.
+- **Completions:** `@` people (sent as real mentions), `:` emoji, `#` rooms, `/` commands.
+- **Media:** pictures inline and in a viewer (kitty graphics; coloured blocks elsewhere);
+  send files by dropping them into the terminal; save attachments to a download folder.
+- **Rooms:** join by address or `matrix.to` link, direct chats, create, invite, leave, room
+  details and members; spaces narrow the room list; room pictures and last-message previews.
+- **Finding things:** `Ctrl-F` in a room, `Ctrl-K` for rooms, `Ctrl-P` for everything.
+- **Notifications:** desktop or terminal notifications with the chat's picture.
+- **Looks:** eleven built-in themes, theme files that reload live, dark/light pairing, and
+  templates for Noctalia, matugen, wallust and pywal so the app follows your desktop.
+- **Yours to shape:** every key can be rebound (settings, or `[keys]` in the config), with
+  an optional vim preset.
+
+## Keys
+
+`F1` lists all keys as they are currently bound. The defaults:
+
+| Key | Does |
+|---|---|
+| `Enter` / `Shift-Enter` | send / line break |
+| `↑` from the composer | select messages; then `Enter` reply, `e` edit, `r` react, `t` thread, `o` open, `s` save, `c` copy, `m` menu, `Del` delete |
+| `Tab`, `Alt-1`…`3`, `Alt-←↑↓→` | move between room list, messages and composer |
+| `Ctrl-↑` / `Ctrl-↓` | previous / next room |
+| `Ctrl-K` | find a room |
+| `Ctrl-F` | find in this room |
+| `Ctrl-P` | command palette |
+| `Ctrl-N` | join a room, start a chat, create a room |
+| `F4` | room details and members |
+| `Alt-S` | step through spaces |
+| `Alt-E` / `Alt-A` | emoji picker / attach a file |
+| `F2` / `F3` | settings / next theme |
+| `Ctrl-Q` | quit |
+
+A right click opens a menu for the message, link, room or draft under the pointer.
 
 ## Installing
 
@@ -49,27 +77,27 @@ environment.systemPackages = [ (pkgs.callPackage /path/to/matrix-rat { }) ];
 Without installing, every `matrix-rat …` command in the documentation can be run from the
 repository as `cargo run -- …`.
 
-Planned:
+Building needs Rust 1.96 or newer and a C toolchain with `cmake` and `perl` (for TLS and the
+bundled SQLite); `shell.nix` provides all of it.
 
-- Room list sidebar, chat view and composer; click anything to focus it
-- Inline images (kitty / sixel / iTerm2, half-block fallback)
-- End-to-end encryption, OAuth login, sliding sync
-- Markdown and slash-command formatting, including spoilers
-- Theme files, bundled palettes, live reload, and templates for Noctalia, matugen, wallust and pywal
+## Configuration
 
-## Licence
-
-Apache-2.0. Parts are adapted from [iamb](https://github.com/ulyssa/iamb) (Apache-2.0); see `NOTICE`.
+Everything is optional. `~/.config/matrix-rat/config.toml` holds the settings (the settings
+menu, `F2`, writes them and keeps your comments); `~/.config/matrix-rat/themes/` holds theme
+files. `--profile <name>` keeps separate accounts apart.
 
 ## Themes
 
-Eleven themes are built in (`F3` cycles them, the settings menu `F2` lists them); `theme = "terminal"` follows your terminal's
-own colours. To pair separate dark and light themes, set `theme_dark` and `theme_light` in `~/.config/matrix-rat/config.toml`
-(or toggle `Follow dark/light` in Settings): startup checks the desktop portal preference first and otherwise falls back to a
-terminal query (`CSI ?996n` and `OSC 11` luminance) or `COLORFGBG`; live desktop changes come from the XDG Desktop Portal over
-D-Bus (`org.freedesktop.appearance` `color-scheme`), and `F3` updates the active mode's slot. Theme files in
-`~/.config/matrix-rat/themes/` are reloaded the moment they change, so tools like Noctalia, matugen, wallust and pywal can
+Eleven themes are built in (`F3` cycles them, the settings list them); `theme = "terminal"`
+follows your terminal's own colours. Theme files in `~/.config/matrix-rat/themes/` are
+reloaded the moment they change, so tools like Noctalia, matugen, wallust and pywal can
 recolour the app: see [contrib/themes/README.md](contrib/themes/README.md).
+
+To use one theme in the dark and another in the light, switch on "Follow dark/light" in the
+settings (or set `theme_dark` and `theme_light`). The app picks the mode at start from the
+desktop's setting, else from the terminal's background colour, and follows the desktop's
+setting while running (through the XDG desktop portal; not over SSH). `F3` then changes the
+theme of the current mode.
 
 ## Key bindings
 
@@ -110,3 +138,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 - **Room list (`sidebar`)**: `j`/`k` move cursor, `g`/`G` top/bottom, `l` focus messages, `i` focus composer, `/` find in room.
 - **Messages (`timeline`)**: `j`/`k` select newer/older message, `g`/`G` oldest/newest, `h` focus room list, `l`/`i` focus composer, `/` find in room.
 - **Composer (`composer`)**: `Esc` returns focus to messages (plain letters and symbols always type).
+
+## Licence
+
+Apache-2.0. Parts are adapted from [iamb](https://github.com/ulyssa/iamb) (Apache-2.0); see `NOTICE`.
