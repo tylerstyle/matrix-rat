@@ -27,6 +27,8 @@ pub struct Notice {
     pub body: String,
     /// A mention or keyword hit, as opposed to an ordinary message.
     pub highlight: bool,
+    /// Event id of the thread the message belongs to, if any.
+    pub thread: Option<String>,
 }
 
 /// Hand-written: the text of a message does not belong in a log.
@@ -40,37 +42,65 @@ impl std::fmt::Debug for Notice {
 /// syncs of a session deliver every pending invitation again; those are not news.
 const SETTLE: Duration = Duration::from_secs(20);
 
+#[derive(Default)]
+struct WatchState {
+    events: Option<UnboundedSender<MatrixEvent>>,
+    /// When the first room list arrived: the session is up from then on.
+    armed: Option<std::time::Instant>,
+    /// Rooms whose invitation has been announced.
+    invited: std::collections::HashSet<String>,
+}
+
 /// Keeps notices flowing while it lives. The handler itself cannot be removed from
 /// the client, and the client may outlive the session in background tasks; dropping
 /// this takes the channel away from the handler, so the worker's event channel can
 /// close.
-pub struct Watch(std::sync::Arc<std::sync::Mutex<Option<UnboundedSender<MatrixEvent>>>>);
+pub struct Watch(std::sync::Arc<std::sync::Mutex<WatchState>>);
+
+impl Watch {
+    /// The first room list is in. Invitations count as news once the session has
+    /// settled after this, however long the start took.
+    pub fn arm(&self) {
+        let mut state = self.0.lock().expect("not poisoned");
+        state.armed.get_or_insert_with(std::time::Instant::now);
+    }
+}
 
 impl Drop for Watch {
     fn drop(&mut self) {
-        self.0.lock().expect("not poisoned").take();
+        self.0.lock().expect("not poisoned").events.take();
     }
 }
 
 /// Registers the handler for this session.
 pub async fn watch(client: &Client, events: UnboundedSender<MatrixEvent>) -> Watch {
-    let started = std::time::Instant::now();
-    let channel = std::sync::Arc::new(std::sync::Mutex::new(Some(events)));
-    let watch = Watch(channel.clone());
+    let state = std::sync::Arc::new(std::sync::Mutex::new(WatchState {
+        events: Some(events),
+        ..WatchState::default()
+    }));
+    let watch = Watch(state.clone());
     client
         .register_notification_handler(move |notification, room, client| {
-            let events = channel.lock().expect("not poisoned").clone();
+            let invitation = matches!(
+                notification.event,
+                RawAnySyncOrStrippedTimelineEvent::Stripped(_)
+            );
+            let events = {
+                let mut state = state.lock().expect("not poisoned");
+                let settled = state.armed.is_some_and(|at| at.elapsed() >= SETTLE);
+                // An invitation is announced once per room, and only as news.
+                if invitation && !(settled && state.invited.insert(room.room_id().to_string())) {
+                    // Seen during the start: remember it, so it is not news later.
+                    state.invited.insert(room.room_id().to_string());
+                    None
+                } else {
+                    state.events.clone()
+                }
+            };
             async move {
                 let Some(events) = events else {
                     return;
                 };
-                let invitation = matches!(
-                    notification.event,
-                    RawAnySyncOrStrippedTimelineEvent::Stripped(_)
-                );
-                if invitation && started.elapsed() < SETTLE {
-                    return;
-                }
                 if let Some(notice) = notice(notification, &room, &client).await {
                     let _ = events.send(MatrixEvent::Notice(notice));
                 }
@@ -96,8 +126,10 @@ async fn notice(notification: Notification, room: &Room, client: &Client) -> Opt
         Some(name) => name.to_string(),
         None => room.room_id().to_string(),
     };
+    let mut thread = None;
     let (sender, body) = match &notification.event {
         RawAnySyncOrStrippedTimelineEvent::Sync(raw) => {
+            thread = thread_of(raw.json().get());
             let event = raw.deserialize().ok()?;
             if Some(event.sender()) == client.user_id() {
                 return None;
@@ -124,7 +156,17 @@ async fn notice(notification: Notification, room: &Room, client: &Client) -> Opt
         sender: sanitize_line(&sender),
         body: truncate(sanitize_line(&body).trim(), BODY_COLUMNS),
         highlight,
+        thread,
     })
+}
+
+/// The thread an event belongs to, read from its `m.thread` relation.
+fn thread_of(event_json: &str) -> Option<String> {
+    let event: serde_json::Value = serde_json::from_str(event_json).ok()?;
+    let relation = event.get("content")?.get("m.relates_to")?;
+    (relation.get("rel_type")?.as_str()? == "m.thread")
+        .then(|| relation.get("event_id")?.as_str().map(sanitize_line))
+        .flatten()
 }
 
 /// Notification rules can only be applied in a room where our own membership is
@@ -134,6 +176,8 @@ async fn notice(notification: Notification, room: &Room, client: &Client) -> Opt
 #[derive(Default)]
 pub struct OwnMembers {
     tried: std::collections::HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    /// Rooms where our membership is known; nothing to do there.
+    fine: std::collections::HashSet<matrix_sdk::ruma::OwnedRoomId>,
     tasks: tokio::task::JoinSet<()>,
 }
 
@@ -141,6 +185,15 @@ impl OwnMembers {
     const AT_ONCE: usize = 2;
     /// A safety net for odd servers, not a crawler: after this many rooms it stops.
     const MOST: usize = 500;
+
+    /// Resolves when one of the running fetches ends, so the next rooms can start
+    /// without waiting for the room list to change. Never resolves while idle.
+    pub async fn finished(&mut self) {
+        if self.tasks.is_empty() {
+            std::future::pending::<()>().await;
+        }
+        let _ = self.tasks.join_next().await;
+    }
 
     pub async fn ensure(
         &mut self,
@@ -151,17 +204,20 @@ impl OwnMembers {
             if self.tasks.len() >= Self::AT_ONCE || self.tried.len() >= Self::MOST {
                 return;
             }
-            if room.state() != matrix_sdk::RoomState::Joined || self.tried.contains(room.room_id())
+            if room.state() != matrix_sdk::RoomState::Joined
+                || room.is_space()
+                || self.tried.contains(room.room_id())
+                || self.fine.contains(room.room_id())
             {
                 continue;
             }
-            self.tried.insert(room.room_id().to_owned());
-            if matches!(
-                room.get_member_no_sync(room.own_user_id()).await,
-                Ok(Some(_))
-            ) {
+            // Only rooms that really need a fetch count against the limit.
+            let known = room.get_member_no_sync(room.own_user_id()).await;
+            if matches!(known, Ok(Some(_))) {
+                self.fine.insert(room.room_id().to_owned());
                 continue;
             }
+            self.tried.insert(room.room_id().to_owned());
             let room = room.clone();
             self.tasks.spawn(async move {
                 if let Err(err) = room.sync_members().await {

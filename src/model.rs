@@ -108,6 +108,10 @@ pub enum Shield {
     SenderMismatch,
     /// Arrived unencrypted although the room is encrypted.
     NotEncrypted,
+    /// The key for this message did not come straight from the sender's device (it
+    /// was restored from the backup or passed on by another device), or the device
+    /// could not be tied to the sender. Usual for older history on a new device.
+    Unconfirmed,
 }
 
 impl Shield {
@@ -117,12 +121,13 @@ impl Shield {
             Shield::IdentityChanged => "⚠ sender's identity has changed",
             Shield::SenderMismatch => "⚠ sender could not be confirmed",
             Shield::NotEncrypted => "not encrypted",
+            Shield::Unconfirmed => "sender not confirmed",
         }
     }
 
     /// A warning, as opposed to a remark.
     pub fn serious(self) -> bool {
-        self != Shield::NotEncrypted
+        !matches!(self, Shield::NotEncrypted | Shield::Unconfirmed)
     }
 }
 

@@ -230,6 +230,8 @@ pub struct RoomSummary {
     pub category: RoomCategory,
     /// Notification count, shown as a badge.
     pub notifications: u64,
+    /// The count as the server reports it; unlike ours it needs nothing from us.
+    pub server_notifications: u64,
     pub mention: bool,
     /// Has unread messages, even if they do not notify.
     pub unread: bool,
@@ -607,8 +609,10 @@ impl Worker {
                         diff.apply(&mut rooms);
                     }
                     own_members.ensure(&rooms).await;
+                    _notices.arm();
                     self.emit(MatrixEvent::Rooms(summarize(&rooms).await));
                 }
+                () = own_members.finished() => own_members.ensure(&rooms).await,
                 Some(state) = sync_state.next() => {
                     self.emit(MatrixEvent::Sync(sync_status(&state)));
                 }
@@ -725,6 +729,7 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
             name: crate::text::sanitize_line(&name),
             category,
             notifications,
+            server_notifications: room.unread_notification_counts().notification_count,
             mention: room.num_unread_mentions() > 0,
             unread: notifications > 0 || room.num_unread_messages() > 0 || room.is_marked_unread(),
             avatar: avatar

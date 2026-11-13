@@ -6,6 +6,7 @@ use std::io::Write;
 use serde::Deserialize;
 
 use crate::matrix::Notice;
+use crate::text::truncate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -47,19 +48,22 @@ impl NotifyMode {
 
 /// Title and text as shown: "sender in room" for rooms, the person for direct chats.
 pub fn title_and_text(notice: &Notice, preview: bool) -> (String, String) {
+    // Without preview nothing of the conversation is shown: not the text, not who
+    // wrote, not where.
+    if !preview {
+        let text = if notice.highlight {
+            "You were mentioned"
+        } else {
+            "New message"
+        };
+        return ("matrix-rat".to_owned(), text.to_owned());
+    }
     let title = if notice.sender.is_empty() || notice.sender == notice.room {
         notice.room.clone()
     } else {
         format!("{} in {}", notice.sender, notice.room)
     };
-    let text = if preview {
-        notice.body.clone()
-    } else if notice.highlight {
-        "You were mentioned".to_owned()
-    } else {
-        "New message".to_owned()
-    };
-    (title, text)
+    (truncate(&title, 120), notice.body.clone())
 }
 
 /// Shows a notification. Never blocks and never fails loudly: a notification that
@@ -68,13 +72,35 @@ pub fn show(mode: NotifyMode, notice: &Notice, preview: bool) {
     let (title, text) = title_and_text(notice, preview);
     match mode.resolved() {
         NotifyMode::Desktop => {
-            let urgent = notice.highlight;
-            // The service may be slow or absent; that must not hold up the interface.
-            std::thread::spawn(move || {
+            let _ = desktop().send((title, text, notice.highlight));
+        }
+        NotifyMode::Terminal => {
+            let mut out = std::io::stdout();
+            let id = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = out
+                .write_all(terminal_sequence(&title, &text, kitty(), id).as_bytes())
+                .and_then(|()| out.flush());
+        }
+        NotifyMode::Auto | NotifyMode::Off => {}
+    }
+}
+
+static SERIAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// One thread shows all desktop notifications, one after the other: the service may be
+/// slow or absent, which must not hold up the interface, and a burst must not start a
+/// thread and a bus connection each.
+fn desktop() -> &'static std::sync::mpsc::Sender<(String, String, bool)> {
+    static SENDER: std::sync::OnceLock<std::sync::mpsc::Sender<(String, String, bool)>> =
+        std::sync::OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<(String, String, bool)>();
+        std::thread::spawn(move || {
+            for (title, text, urgent) in receiver {
                 let mut notification = notify_rust::Notification::new();
                 notification
                     .appname("matrix-rat")
-                    .summary(&title)
+                    .summary(&escape_markup(&title))
                     .body(&escape_markup(&text))
                     .icon("mail-message-new");
                 if urgent {
@@ -83,16 +109,10 @@ pub fn show(mode: NotifyMode, notice: &Notice, preview: bool) {
                 if let Err(err) = notification.show() {
                     tracing::debug!(%err, "could not show a desktop notification");
                 }
-            });
-        }
-        NotifyMode::Terminal => {
-            let mut out = std::io::stdout();
-            let _ = out
-                .write_all(terminal_sequence(&title, &text, kitty()).as_bytes())
-                .and_then(|()| out.flush());
-        }
-        NotifyMode::Auto | NotifyMode::Off => {}
-    }
+            }
+        });
+        sender
+    })
 }
 
 fn kitty() -> bool {
@@ -109,15 +129,24 @@ fn escape_markup(text: &str) -> String {
 
 /// OSC 99 (kitty's protocol, with title and text) or the older OSC 9 (one line).
 /// The text is from other people: nothing that could end the sequence may be in it.
-fn terminal_sequence(title: &str, text: &str, kitty: bool) -> String {
-    let clean = |s: &str| -> String { s.chars().filter(|c| !c.is_control()).collect() };
+fn terminal_sequence(title: &str, text: &str, kitty: bool, id: u32) -> String {
+    let clean = |s: &str| -> String {
+        crate::text::sanitize_line(s)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect()
+    };
     let (title, text) = (clean(title), clean(text));
     if kitty {
+        // Each notification has its own id, so a new one does not replace an unread one.
         format!(
-            "\x1b]99;i=matrix-rat:d=0;{title}\x1b\\\x1b]99;i=matrix-rat:d=1:p=body;{text}\x1b\\"
+            "\x1b]99;i=mr{id}:d=0:p=title;{title}\x1b\\\x1b]99;i=mr{id}:d=1:p=body;{text}\x1b\\"
         )
     } else {
-        format!("\x1b]9;{title}: {text}\x1b\\")
+        // In OSC 9 a leading "4;" would be read as a progress report, so no text of
+        // ours may put a semicolon where the terminal looks for one.
+        let line = format!("{title}: {text}").replace(';', ",");
+        format!("\x1b]9;{line}\x1b\\")
     }
 }
 
@@ -132,6 +161,7 @@ mod tests {
             sender: sender.into(),
             body: body.into(),
             highlight,
+            thread: None,
         }
     }
 
@@ -145,19 +175,28 @@ mod tests {
         // A direct chat is named after the person; no "ann in ann".
         let direct = notice("ann", "ann", "hello", false);
         assert_eq!(title_and_text(&direct, true).0, "ann");
-        // Without preview the text of the message stays private.
-        assert_eq!(title_and_text(&room, false).1, "New message");
+        // Without preview nothing of the conversation shows: no text, sender or room.
+        assert_eq!(
+            title_and_text(&room, false),
+            ("matrix-rat".to_owned(), "New message".to_owned())
+        );
         let mention = notice("Rust", "ann", "you: look", true);
         assert_eq!(title_and_text(&mention, false).1, "You were mentioned");
     }
 
     #[test]
     fn nothing_from_a_message_can_break_out() {
-        let sequence = terminal_sequence("a\x1b]52;c;evil\x07", "b\x1b\\c\nd", true);
+        let sequence = terminal_sequence("a\x1b]52;c;evil\x07", "b\x1b\\c\nd", true, 7);
         // Exactly the two sequences we wrote: two starts, two ends.
         assert_eq!(sequence.matches('\x1b').count(), 4);
         assert!(!sequence.contains('\x07') && !sequence.contains('\n'));
-        assert_eq!(terminal_sequence("t", "x", false), "\x1b]9;t: x\x1b\\");
+        assert!(sequence.contains("i=mr7:d=0:p=title;") && sequence.contains("i=mr7:d=1:p=body;"));
+        assert_eq!(terminal_sequence("t", "x", false, 1), "\x1b]9;t: x\x1b\\");
+        // A name must not turn the notification into a progress report (OSC 9;4).
+        assert_eq!(
+            terminal_sequence("4;3;50", "x;y", false, 1),
+            "\x1b]9;4,3,50: x,y\x1b\\"
+        );
         assert_eq!(
             escape_markup("<b>a & b</b>"),
             "&lt;b&gt;a &amp; b&lt;/b&gt;"

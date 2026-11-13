@@ -202,6 +202,8 @@ fn event_message(
                     };
                 }
                 MsgLikeKind::Redacted => {
+                    // A deleted message has no content to doubt.
+                    message.shield = None;
                     message.kind = MsgKind::Redacted;
                     message.body = "Message deleted".to_owned();
                 }
@@ -284,9 +286,11 @@ fn event_message(
     Some(message)
 }
 
-/// What the SDK advises to warn about. Messages whose keys came from the backup
-/// ("authenticity not guaranteed") are left unmarked: that is all of the older
-/// history on a new device, and a mark on every line would say nothing.
+/// What the SDK advises to warn about, in its lenient mode: people who have never been
+/// verified are not marked (most contacts never are), only what contradicts an
+/// expectation. "Authenticity not guaranteed" covers harmless history restored from
+/// the backup as well as a device that could not be tied to its owner; the SDK does
+/// not tell them apart, so it is shown, as a quiet remark rather than a warning.
 fn shield(event: &EventTimelineItem) -> Option<Shield> {
     use matrix_sdk_ui::timeline::TimelineEventShieldState as State;
     use matrix_sdk_ui::timeline::TimelineEventShieldStateCode as Code;
@@ -298,7 +302,9 @@ fn shield(event: &EventTimelineItem) -> Option<Shield> {
         Code::VerificationViolation => Some(Shield::IdentityChanged),
         Code::MismatchedSender => Some(Shield::SenderMismatch),
         Code::SentInClear => Some(Shield::NotEncrypted),
-        Code::AuthenticityNotGuaranteed | Code::UnverifiedIdentity => None,
+        Code::AuthenticityNotGuaranteed => Some(Shield::Unconfirmed),
+        // Never produced in lenient mode.
+        Code::UnverifiedIdentity => None,
     }
 }
 

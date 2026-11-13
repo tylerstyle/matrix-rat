@@ -22,6 +22,13 @@ pub struct Threads {
     drafts: HashMap<(String, String), String>,
 }
 
+impl Threads {
+    /// Event id of the message the open thread starts at.
+    pub fn open_root(&self) -> Option<&str> {
+        self.open.as_ref()?.root.as_deref()
+    }
+}
+
 #[derive(Debug)]
 pub struct ThreadView {
     /// Event id of the message the thread starts at; `None` in the demo.
@@ -640,6 +647,7 @@ mod tests {
             name: "Beta".into(),
             category: RoomCategory::Room,
             notifications: 0,
+            server_notifications: 0,
             mention: false,
             unread: false,
             avatar: None,

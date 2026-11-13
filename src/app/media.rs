@@ -762,6 +762,7 @@ mod tests {
                 name: format!("Room {n:02}"),
                 category: RoomCategory::Room,
                 notifications: 0,
+                server_notifications: 0,
                 mention: false,
                 unread: false,
                 avatar: Some(format!("mxc://example.org/avatar{n}")),

@@ -44,6 +44,12 @@ const TOAST_TIME: Duration = Duration::from_secs(3);
 /// and for how long a detailed one stands for its room.
 const COUNT_NOTICE_WAIT: Duration = Duration::from_millis(1500);
 const DETAILED_COVERS: Duration = Duration::from_secs(10);
+/// Notification limits: per room, and in all within a window.
+const NOTICE_PER_ROOM: Duration = Duration::from_secs(5);
+const NOTICE_WINDOW: Duration = Duration::from_secs(30);
+const NOTICE_MOST: usize = 6;
+/// Unread counts that rise right after login are the backlog arriving, not news.
+const SESSION_SETTLE: Duration = Duration::from_secs(20);
 const WHEEL_LINES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +156,12 @@ pub struct App {
     /// detailed one arrives for the same room; and when each room last got one.
     count_notices: Vec<(Instant, crate::matrix::Notice)>,
     detailed_notices: std::collections::HashMap<String, Instant>,
+    /// When and for which room notifications were shown lately, to limit bursts.
+    shown_notices: Vec<(Instant, String)>,
+    /// Between a logout (or expiry) and the next login.
+    logged_out: bool,
+    /// When this session's login was confirmed.
+    session_started: Option<Instant>,
     /// Notifications on their way out; the event loop shows them.
     pub pending_notices: Vec<crate::matrix::Notice>,
     /// The `download_dir` setting; empty means the desktop's download folder.
@@ -266,6 +278,9 @@ impl App {
             notification_preview: true,
             count_notices: Vec::new(),
             detailed_notices: Default::default(),
+            shown_notices: Vec::new(),
+            logged_out: false,
+            session_started: None,
             pending_notices: Vec::new(),
             download_dir: String::new(),
             saving: Default::default(),
@@ -541,16 +556,32 @@ impl App {
     /// A message that deserves a notification arrived. It is shown unless the user is
     /// looking right at it: the window has the focus and that room is open.
     fn on_notice(&mut self, notice: crate::matrix::Notice) {
+        // Watching means the message is on screen right now: this room and this
+        // thread (or the room itself), at the newest message, nothing covering it.
         let watching = self.window_focused
             && self.modal.is_none()
-            && self.room().is_some_and(|room| room.id == notice.room_id);
-        if self.notify_mode == crate::notify::NotifyMode::Off || watching {
+            && !self.help_open
+            && !self.images.viewer_open()
+            && self.timeline.scroll == 0
+            && self.room().is_some_and(|room| room.id == notice.room_id)
+            && self.threads.open_root() == notice.thread.as_deref();
+        if self.notify_mode == crate::notify::NotifyMode::Off || watching || self.logged_out {
             return;
         }
-        // A burst (a busy room, catching up after sleep) must not flood the desktop.
-        if self.pending_notices.len() < 5 {
-            self.pending_notices.push(notice);
+        // A burst (a busy room, catching up after sleep) must not flood the desktop:
+        // one notification per room every few seconds, and a few per half minute in all.
+        let now = Instant::now();
+        self.shown_notices
+            .retain(|(at, _)| now.duration_since(*at) < NOTICE_WINDOW);
+        let same_room = self
+            .shown_notices
+            .iter()
+            .any(|(at, room)| *room == notice.room_id && now.duration_since(*at) < NOTICE_PER_ROOM);
+        if same_room || self.shown_notices.len() >= NOTICE_MOST {
+            return;
         }
+        self.shown_notices.push((now, notice.room_id.clone()));
+        self.pending_notices.push(notice);
     }
 
     /// Shows the count-based notifications that have waited long enough, unless a
@@ -563,6 +594,8 @@ impl App {
             .into_iter()
             .partition(|(since, _)| since.elapsed() >= wait);
         self.count_notices = waiting;
+        self.detailed_notices
+            .retain(|_, at| at.elapsed() < DETAILED_COVERS);
         for (_, notice) in due {
             let covered = self
                 .detailed_notices
@@ -598,6 +631,13 @@ impl App {
         self.user_id = None;
         self.recovery_prompted = false;
         self.verify = Default::default();
+        self.logged_out = true;
+        self.session_started = None;
+        self.pending_notices.clear();
+        self.count_notices.clear();
+        self.detailed_notices.clear();
+        self.shown_notices.clear();
+        self.row_cache = None;
         self.saving.clear();
         self.saved.clear();
         self.confirm_large = None;
@@ -1609,8 +1649,12 @@ impl App {
                     self.modal = None;
                 }
                 self.user_id = Some(user_id);
+                self.logged_out = false;
+                self.session_started = Some(Instant::now());
             }
             MatrixEvent::Sync(status) => self.sync = Some(status),
+            // News of a session that has ended must not bring its rooms back.
+            MatrixEvent::Rooms(_) if self.logged_out => {}
             MatrixEvent::Rooms(rooms) => self.apply_rooms(rooms),
             MatrixEvent::Recovery(status) => {
                 // Takes precedence over the emoji picker, never over the login form.
@@ -1735,13 +1779,17 @@ impl App {
                 if let Some(room) = &known
                     && had_rooms
                     && kind != RoomKind::Invite
-                    && summary.notifications > room.server_count
+                    && summary.server_notifications > room.server_count
+                    && self
+                        .session_started
+                        .is_some_and(|at| at.elapsed() >= SESSION_SETTLE)
                 {
                     risen.push(crate::matrix::Notice {
                         room_id: summary.id.clone(),
                         room: summary.name.clone(),
                         sender: String::new(),
-                        body: match summary.notifications {
+                        thread: None,
+                        body: match summary.server_notifications {
                             1 => "New message".to_owned(),
                             n => format!("{n} new messages"),
                         },
@@ -1749,7 +1797,7 @@ impl App {
                     });
                 }
                 let mut room = known.unwrap_or_else(|| Room::new(&summary.id, &summary.name, kind));
-                room.server_count = summary.notifications;
+                room.server_count = summary.server_notifications;
                 room.name = summary.name;
                 room.kind = kind;
                 room.unread = summary.notifications.min(u32::MAX as u64) as u32;
@@ -2680,6 +2728,7 @@ mod tests {
             name: name.into(),
             category,
             notifications,
+            server_notifications: notifications,
             mention: false,
             unread: notifications > 0,
             avatar: None,
@@ -3620,6 +3669,7 @@ mod tests {
                 sender: "ann".into(),
                 body: "hello".into(),
                 highlight: false,
+                thread: None,
             })
         };
         // The open room, window focused: the message is on screen already.
@@ -3635,8 +3685,21 @@ mod tests {
             (2, NotifyMode::Terminal, true)
         );
         assert!(app.pending_notices.is_empty());
-        // A risen unread count is news too, shown after a short wait...
+        // A risen unread count is news too, shown after a short wait, once the
+        // session has settled (right after login it is only the backlog arriving)...
         app.detailed_notices.clear();
+        app.shown_notices.clear();
+        app.session_started = Some(Instant::now());
+        let mut early = summary("!b", "Beta", RoomCategory::Room, 1);
+        early.server_notifications = 1;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            early,
+            summary("!i", "Invited", RoomCategory::Invite, 3),
+        ]));
+        app.release_count_notices(Duration::ZERO);
+        assert!(app.pending_notices.is_empty());
+        app.session_started = Instant::now().checked_sub(SESSION_SETTLE);
         let mut beta = summary("!b", "Beta", RoomCategory::Room, 0);
         let rooms = |beta: &RoomSummary| {
             MatrixEvent::Rooms(vec![
@@ -3646,6 +3709,7 @@ mod tests {
             ])
         };
         beta.notifications = 2;
+        beta.server_notifications = 2;
         app.on_matrix(rooms(&beta));
         assert!(app.pending_notices.is_empty());
         app.release_count_notices(Duration::ZERO);
@@ -3657,18 +3721,43 @@ mod tests {
         );
         // ...the same count again is not, and a detailed notice replaces the plain one.
         app.on_matrix(rooms(&beta));
-        beta.notifications = 3;
+        beta.server_notifications = 3;
         app.on_matrix(rooms(&beta));
+        // (The per-room pause is over by then.)
+        app.shown_notices.clear();
         app.on_matrix(notice("!b"));
         app.release_count_notices(Duration::ZERO);
         let (notices, ..) = app.take_notices();
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].body, "hello");
-        // A flood is cut short; off means off.
+        // A busy room gets one notification per pause, a flood from many rooms is cut
+        // short, and neither limit is reset by the event loop taking them.
+        app.shown_notices.clear();
         for _ in 0..20 {
             app.on_matrix(notice("!b"));
+            app.take_notices();
         }
-        assert_eq!(app.take_notices().0.len(), 5);
+        assert_eq!(app.shown_notices.len(), 1);
+        let mut shown = 1;
+        for n in 0..20 {
+            app.on_matrix(notice(&format!("!room{n}")));
+            shown += app.take_notices().0.len();
+        }
+        assert_eq!(shown, NOTICE_MOST);
+        // Not while scrolled back or behind the help: then it is not on screen.
+        app.shown_notices.clear();
+        app.on_event(Event::FocusGained);
+        app.help_open = true;
+        app.on_matrix(notice("!a"));
+        assert_eq!(app.take_notices().0.len(), 1);
+        app.help_open = false;
+        // Logging out forgets what was waiting.
+        app.shown_notices.clear();
+        app.on_matrix(notice("!b"));
+        app.reset_session();
+        assert!(app.pending_notices.is_empty());
+        app.on_matrix(rooms(&beta));
+        assert!(app.rooms.is_empty());
         app.notify_mode = NotifyMode::Off;
         app.on_matrix(notice("!b"));
         assert!(app.pending_notices.is_empty());
