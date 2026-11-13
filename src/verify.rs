@@ -13,6 +13,8 @@ pub struct VerifyState {
     pub flow: Option<VerifyUpdate>,
     /// A verification the user cancelled; its remaining updates are not shown.
     pub dismissed: Option<u64>,
+    /// The newest verification seen. Updates of older ones are late and dropped.
+    pub newest: u64,
     /// Waiting for the outcome of setting up cross-signing.
     pub setting_up: bool,
 }
@@ -101,6 +103,8 @@ pub enum Button {
     Show,
     /// Create the account's cross-signing keys.
     SetUp,
+    /// Send our unanswered request again.
+    Retry,
 }
 
 impl Button {
@@ -115,6 +119,7 @@ impl Button {
             Self::Close => " Close ",
             Self::Show => " Show ",
             Self::SetUp => " Set up ",
+            Self::Retry => " Ask again ",
         }
     }
 }
@@ -171,9 +176,8 @@ impl VerifyPopup {
                 Some(VerifyStage::Requested) => &[B::Accept, B::Decline],
                 Some(VerifyStage::Ready) => &[B::Start, B::Cancel],
                 Some(VerifyStage::Compare { .. }) => &[B::Match, B::Mismatch],
-                Some(VerifyStage::Waiting | VerifyStage::Starting | VerifyStage::Confirmed) => {
-                    &[B::Cancel]
-                }
+                Some(VerifyStage::Waiting) => &[B::Retry, B::Cancel],
+                Some(VerifyStage::Starting | VerifyStage::Confirmed) => &[B::Cancel],
                 Some(VerifyStage::Done | VerifyStage::Cancelled { .. }) => &[B::Close],
             },
         }

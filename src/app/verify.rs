@@ -105,6 +105,11 @@ impl App {
                     self.open_modal(Modal::Verify(VerifyPopup::flow()));
                 }
             }
+            Button::Retry => {
+                // The old request's last words are not shown; the new one takes its place.
+                self.verify.dismissed = flow;
+                self.send_matrix(MatrixCmd::Verification(VerifyCmd::Request));
+            }
             Button::SetUp => {
                 if !self.verify.setting_up {
                     self.verify.setting_up = true;
@@ -182,9 +187,10 @@ impl App {
     }
 
     pub(super) fn on_verification(&mut self, update: VerifyUpdate) {
-        if self.verify.dismissed == Some(update.flow) {
+        if self.verify.dismissed == Some(update.flow) || update.flow < self.verify.newest {
             return;
         }
+        self.verify.newest = update.flow;
         let same_flow = self.verify.flow.as_ref().map(|f| f.flow) == Some(update.flow);
         let stage_changed = !same_flow
             || self.verify.flow.as_ref().is_some_and(|f| {
@@ -508,6 +514,38 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         assert!(app.modal.is_none());
         assert!(drain(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn asking_again_replaces_the_request_and_late_news_is_dropped() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::Security(unverified()));
+        app.perform(crate::action::Action::StartVerification);
+        assert_eq!(drain(&mut commands), ["Verification(Request)"]);
+        app.on_matrix(update(1, VerifyStage::Waiting));
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "Ask again");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(drain(&mut commands), ["Verification(Request)"]);
+        // The old request ends (cancelled by us): not shown.
+        app.on_matrix(update(
+            1,
+            VerifyStage::Cancelled {
+                reason: "You cancelled the verification".into(),
+            },
+        ));
+        assert_eq!(
+            app.verify.flow.as_ref().unwrap().stage,
+            VerifyStage::Waiting
+        );
+        app.on_matrix(update(2, VerifyStage::Waiting));
+        app.on_matrix(update(2, compare()));
+        // Anything from the first request that arrives late changes nothing.
+        app.on_matrix(update(1, VerifyStage::Done));
+        let flow = app.verify.flow.as_ref().unwrap();
+        assert_eq!(flow.flow, 2);
+        assert!(matches!(flow.stage, VerifyStage::Compare { .. }));
+        assert!(matches!(app.modal, Some(Modal::Verify(_))));
     }
 
     #[test]

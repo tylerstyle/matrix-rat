@@ -26,7 +26,7 @@ use matrix_sdk::ruma::events::key::verification::cancel::CancelCode;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
 use matrix_sdk::ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent};
 use matrix_sdk::ruma::events::secret::send::ToDeviceSecretSendEvent;
-use matrix_sdk::ruma::{DeviceId, OwnedUserId};
+use matrix_sdk::ruma::{DeviceId, MilliSecondsSinceUnixEpoch, OwnedUserId};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -190,11 +190,19 @@ impl std::fmt::Debug for VerifyCmd {
 
 // ----- the worker side ----------------------------------------------------------------
 
-/// A verification request that arrived: who sent it, and its flow id.
-type Incoming = (OwnedUserId, String);
+/// A verification request that arrived.
+pub struct Incoming {
+    sender: OwnedUserId,
+    flow_id: String,
+    /// Sent to this device directly (the user's own devices do that), not in a room,
+    /// and in the last few minutes.
+    fresh_to_device: bool,
+}
 
 struct Running {
     flow: u64,
+    /// We asked (rather than answered someone).
+    outgoing: bool,
     answers: UnboundedSender<Answer>,
     finished: Arc<AtomicBool>,
     task: JoinHandle<()>,
@@ -221,7 +229,13 @@ impl Verifier {
             client.add_event_handler(move |ev: ToDeviceKeyVerificationRequestEvent| {
                 let tx = to_device.clone();
                 async move {
-                    let _ = tx.send((ev.sender, ev.content.transaction_id.to_string()));
+                    let age = u64::from(MilliSecondsSinceUnixEpoch::now().get())
+                        .saturating_sub(ev.content.timestamp.get().into());
+                    let _ = tx.send(Incoming {
+                        sender: ev.sender,
+                        flow_id: ev.content.transaction_id.to_string(),
+                        fresh_to_device: age < 5 * 60 * 1000,
+                    });
                 }
             });
         // Requests from other people arrive as messages in a direct chat.
@@ -229,7 +243,11 @@ impl Verifier {
             let tx = tx.clone();
             async move {
                 if matches!(ev.content.msgtype, MessageType::VerificationRequest(_)) {
-                    let _ = tx.send((ev.sender, ev.event_id.to_string()));
+                    let _ = tx.send(Incoming {
+                        sender: ev.sender,
+                        flow_id: ev.event_id.to_string(),
+                        fresh_to_device: false,
+                    });
                 }
             }
         });
@@ -273,14 +291,28 @@ impl Verifier {
             .is_some_and(|r| !r.finished.load(Ordering::SeqCst))
     }
 
-    pub async fn on_incoming(&mut self, (user_id, flow_id): Incoming) {
+    pub async fn on_incoming(&mut self, incoming: Incoming) {
+        let user_id = incoming.sender;
         let Some(request) = self
             .client
             .encryption()
-            .get_verification_request(&user_id, &flow_id)
+            .get_verification_request(&user_id, &incoming.flow_id)
             .await
         else {
-            // Too old, not for us, or otherwise ignored by the SDK.
+            // Too old, not for us, or ignored by the SDK. The usual case for one of our
+            // own devices: it is so new that this one has not heard of it yet (the
+            // server reports new devices with the next sync, which can take a while).
+            // Fetch the device list now, so that asking again works.
+            if incoming.fresh_to_device && self.client.user_id() == Some(&*user_id) {
+                tracing::info!("verification request from an unknown own device");
+                let client = self.client.clone();
+                tokio::spawn(async move { refresh_own_keys(&client).await });
+                let _ = self.events.send(MatrixEvent::ActionFailed(
+                    "A device of yours that this one did not know yet asked for verification. \
+                     Ask again from that device."
+                        .to_owned(),
+                ));
+            }
             return;
         };
         if request.we_started()
@@ -302,7 +334,8 @@ impl Verifier {
     pub async fn handle(&mut self, command: VerifyCmd) {
         match command {
             VerifyCmd::Request => {
-                if self.busy() {
+                // Asking again replaces our own unanswered request.
+                if self.busy() && !self.running.as_ref().is_some_and(|r| r.outgoing) {
                     let _ = self.events.send(MatrixEvent::ActionFailed(
                         "A verification is already running".to_owned(),
                     ));
@@ -337,8 +370,14 @@ impl Verifier {
     /// the user's other devices.
     fn launch(&mut self, request: Option<VerificationRequest>) {
         if let Some(old) = self.running.take() {
-            old.task.abort();
+            if old.finished.load(Ordering::SeqCst) {
+                old.task.abort();
+            } else {
+                // Let it tell the other side; it ends by itself after that.
+                let _ = old.answers.send(Answer::Cancel);
+            }
         }
+        let outgoing = request.is_none();
         self.next_flow += 1;
         let (answers, answer_rx) = unbounded_channel();
         let finished = Arc::new(AtomicBool::new(false));
@@ -356,6 +395,7 @@ impl Verifier {
         let task = tokio::spawn(flow.run(client, request, answer_rx));
         self.running = Some(Running {
             flow: self.next_flow,
+            outgoing,
             answers,
             finished,
             task,
@@ -380,7 +420,10 @@ impl Verifier {
 async fn set_up_cross_signing(client: &Client, password: Option<String>) -> Result<(), String> {
     let encryption = client.encryption();
     let err = match encryption.bootstrap_cross_signing_if_needed(None).await {
-        Ok(()) => return Ok(()),
+        Ok(()) => {
+            refresh_own_keys(client).await;
+            return Ok(());
+        }
         Err(err) => err,
     };
     let Some(info) = err.as_uiaa_response() else {
@@ -397,7 +440,36 @@ async fn set_up_cross_signing(client: &Client, password: Option<String>) -> Resu
     encryption
         .bootstrap_cross_signing(Some(AuthData::Password(auth)))
         .await
-        .map_err(|err| format!("Could not set up encryption: {err}"))
+        .map_err(|err| format!("Could not set up encryption: {err}"))?;
+    refresh_own_keys(client).await;
+    Ok(())
+}
+
+/// Fetches this account's devices and identity from the server now. New signatures on
+/// our own device otherwise only show up when the server next mentions a change, which
+/// can take a minute while nothing else happens.
+async fn refresh_own_keys(client: &Client) {
+    if let Some(user_id) = client.user_id()
+        && let Err(err) = client.encryption().request_user_identity(user_id).await
+    {
+        tracing::warn!(%err, "could not fetch our own keys");
+    }
+}
+
+/// After this device was verified: the other device uploads its signature for this
+/// one a moment after the verification ends. Look until it is there.
+async fn await_own_signature(client: Client, refresh: Arc<Notify>) {
+    for delay in [0, 1, 2, 4, 8] {
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        if matches!(
+            client.encryption().get_own_device().await,
+            Ok(Some(device)) if device.is_cross_signed_by_owner()
+        ) {
+            break;
+        }
+        refresh_own_keys(&client).await;
+        refresh.notify_one();
+    }
 }
 
 type SasStream = Pin<Box<dyn Stream<Item = SasState> + Send>>;
@@ -516,6 +588,9 @@ impl Flow {
                     None => break,
                 },
             }
+        }
+        if self.this_device && self.last == Some(VerifyStage::Done) {
+            tokio::spawn(await_own_signature(client, self.refresh.clone()));
         }
     }
 

@@ -156,7 +156,8 @@ fn flow_body(flow: &VerifyUpdate) -> (String, &'static str, Vec<Row>) {
             Row::Blank,
             muted(
                 "Open Element or matrix-rat on a device that is already verified and accept \
-                 the request there.",
+                 the request there. A device that has just logged in can take a minute to \
+                 become known to the others: if nothing shows up there, ask again.",
             ),
         ],
         VerifyStage::Ready => vec![
@@ -275,17 +276,23 @@ pub fn status_hint(
             ..
         }))
     );
-    let (mark, mark_role, text, verb, action) = match state.hint(popup_open) {
+    // Mark, its colour, what is wrong, what a click does, and a short form of both.
+    let (mark, mark_role, text, verb, short, action) = match state.hint(popup_open) {
         None => return,
-        Some(Hint::Pending { requested }) => (
+        Some(Hint::Pending { requested: true }) => (
             "◆",
             Role::StatusKey,
-            if requested {
-                "verification request"
-            } else {
-                "verification running"
-            },
-            if requested { "answer" } else { "show" },
+            "verification request",
+            "answer",
+            "answer request",
+            Action::Verify(Button::Show),
+        ),
+        Some(Hint::Pending { requested: false }) => (
+            "◆",
+            Role::StatusKey,
+            "verification running",
+            "show",
+            "verification",
             Action::Verify(Button::Show),
         ),
         Some(Hint::Unverified) => (
@@ -293,6 +300,7 @@ pub fn status_hint(
             Role::Error,
             "unverified device",
             "verify",
+            "verify device",
             Action::StartVerification,
         ),
         Some(Hint::NotSetUp) => (
@@ -300,17 +308,23 @@ pub fn status_hint(
             Role::Muted,
             "encryption not set up",
             "set up",
+            "set up encryption",
             Action::StartVerification,
         ),
     };
     let start = area.x + spans.iter().map(|s| width(&s.content) as u16).sum::<u16>();
-    let hint = [
+    let mut hint = vec![
         Span::styled(format!("{mark} "), theme.style(mark_role)),
         Span::styled(format!("{text} — "), theme.style(Role::Status)),
         Span::styled(verb.to_owned(), theme.style(Role::StatusKey)),
     ];
-    let hint_width = hint.iter().map(|s| width(&s.content) as u16).sum::<u16>();
-    let end = (start + hint_width).min(area.right());
+    let measure = |hint: &[Span]| hint.iter().map(|s| width(&s.content) as u16).sum::<u16>();
+    // Leave room for at least one key hint after it; otherwise say it shorter.
+    if start + measure(&hint) + 20 > area.right() {
+        hint.truncate(1);
+        hint.push(Span::styled(short.to_owned(), theme.style(Role::StatusKey)));
+    }
+    let end = (start + measure(&hint)).min(area.right());
     let hovered = hover == Some(HitId::Do(action));
     for mut span in hint {
         if hovered {
