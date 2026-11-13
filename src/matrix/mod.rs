@@ -304,6 +304,9 @@ pub enum MatrixEvent {
     },
     /// The largest file the server accepts, in bytes.
     UploadLimit(u64),
+    /// The first file of a [`MatrixCmd::SendFiles`] could not be sent, so none was:
+    /// the caption and the reply belong to that one. Carries the reason.
+    FilesNotSent(String),
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -354,6 +357,8 @@ impl std::fmt::Debug for MatrixEvent {
             Self::Notice(notice) => write!(f, "{notice:?}"),
             Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
             Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
+            // The reason names a file.
+            Self::FilesNotSent(_) => f.write_str("FilesNotSent"),
         }
     }
 }

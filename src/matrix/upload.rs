@@ -60,8 +60,9 @@ impl Uploads {
         }
     }
 
-    /// Sends `files` in order. The caption and the reply go with the first one that
-    /// can be sent. A file that cannot be read is reported and the rest still goes.
+    /// Sends `files` in order. The caption and the reply belong to the first: if that
+    /// one cannot be sent, none is ([`MatrixEvent::FilesNotSent`]). A later file that
+    /// cannot be read is reported and the rest still goes.
     pub fn send(
         &mut self,
         timeline: Arc<Timeline>,
@@ -80,43 +81,52 @@ impl Uploads {
                 .map(u64::from);
             let mut caption = caption.and_then(caption_content);
             let mut reply_to = reply_to;
-            for path in files {
+            for (n, path) in files.into_iter().enumerate() {
                 let prepared =
                     tokio::task::spawn_blocking(move || upload::prepare(&path, limit)).await;
-                let prepared = match prepared {
-                    Ok(Ok(prepared)) => prepared,
+                let outcome = match prepared {
+                    Ok(Ok(prepared)) => {
+                        let name = prepared.name.clone();
+                        match attachment(prepared) {
+                            Some((source, mime, mut config)) => {
+                                // Only ever with the first file.
+                                config.caption = caption.take();
+                                config.in_reply_to = reply_to.take();
+                                timeline
+                                    .send_attachment(source, mime, config)
+                                    .use_send_queue()
+                                    .await
+                                    .map_err(|err| {
+                                        tracing::warn!(?err, "could not queue a file for sending");
+                                        short(&format!("Could not send {name}: {err}"))
+                                    })
+                            }
+                            None => Err(short(&format!("Could not send {name}"))),
+                        }
+                    }
+                    // The reason names the file; the path stays out of the log.
                     Ok(Err(reason)) => {
-                        // The reason names the file; the path stays out of the log.
                         tracing::warn!("a file could not be prepared for sending");
-                        let _ = events.send(MatrixEvent::ActionFailed(reason));
-                        continue;
+                        Err(short(&reason))
                     }
                     Err(err) => {
                         tracing::warn!(?err, "preparing a file for sending failed");
-                        let _ = events.send(MatrixEvent::ActionFailed(
-                            "Could not send the file".to_owned(),
-                        ));
-                        continue;
+                        Err("Could not send the file".to_owned())
                     }
                 };
-                let name = prepared.name.clone();
-                let Some((source, mime, mut config)) = attachment(prepared) else {
-                    let _ =
-                        events.send(MatrixEvent::ActionFailed(format!("Could not send {name}")));
-                    continue;
-                };
-                config.caption = caption.take();
-                config.in_reply_to = reply_to.take();
-                let sent = timeline
-                    .send_attachment(source, mime, config)
-                    .use_send_queue()
-                    .await;
-                if let Err(err) = sent {
-                    tracing::warn!(?err, "could not queue a file for sending");
-                    let _ = events.send(MatrixEvent::ActionFailed(format!(
-                        "Could not send {name}: {err}"
-                    )));
+                match outcome {
+                    Ok(()) => {}
+                    Err(reason) if n == 0 => {
+                        let _ = events.send(MatrixEvent::FilesNotSent(reason));
+                        return;
+                    }
+                    Err(reason) => {
+                        let _ = events.send(MatrixEvent::ActionFailed(reason));
+                    }
                 }
+                // What belonged to the first file goes with no other.
+                caption = None;
+                reply_to = None;
             }
         });
     }
@@ -201,7 +211,7 @@ pub fn failure_reason(error: &matrix_sdk::Error) -> String {
 /// One line of bounded length without control characters: the text may come from the
 /// server.
 fn short(text: &str) -> String {
-    truncate(sanitize_line(text).trim(), 80)
+    truncate(sanitize_line(text).trim(), 120)
 }
 
 #[cfg(test)]
@@ -338,6 +348,7 @@ mod tests {
             let mut limit = None;
             let mut saw_echo = false;
             let mut saw_progress = false;
+            let mut refused = None;
             let mut fetched = false;
             let mut whole = None;
             loop {
@@ -346,6 +357,7 @@ mod tests {
                     | MatrixEvent::Error(err)
                     | MatrixEvent::ActionFailed(err) => panic!("{err}"),
                     MatrixEvent::UploadLimit(bytes) => limit = Some(bytes),
+                    MatrixEvent::FilesNotSent(reason) => refused = Some(reason),
                     MatrixEvent::Rooms(rooms) if room_id.is_none() => {
                         let joined = rooms.iter().find(|r| r.category != RoomCategory::Invite);
                         if let Some(room) = joined {
@@ -353,6 +365,14 @@ mod tests {
                             handle.send(MatrixCmd::OpenRoom {
                                 room_id: room.id.clone(),
                                 generation: 1,
+                            });
+                            // First a batch whose first file is gone: the caption was
+                            // meant for that one, so the second file must not go either.
+                            handle.send(MatrixCmd::SendFiles {
+                                room_id: room.id.clone(),
+                                files: vec![root.join("gone.txt"), text_path.clone()],
+                                caption: Some(crate::format::parse("for the file that is gone")),
+                                reply_to: None,
                             });
                             let command = MatrixCmd::SendFiles {
                                 room_id: room.id.clone(),
@@ -396,6 +416,12 @@ mod tests {
                         if !sent(file) || !sent(picture) || fetched {
                             continue;
                         }
+                        // Once only: the batch that could not start sent nothing.
+                        let copies = messages
+                            .iter()
+                            .filter(|m| m.file.as_ref().is_some_and(|f| f.name == text_name))
+                            .count();
+                        assert_eq!(copies, 1);
                         // The file: name, size, and the caption went with it (the first).
                         let attached = file.file.as_ref().unwrap();
                         assert_eq!(attached.size, Some(text_content.len() as u64));
@@ -433,16 +459,17 @@ mod tests {
                     _ => {}
                 }
                 if whole.is_some() && limit.is_some() {
-                    return (saw_echo, saw_progress, whole, limit);
+                    return (saw_echo, saw_progress, whole, limit, refused);
                 }
             }
         };
-        let (saw_echo, saw_progress, whole, limit) =
+        let (saw_echo, saw_progress, whole, limit, refused) =
             tokio::time::timeout(Duration::from_secs(60), wait)
                 .await
                 .expect("timed out waiting for the sent files");
         assert!(saw_echo, "the files never showed as being sent");
         assert!(saw_progress, "no upload progress was reported");
+        assert_eq!(refused.as_deref(), Some("gone.txt does not exist"));
         assert_eq!(whole, Some((1200, 700)));
         assert!(limit.is_some_and(|bytes| bytes > 0));
         handle.send(MatrixCmd::Shutdown);

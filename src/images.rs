@@ -36,8 +36,8 @@ pub const FULL_PIXELS: (u32, u32) = (3840, 2160);
 /// Files above this are not downloaded.
 pub const MAX_DOWNLOAD: u64 = 20 * 1024 * 1024;
 /// Decoding refuses pictures wider or taller than this (decompression bombs).
-const MAX_DECODE_SIDE: u32 = 16_384;
-const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+pub const MAX_DECODE_SIDE: u32 = 16_384;
+pub const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 /// Memory the cache may hold before the pictures unused for longest are dropped.
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 256;

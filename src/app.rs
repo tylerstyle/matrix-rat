@@ -741,8 +741,11 @@ impl App {
     }
 
     fn send(&mut self) {
-        // An `/upload` command attaches; with files waiting, Enter sends those.
-        if self.upload_command() || self.send_attachments() {
+        // An `/upload` command attaches; with files waiting, Enter sends those. An
+        // edit comes first: its text is a message, and files wait until it is done.
+        if !matches!(self.compose_mode, ComposeMode::Edit(_))
+            && (self.upload_command() || self.send_attachments())
+        {
             return;
         }
         let text = self.composer.text().trim().to_owned();
@@ -1278,6 +1281,7 @@ impl App {
                     Some((_, message))
                         if message.own
                             && (message.image.is_some()
+                                || message.file.is_some()
                                 || !matches!(message.kind, MsgKind::Text | MsgKind::Emote)) =>
                     {
                         self.show_toast("This message cannot be edited");
@@ -1731,6 +1735,7 @@ impl App {
             MatrixEvent::Verification(update) => self.on_verification(update),
             MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
             MatrixEvent::UploadLimit(bytes) => self.attach.limit = Some(bytes),
+            MatrixEvent::FilesNotSent(reason) => self.on_files_not_sent(reason),
         }
     }
 
@@ -2073,6 +2078,11 @@ impl App {
                 return;
             }
             None => {}
+        }
+        // The picture viewer and the help cover the composer: nothing is pasted
+        // (or attached) where it cannot be seen.
+        if self.help_open || self.images.viewer_open() {
+            return;
         }
         // Files dropped on the terminal arrive as a paste of their paths.
         if self.attach_pasted(&text) {

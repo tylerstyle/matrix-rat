@@ -32,6 +32,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.hits.add(area, HitId::Pane(Pane::Composer));
+    // Until a row shows them, waiting files count as not seen.
+    app.attach.hidden = !app.attachments().is_empty();
     if inner.width < 3 || inner.height == 0 {
         return;
     }
@@ -68,8 +70,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         text_area.height = text_area.height.saturating_sub(1);
     }
     // Files waiting to be sent, one line each; the text keeps at least one row.
-    let room_id = app.room().map(|room| room.id.as_str()).unwrap_or_default();
-    let files = app.attach.files(room_id);
+    let scope = app.attach_scope();
+    let files = app.attach.files(scope.as_ref());
     let file_rows = super::attach::rows(files.len()).min(text_area.height.saturating_sub(1));
     if file_rows > 0 {
         let rect = Rect::new(text_area.x, text_area.y, text_area.width, file_rows);
@@ -78,6 +80,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         text_area.height -= file_rows;
     }
     let has_files = !files.is_empty();
+    // Without a row for them, Enter does not send them.
+    app.attach.hidden = has_files && file_rows == 0;
     if text_area.height == 0 {
         return;
     }

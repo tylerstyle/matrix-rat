@@ -53,6 +53,12 @@ impl App {
         self.threads.open.is_some()
     }
 
+    /// What names the open thread among the things kept per thread (drafts, files
+    /// waiting to be sent).
+    pub(super) fn thread_key(&self) -> Option<&str> {
+        self.threads.open.as_ref().map(|view| view.key.as_str())
+    }
+
     /// Shows the thread that starts at the message at `index`. A message without
     /// replies gets an empty thread; the first message sent there starts it.
     pub(super) fn open_thread(&mut self, index: usize) {
