@@ -194,7 +194,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
             ),
         ];
         let value_x = rect.x + 2 + LABEL;
-        let room = (rect.right() - value_x) as usize;
+        let room = rect.right().saturating_sub(value_x) as usize;
         app.hits.add(rect, HitId::Setting(index, 0));
         match setting {
             Setting::Theme | Setting::SidebarWidth => {

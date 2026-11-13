@@ -35,6 +35,8 @@ pub struct Media {
     /// What is being fetched right now: key and whether it is the whole file.
     busy: Arc<Mutex<HashSet<(String, bool)>>>,
     slots: Arc<Semaphore>,
+    /// Saving holds a whole file in memory, so only one runs at a time.
+    save_slot: Arc<Semaphore>,
 }
 
 impl Media {
@@ -44,6 +46,7 @@ impl Media {
             events,
             busy: Arc::default(),
             slots: Arc::new(Semaphore::new(PARALLEL)),
+            save_slot: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -86,7 +89,9 @@ impl Media {
         let client = self.client.clone();
         let events = self.events.clone();
         let busy = self.busy.clone();
+        let save_slot = self.save_slot.clone();
         tokio::spawn(async move {
+            let _slot = save_slot.acquire().await;
             let request = MediaRequestParameters {
                 source: *file.source,
                 format: MediaFormat::File,

@@ -495,7 +495,7 @@ impl App {
     }
 
     /// Nothing of a previous session may linger behind the login form.
-    fn reset_session(&mut self) {
+    pub(crate) fn reset_session(&mut self) {
         self.rooms.clear();
         self.active = 0;
         self.timeline = TimelineState::default();
@@ -507,6 +507,7 @@ impl App {
         self.recovery_prompted = false;
         self.verify = Default::default();
         self.saving.clear();
+        self.saved.clear();
         self.confirm_large = None;
         self.sync = Some(SyncStatus::Stopped);
     }
@@ -1160,7 +1161,11 @@ impl App {
             Action::Open => {
                 let opened = match self.timeline.selected {
                     Some(i) => {
-                        self.open_image(i) || self.open_link(i, 0) || self.save_attachment(true)
+                        // A file message is about its file, even with a link in the caption.
+                        let has_file = self.messages().get(i).is_some_and(|m| m.file.is_some());
+                        self.open_image(i)
+                            || (has_file && self.save_attachment(true))
+                            || self.open_link(i, 0)
                     }
                     None => false,
                 };

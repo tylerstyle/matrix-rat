@@ -39,25 +39,35 @@ impl App {
             return true;
         }
         if open
-            && let Some(path) = self.saved.get(&file.key)
+            && let Some(path) = self.saved.get(&file.key).cloned()
             && path.exists()
         {
-            super::open_in_browser(&path.to_string_lossy());
+            self.open_saved(&path);
             return true;
         }
         if self.saving.contains(&file.key) {
             self.show_toast(format!("Still saving {}…", file.name));
             return true;
         }
-        let large = file.size.filter(|size| *size > files::LARGE_FILE);
-        if let Some(size) = large
-            && self.confirm_large.as_deref() != Some(&file.key)
-        {
-            self.show_toast(format!(
-                "{} is {}. Press s again to download it",
+        // The whole file passes through memory, and the size is only the sender's
+        // word: ask once for large files and for those that do not state a size.
+        let again = if open { "o" } else { "s" };
+        let question = match file.size {
+            Some(size) if size > files::LARGE_FILE => Some(format!(
+                "{} is {}. Press {again} again to download it",
                 file.name,
                 human_size(size)
-            ));
+            )),
+            Some(_) => None,
+            None => Some(format!(
+                "{} does not say how large it is. Press {again} again to download it",
+                file.name
+            )),
+        };
+        if let Some(question) = question
+            && self.confirm_large.as_deref() != Some(&file.key)
+        {
+            self.show_toast(question);
             self.confirm_large = Some(file.key);
             return true;
         }
@@ -78,12 +88,15 @@ impl App {
         open: bool,
         result: Result<PathBuf, String>,
     ) {
-        self.saving.remove(&key);
+        // Not ours any more (logged out since): the file stays, nothing is shown or opened.
+        if !self.saving.remove(&key) {
+            return;
+        }
         match result {
             Ok(path) => {
                 self.show_toast(format!("Saved to {}", files::display(&path)));
                 if open {
-                    super::open_in_browser(&path.to_string_lossy());
+                    self.open_saved(&path);
                 }
                 self.saved.insert(key, path);
             }
@@ -91,9 +104,23 @@ impl App {
         }
     }
 
+    /// Hands a saved file to the desktop's program for it, if its type is one that only
+    /// gets shown or played. Anything else stays saved and is named, not launched.
+    fn open_saved(&mut self, path: &std::path::Path) {
+        if files::opens_safely(path) {
+            super::open_in_browser(&path.to_string_lossy());
+        } else {
+            self.show_toast(format!(
+                "Saved to {} (this file type is not opened automatically)",
+                files::display(path)
+            ));
+        }
+    }
+
     /// Enter on the download folder row finishes typing: the folder is remembered.
     pub(super) fn set_download_dir(&mut self, text: &str) {
         self.download_dir = text.trim().to_owned();
+        self.saved.clear();
         self.save_setting("download_dir", self.download_dir.clone());
         self.show_toast(format!(
             "Files are saved to {}",
@@ -212,6 +239,25 @@ mod tests {
         assert!(toast(&app).contains("3.0 GB"), "{}", toast(&app));
         app.perform(Action::Save);
         assert_eq!(saves(&mut commands).len(), 1);
+        // A file that does not state its size is asked about too.
+        let mut unknown = file_message("blob.bin", 0);
+        unknown.file.as_mut().unwrap().size = None;
+        let (mut app, mut commands) = app_with(vec![unknown]);
+        app.timeline.selected = Some(0);
+        app.perform(Action::Save);
+        assert!(saves(&mut commands).is_empty());
+        app.perform(Action::Save);
+        assert_eq!(saves(&mut commands).len(), 1);
+        // A result that arrives after logging out opens nothing and says nothing.
+        app.reset_session();
+        app.toast = None;
+        app.on_matrix(MatrixEvent::FileSaved {
+            key: "mxc://example.org/blob.bin".to_owned(),
+            open: true,
+            result: Ok(PathBuf::from("/tmp/blob.bin")),
+        });
+        assert!(app.toast.is_none());
+        assert!(app.saved.is_empty());
 
         // `o` on a file saves it and asks for it to be opened.
         let (mut app, mut commands) = app_with(vec![file_message("notes.txt", 10)]);
@@ -220,6 +266,24 @@ mod tests {
         let sent = saves(&mut commands);
         assert_eq!(sent.len(), 1);
         assert!(sent[0].2);
+        // Opening a file wins over a link in its caption.
+        let mut with_link = file_message("notes.txt", 10);
+        with_link.body.push_str("\nsee https://example.org");
+        let (mut app, mut commands) = app_with(vec![with_link]);
+        app.timeline.selected = Some(0);
+        app.on_event(key(KeyCode::Char('o')));
+        assert_eq!(saves(&mut commands).len(), 1);
+        // A launcher is saved but not started.
+        app.on_matrix(MatrixEvent::FileSaved {
+            key: "mxc://example.org/notes.txt".to_owned(),
+            open: true,
+            result: Ok(PathBuf::from("/tmp/evil.desktop")),
+        });
+        assert!(
+            toast(&app).contains("not opened automatically"),
+            "{}",
+            toast(&app)
+        );
     }
 
     #[test]
