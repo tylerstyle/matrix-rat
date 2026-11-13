@@ -272,7 +272,7 @@ impl App {
     // ----- room info -----------------------------------------------------------------
 
     /// Shows the room info for the room at `index`, with `select` selected.
-    fn open_info(&mut self, index: Option<usize>, select: Option<InfoRow>) {
+    pub(super) fn open_info(&mut self, index: Option<usize>, select: Option<InfoRow>) {
         if self.modal.is_some() || self.images.viewer_open() {
             return;
         }

@@ -547,8 +547,13 @@ async fn forward(
     let (mut items, changes) = timeline.subscribe().await;
     pin_mut!(changes);
     let (_typing_guard, mut typing) = room.subscribe_to_typing_notifications();
-    let snapshot = |items: &Vector<Arc<TimelineItem>>, unread: HashSet<String>| {
+    // Who has read up to where, by name.
+    let mut readers = super::receipts::Names::default();
+    let snapshot = |items: &Vector<Arc<TimelineItem>>,
+                    unread: HashSet<String>,
+                    readers: &super::receipts::Names| {
         let mut messages = convert(items, &own);
+        readers.annotate(&mut messages, items, &own);
         threads::annotate(&mut messages, in_thread, &unread);
         MatrixEvent::Timeline {
             room_id: room_id.clone(),
@@ -598,7 +603,8 @@ async fn forward(
     };
     fetch_replies(&items);
     let marks = unread(&items).await;
-    if events.send(snapshot(&items, marks)).is_err() {
+    readers.learn(&room, &items, &own).await;
+    if events.send(snapshot(&items, marks, &readers)).is_err() {
         return;
     }
     loop {
@@ -610,7 +616,8 @@ async fn forward(
                 }
                 fetch_replies(&items);
                 let marks = unread(&items).await;
-                if events.send(snapshot(&items, marks)).is_err() {
+                readers.learn(&room, &items, &own).await;
+                if events.send(snapshot(&items, marks, &readers)).is_err() {
                     return;
                 }
             }

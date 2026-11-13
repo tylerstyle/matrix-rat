@@ -21,6 +21,8 @@ pub struct Config {
     /// Let others see how far you have read. When off, the server still learns it
     /// (so unread counts clear on your other devices) but tells nobody.
     pub read_receipts: bool,
+    /// Show under messages who has read up to there.
+    pub read_markers: bool,
     /// Notifications for new messages: "auto", "desktop", "terminal" or "off".
     pub notifications: crate::notify::NotifyMode,
     /// Show the text of the message in notifications.
@@ -51,6 +53,7 @@ impl Default for Config {
             mouse: true,
             typing_notices: true,
             read_receipts: true,
+            read_markers: true,
             notifications: crate::notify::NotifyMode::Auto,
             notification_preview: true,
             download_dir: String::new(),
@@ -107,6 +110,10 @@ mod tests {
         assert_eq!(config.theme, "terminal");
         assert_eq!(config.sidebar_width, 24);
         assert!(config.mouse);
+        assert!(config.read_receipts);
+        assert!(config.read_markers);
+        let config: Config = toml::from_str("read_markers = false").unwrap();
+        assert!(!config.read_markers);
         assert!(config.read_receipts);
         assert_eq!(config.images, ImageMode::Auto);
     }

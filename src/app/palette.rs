@@ -151,6 +151,7 @@ impl App {
             Setting::Mouse
             | Setting::TypingNotices
             | Setting::ReadReceipts
+            | Setting::ReadMarkers
             | Setting::Notifications => {
                 self.change_setting(setting, 0);
                 self.show_toast(format!(

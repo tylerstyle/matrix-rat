@@ -531,6 +531,8 @@ pub struct InfoPopup {
     pub busy: Option<&'static str>,
     /// Which answer ends `busy`.
     pub pending: Option<Pending>,
+    /// A row to select once it is there: some only exist when the details are in.
+    pub wanted: Option<InfoRow>,
 }
 
 /// Hand-written: names and topics stay out of logs.
@@ -560,6 +562,7 @@ impl InfoPopup {
             confirm: None,
             busy: None,
             pending: None,
+            wanted: None,
         }
     }
 
@@ -646,7 +649,7 @@ impl InfoPopup {
         self.member(self.current()?)
     }
 
-    /// Selects `row` if it is shown.
+    /// Selects `row` if it is shown; before the details are in, as soon as it is.
     pub fn select(&mut self, row: InfoRow) {
         if let Some(at) = self.rows().iter().position(|r| *r == row) {
             if at != self.selected {
@@ -654,11 +657,15 @@ impl InfoPopup {
             }
             self.selected = at;
             self.reveal = true;
+        } else if self.details.is_none() {
+            self.wanted = Some(row);
         }
     }
 
     pub fn step(&mut self, delta: isize) {
         self.confirm = None;
+        // The user has chosen for themselves.
+        self.wanted = None;
         // Up from the first row: what stands above it (name, topic, facts) comes
         // back into view; in a low window the rows alone can fill it.
         if delta < 0 && self.selected == 0 {
@@ -731,6 +738,9 @@ impl InfoPopup {
             (None, None) => None,
         };
         self.selected = same.unwrap_or(self.selected.min(rows.len().saturating_sub(1)));
+        if let Some(row) = self.wanted.take() {
+            self.select(row);
+        }
     }
 
     pub fn scroll_by(&mut self, lines: isize) {

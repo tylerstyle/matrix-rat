@@ -1,3 +1,5 @@
+mod receipts;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -601,7 +603,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut cache = match previous {
         Some(cache) if cache.key == key => cache,
         previous => {
-            let rows = build_rows(room, content.width as usize, theme, revealed, &app.images);
+            let mut rows = build_rows(room, content.width as usize, theme, revealed, &app.images);
+            if app.read_markers {
+                rows = receipts::add(rows, room, content.width as usize, theme);
+            }
             // Reading older messages: keep the same ones on screen when new ones
             // arrive below or something changes its height.
             if let Some(anchor) = previous

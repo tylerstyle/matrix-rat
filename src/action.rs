@@ -99,4 +99,7 @@ pub enum Action {
     InviteUser,
     /// A control of the room popups.
     Manage(crate::manage::Click),
+    /// Open the menu of what has the focus: the selected message, the room under the
+    /// cursor, or the composer.
+    ContextMenu,
 }

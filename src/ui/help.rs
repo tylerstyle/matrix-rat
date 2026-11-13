@@ -9,7 +9,7 @@ use crate::keymap::{Context, DEFAULT};
 use crate::theme::{Role, Theme};
 
 const MOUSE_HINT: &str =
-    "Mouse: click to focus · wheel scrolls · drag the room list's edge to resize";
+    "Mouse: click to focus · right click for a menu · wheel scrolls · drag the room list's edge";
 
 /// The heading and the bindings of one context.
 fn section(theme: &Theme, context: Context) -> Vec<Line<'static>> {

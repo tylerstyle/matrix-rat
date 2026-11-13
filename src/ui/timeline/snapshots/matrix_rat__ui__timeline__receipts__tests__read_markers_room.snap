@@ -1,0 +1,16 @@
+---
+source: src/ui/timeline/receipts.rs
+expression: "lines(&busy, 44).join(\"\\n\")"
+---
+────────────────── Today ───────────────────
+● alice  12:00
+  Has anyone tried the new event cache yet?
+                                      ✓ erin
+
+● you  12:00
+  Yes, startup is instant now.    ✓ B C F +9
+  Back-pagination survives restarts too.
+
+● dave  12:00
+  Shipping a client on top of it this week
+  (edited)                            ✓ A SS

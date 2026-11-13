@@ -271,6 +271,14 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        KeyCode::Menu,
+        NONE,
+        Action::ContextMenu,
+        "Menu",
+        "Menu for what has the focus",
+    ),
+    bind(
+        Global,
         Char('z'),
         CTRL,
         Action::Suspend,
@@ -383,6 +391,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::OpenThread,
         "t",
         "Open the message's thread",
+    ),
+    bind(
+        Timeline,
+        Char('m'),
+        NONE,
+        Action::ContextMenu,
+        "m",
+        "Menu for the message",
     ),
     bind(
         Timeline,

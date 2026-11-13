@@ -9,7 +9,7 @@ use crate::text::{truncate, width};
 use crate::theme::Role;
 
 /// The first letter of a name, in exactly two columns.
-fn initial(name: &str) -> String {
+pub(super) fn initial(name: &str) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     let first = name
         .trim_start_matches(|c: char| !c.is_alphanumeric() && c.is_ascii())

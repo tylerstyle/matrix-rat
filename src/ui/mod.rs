@@ -6,6 +6,7 @@ mod composer;
 mod help;
 pub mod hit;
 mod image;
+mod menu;
 mod modal;
 mod palette;
 mod roominfo;
