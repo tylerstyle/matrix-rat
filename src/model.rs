@@ -85,6 +85,27 @@ pub struct Message {
     pub reactions: Vec<Reaction>,
     /// Set for picture messages; `body` then holds the text shown when pictures are off.
     pub image: Option<ImageInfo>,
+    /// Set for file, audio and video messages.
+    pub file: Option<Attachment>,
+}
+
+/// Something that can be saved to disk: a file, or the original of a picture.
+#[derive(Clone)]
+pub struct Attachment {
+    /// The file's `mxc://` address.
+    pub key: String,
+    /// File name as the sender gave it, safe to show (not yet safe as a path).
+    pub name: String,
+    /// Size in bytes, as stated by the sender.
+    pub size: Option<u64>,
+    pub source: Box<matrix_sdk::ruma::events::room::MediaSource>,
+}
+
+/// Hand-written: an encrypted source carries the key of the file.
+impl std::fmt::Debug for Attachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Attachment({})", self.name)
+    }
 }
 
 /// A picture attached to a message.
@@ -128,7 +149,30 @@ impl std::fmt::Debug for ImageSource {
     }
 }
 
+impl ImageInfo {
+    /// The original file of the picture, for saving. The demo picture has none.
+    pub fn attachment(&self) -> Option<Attachment> {
+        match &self.source {
+            ImageSource::Demo => None,
+            ImageSource::Matrix(media) => Some(Attachment {
+                key: self.key.clone(),
+                name: self.name.clone(),
+                size: self.size,
+                source: Box::new(media.full.clone()),
+            }),
+        }
+    }
+}
+
 impl Message {
+    /// What saving this message would write to disk, if anything.
+    pub fn attachment(&self) -> Option<Attachment> {
+        if let Some(file) = &self.file {
+            return Some(file.clone());
+        }
+        self.image.as_ref()?.attachment()
+    }
+
     pub fn has_spoiler(&self) -> bool {
         const MARK: &[u8] = b"data-mx-spoiler";
         // Attribute names are case-insensitive, like in the parser.

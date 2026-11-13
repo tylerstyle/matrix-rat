@@ -215,6 +215,24 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
                 let dot = if on { "● " } else { "○ " };
                 spans.push(Span::styled(format!("{dot}{value}"), theme.style(role)));
             }
+            Setting::DownloadDir => match (&menu.editing, selected) {
+                (Some(typed), true) => {
+                    // Show the end of a long path, where typing happens.
+                    let mut shown = typed.clone();
+                    while width(&shown) + 1 > room && !shown.is_empty() {
+                        shown.remove(0);
+                    }
+                    frame
+                        .set_cursor_position(Position::new(value_x + width(&shown) as u16, rect.y));
+                    let rest = "_".repeat(room.saturating_sub(width(&shown)));
+                    spans.push(Span::styled(shown, theme.style(Role::Text)));
+                    spans.push(Span::styled(rest, theme.style(Role::Border)));
+                }
+                _ => spans.push(Span::styled(
+                    truncate(&value, room),
+                    theme.style(Role::Text),
+                )),
+            },
             Setting::Keys => spans.push(Span::styled("F1", theme.style(Role::StatusKey))),
             Setting::Encryption => {
                 let role = if value.starts_with("not") {

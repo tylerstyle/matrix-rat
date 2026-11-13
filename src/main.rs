@@ -6,6 +6,7 @@ mod app;
 mod composer;
 mod config;
 mod emoji;
+mod files;
 mod format;
 mod images;
 mod keymap;

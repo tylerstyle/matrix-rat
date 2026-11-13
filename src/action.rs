@@ -62,6 +62,8 @@ pub enum Action {
     /// Verify this device with another of the user's devices (or offer what fits:
     /// the recovery key, or setting up cross-signing).
     StartVerification,
+    /// Save the selected message's file or picture to the download folder.
+    Save,
     /// A control of the device verification popup.
     Verify(crate::verify::Button),
 }

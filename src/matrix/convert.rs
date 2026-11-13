@@ -13,7 +13,7 @@ use matrix_sdk_ui::timeline::{
 };
 
 use crate::model::{
-    ImageInfo, ImageSource, ItemRef, MediaRef, Message, MsgKind, Reaction, SendState,
+    Attachment, ImageInfo, ImageSource, ItemRef, MediaRef, Message, MsgKind, Reaction, SendState,
 };
 use crate::text::{sanitize, sanitize_line};
 
@@ -149,9 +149,39 @@ fn event_message(
                             message.image = Some(image);
                             text
                         }
-                        MessageType::File(c) => format!("📎 {}", c.filename()),
-                        MessageType::Video(c) => format!("🎞  {}", c.filename()),
-                        MessageType::Audio(c) => format!("🔊 {}", c.filename()),
+                        MessageType::File(c) => {
+                            let size = c.info.as_ref().and_then(|info| info.size);
+                            attach(
+                                &mut message,
+                                "📎",
+                                &c.source,
+                                c.filename(),
+                                c.caption(),
+                                size,
+                            )
+                        }
+                        MessageType::Video(c) => {
+                            let size = c.info.as_ref().and_then(|info| info.size);
+                            attach(
+                                &mut message,
+                                "🎞 ",
+                                &c.source,
+                                c.filename(),
+                                c.caption(),
+                                size,
+                            )
+                        }
+                        MessageType::Audio(c) => {
+                            let size = c.info.as_ref().and_then(|info| info.size);
+                            attach(
+                                &mut message,
+                                "🔊",
+                                &c.source,
+                                c.filename(),
+                                c.caption(),
+                                size,
+                            )
+                        }
                         MessageType::Location(c) => format!("📍 {}", c.body),
                         other => other.body().to_owned(),
                     };
@@ -237,6 +267,43 @@ fn event_message(
         reaction.key = sanitize_line(&reaction.key);
     }
     Some(message)
+}
+
+/// Marks a message as carrying a file and returns the line that stands for it.
+fn attach(
+    message: &mut Message,
+    icon: &str,
+    source: &MediaSource,
+    filename: &str,
+    caption: Option<&str>,
+    size: Option<matrix_sdk::ruma::UInt>,
+) -> String {
+    let key = match source {
+        MediaSource::Plain(uri) => uri.to_string(),
+        MediaSource::Encrypted(file) => file.url.to_string(),
+    };
+    let name = sanitize_line(filename);
+    let name = if name.trim().is_empty() {
+        "attachment".to_owned()
+    } else {
+        name
+    };
+    let size = size.map(u64::from);
+    let mut text = match size {
+        Some(size) => format!("{icon} {name} · {}", crate::images::human_size(size)),
+        None => format!("{icon} {name}"),
+    };
+    if let Some(caption) = caption.map(sanitize).filter(|c| !c.trim().is_empty()) {
+        text.push('\n');
+        text.push_str(&caption);
+    }
+    message.file = Some(Attachment {
+        key: sanitize_line(&key),
+        name,
+        size,
+        source: Box::new(source.clone()),
+    });
+    text
 }
 
 /// What the UI needs to show a picture. Everything in it comes from the sender.

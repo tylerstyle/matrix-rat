@@ -91,6 +91,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 ("r", "react", Some(A::React)),
                 ("Del", "delete", Some(A::Delete)),
                 ("c", "copy", Some(A::Copy)),
+                ("s", "save", Some(A::Save)),
                 ("Esc", "back", Some(A::Back)),
             ],
             Pane::Sidebar => vec![
@@ -99,6 +100,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 ("type", "to filter", None),
             ],
         });
+        // Saving is only offered where there is something to save.
+        let can_save = app.can_save();
+        hints.retain(|(_, text, _)| *text != "save" || can_save);
         let mut col = area.x + spans.iter().map(|s| width(&s.content) as u16).sum::<u16>();
         for (k, text, action) in hints {
             let label = format!(" {text}  ");

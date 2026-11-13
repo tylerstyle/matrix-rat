@@ -295,6 +295,7 @@ impl Timelines {
                 size,
                 full,
             } => self.media.fetch(key, *media, size, full),
+            MatrixCmd::SaveFile { file, dir, open } => self.media.save(file, dir, open),
             // Handled by the session loop.
             MatrixCmd::LoginPassword { .. }
             | MatrixCmd::LoginBrowser { .. }

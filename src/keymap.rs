@@ -297,11 +297,19 @@ pub const DEFAULT: &[Binding] = &[
     bind(Timeline, Char('c'), NONE, Action::Copy, "c", "Copy text"),
     bind(
         Timeline,
+        Char('s'),
+        NONE,
+        Action::Save,
+        "s",
+        "Save file or picture",
+    ),
+    bind(
+        Timeline,
         Char('o'),
         NONE,
         Action::Open,
         "o",
-        "Open link or image",
+        "Open link, picture or file",
     ),
     bind(
         Timeline,

@@ -2,6 +2,7 @@
 //! blocking thread, hand the pixels to the UI.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,12 +14,15 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::MatrixEvent;
+use crate::files;
 use crate::images::{self, Decoded, FULL_PIXELS, MAX_DOWNLOAD, THUMBNAIL_PIXELS, human_size};
-use crate::model::MediaRef;
+use crate::model::{Attachment, MediaRef};
 
 /// Downloads running at the same time.
 const PARALLEL: usize = 4;
 const TIMEOUT: Duration = Duration::from_secs(60);
+/// Saving is asked for by the user and may be a large file.
+const SAVE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Below this size the file itself is fetched instead of a thumbnail: it is needed for
 /// the viewer anyway and saves the server the scaling.
 const SMALL_FILE: u64 = 256 * 1024;
@@ -67,6 +71,52 @@ impl Media {
             busy.lock().expect("not poisoned").remove(&id);
             let (key, full) = id;
             let _ = events.send(MatrixEvent::Image { key, full, result });
+        });
+    }
+}
+
+impl Media {
+    /// Downloads a file (decrypting it if needed) and writes it into `dir` under a
+    /// name that is free there. The outcome arrives as [`MatrixEvent::FileSaved`].
+    pub fn save(&self, file: Attachment, dir: PathBuf, open: bool) {
+        let id = (format!("save {}", file.key), true);
+        if !self.busy.lock().expect("not poisoned").insert(id.clone()) {
+            return;
+        }
+        let client = self.client.clone();
+        let events = self.events.clone();
+        let busy = self.busy.clone();
+        tokio::spawn(async move {
+            let request = MediaRequestParameters {
+                source: *file.source,
+                format: MediaFormat::File,
+            };
+            let work = async {
+                // Not kept in the SDK's cache: the copy on disk is the point.
+                let bytes = client
+                    .media()
+                    .get_media_content(&request, false)
+                    .await
+                    .map_err(|err| {
+                        tracing::debug!(%err, "could not download file");
+                        "the download failed".to_owned()
+                    })?;
+                let name = file.name;
+                tokio::task::spawn_blocking(move || files::write_new(&dir, &name, &bytes))
+                    .await
+                    .map_err(|_| "writing the file failed".to_owned())?
+                    .map_err(|err| format!("{err}"))
+            };
+            let result = match tokio::time::timeout(SAVE_TIMEOUT, work).await {
+                Ok(result) => result,
+                Err(_) => Err("the download took too long".to_owned()),
+            };
+            busy.lock().expect("not poisoned").remove(&id);
+            let _ = events.send(MatrixEvent::FileSaved {
+                key: file.key,
+                open,
+                result,
+            });
         });
     }
 }
@@ -197,12 +247,14 @@ mod tests {
         images::demo_picture(1200, 700)
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
+        let uploaded = png.clone();
         room.send_attachment(&name, &mime::IMAGE_PNG, png, AttachmentConfig::new())
             .await
             .unwrap();
         let room_id = room.room_id().to_string();
 
         let root = std::env::temp_dir().join(format!("matrix-rat-image-{}", std::process::id()));
+        let downloads = root.join("downloads");
         let paths = Paths {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
@@ -223,6 +275,7 @@ mod tests {
             let mut requested = false;
             let mut small = None;
             let mut whole = None;
+            let mut saved = None;
             loop {
                 match events.recv().await.expect("worker stopped") {
                     MatrixEvent::LoginFailed(err)
@@ -257,6 +310,11 @@ mod tests {
                                     full,
                                 });
                             }
+                            handle.send(MatrixCmd::SaveFile {
+                                file: image.attachment().expect("can be saved"),
+                                dir: downloads.clone(),
+                                open: false,
+                            });
                         }
                     }
                     MatrixEvent::Image { full, result, .. } => {
@@ -268,15 +326,18 @@ mod tests {
                         } else {
                             small = Some((decoded.original, size));
                         }
-                        if let (Some(small), Some(whole)) = (small, whole) {
-                            return (small, whole);
-                        }
+                    }
+                    MatrixEvent::FileSaved { result, .. } => {
+                        saved = Some(result.expect("file could not be saved"));
                     }
                     _ => {}
                 }
+                if let (Some(small), Some(whole), Some(saved)) = (small, whole, &saved) {
+                    return (small, whole, saved.clone());
+                }
             }
         };
-        let (small, whole) = tokio::time::timeout(Duration::from_secs(60), wait)
+        let (small, whole, saved) = tokio::time::timeout(Duration::from_secs(60), wait)
             .await
             .expect("timed out waiting for the picture");
         // The whole file as uploaded; the small version within the thumbnail bounds
@@ -285,6 +346,9 @@ mod tests {
         let (_, (width, height)) = small;
         assert!(width <= THUMBNAIL_PIXELS.0 && height <= THUMBNAIL_PIXELS.1);
         assert!((width * 700).abs_diff(height * 1200) <= 1200, "{small:?}");
+        // The saved file is the upload, byte for byte, under its own name.
+        assert_eq!(saved, downloads.join(&name));
+        assert_eq!(std::fs::read(&saved).unwrap(), uploaded);
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);

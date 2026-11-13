@@ -74,6 +74,11 @@ impl App {
         match (code, mods) {
             (KeyCode::Char('q'), KeyModifiers::CONTROL) => self.should_quit = true,
             (KeyCode::Char('z'), KeyModifiers::CONTROL) => self.suspend_requested = true,
+            (KeyCode::Char('s'), KeyModifiers::NONE) => {
+                if !self.save_attachment(false) {
+                    self.show_toast("This picture cannot be saved");
+                }
+            }
             (KeyCode::Esc | KeyCode::Enter, _)
             | (KeyCode::Char('q' | 'o' | ' '), KeyModifiers::NONE) => self.images.close_viewer(),
             _ => {}

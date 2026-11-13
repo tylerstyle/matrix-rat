@@ -111,6 +111,13 @@ pub enum MatrixCmd {
     },
     /// Device verification and cross-signing.
     Verification(VerifyCmd),
+    /// Download a file and write it into `dir`; answered with [`MatrixEvent::FileSaved`].
+    SaveFile {
+        file: crate::model::Attachment,
+        dir: std::path::PathBuf,
+        /// Open it with the desktop's program for it afterwards.
+        open: bool,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -142,6 +149,7 @@ impl std::fmt::Debug for MatrixCmd {
             // The source of an encrypted file carries its key.
             Self::FetchImage { full, .. } => write!(f, "FetchImage(full: {full})"),
             Self::Verification(command) => write!(f, "Verification({command:?})"),
+            Self::SaveFile { open, .. } => write!(f, "SaveFile(open: {open})"),
         }
     }
 }
@@ -236,6 +244,12 @@ pub enum MatrixEvent {
     Verification(VerifyUpdate),
     /// Outcome of [`VerifyCmd::SetUp`].
     CrossSigningSetUp(Result<(), String>),
+    /// Outcome of [`MatrixCmd::SaveFile`]: where the file is now, or what went wrong.
+    FileSaved {
+        key: String,
+        open: bool,
+        result: Result<std::path::PathBuf, String>,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -282,6 +296,7 @@ impl std::fmt::Debug for MatrixEvent {
             Self::CrossSigningSetUp(result) => {
                 write!(f, "CrossSigningSetUp(ok: {})", result.is_ok())
             }
+            Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
         }
     }
 }

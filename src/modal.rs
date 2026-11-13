@@ -171,18 +171,20 @@ pub enum Setting {
     Mouse,
     TypingNotices,
     ReadReceipts,
+    DownloadDir,
     Keys,
     Encryption,
     Logout,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 8] = [
+    pub const ALL: [Setting; 9] = [
         Setting::Theme,
         Setting::SidebarWidth,
         Setting::Mouse,
         Setting::TypingNotices,
         Setting::ReadReceipts,
+        Setting::DownloadDir,
         Setting::Keys,
         Setting::Encryption,
         Setting::Logout,
@@ -206,6 +208,7 @@ impl Setting {
             Setting::Mouse => "Mouse",
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
+            Setting::DownloadDir => "Download folder",
             Setting::Keys => "Key bindings",
             Setting::Encryption => "Encryption",
             Setting::Logout => "Log out",
@@ -221,6 +224,9 @@ impl Setting {
             Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",
+            Setting::DownloadDir => {
+                "Where s saves files and pictures. Enter to change; empty for the default."
+            }
             Setting::Keys => "Show all key bindings (F1).",
             Setting::Encryption => {
                 "Verify this device with another of your devices, or see its status."
@@ -238,6 +244,8 @@ pub struct SettingsMenu {
     pub selected: usize,
     /// Log out was chosen once; choosing it again does it.
     pub confirm_logout: bool,
+    /// The download folder while it is being typed.
+    pub editing: Option<String>,
 }
 
 impl SettingsMenu {
@@ -249,6 +257,7 @@ impl SettingsMenu {
         let count = Setting::ALL.len() as isize;
         self.selected = (self.selected as isize + delta).rem_euclid(count) as usize;
         self.confirm_logout = false;
+        self.editing = None;
     }
 }
 

@@ -797,6 +797,11 @@ impl ImageStore {
 
     // ----- viewer --------------------------------------------------------------------
 
+    /// The picture the viewer is showing.
+    pub fn viewer_info(&self) -> Option<&ImageInfo> {
+        self.viewer.as_ref().map(|viewer| &viewer.info)
+    }
+
     pub fn viewer_open(&self) -> bool {
         self.viewer.is_some()
     }

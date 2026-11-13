@@ -1,5 +1,6 @@
 //! Application state, input handling and the event loop.
 
+mod files;
 mod media;
 mod verify;
 
@@ -134,6 +135,13 @@ pub struct App {
     pub mouse: bool,
     /// Text on its way to the system clipboard; the event loop sends it.
     pub pending_copy: Option<String>,
+    /// The `download_dir` setting; empty means the desktop's download folder.
+    download_dir: String,
+    /// Attachments being downloaded, and where finished ones went (by `mxc://` address).
+    saving: std::collections::HashSet<String>,
+    saved: std::collections::HashMap<String, PathBuf>,
+    /// A large attachment the user was asked about once.
+    confirm_large: Option<String>,
     /// The theme the user asked for, which may not exist yet (a generator may still
     /// have to write it).
     wanted_theme: String,
@@ -181,6 +189,7 @@ impl App {
         app.typing_notices = config.typing_notices;
         app.read_receipts = config.read_receipts;
         app.mouse = config.mouse;
+        app.download_dir = config.download_dir.clone();
         app.config_theme = config.theme.clone();
         app.set_theme(&config.theme);
         app
@@ -189,7 +198,10 @@ impl App {
     /// Demo data with fixed settings; also what the tests render.
     #[cfg(test)]
     pub fn demo() -> Self {
-        Self::with_theme(Theme::builtin(DEFAULT_THEME).expect("default theme"))
+        let mut app = Self::with_theme(Theme::builtin(DEFAULT_THEME).expect("default theme"));
+        // Not the machine's own folder, so screens look the same everywhere.
+        app.download_dir = "~/Downloads".to_owned();
+        app
     }
 
     fn with_theme(theme: Theme) -> Self {
@@ -223,6 +235,10 @@ impl App {
             read_receipts: true,
             mouse: true,
             pending_copy: None,
+            download_dir: String::new(),
+            saving: Default::default(),
+            saved: Default::default(),
+            confirm_large: None,
             wanted_theme: DEFAULT_THEME.to_owned(),
             config_file: None,
             config_theme: String::new(),
@@ -393,6 +409,7 @@ impl App {
             Setting::Mouse => switch(self.mouse),
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
+            Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::Keys => String::new(),
             Setting::Encryption => match self.verify.security.map(|s| s.device) {
                 Some(crate::matrix::DeviceTrust::Verified) => "this device is verified",
@@ -433,6 +450,13 @@ impl App {
             Setting::ReadReceipts => {
                 self.read_receipts = !self.read_receipts;
                 self.save_setting("read_receipts", self.read_receipts);
+            }
+            Setting::DownloadDir => {
+                if delta == 0
+                    && let Some(Modal::Settings(menu)) = &mut self.modal
+                {
+                    menu.editing = Some(self.download_dir.clone());
+                }
             }
             Setting::Keys => {
                 if delta == 0 {
@@ -482,6 +506,8 @@ impl App {
         self.user_id = None;
         self.recovery_prompted = false;
         self.verify = Default::default();
+        self.saving.clear();
+        self.confirm_large = None;
         self.sync = Some(SyncStatus::Stopped);
     }
 
@@ -1133,7 +1159,9 @@ impl App {
             }
             Action::Open => {
                 let opened = match self.timeline.selected {
-                    Some(i) => self.open_image(i) || self.open_link(i, 0),
+                    Some(i) => {
+                        self.open_image(i) || self.open_link(i, 0) || self.save_attachment(true)
+                    }
                     None => false,
                 };
                 if !opened {
@@ -1168,6 +1196,11 @@ impl App {
             Action::OpenSettings => {
                 if self.modal.is_none() {
                     self.open_modal(Modal::Settings(SettingsMenu::default()));
+                }
+            }
+            Action::Save => {
+                if !self.save_attachment(false) {
+                    self.show_toast("Nothing to save in this message");
                 }
             }
             Action::StartVerification => self.start_verification(),
@@ -1280,6 +1313,11 @@ impl App {
                 }
                 Some(Modal::Recovery(form)) if !form.busy => form.key.clear(),
                 Some(Modal::Emoji(picker)) => picker.set_query(String::new()),
+                Some(Modal::Settings(menu)) => {
+                    if let Some(text) = &mut menu.editing {
+                        text.clear();
+                    }
+                }
                 _ => {}
             }
             return;
@@ -1352,6 +1390,22 @@ impl App {
                     _ => {}
                 }
             }
+            Some(Modal::Settings(menu)) if menu.editing.is_some() => match code {
+                KeyCode::Esc => menu.editing = None,
+                KeyCode::Enter => {
+                    let text = menu.editing.take().unwrap_or_default();
+                    self.set_download_dir(&text);
+                }
+                KeyCode::Backspace => {
+                    menu.editing.as_mut().map(String::pop);
+                }
+                KeyCode::Char(c) if plain => {
+                    if let Some(text) = &mut menu.editing {
+                        text.push(c);
+                    }
+                }
+                _ => {}
+            },
             Some(Modal::Settings(menu)) => {
                 let setting = menu.current();
                 match code {
@@ -1460,6 +1514,7 @@ impl App {
             MatrixEvent::Image { key, full, result } => {
                 self.images.on_loaded(&key, full, result);
             }
+            MatrixEvent::FileSaved { key, open, result } => self.on_file_saved(key, open, result),
             MatrixEvent::Security(security) => self.on_security(security),
             MatrixEvent::Verification(update) => self.on_verification(update),
             MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
@@ -1752,7 +1807,12 @@ impl App {
                 picker.set_query(query);
                 return;
             }
-            Some(Modal::Settings(_)) => return,
+            Some(Modal::Settings(menu)) => {
+                if let Some(typed) = &mut menu.editing {
+                    typed.push_str(first_line);
+                }
+                return;
+            }
             Some(Modal::Verify(_)) => return,
             None => {}
         }
@@ -1808,8 +1868,11 @@ impl App {
                             if menu.selected != index {
                                 menu.selected = index;
                                 menu.confirm_logout = false;
+                                menu.editing = None;
                             }
-                            self.change_setting(setting, delta);
+                            if menu.editing.is_none() {
+                                self.change_setting(setting, delta);
+                            }
                         }
                     }
                     Some(HitId::Splitter) => self.dragging_splitter = true,
