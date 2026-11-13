@@ -115,6 +115,8 @@ impl App {
         // Shown at once: the first message, and in the demo the replies it carries.
         let mut first = root_message.clone();
         first.id = ROOT_ID.to_owned();
+        // Those are the room's receipts, not the thread's.
+        first.read_by = Default::default();
         let replies = first.thread.take().map(|thread| thread.demo_replies);
         let mut shown = vec![first];
         shown.extend(replies.unwrap_or_default());
@@ -286,6 +288,8 @@ impl App {
                 let mut first = view.root_message.clone();
                 first.id = ROOT_ID.to_owned();
                 first.thread = None;
+                // Those are the room's receipts, not the thread's.
+                first.read_by = Default::default();
                 messages.insert(0, first);
             }
         }

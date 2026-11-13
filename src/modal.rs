@@ -177,16 +177,19 @@ pub enum Setting {
     Keys,
     Encryption,
     Logout,
+    /// Whether the messages say who has read them (shown next to `ReadReceipts`).
+    ReadMarkers,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 11] = [
+    pub const ALL: [Setting; 12] = [
         Setting::Theme,
         Setting::SidebarWidth,
         Setting::RoomPreviews,
         Setting::Mouse,
         Setting::TypingNotices,
         Setting::ReadReceipts,
+        Setting::ReadMarkers,
         Setting::Notifications,
         Setting::DownloadDir,
         Setting::Keys,
@@ -213,6 +216,7 @@ impl Setting {
             Setting::Mouse => "Mouse",
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
+            Setting::ReadMarkers => "Read markers",
             Setting::Notifications => "Notifications",
             Setting::DownloadDir => "Download folder",
             Setting::Keys => "Key bindings",
@@ -233,6 +237,7 @@ impl Setting {
             Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",
+            Setting::ReadMarkers => "Show under messages who has read up to there.",
             Setting::Notifications => {
                 "Tell you about new messages while you are in another room or window."
             }
@@ -287,6 +292,8 @@ pub enum Modal {
     /// Join a room, start a direct chat, create a room, or invite someone.
     New(crate::manage::NewPopup),
     RoomInfo(crate::manage::InfoPopup),
+    /// The context menu of a message, a room, a link or the composer.
+    Menu(crate::menu::Menu),
     /// Configure key bindings and preset.
     Keybinds(crate::keymap::Editor),
 }

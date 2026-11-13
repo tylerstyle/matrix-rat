@@ -168,6 +168,7 @@ action_table! {
     Action::DeclineInvite => ("decline_invite", Context::Global, "Decline invitation"),
     Action::StartVerification => ("start_verification", Context::Global, "Encryption / Verify device"),
     Action::CloseThread => ("close_thread", Context::Global, "Close thread"),
+    Action::ContextMenu => ("context_menu", Context::Global, "Menu for what has the focus"),
     Action::SidebarUp => ("sidebar_up", Context::Sidebar, "Previous room"),
     Action::SidebarDown => ("sidebar_down", Context::Sidebar, "Next room"),
     Action::SidebarTop => ("sidebar_top", Context::Sidebar, "First room"),
@@ -443,6 +444,14 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        KeyCode::Menu,
+        NONE,
+        Action::ContextMenu,
+        "Menu",
+        "Menu for what has the focus",
+    ),
+    bind(
+        Global,
         Char('z'),
         CTRL,
         Action::Suspend,
@@ -555,6 +564,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::OpenThread,
         "t",
         "Open the message's thread",
+    ),
+    bind(
+        Timeline,
+        Char('m'),
+        NONE,
+        Action::ContextMenu,
+        "m",
+        "Menu for the message",
     ),
     bind(
         Timeline,
@@ -820,6 +837,7 @@ pub fn parse_key(context: Context, spec: &str) -> Result<(KeyCode, KeyModifiers)
         "backspace" | "bs" => KeyCode::Backspace,
         "del" | "delete" => KeyCode::Delete,
         "ins" | "insert" => KeyCode::Insert,
+        "menu" => KeyCode::Menu,
         "home" => KeyCode::Home,
         "end" => KeyCode::End,
         "pgup" | "pageup" | "page_up" | "page-up" => KeyCode::PageUp,
@@ -900,6 +918,7 @@ pub fn from_key_event(context: Context, key: KeyEvent) -> Result<(KeyCode, KeyMo
         | KeyCode::Down
         | KeyCode::Left
         | KeyCode::Right
+        | KeyCode::Menu
         | KeyCode::F(1..=12) => {}
         _ => return Err("unsupported key for key bindings".to_owned()),
     }
@@ -927,6 +946,7 @@ pub fn format_label(code: KeyCode, mods: KeyModifiers) -> String {
         KeyCode::Backspace => out.push_str("Backspace"),
         KeyCode::Delete => out.push_str("Del"),
         KeyCode::Insert => out.push_str("Ins"),
+        KeyCode::Menu => out.push_str("Menu"),
         KeyCode::Home => out.push_str("Home"),
         KeyCode::End => out.push_str("End"),
         KeyCode::PageUp => out.push_str("PgUp"),
@@ -969,6 +989,7 @@ pub fn format_config_key(code: KeyCode, mods: KeyModifiers) -> String {
         KeyCode::Backspace => out.push_str("backspace"),
         KeyCode::Delete => out.push_str("del"),
         KeyCode::Insert => out.push_str("ins"),
+        KeyCode::Menu => out.push_str("menu"),
         KeyCode::Home => out.push_str("home"),
         KeyCode::End => out.push_str("end"),
         KeyCode::PageUp => out.push_str("pgup"),

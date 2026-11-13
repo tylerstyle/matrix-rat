@@ -30,6 +30,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Search(bar) => super::search::draw(frame, app, area, bar),
         Modal::New(form) => super::roominfo::draw_new(frame, app, area, form),
         Modal::RoomInfo(info) => super::roominfo::draw_info(frame, app, area, info),
+        Modal::Menu(menu) => super::menu::draw(frame, app, area, menu),
         Modal::Keybinds(editor) => super::keybinds::draw(frame, app, area, editor),
     }
     app.modal = Some(modal);
@@ -218,6 +219,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
             Setting::Mouse
             | Setting::TypingNotices
             | Setting::ReadReceipts
+            | Setting::ReadMarkers
             | Setting::RoomPreviews
             | Setting::Notifications => {
                 let on = value == "on";

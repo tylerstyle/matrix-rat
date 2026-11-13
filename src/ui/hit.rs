@@ -51,6 +51,8 @@ pub enum HitId {
     Palette(usize),
     /// A row in the composer completion popup (index into `completion.items`).
     Complete(usize),
+    /// A row of the context menu.
+    Menu(usize),
     /// A row in the key-bindings editor (index into `editor.rows()`).
     KeybindRow(usize),
     /// A button in the key-bindings editor.
@@ -83,6 +85,16 @@ impl HitMap {
             .map(|(_, id)| *id)
     }
 
+    /// Where something was drawn in the last frame: the smallest rectangle around
+    /// everything registered for it (a message is registered row by row).
+    pub fn rect_of(&self, id: HitId) -> Option<Rect> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| *entry == id)
+            .map(|(rect, _)| *rect)
+            .reduce(|all, rect| all.union(rect))
+    }
+
     /// The pane under the pointer, looking through whatever lies on top of it.
     pub fn pane_at(&self, column: u16, row: u16) -> Option<Pane> {
         let position = Position::new(column, row);
@@ -108,6 +120,10 @@ mod tests {
         assert_eq!(map.at(0, 0), Some(HitId::Pane(Pane::Timeline)));
         assert_eq!(map.at(10, 10), None);
         assert_eq!(map.pane_at(3, 2), Some(Pane::Timeline));
+        assert_eq!(map.rect_of(HitId::Message(4)), Some(Rect::new(2, 2, 3, 1)));
+        map.add(Rect::new(2, 3, 5, 1), HitId::Message(4));
+        assert_eq!(map.rect_of(HitId::Message(4)), Some(Rect::new(2, 2, 5, 2)));
+        assert_eq!(map.rect_of(HitId::Message(5)), None);
         map.clear();
         assert_eq!(map.at(3, 2), None);
     }

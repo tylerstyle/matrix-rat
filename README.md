@@ -25,6 +25,10 @@ rooms, `Alt-A` attaches a file (or drop one into the terminal).
 room's details and members, and is where you invite people, rename, mute, favourite or leave.
 On a selected message: `t` opens its thread, `Enter` replies, `e` edits, `r` reacts, `o` opens a link, picture or
 file, `s` saves a file or picture to the download folder (set it in the settings).
+A right click opens a menu of what can be done with the message, link, room or draft under the
+pointer; `m` (or the menu key) opens the same menu for the selected message.
+Messages say who has read up to them: `✓ read` in a chat with one person, initials in a room
+("Read by…" in the menu lists the names). `read_markers = false`, or the settings, turn that off.
 
 ## Installing
 

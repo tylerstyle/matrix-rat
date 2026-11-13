@@ -1,0 +1,15 @@
+---
+source: src/ui/timeline/receipts.rs
+expression: "lines(&direct, 44).join(\"\\n\")"
+---
+────────────────── Today ───────────────────
+● you  12:00
+  Lunch at 12?
+
+● bob  12:00
+  Sure. The usual place?
+
+● you  12:00
+  Yes. I will bring the laptop so we can
+  look at the theme files.            ✓ read
+  See you there

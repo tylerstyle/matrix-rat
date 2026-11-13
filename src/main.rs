@@ -15,6 +15,7 @@ mod lock;
 mod logging;
 mod manage;
 mod matrix;
+mod menu;
 mod modal;
 mod model;
 mod notify;

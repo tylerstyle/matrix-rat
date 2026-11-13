@@ -5,6 +5,7 @@ mod complete;
 mod files;
 mod keybinds;
 mod media;
+mod menu;
 mod palette;
 mod rooms;
 pub mod search;
@@ -153,6 +154,8 @@ pub struct App {
     typing_sent: Option<Instant>,
     pub typing_notices: bool,
     pub read_receipts: bool,
+    /// Show who has read up to where (the `read_markers` setting).
+    pub read_markers: bool,
     /// Whether clicks go to the app; the event loop applies changes to the terminal.
     pub mouse: bool,
     /// Text on its way to the system clipboard; the event loop sends it.
@@ -248,6 +251,7 @@ impl App {
         app.sidebar.width = config.sidebar_width;
         app.typing_notices = config.typing_notices;
         app.read_receipts = config.read_receipts;
+        app.read_markers = config.read_markers;
         app.mouse = config.mouse;
         app.download_dir = config.download_dir.clone();
         app.room_previews = config.room_previews;
@@ -311,6 +315,7 @@ impl App {
             typing_sent: None,
             typing_notices: true,
             read_receipts: true,
+            read_markers: true,
             mouse: true,
             pending_copy: None,
             notify_mode: crate::notify::NotifyMode::Off,
@@ -524,6 +529,7 @@ impl App {
             Setting::Mouse => switch(self.mouse),
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
+            Setting::ReadMarkers => switch(self.read_markers),
             Setting::Notifications => switch(self.notify_mode != crate::notify::NotifyMode::Off),
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::Keys => self.keymap.preset_summary(),
@@ -561,6 +567,12 @@ impl App {
             Setting::ReadReceipts => {
                 self.read_receipts = !self.read_receipts;
                 self.save_setting("read_receipts", self.read_receipts);
+            }
+            Setting::ReadMarkers => {
+                self.read_markers = !self.read_markers;
+                self.save_setting("read_markers", self.read_markers);
+                // The rows are laid out afresh.
+                self.timeline_rev += 1;
             }
             Setting::RoomPreviews => {
                 self.room_previews = !self.room_previews;
@@ -1609,6 +1621,7 @@ impl App {
                 }
             }
             Action::Setting(setting) => self.perform_setting(setting),
+            Action::ContextMenu => self.open_menu_by_key(),
             Action::NewRoom
             | Action::RoomInfo
             | Action::LeaveRoom
@@ -1689,6 +1702,7 @@ impl App {
             Some(Modal::Search(_)) => self.close_search(),
             Some(Modal::Verify(_)) => self.verify_escape(),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_escape(),
+            Some(Modal::Menu(_)) => self.modal = None,
             None => {}
         }
     }
@@ -1843,6 +1857,7 @@ impl App {
             Some(Modal::Palette(_)) => self.on_palette_key(code, mods),
             Some(Modal::Search(_)) => self.on_search_key(code, mods),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.on_manage_key(code, mods),
+            Some(Modal::Menu(_)) => self.on_menu_key(code, mods),
             Some(Modal::Keybinds(_)) => self.on_keybinds_key(key, code, mods),
             None => {}
         }
@@ -1978,6 +1993,8 @@ impl App {
             MatrixEvent::Manage(_) if self.logged_out => {}
             MatrixEvent::Manage(event) => self.on_manage(event),
         }
+        // A menu about something that is gone closes.
+        self.menu_follow();
     }
 
     /// Replaces the room list with the server's, keeping what belongs to the UI (drafts,
@@ -2219,13 +2236,7 @@ impl App {
 
         // Ctrl-C never quits (too easy to hit); it clears the draft instead.
         if (code, mods) == (KeyCode::Char('c'), KeyModifiers::CONTROL) {
-            // What is attached goes with the draft.
-            let had_files = self.clear_attachments();
-            if !self.composer.is_empty() {
-                self.composer.take();
-                self.clear_completion_marks();
-                self.cancel_compose();
-            } else if !had_files {
+            if !self.clear_draft() {
                 let quit = self
                     .keymap
                     .label_in(Context::Global, Action::Quit)
@@ -2269,6 +2280,19 @@ impl App {
             // Unbound keys do nothing here; they are never typed into the draft.
             Pane::Timeline => {}
         }
+    }
+
+    /// Empties the draft, with what is attached to it. False if there was nothing.
+    fn clear_draft(&mut self) -> bool {
+        // What is attached goes with the draft.
+        let had_files = self.clear_attachments();
+        if !self.composer.is_empty() {
+            self.composer.take();
+            self.clear_completion_marks();
+            self.cancel_compose();
+            return true;
+        }
+        had_files
     }
 
     /// Types into whatever has the focus: the room filter or the composer.
@@ -2354,6 +2378,8 @@ impl App {
             }
             Some(Modal::Search(_)) => return self.search_paste(first_line),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => return self.on_manage_paste(first_line),
+            // A paste is not an answer to a menu.
+            Some(Modal::Menu(_)) => return,
             Some(Modal::Keybinds(_)) => return,
             None => {}
         }
@@ -2383,6 +2409,9 @@ impl App {
 
     fn on_mouse(&mut self, mouse: MouseEvent) {
         let hit = self.hits.at(mouse.column, mouse.row);
+        if self.menu_mouse(&mouse, hit) {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.dirty = true;
@@ -2490,6 +2519,8 @@ impl App {
                     Some(HitId::Complete(index)) => {
                         self.accept_completion(Some(index));
                     }
+                    // Handled by `menu_mouse` above.
+                    Some(HitId::Menu(_)) => {}
                     Some(HitId::KeybindRow(index)) => self.click_keybind_row(index),
                     Some(HitId::KeybindBtn(button)) => self.click_keybind_button(button),
                 }

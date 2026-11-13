@@ -97,6 +97,35 @@ pub struct Message {
     pub shield: Option<Shield>,
     /// Mentions (`m.mentions`) carried by the message, used to preserve them on edit.
     pub mentions: Option<matrix_sdk::ruma::events::Mentions>,
+    /// Who has read up to this message (and no further), as far as they tell.
+    pub read_by: ReadBy,
+}
+
+/// The people whose read receipt sits on a message: never ourselves, never its sender.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadBy {
+    /// Newest first; at most `ReadBy::KEPT` of them.
+    pub readers: Vec<Reader>,
+    /// How many there are in all.
+    pub total: u32,
+}
+
+impl ReadBy {
+    /// Names kept per message; the rest are only counted.
+    pub const KEPT: usize = 20;
+
+    pub fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reader {
+    /// Display name, safe to show.
+    pub name: String,
+    /// When they read it ("14:05", or with the day when it was not today); empty if
+    /// the receipt does not say.
+    pub time: String,
 }
 
 /// Why a message in an encrypted room cannot be fully trusted.

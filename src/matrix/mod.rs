@@ -5,6 +5,7 @@ mod convert;
 mod manage;
 mod media;
 mod notify;
+mod receipts;
 mod rooms;
 mod session;
 mod spaces;

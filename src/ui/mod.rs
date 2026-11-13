@@ -7,6 +7,7 @@ mod help;
 pub mod hit;
 mod image;
 mod keybinds;
+mod menu;
 mod modal;
 mod palette;
 mod roominfo;

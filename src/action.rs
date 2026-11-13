@@ -99,6 +99,9 @@ pub enum Action {
     InviteUser,
     /// A control of the room popups.
     Manage(crate::manage::Click),
+    /// Open the menu of what has the focus: the selected message, the room under the
+    /// cursor, or the composer.
+    ContextMenu,
     /// Jump to the oldest loaded message in the timeline.
     JumpToOldest,
     /// Move the room-list cursor to the first visible room.
