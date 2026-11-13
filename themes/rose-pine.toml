@@ -16,4 +16,4 @@ success = "#9ccfd8"
 warning = "#f6c177"
 
 [users]
-colors = ["#c4a7e7", "#9ccfd8", "#f6c177", "#ebbcba", "#31748f", "#eb6f92", "#e0def4", "#908caa"]
+colors = ["#c4a7e7", "#9ccfd8", "#f6c177", "#ebbcba", "#31748f", "#eb6f92"]

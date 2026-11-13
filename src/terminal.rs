@@ -175,3 +175,22 @@ fn install_panic_hook() {
         previous(info);
     }));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::base64;
+
+    #[test]
+    fn base64_pads_correctly() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("ünï", "w7xuw68="),
+        ] {
+            assert_eq!(base64(plain.as_bytes()), encoded);
+        }
+    }
+}

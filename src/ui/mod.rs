@@ -280,10 +280,11 @@ mod tests {
 
     #[test]
     fn tiny_sizes_do_not_panic() {
-        use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm};
+        use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, SettingsMenu};
         let modals = [
             None,
             Some(Modal::Emoji(EmojiPicker::default())),
+            Some(Modal::Settings(SettingsMenu::default())),
             Some(Modal::Login(LoginForm::new(Some("an error".into())))),
             Some(Modal::Recovery(RecoveryForm::default())),
         ];

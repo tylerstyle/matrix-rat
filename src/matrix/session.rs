@@ -93,6 +93,15 @@ pub fn forget(paths: &Paths) {
     let _ = std::fs::remove_file(paths.session_file());
 }
 
+/// Removes everything a session left behind, for an explicit logout. The stores are
+/// encrypted with a passphrase kept in the session file, so without it they are only
+/// unreadable leftovers.
+pub fn clear(paths: &Paths) {
+    forget(paths);
+    let _ = std::fs::remove_dir_all(paths.store_dir());
+    let _ = std::fs::remove_dir_all(paths.data_dir.join("store.previous"));
+}
+
 pub fn save(paths: &Paths, client: &Client, passphrase: &str) -> Result<()> {
     let auth = if let Some(session) = client.matrix_auth().session() {
         SavedAuth::Password { session }

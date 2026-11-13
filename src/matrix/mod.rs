@@ -331,7 +331,7 @@ impl Worker {
                 Ok(SessionEnd::LoggedOut) => {
                     // Tell the server, but log out here even if it cannot be reached.
                     match tokio::time::timeout(Duration::from_secs(10), client.logout()).await {
-                        Ok(Ok(())) => reason = Some("You are logged out.".to_owned()),
+                        Ok(Ok(())) => {}
                         outcome => {
                             tracing::warn!(?outcome, "could not log out on the server");
                             reason = Some(
@@ -341,7 +341,8 @@ impl Worker {
                             );
                         }
                     }
-                    session::forget(&self.paths);
+                    drop(client);
+                    session::clear(&self.paths);
                 }
                 Err(err) => {
                     tracing::error!(?err, "session failed");
@@ -374,8 +375,11 @@ impl Worker {
         loop {
             let request = match commands.recv().await? {
                 MatrixCmd::Shutdown => return None,
-                MatrixCmd::CancelLogin | MatrixCmd::Recover { .. } => continue,
-                request => request,
+                request @ (MatrixCmd::LoginPassword { .. } | MatrixCmd::LoginBrowser { .. }) => {
+                    request
+                }
+                // Anything else was meant for a session that has ended.
+                _ => continue,
             };
             let login = async {
                 match &request {

@@ -403,6 +403,11 @@ impl App {
             }
             Setting::Mouse => {
                 self.mouse = !self.mouse;
+                if !self.mouse {
+                    // No more pointer events will come to clear these.
+                    self.hover = None;
+                    self.dragging_splitter = false;
+                }
                 self.save_setting("mouse", self.mouse);
             }
             Setting::TypingNotices => {
@@ -433,13 +438,29 @@ impl App {
                 };
                 if menu.confirm_logout {
                     self.modal = None;
-                    self.show_toast("Logging out…");
                     self.send_matrix(MatrixCmd::Logout);
+                    // Nothing may be sent for the old session from here on.
+                    self.reset_session();
+                    self.show_toast("Logging out…");
                 } else {
                     menu.confirm_logout = true;
                 }
             }
         }
+    }
+
+    /// Nothing of a previous session may linger behind the login form.
+    fn reset_session(&mut self) {
+        self.rooms.clear();
+        self.active = 0;
+        self.timeline = TimelineState::default();
+        self.composer.take();
+        self.compose_mode = ComposeMode::Normal;
+        self.edit_stash = None;
+        self.typing_sent = None;
+        self.user_id = None;
+        self.recovery_prompted = false;
+        self.sync = Some(SyncStatus::Stopped);
     }
 
     fn set_focus(&mut self, pane: Pane) {
@@ -1081,6 +1102,8 @@ impl App {
                 if let Some(text) = text {
                     self.pending_copy = Some(text);
                     self.show_toast("Copied");
+                } else {
+                    self.show_toast("Nothing to copy");
                 }
             }
             Action::Open => {
@@ -1323,17 +1346,7 @@ impl App {
         self.dirty = true;
         match event {
             MatrixEvent::NeedLogin { reason } => {
-                // Nothing of a previous session may linger behind the login form.
-                self.rooms.clear();
-                self.active = 0;
-                self.timeline = TimelineState::default();
-                self.composer.take();
-                self.compose_mode = ComposeMode::Normal;
-                self.edit_stash = None;
-                self.typing_sent = None;
-                self.user_id = None;
-                self.recovery_prompted = false;
-                self.sync = Some(SyncStatus::Stopped);
+                self.reset_session();
                 self.open_modal(Modal::Login(LoginForm::new(reason)));
             }
             MatrixEvent::LoginFailed(error) => {
@@ -3217,7 +3230,7 @@ mod tests {
 
     #[test]
     fn logging_out_needs_a_second_enter() {
-        let (mut app, _terminal, mut commands) = connected();
+        let (mut app, mut terminal, mut commands) = connected();
         drain(&mut commands);
         app.on_event(key(KeyCode::F(2)));
         app.on_event(key(KeyCode::Up));
@@ -3231,6 +3244,11 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         assert_eq!(drain(&mut commands), ["Logout"]);
         assert!(app.modal.is_none());
+        // The old session's rooms are gone at once, so nothing more is sent for them.
+        assert!(app.rooms.is_empty());
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        assert!(drain(&mut commands).is_empty());
     }
 
     #[test]
