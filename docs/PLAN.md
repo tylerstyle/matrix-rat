@@ -461,6 +461,15 @@ differentiators and can be reviewed with fake data in days.
 | Noctalia v4 vs v5 template differences | v5 is primary and tested; v4 snippet shares the template body and avoids v5-only tokens via a separate file if needed. |
 | Scope creep | v1 column in §9 is the contract; "Later" items wait. |
 
+### Open requests
+
+- **Notification icon (requested 2026-11-13):** a desktop notification shows the picture
+  of the chat it comes from; without one, a coloured tile with the capital first letter of
+  the room name (the same tile the room list uses). Needs the picture as a file for the
+  notification service (a small cache in the runtime directory, cleaned up on exit) and a
+  drawn letter for the fallback (no font library: a small built-in bitmap alphabet).
+  Terminal notifications (OSC 99) carry no picture and stay as they are.
+
 ## 13. Decisions by the user (2026-11-12)
 
 1. Name and binary: `matrix-rat`.
