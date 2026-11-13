@@ -207,6 +207,14 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        Char('f'),
+        CTRL,
+        Action::Search,
+        "Ctrl-F",
+        "Find in this room",
+    ),
+    bind(
+        Global,
         Char('s'),
         ALT,
         Action::SpaceNext,

@@ -274,6 +274,7 @@ pub enum Modal {
     Emoji(EmojiPicker),
     Settings(SettingsMenu),
     Verify(crate::verify::VerifyPopup),
+    Search(crate::app::search::SearchBar),
     Palette(crate::palette::Palette),
     /// Join a room, start a direct chat, create a room, or invite someone.
     New(crate::manage::NewPopup),

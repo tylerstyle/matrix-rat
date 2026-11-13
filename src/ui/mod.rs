@@ -9,6 +9,7 @@ mod image;
 mod modal;
 mod palette;
 mod roominfo;
+mod search;
 mod sidebar;
 mod status;
 mod timeline;
@@ -174,6 +175,26 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 100, 30));
         // A low window drops the blank lines but keeps every row.
         insta::assert_snapshot!("settings_menu_low", render(&mut app, 70, 18));
+    }
+
+    #[test]
+    fn find_bar() {
+        let mut app = App::demo();
+        render(&mut app, 100, 30);
+        app.perform(Action::Search);
+        for c in "cache".chars() {
+            app.on_event(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+        }
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+        // Small windows: it shrinks, and below a minimum it is simply not drawn.
+        for (width, height) in [(30, 8), (17, 5), (10, 3)] {
+            render(&mut app, width, height);
+        }
     }
 
     #[test]

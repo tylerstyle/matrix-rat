@@ -6,6 +6,7 @@ mod files;
 mod media;
 mod palette;
 mod rooms;
+pub mod search;
 mod thread;
 mod verify;
 
@@ -1519,6 +1520,7 @@ impl App {
                     self.open_modal(Modal::Settings(SettingsMenu::default()));
                 }
             }
+            Action::Search => self.open_search(),
             Action::SpaceNext => self.step_space(1),
             Action::SpacePrev => self.step_space(-1),
             Action::RoomPrev => self.step_room(-1),
@@ -1625,6 +1627,7 @@ impl App {
                 self.show_toast("Encrypted history stays locked until you enter the key");
             }
             Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_)) => self.modal = None,
+            Some(Modal::Search(_)) => self.close_search(),
             Some(Modal::Verify(_)) => self.verify_escape(),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_escape(),
             None => {}
@@ -1665,6 +1668,7 @@ impl App {
                 Some(Modal::Recovery(form)) if !form.busy => form.key.clear(),
                 Some(Modal::Emoji(picker)) => picker.set_query(String::new()),
                 Some(Modal::Palette(palette)) => palette.set_query(String::new()),
+                Some(Modal::Search(_)) => self.search_clear(),
                 Some(Modal::Settings(menu)) => {
                     if let Some(text) = &mut menu.editing {
                         text.clear();
@@ -1778,6 +1782,7 @@ impl App {
             }
             Some(Modal::Verify(_)) => self.on_verify_key(code, mods),
             Some(Modal::Palette(_)) => self.on_palette_key(code, mods),
+            Some(Modal::Search(_)) => self.on_search_key(code, mods),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.on_manage_key(code, mods),
             None => {}
         }
@@ -1866,6 +1871,7 @@ impl App {
                     let grew = self.rooms.get(self.active).map_or(0, |r| r.messages.len())
                         > view.count_at_request;
                     view.empty_batches = if grew { 0 } else { view.empty_batches + 1 };
+                    self.search_after_load();
                 }
             }
             MatrixEvent::Typing { generation, names } => {
@@ -2269,6 +2275,7 @@ impl App {
                 palette.push_str(first_line);
                 return;
             }
+            Some(Modal::Search(_)) => return self.search_paste(first_line),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => return self.on_manage_paste(first_line),
             None => {}
         }
@@ -2309,7 +2316,12 @@ impl App {
                         self.help_open = false;
                         if matches!(
                             self.modal,
-                            Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_))
+                            Some(
+                                Modal::Emoji(_)
+                                    | Modal::Settings(_)
+                                    | Modal::Palette(_)
+                                    | Modal::Search(_)
+                            )
                         ) {
                             self.modal = None;
                         }

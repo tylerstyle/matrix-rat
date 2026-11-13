@@ -65,6 +65,8 @@ pub enum Action {
     /// Open the room above or below the open one in the list, from anywhere.
     RoomPrev,
     RoomNext,
+    /// Find text in the open room.
+    Search,
     /// Narrow the room list to the next or previous space ("all rooms" in between).
     SpaceNext,
     SpacePrev,
