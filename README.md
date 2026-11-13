@@ -26,26 +26,31 @@ notifications and themes that follow your desktop are all there.
 | | |
 |---|---|
 | 🔐 **Private by default** | End-to-end encryption, device verification by emoji comparison, recovery key, and warnings on messages that cannot be fully trusted. |
-| 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer with kitty graphics, coloured blocks elsewhere. Room pictures in the list. |
-| 💬 **Everything a chat needs** | Replies, edits, reactions, threads, mentions, read markers, typing notices, Markdown and `\|\|spoilers\|\|` as you type. |
-| 📎 **Files both ways** | Drop a file into the terminal to send it; `s` saves any attachment to your download folder. |
+| 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list (kitty graphics only; coloured initials otherwise). |
+| 💬 **Everything a chat needs** | Replies, edits, reactions, threads, mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
+| 📎 **Files both ways** | Drop a file into the terminal to attach it, `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
 | 🎨 **Yours to shape** | Eleven built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
-| 🔔 **Notifications** | Desktop or terminal notifications with the chat's picture, never for the room you are looking at. |
+| 🔔 **Notifications** | Desktop notifications with the chat's picture, or plain ones through the terminal; none for what you are reading right now. |
 
 ## Install
 
-**With Nix** (the repository is the package):
+matrix-rat is developed and tested on Linux. The desktop features (notifications with
+pictures, following dark/light, the keyring) use D-Bus and are Linux-only; the rest should
+build wherever Rust and a terminal are, but that is untested.
+
+**With Nix** (the repository is the package; no flake needed):
 
 ```sh
 git clone https://github.com/tylerstyle/matrix-rat && cd matrix-rat
-nix-env -if .                 # install into your profile
+nix-build                     # ./result/bin/matrix-rat
+nix-env -if .                 # or install into your profile
 # or on NixOS, in your configuration:
 #   environment.systemPackages = [ (pkgs.callPackage /path/to/matrix-rat { }) ];
 ```
 
-**With Cargo** (Rust 1.96 or newer, plus a C compiler, `cmake` and `perl`):
+**With Cargo** (Rust 1.96 or newer, plus a C compiler, `make`, `cmake` and `perl`):
 
 ```sh
 git clone https://github.com/tylerstyle/matrix-rat && cd matrix-rat
@@ -55,20 +60,24 @@ cargo install --path .        # installs to ~/.cargo/bin
 **Just try it**, without an account and without installing:
 
 ```sh
-cargo run -- --demo
+cargo run -- --demo           # built-in demo data; nothing you change there is saved
 ```
 
-Any modern terminal works. For real pictures use [kitty](https://sw.kovidgoyal.net/kitty/)
-(run matrix-rat directly in it, not inside a multiplexer); everywhere else pictures are
-drawn with coloured blocks.
+Any modern terminal works. For real pictures use a terminal with the kitty graphics
+protocol, such as [kitty](https://sw.kovidgoyal.net/kitty/) or Ghostty, and run matrix-rat
+directly in it: inside tmux, zellij or screen (and in WezTerm and Konsole) pictures are
+drawn with coloured blocks instead.
 
 ## First steps
+
+You need an existing Matrix account; matrix-rat does not register new ones.
 
 1. **Start it:** `matrix-rat`. Enter your homeserver (for example `matrix.org`), then log in
    with your password, or choose **Log in with browser** for servers with single sign-on.
 2. **Unlock your history:** if you use encryption elsewhere, matrix-rat asks for your
-   **recovery key**. Entering it also verifies this device. No key at hand? Choose
-   "verify" in the status line and compare emoji with another of your devices.
+   **recovery key** (or recovery passphrase). Entering it also verifies this device. No key
+   at hand? Click "⚠ unverified device — verify" in the status line and compare emoji with
+   another of your devices.
 3. **Chat:** pick a room with the mouse or `Ctrl-K`, type, press `Enter`.
 
 `F1` shows every key, `F2` opens the settings, `Ctrl-P` finds any command by name.
@@ -78,20 +87,21 @@ drawn with coloured blocks.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` from the composer | walk into the messages; then `Enter` reply, `e` edit, `r` react, `t` thread, `o` open, `s` save, `c` copy, `m` menu, `Del` delete |
-| `Tab`, `Alt-1`…`3`, `Alt-←↑↓→` | move between room list, messages and composer |
+| `↑` from the composer | walk into the messages (from the first line of a draft); then `Enter` reply, `e` edit, `r` react, `t` thread, `o` open, `v` view picture, `s` save, `c` copy, `m` menu, `Del` delete, `End` newest |
+| `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-P` | find a room · find in this room · command palette |
 | `Ctrl-N` | join a room, start a chat, create a room |
-| `F4` | room details and members (invite, rename, mute, favourite, leave) |
+| `F4` | room details and members (invite, rename, notifications, favourite, leave) |
 | `Alt-S` | step through your spaces |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
 | `F2` / `F3` | settings / next theme |
 | `Ctrl-Q` | quit |
 
-While typing: `**bold**`, `*italic*`, `` `code` ``, `||spoiler||`, `> quote`, lists and links
-are formatted as Markdown; `/me`, `/spoiler`, `/plain`, `/shrug` and friends work as
-commands; `@`, `:`, `#` and `/` open completions.
+What you type is sent as Markdown: `**bold**`, `*italic*`, `` `code` ``, `||spoiler||`,
+`> quote`, lists and links (the composer shows the plain text; the formatting appears in
+the sent message). `/me`, `/spoiler`, `/plain`, `/shrug` and friends work as commands;
+`@`, `:`, `#` and `/` open completions.
 
 <div align="center">
 <img src="docs/screenshots/palette.svg" alt="The command palette, filtered by typing" width="860">
@@ -99,14 +109,15 @@ commands; `@`, `:`, `#` and `/` open completions.
 
 ## Make it yours
 
-Everything is optional, and the settings menu (`F2`) writes what you change into
-`~/.config/matrix-rat/config.toml`, keeping your comments.
+Everything is optional. The settings menu (`F2`) covers the common choices and writes
+them into `~/.config/matrix-rat/config.toml`, keeping your comments; a few settings
+exist only in that file (marked below).
 
 ### Themes
 
 Eleven themes are built in; `F3` cycles them. `theme = "terminal"` uses your terminal's own
-colours. Switch on **Follow dark/light** in the settings to use one theme by day and another
-by night, following your desktop.
+colours. Switch on **Follow dark/light** in the settings (`theme_dark` and `theme_light`
+in the file) to use one theme by day and another by night, following your desktop.
 
 Theme files in `~/.config/matrix-rat/themes/` are reloaded the moment they change, so
 wallpaper-driven tools can recolour the app while it runs. Templates for **Noctalia**,
@@ -144,13 +155,13 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 **Key syntax and terminal limits**
 
 - **Modifiers**: `ctrl-`, `alt-`, `shift-` (case-insensitive, e.g. `ctrl-q`, `alt-up`, `shift-enter`).
-- **Named keys**: `enter` (`return`), `esc` (`escape`), `tab`, `backtab`, `space`, `backspace` (`bs`), `del` (`delete`), `ins` (`insert`), `home`, `end`, `pgup` (`pageup`), `pgdn` (`pagedown`), `up`, `down`, `left`, `right`, `f1`–`f12`.
+- **Named keys**: `enter` (`return`), `esc` (`escape`), `tab`, `backtab`, `space`, `backspace` (`bs`), `del` (`delete`), `ins` (`insert`), `home`, `end`, `pgup` (`pageup`), `pgdn` (`pagedown`), `up`, `down`, `left`, `right`, `menu`, `f1`–`f12`.
 - **Characters**: any single non-control character (`e`, `R`, `/`, `?`).
 - **Rejected combinations**: `ctrl-i` (Tab), `ctrl-m` (Enter), `ctrl-[` (Esc), and `ctrl-c` (clear draft) are reserved by terminal input/app behaviour; write `"R"` instead of `"shift-r"`, and omit `shift-` with `ctrl-`/`alt-` on characters because legacy and normalized terminal input do not keep them distinct.
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `start_verification`, `close_thread`.
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `start_verification`, `close_thread`, `context_menu`.
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`.
@@ -170,12 +181,14 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | Setting | What it does |
 |---|---|
 | `room_previews` | latest message under each room, larger room pictures |
-| `images` | `"auto"`, `"halfblocks"` or `"off"` |
-| `notifications`, `notification_preview` | `"auto"`, `"desktop"`, `"terminal"`, `"off"`; hide message text and names |
+| `sidebar_width` | width of the room list (or drag the divider) |
 | `read_receipts`, `read_markers`, `typing_notices` | what others see of you, and what you see of them |
+| `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
 | `download_dir` | where `s` saves attachments |
 | `mouse` | turn off to use the terminal's own text selection |
-| `secret_store` | `"file"` (default) or `"keyring"` to keep the store's key in the system keyring |
+| `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
+| `notification_preview` (file only) | `false` hides message text, names and pictures in notifications |
+| `secret_store` (file only) | `"file"` (default), `"keyring"` to keep the store's key in the system keyring, or `"auto"` |
 
 `--profile <name>` keeps several accounts apart.
 
@@ -185,9 +198,10 @@ Setting `preset = "vim"` keeps the default keys and adds:
   the bridge encrypts for the people on the other side.
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
   once at start.
-- **Logs** are in `~/.local/state/matrix-rat/<profile>/`. The app keeps message text,
-  passwords and keys out of what it logs.
-- **Something stuck?** `Ctrl-Q` always quits; `Ctrl-Z` suspends to the shell.
+- **Logs** are in `~/.local/state/matrix-rat/<profile>/`. At the default level the app
+  keeps message text, passwords and keys out of them.
+- **Something stuck?** `Ctrl-Q` quits and `Ctrl-Z` suspends to the shell, also from
+  behind a popup (unless you have bound those keys to something else).
 
 ## For developers
 
@@ -196,12 +210,12 @@ nix-shell                      # toolchain and C dependencies (or bring your own
 scripts/check.sh               # fmt, clippy -D warnings, tests, build
 scripts/dev-homeserver.sh      # a throwaway local homeserver for the server-backed tests
 MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass \
-  cargo test -- --ignored --test-threads=1
+  cargo test matrix:: -- --ignored --test-threads=1
 cargo test write_screenshots -- --ignored   # regenerate the pictures above
 ```
 
-The UI thread owns all state and talks to a Matrix worker over two channels; every key,
-click and palette entry resolves to the same `Action`. The design, the milestones and the
+The UI thread owns all state and talks to a Matrix worker over two channels; keys, status
+line hints, menus and palette entries resolve to the same `Action`s. The design, the milestones and the
 log of every code review are in [docs/PLAN.md](docs/PLAN.md); the reviews themselves are in
 [docs/reviews/](docs/reviews/).
 
