@@ -45,6 +45,11 @@ pub struct ThreadView {
     room_rows: Option<crate::ui::RowCache>,
     room_draft: String,
     focus: Pane,
+    /// The worker has sent the thread's messages at least once.
+    loaded: bool,
+    /// The thread's own timeline holds the first message (it is loaded last, with the
+    /// oldest replies). Until then only the room's timeline can act on it.
+    root_loaded: bool,
 }
 
 impl App {
@@ -57,6 +62,14 @@ impl App {
     /// waiting to be sent).
     pub(super) fn thread_key(&self) -> Option<&str> {
         self.threads.open.as_ref().map(|view| view.key.as_str())
+    }
+
+    /// A thread is open and still shows only what the room knew of it.
+    pub(super) fn thread_loading(&self) -> bool {
+        self.threads
+            .open
+            .as_ref()
+            .is_some_and(|view| view.root.is_some() && !view.loaded)
     }
 
     /// Shows the thread that starts at the message at `index`. A message without
@@ -115,6 +128,8 @@ impl App {
             room_rows: self.row_cache.take(),
             room_draft,
             focus: self.focus,
+            loaded: false,
+            root_loaded: false,
         });
         self.timeline_rev += 1;
         // A new generation: late updates for the room are dropped from here on.
@@ -152,6 +167,7 @@ impl App {
         }
         self.composer.set_text(&view.room_draft);
 
+        let mut deleted = None;
         if let Some(room) = self.rooms.get_mut(self.active) {
             let shown = std::mem::replace(&mut room.messages, view.room_messages);
             match &view.root {
@@ -166,19 +182,35 @@ impl App {
                 }
                 // The demo keeps a thread's replies with its first message.
                 None => {
-                    if let Some(first) = room.messages.get_mut(view.root_index) {
-                        let (mut roots, replies): (Vec<_>, Vec<_>) =
-                            shown.into_iter().partition(|m| m.id == ROOT_ID);
-                        if let Some(mut edited) = roots.pop() {
+                    let (mut roots, replies): (Vec<_>, Vec<_>) =
+                        shown.into_iter().partition(|m| m.id == ROOT_ID);
+                    match (roots.pop(), room.messages.get_mut(view.root_index)) {
+                        (Some(mut edited), Some(first)) => {
                             edited.id = std::mem::take(&mut first.id);
+                            edited.thread = ThreadSummary::of(replies);
                             *first = edited;
                         }
-                        first.thread = ThreadSummary::of(replies);
+                        // Deleted inside the thread: gone from the room too.
+                        (None, Some(_)) => {
+                            room.messages.remove(view.root_index);
+                            deleted = Some(view.root_index);
+                        }
+                        _ => {}
                     }
                 }
             }
         }
         self.timeline = view.room_timeline;
+        if let Some(deleted) = deleted {
+            // The selection stays on its message, or moves next to the gap.
+            self.timeline.selected = match self.timeline.selected {
+                Some(i) if i > deleted => Some(i - 1),
+                Some(i) if i == deleted => self
+                    .find_selectable(i.saturating_sub(1), false)
+                    .or_else(|| self.find_selectable(i, true)),
+                other => other,
+            };
+        }
         // Answers to what was asked for the room before are dropped as stale.
         self.timeline.loading_older = false;
         self.timeline.drawn = false;
@@ -190,11 +222,19 @@ impl App {
 
     /// Addresses a command about messages to the open thread, if there is one.
     pub(super) fn in_thread(&self, command: MatrixCmd) -> MatrixCmd {
-        let root = self
-            .threads
-            .open
-            .as_ref()
-            .and_then(|view| view.root.clone());
+        let view = self.threads.open.as_ref();
+        let root = view.and_then(|view| view.root.clone());
+        // The thread's first message is a message of the room. While the thread's
+        // timeline does not hold it yet, the room's is the one that can change it.
+        if let (Some(root), Some(view)) = (&root, view)
+            && !view.root_loaded
+            && let MatrixCmd::Edit { item, .. }
+            | MatrixCmd::ToggleReaction { item, .. }
+            | MatrixCmd::Redact { item, .. } = &command
+            && matches!(item, ItemRef::Event(id) if id == root)
+        {
+            return command;
+        }
         match (root, command) {
             (
                 Some(root),
@@ -214,19 +254,30 @@ impl App {
         }
     }
 
-    /// The messages of an update for the open thread. Until the thread's own copy of
-    /// its first message is loaded, the one known from the room stands in for it.
-    pub(super) fn thread_snapshot(&self, mut messages: Vec<Message>) -> Vec<Message> {
-        if let Some(view) = &self.threads.open
-            && let Some(root) = &view.root
-            && !messages
-                .iter()
-                .any(|m| matches!(&m.item, Some(ItemRef::Event(id)) if id == root))
-        {
-            let mut first = view.root_message.clone();
-            first.id = ROOT_ID.to_owned();
-            first.thread = None;
-            messages.insert(0, first);
+    /// The messages of an update for the open thread. The first message keeps one
+    /// identity throughout, so a selection, reply or edit on it stays put: until the
+    /// thread's own copy is loaded the one known from the room stands in for it, and
+    /// the thread's copy then takes its place under the same id.
+    pub(super) fn thread_snapshot(&mut self, mut messages: Vec<Message>) -> Vec<Message> {
+        let Some(view) = &mut self.threads.open else {
+            return messages;
+        };
+        let Some(root) = &view.root else {
+            return messages;
+        };
+        view.loaded = true;
+        let own = messages
+            .iter_mut()
+            .find(|m| matches!(&m.item, Some(ItemRef::Event(id)) if id == root));
+        view.root_loaded = own.is_some();
+        match own {
+            Some(first) => first.id = ROOT_ID.to_owned(),
+            None => {
+                let mut first = view.root_message.clone();
+                first.id = ROOT_ID.to_owned();
+                first.thread = None;
+                messages.insert(0, first);
+            }
         }
         messages
     }
@@ -456,6 +507,12 @@ mod tests {
         assert!(!text.contains("💬"), "{text}");
         assert!(text.contains("Reply in thread…"), "{text}");
 
+        // Nothing of the thread has arrived yet, so nothing is marked read; the
+        // replies are asked for.
+        app.after_draw();
+        assert!(app.timeline.marked_read.is_none());
+        assert_eq!(drain(&mut commands), ["InThread($ev5, Paginate(!a))"]);
+
         app.on_matrix(update(&app, 2, thread_messages()));
         let text = screen(&mut app, &mut terminal);
         assert!(text.contains("first reply"), "{text}");
@@ -501,7 +558,13 @@ mod tests {
         assert_eq!(app.rooms[0].messages.len(), 1);
         app.on_matrix(update(&app, 2, thread_messages()));
         assert_eq!(app.rooms[0].messages.len(), 3);
-        assert!(app.rooms[0].messages.iter().all(|m| m.id != ROOT_ID));
+        // The thread's own copy of the first message goes by the same id.
+        let ids: Vec<&str> = app.rooms[0]
+            .messages
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(ids, [ROOT_ID, "1", "2"]);
 
         // And the other way round: the thread's update after going back.
         app.close_thread();
@@ -662,5 +725,115 @@ mod tests {
         assert_eq!(app.rooms[app.active].id, "!b");
         app.close_thread();
         assert!(app.rooms[app.active].messages.is_empty());
+    }
+
+    #[test]
+    fn the_first_message_keeps_its_place_while_the_thread_loads() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.rooms[0].messages[5].own = true;
+        app.open_thread(5);
+        drain(&mut commands);
+
+        // Selected and being answered before anything of the thread has arrived.
+        app.perform(Action::SelectOlder);
+        assert_eq!(app.timeline.selected, Some(0));
+        app.perform(Action::Reply);
+        assert_eq!(app.compose_mode, crate::app::ComposeMode::Reply(0));
+
+        // The newest replies arrive first, without the first message.
+        let replies: Vec<Message> = thread_messages().split_off(1);
+        app.on_matrix(update(&app, 2, replies));
+        assert_eq!(app.rooms[0].messages.len(), 3);
+        assert_eq!(app.rooms[0].messages[0].id, ROOT_ID);
+        assert_eq!(app.compose_mode, crate::app::ComposeMode::Reply(0));
+
+        // Until the thread holds its first message, the room's timeline acts on it;
+        // the other messages are the thread's.
+        app.toggle_reaction(0, "👍");
+        app.toggle_reaction(1, "👍");
+        app.delete_message(0);
+        assert_eq!(
+            drain(&mut commands),
+            [
+                "ToggleReaction(!a)",
+                "InThread($ev5, ToggleReaction(!a))",
+                "Redact(!a)"
+            ]
+        );
+        // A reply to it still belongs to the thread.
+        type_text(&mut app, "answer");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(drain(&mut commands), ["InThread($ev5, Send(!a))"]);
+
+        // Editing it, with the emoji picker open for it and the view scrolled, when
+        // the thread's own copy takes over: everything stays on it.
+        app.timeline.selected = Some(0);
+        app.perform(Action::Edit);
+        assert_eq!(app.compose_mode, crate::app::ComposeMode::Edit(0));
+        assert_eq!(app.composer.text(), "line 5");
+        let mut loaded = thread_messages();
+        loaded[0].own = true;
+        app.on_matrix(update(&app, 2, loaded));
+        assert_eq!(app.rooms[0].messages.len(), 3);
+        assert_eq!(app.rooms[0].messages[0].id, ROOT_ID);
+        assert_eq!(app.compose_mode, crate::app::ComposeMode::Edit(0));
+        assert_eq!(app.composer.text(), "line 5");
+        screen(&mut app, &mut terminal);
+
+        // From now on the thread's timeline has it.
+        app.on_event(key(KeyCode::Enter));
+        app.toggle_reaction(0, "👍");
+        assert_eq!(
+            drain(&mut commands),
+            [
+                "InThread($ev5, Edit(!a))",
+                "InThread($ev5, ToggleReaction(!a))"
+            ]
+        );
+
+        // A selection on it survives the same change, whatever the thread calls it.
+        let (mut app, _terminal, _commands) = connected();
+        app.open_thread(5);
+        app.on_matrix(update(&app, 2, thread_messages().split_off(1)));
+        app.perform(Action::Focus(Pane::Timeline));
+        app.timeline.selected = Some(0);
+        let mut loaded = thread_messages();
+        loaded[0].id = "17".to_owned();
+        app.on_matrix(update(&app, 2, loaded));
+        assert_eq!(app.timeline.selected, Some(0));
+        assert_eq!(app.focus, Pane::Timeline);
+    }
+
+    #[test]
+    fn deleting_the_first_message_in_the_demo_removes_it_from_the_room() {
+        let mut app = App::demo();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let rust = app.rooms.iter().position(|r| r.name == "rust").unwrap();
+        app.open_room(rust);
+        let count = app.rooms[rust].messages.len();
+        // "Good to know, thanks." is ours; the message after it is selected.
+        let own = app.rooms[rust].messages.iter().position(|m| m.own).unwrap();
+        app.perform(Action::Focus(Pane::Timeline));
+        app.timeline.selected = Some(own + 1);
+        let after = app.rooms[rust].messages[own + 1].body.clone();
+        app.open_thread(own);
+        app.delete_message(0);
+        app.close_thread();
+        assert_eq!(app.rooms[rust].messages.len(), count - 1);
+        assert!(app.rooms[rust].messages.iter().all(|m| !m.own));
+        // The selection is still on the same message.
+        let selected = app.timeline.selected.unwrap();
+        assert_eq!(app.rooms[rust].messages[selected].body, after);
+        screen(&mut app, &mut terminal);
+
+        // Deleted while it was the selected one: the selection moves next to the gap.
+        let mut app = App::demo();
+        app.open_room(rust);
+        app.perform(Action::Focus(Pane::Timeline));
+        app.timeline.selected = Some(own);
+        app.open_thread(own);
+        app.delete_message(0);
+        app.close_thread();
+        assert_eq!(app.timeline.selected, Some(own - 1));
     }
 }
