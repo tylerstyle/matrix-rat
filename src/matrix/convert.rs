@@ -139,6 +139,7 @@ fn event_message(
             match &content.kind {
                 MsgLikeKind::Message(msg) => {
                     message.edited = msg.is_edited();
+                    message.mentions = msg.mentions().cloned();
                     message.body = match msg.msgtype() {
                         MessageType::Emote(c) => {
                             message.kind = MsgKind::Emote;

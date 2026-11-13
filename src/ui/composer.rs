@@ -112,13 +112,19 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         0
     };
+    let focused = app.focus == Pane::Composer;
+    let cursor_pos = (focused && !app.help_open && app.modal.is_none()).then(|| {
+        let x = text_area.x + (cursor_col as u16).min(text_area.width.saturating_sub(1));
+        let y = text_area.y + (cursor_row - first) as u16;
+        (x, y)
+    });
     app.composer_view = crate::app::ComposerView {
         area: text_area,
         width: max,
         first_row: first,
+        cursor: cursor_pos,
     };
 
-    let focused = app.focus == Pane::Composer;
     if app.composer.is_empty() {
         let hint = if has_files && focused {
             "Add a caption, or press Enter to send"
@@ -148,9 +154,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     app.hits.add(text_area, HitId::ComposerText);
 
-    if focused && !app.help_open && app.modal.is_none() {
-        let x = text_area.x + (cursor_col as u16).min(text_area.width.saturating_sub(1));
-        let y = text_area.y + (cursor_row - first) as u16;
+    if let Some((x, y)) = cursor_pos {
         frame.set_cursor_position(Position::new(x, y));
     }
 }

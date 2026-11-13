@@ -7,11 +7,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures::{StreamExt, pin_mut};
 use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
+use matrix_sdk::ruma::events::Mentions;
 use matrix_sdk::ruma::events::room::message::{
     RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
 };
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, RoomId};
-use matrix_sdk::{Client, Room};
+use matrix_sdk::{Client, Room, RoomMemberships};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
     RoomExt, Timeline, TimelineDetails, TimelineEventItemId, TimelineFocus, TimelineItem,
@@ -401,6 +402,21 @@ impl Timelines {
                     Err(err) => self.fail("Could not send", format!("{err:#}")),
                 }
             }
+            MatrixCmd::FetchMembers { room_id } => {
+                let Ok(room) = self.room(&room_id) else {
+                    return;
+                };
+                if room.state() != matrix_sdk::RoomState::Joined {
+                    return;
+                }
+                while self.member_fetches.try_join_next().is_some() {}
+                let events = self.events.clone();
+                self.member_fetches.spawn(async move {
+                    if let Some(event) = load_room_members(room, room_id).await {
+                        let _ = events.send(event);
+                    }
+                });
+            }
             // Handled by the session loop.
             MatrixCmd::LoginPassword { .. }
             | MatrixCmd::LoginBrowser { .. }
@@ -424,20 +440,83 @@ fn item_id(item: &ItemRef) -> Result<TimelineEventItemId> {
     })
 }
 
+const MAX_COMPLETION_MEMBERS: usize = 50_000;
+
+async fn load_room_members(room: Room, room_id: String) -> Option<MatrixEvent> {
+    let raw_members = if room.are_members_synced() {
+        room.members_no_sync(RoomMemberships::JOIN).await
+    } else {
+        room.members(RoomMemberships::JOIN).await
+    };
+    let raw_members = match raw_members {
+        Ok(members) => members,
+        Err(err) => {
+            tracing::warn!(?err, "could not load room members");
+            return None;
+        }
+    };
+    let own = room.own_user_id().to_owned();
+    let can_mention_room = room
+        .power_levels()
+        .await
+        .is_ok_and(|pls| pls.user_can_trigger_room_notification(&own));
+    let members = raw_members
+        .into_iter()
+        .take(MAX_COMPLETION_MEMBERS)
+        .map(|member| {
+            let user_id = crate::text::sanitize_line(member.user_id().as_str());
+            let name = crate::text::sanitize_line(member.name());
+            crate::complete::Member {
+                display_name: if name.is_empty() {
+                    user_id.clone()
+                } else {
+                    name
+                },
+                user_id,
+            }
+        })
+        .collect();
+    Some(MatrixEvent::RoomMembers {
+        room_id,
+        members,
+        can_mention_room,
+    })
+}
+
 fn content(message: &Outgoing) -> Result<RoomMessageEventContent> {
     Ok(match message {
-        Outgoing::Text { plain, html: None } => RoomMessageEventContent::text_plain(plain),
+        Outgoing::Text {
+            plain,
+            html: None,
+            mentions,
+        } => apply_mentions(RoomMessageEventContent::text_plain(plain), mentions),
         Outgoing::Text {
             plain,
             html: Some(html),
-        } => RoomMessageEventContent::text_html(plain, html),
-        Outgoing::Emote { plain, html: None } => RoomMessageEventContent::emote_plain(plain),
+            mentions,
+        } => apply_mentions(RoomMessageEventContent::text_html(plain, html), mentions),
+        Outgoing::Emote {
+            plain,
+            html: None,
+            mentions,
+        } => apply_mentions(RoomMessageEventContent::emote_plain(plain), mentions),
         Outgoing::Emote {
             plain,
             html: Some(html),
-        } => RoomMessageEventContent::emote_html(plain, html),
+            mentions,
+        } => apply_mentions(RoomMessageEventContent::emote_html(plain, html), mentions),
         Outgoing::Rejected(reason) => bail!("{reason}"),
     })
+}
+
+fn apply_mentions(
+    mut content: RoomMessageEventContent,
+    mentions: &Option<Mentions>,
+) -> RoomMessageEventContent {
+    if let Some(mentions) = mentions {
+        content = content.add_mentions(mentions.clone());
+    }
+    content
 }
 
 fn content_without_relation(message: &Outgoing) -> Result<RoomMessageEventContentWithoutRelation> {
@@ -541,5 +620,227 @@ async fn forward(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use matrix_sdk::config::SyncSettings;
+
+    use crate::complete::MentionMark;
+    use crate::format::parse_with_mentions;
+    use crate::matrix::{MatrixCmd, MatrixEvent, RoomCategory, spawn};
+    use crate::paths::Paths;
+
+    /// Alice logs in, fetches room members, mentions Bob, and Bob receives the event with
+    /// `m.mentions` containing Bob's user id.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver (scripts/dev-homeserver.sh)"]
+    async fn alice_mentioning_bob_delivers_m_mentions() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
+            .with_test_writer()
+            .try_init();
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+
+        let root = std::env::temp_dir().join(format!("matrix-rat-mention-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver: homeserver.clone(),
+            username: "alice".to_owned(),
+            password: "alicepass".to_owned(),
+        });
+
+        let bob = matrix_sdk::Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .unwrap();
+        bob.matrix_auth()
+            .login_username("bob", "bobpass")
+            .initial_device_display_name("matrix-rat mention test")
+            .send()
+            .await
+            .unwrap();
+        bob.event_cache().subscribe().unwrap();
+        bob.sync_once(SyncSettings::default()).await.unwrap();
+        let bob_id = bob.user_id().unwrap().to_owned();
+        let bob_sync = tokio::spawn({
+            let bob = bob.clone();
+            async move {
+                let _ = bob.sync(SyncSettings::default()).await;
+            }
+        });
+
+        // Wait until Alice's worker reports a joined room that Bob is already in (preferring
+        // unencrypted so history queries avoid undecryptable old events; falls back if needed).
+        let bob_room = tokio::time::timeout(Duration::from_secs(60), async {
+            let mut fallback = None;
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) => {
+                        for listed in rooms
+                            .into_iter()
+                            .filter(|r| r.category != RoomCategory::Invite)
+                        {
+                            let Ok(room_id) =
+                                <&matrix_sdk::ruma::RoomId>::try_from(listed.id.as_str())
+                            else {
+                                continue;
+                            };
+                            let joined = if let Some(room) = bob.get_room(room_id)
+                                && room.state() == matrix_sdk::RoomState::Joined
+                            {
+                                Some(room)
+                            } else {
+                                bob.join_room_by_id(room_id).await.ok()
+                            };
+                            if let Some(room) = joined {
+                                if !room.encryption_state().is_encrypted() {
+                                    return room;
+                                }
+                                fallback.get_or_insert(room);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(room) = fallback.take()
+                    && events.is_empty()
+                {
+                    return room;
+                }
+            }
+        })
+        .await
+        .expect("timed out finding a shared room between alice and bob");
+        let room_id = bob_room.room_id().to_string();
+
+        // Alice opens the room and requests members; Bob should appear in RoomMembers.
+        handle.send(MatrixCmd::OpenRoom {
+            room_id: room_id.clone(),
+            generation: 1,
+        });
+        handle.send(MatrixCmd::FetchMembers {
+            room_id: room_id.clone(),
+        });
+        let bob_member = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::ActionFailed(err) | MatrixEvent::Error(err) => {
+                        panic!("worker error: {err}")
+                    }
+                    MatrixEvent::RoomMembers {
+                        room_id: ev_room,
+                        members,
+                        ..
+                    } if ev_room == room_id => {
+                        if let Some(found) =
+                            members.into_iter().find(|m| m.user_id == bob_id.as_str())
+                        {
+                            return found;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for Bob in RoomMembers");
+
+        // Send a message using the mention completion mark and verify Bob receives m.mentions.
+        let needle = format!("mention-check-{}", std::process::id());
+        let text = format!("{needle} {}", bob_member.display_name);
+        let expected_uid = bob_member.user_id.clone();
+        let outgoing = parse_with_mentions(
+            &text,
+            &[MentionMark::User {
+                label: bob_member.display_name,
+                user_id: bob_member.user_id,
+            }],
+            false,
+        );
+        handle.send(MatrixCmd::Send {
+            room_id: room_id.clone(),
+            message: outgoing,
+            reply_to: None,
+        });
+
+        // Confirm Alice's worker sees the sent event on the timeline before polling Bob.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::ActionFailed(err) | MatrixEvent::Error(err) => {
+                        panic!("send failed: {err}")
+                    }
+                    MatrixEvent::Timeline {
+                        room_id: ev_room,
+                        messages,
+                        ..
+                    } if ev_room == room_id
+                        && messages.iter().any(|m| {
+                            m.body.contains(&needle)
+                                && matches!(m.item, Some(crate::model::ItemRef::Event(_)))
+                        }) =>
+                    {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for Alice send confirmation");
+
+        let received = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let page = bob_room
+                    .messages(matrix_sdk::room::MessagesOptions::backward())
+                    .await
+                    .unwrap();
+                for event in page.chunk {
+                    let Ok(matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                        matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(
+                            matrix_sdk::ruma::events::SyncMessageLikeEvent::Original(ev),
+                        ),
+                    )) = event.raw().deserialize()
+                    else {
+                        continue;
+                    };
+                    if let matrix_sdk::ruma::events::room::message::MessageType::Text(t) =
+                        &ev.content.msgtype
+                        && t.body.contains(&needle)
+                    {
+                        let formatted = t.formatted.as_ref().map(|f| f.body.as_str()).unwrap_or("");
+                        assert!(formatted.contains(&expected_uid), "formatted: {formatted}");
+                        return ev.content.mentions;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for Bob to receive mention");
+        let mentions = received.expect("message should carry m.mentions");
+        assert!(mentions.user_ids.contains(&bob_id));
+
+        bob_sync.abort();
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = bob.matrix_auth().logout().await;
+        let _ = std::fs::remove_dir_all(root);
     }
 }

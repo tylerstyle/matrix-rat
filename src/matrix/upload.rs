@@ -79,7 +79,8 @@ impl Uploads {
                 .ok()
                 .and_then(Result::ok)
                 .map(u64::from);
-            let mut caption = caption.and_then(caption_content);
+            let (mut caption, mut caption_mentions) =
+                caption.map(caption_content).unwrap_or((None, None));
             let mut reply_to = reply_to;
             for (n, path) in files.into_iter().enumerate() {
                 let prepared =
@@ -91,6 +92,7 @@ impl Uploads {
                             Some((source, mime, mut config)) => {
                                 // Only ever with the first file.
                                 config.caption = caption.take();
+                                config.mentions = caption_mentions.take();
                                 config.in_reply_to = reply_to.take();
                                 timeline
                                     .send_attachment(source, mime, config)
@@ -126,21 +128,32 @@ impl Uploads {
                 }
                 // What belonged to the first file goes with no other.
                 caption = None;
+                caption_mentions = None;
                 reply_to = None;
             }
         });
     }
 }
 
-fn caption_content(caption: Outgoing) -> Option<TextMessageEventContent> {
+fn caption_content(
+    caption: Outgoing,
+) -> (
+    Option<TextMessageEventContent>,
+    Option<matrix_sdk::ruma::events::Mentions>,
+) {
     match caption {
-        Outgoing::Text { plain, html: None } => Some(TextMessageEventContent::plain(plain)),
+        Outgoing::Text {
+            plain,
+            html: None,
+            mentions,
+        } => (Some(TextMessageEventContent::plain(plain)), mentions),
         Outgoing::Text {
             plain,
             html: Some(html),
-        } => Some(TextMessageEventContent::html(plain, html)),
+            mentions,
+        } => (Some(TextMessageEventContent::html(plain, html)), mentions),
         // The UI does not offer these as captions.
-        Outgoing::Emote { .. } | Outgoing::Rejected(_) => None,
+        Outgoing::Emote { .. } | Outgoing::Rejected(_) => (None, None),
     }
 }
 
@@ -290,15 +303,23 @@ mod tests {
 
     #[test]
     fn captions_keep_their_formatting() {
-        let caption = caption_content(crate::format::parse("look at **this**")).unwrap();
+        let caption = caption_content(crate::format::parse("look at **this**"))
+            .0
+            .unwrap();
         assert_eq!(caption.body, "look at **this**");
         assert_eq!(
             caption.formatted.unwrap().body,
             "look at <strong>this</strong>"
         );
-        let plain = caption_content(crate::format::parse("just words")).unwrap();
+        let plain = caption_content(crate::format::parse("just words"))
+            .0
+            .unwrap();
         assert!(plain.formatted.is_none());
-        assert!(caption_content(crate::format::parse("/me waves")).is_none());
+        assert!(
+            caption_content(crate::format::parse("/me waves"))
+                .0
+                .is_none()
+        );
     }
 
     /// Sends a text file and a picture through the worker and waits until the server

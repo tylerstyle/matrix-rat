@@ -152,6 +152,10 @@ pub enum MatrixCmd {
         /// Event id of the message being replied to (by the first file).
         reply_to: Option<String>,
     },
+    /// Load joined members (once per room open) for `@` completions.
+    FetchMembers {
+        room_id: String,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -192,6 +196,7 @@ impl std::fmt::Debug for MatrixCmd {
             Self::SendFiles { room_id, files, .. } => {
                 write!(f, "SendFiles({room_id}, {} files)", files.len())
             }
+            Self::FetchMembers { room_id } => write!(f, "FetchMembers({room_id})"),
         }
     }
 }
@@ -240,6 +245,8 @@ pub struct RoomSummary {
     /// `mxc://` address of the room's picture (for a chat with one person without
     /// a picture of its own: that person's).
     pub avatar: Option<String>,
+    /// Canonical alias (e.g. `#rust:matrix.org`), when set.
+    pub alias: Option<String>,
 }
 
 pub enum MatrixEvent {
@@ -311,6 +318,12 @@ pub enum MatrixEvent {
     /// The first file of a [`MatrixCmd::SendFiles`] could not be sent, so none was:
     /// the caption and the reply belong to that one. Carries the reason.
     FilesNotSent(String),
+    /// Joined members and `@room` permission for a room, used for `@` completions.
+    RoomMembers {
+        room_id: String,
+        members: Vec<crate::complete::Member>,
+        can_mention_room: bool,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -364,6 +377,16 @@ impl std::fmt::Debug for MatrixEvent {
             Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
             // The reason names a file.
             Self::FilesNotSent(_) => f.write_str("FilesNotSent"),
+            // Member display names and user ids are omitted from the log.
+            Self::RoomMembers {
+                room_id,
+                members,
+                can_mention_room,
+            } => write!(
+                f,
+                "RoomMembers({room_id}, {} members, room_mention: {can_mention_room})",
+                members.len()
+            ),
         }
     }
 }
@@ -762,6 +785,9 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
                 })
                 .map(|uri| uri.to_string())
                 .filter(|uri| !uri.contains(|c: char| c.is_control() || c.is_whitespace())),
+            alias: room
+                .canonical_alias()
+                .map(|alias| crate::text::sanitize_line(alias.as_str())),
         });
     }
     summaries

@@ -1,6 +1,7 @@
 //! Application state, input handling and the event loop.
 
 mod attach;
+mod complete;
 mod files;
 mod media;
 mod palette;
@@ -23,7 +24,7 @@ use tokio::time::MissedTickBehavior;
 use crate::action::{Action, Dir, Pane};
 use crate::composer::Composer;
 use crate::config::Config;
-use crate::format::{self, Outgoing};
+use crate::format::Outgoing;
 use crate::keymap::{self, Context};
 use crate::matrix::{
     self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
@@ -112,6 +113,7 @@ pub struct ComposerView {
     pub area: Rect,
     pub width: usize,
     pub first_row: usize,
+    pub cursor: Option<(u16, u16)>,
 }
 
 #[derive(Debug)]
@@ -211,6 +213,8 @@ pub struct App {
     pub threads: thread::Threads,
     /// Files waiting in the composer to be sent.
     pub attach: attach::AttachState,
+    /// Composer completions and tracked mentions/room links.
+    pub complete: complete::CompleteState,
 }
 
 impl App {
@@ -320,6 +324,7 @@ impl App {
             images: crate::images::ImageStore::new(crate::images::Graphics::halfblocks()),
             threads: Default::default(),
             attach: Default::default(),
+            complete: Default::default(),
         }
     }
 
@@ -664,6 +669,7 @@ impl App {
         self.confirm_large = None;
         self.images.clear();
         self.attach.clear();
+        self.complete.reset_session();
         self.sync = Some(SyncStatus::Stopped);
     }
 
@@ -689,6 +695,7 @@ impl App {
             }
             Pane::Composer => self.timeline.selected = None,
         }
+        self.sync_completion();
     }
 
     fn open_room(&mut self, index: usize) {
@@ -711,10 +718,14 @@ impl App {
             self.cancel_compose();
             let draft = self.composer.take();
             if let Some(room) = self.rooms.get_mut(self.active) {
+                let old_id = room.id.clone();
                 room.draft = draft;
+                self.save_room_marks(&old_id);
             }
+            let new_id = self.rooms[index].id.clone();
             let draft = std::mem::take(&mut self.rooms[index].draft);
             self.composer.set_text(&draft);
+            self.restore_room_marks(&new_id);
         }
         self.active = index;
         self.rooms[index].unread = 0;
@@ -723,6 +734,7 @@ impl App {
         self.timeline = TimelineState::default();
         self.sidebar.filter.clear();
         self.request_timeline();
+        self.request_members_for_open_room();
         self.set_focus(Pane::Composer);
     }
 
@@ -842,7 +854,7 @@ impl App {
             self.show_toast("Accept the invitation first");
             return;
         }
-        let outgoing = match format::parse(&text) {
+        let outgoing = match self.format_outgoing(&text) {
             // The draft stays, so a typo in a command is easy to fix.
             Outgoing::Rejected(reason) => return self.show_toast(reason),
             outgoing => outgoing,
@@ -876,6 +888,7 @@ impl App {
             };
             self.send_matrix(command);
             self.composer.take();
+            self.clear_completion_marks();
             if matches!(self.compose_mode, ComposeMode::Edit(_)) {
                 self.end_edit();
             }
@@ -886,14 +899,23 @@ impl App {
 
         // Demo mode: everything happens locally.
         self.composer.take();
+        self.clear_completion_marks();
         let mode = self.compose_mode;
         if matches!(mode, ComposeMode::Edit(_)) {
             self.end_edit();
         }
         self.compose_mode = ComposeMode::Normal;
-        let (body, kind) = match outgoing {
-            Outgoing::Emote { plain, .. } => (plain, MsgKind::Emote),
-            Outgoing::Text { plain, .. } => (plain, MsgKind::Text),
+        let (body, html, mentions, kind) = match outgoing {
+            Outgoing::Emote {
+                plain,
+                html,
+                mentions,
+            } => (plain, html, mentions, MsgKind::Emote),
+            Outgoing::Text {
+                plain,
+                html,
+                mentions,
+            } => (plain, html, mentions, MsgKind::Text),
             Outgoing::Rejected(_) => return,
         };
         let mut message = Message {
@@ -901,6 +923,8 @@ impl App {
             time: "now".to_owned(),
             day: "Today".to_owned(),
             body,
+            html,
+            mentions,
             kind,
             own: true,
             ..Message::default()
@@ -909,6 +933,8 @@ impl App {
             ComposeMode::Edit(i) if i < self.messages().len() => {
                 if let Some(target) = self.messages_mut().and_then(|m| m.get_mut(i)) {
                     target.body = message.body;
+                    target.html = message.html;
+                    target.mentions = message.mentions;
                     target.kind = message.kind;
                     target.edited = true;
                 }
@@ -1126,9 +1152,24 @@ impl App {
 
     /// Starts editing: the unsent draft is put aside and comes back afterwards.
     fn begin_edit(&mut self, index: usize, text: &str) {
-        if !matches!(self.compose_mode, ComposeMode::Edit(_)) {
+        let already_editing = matches!(self.compose_mode, ComposeMode::Edit(_));
+        if !already_editing {
             self.edit_stash = Some(self.composer.take());
         }
+        let (marks, had_mentions) = self
+            .messages()
+            .get(index)
+            .map(|msg| {
+                let marks =
+                    crate::complete::marks_from_message(msg.html.as_deref(), msg.mentions.as_ref());
+                let had = msg
+                    .mentions
+                    .as_ref()
+                    .is_some_and(|m| !m.user_ids.is_empty() || m.room);
+                (marks, had)
+            })
+            .unwrap_or_default();
+        self.stash_marks_for_edit(marks, had_mentions, already_editing);
         self.composer.set_text(text);
         self.compose_mode = ComposeMode::Edit(index);
         self.set_focus(Pane::Composer);
@@ -1138,6 +1179,7 @@ impl App {
     fn end_edit(&mut self) {
         let draft = self.edit_stash.take().unwrap_or_default();
         self.composer.set_text(&draft);
+        self.restore_marks_after_edit();
         self.compose_mode = ComposeMode::Normal;
     }
 
@@ -1821,6 +1863,11 @@ impl App {
             MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
             MatrixEvent::UploadLimit(bytes) => self.attach.limit = Some(bytes),
             MatrixEvent::FilesNotSent(reason) => self.on_files_not_sent(reason),
+            MatrixEvent::RoomMembers {
+                room_id,
+                members,
+                can_mention_room,
+            } => self.on_room_members(room_id, members, can_mention_room),
         }
     }
 
@@ -1894,6 +1941,7 @@ impl App {
                 room.bold = summary.unread;
                 room.mention = summary.mention;
                 room.avatar = summary.avatar;
+                room.alias = summary.alias;
                 room
             })
             .collect();
@@ -1919,6 +1967,7 @@ impl App {
                 if was_invite && self.rooms[index].kind != RoomKind::Invite {
                     self.timeline = TimelineState::default();
                     self.request_timeline();
+                    self.request_members_for_open_room();
                 }
             }
             None => {
@@ -1939,14 +1988,20 @@ impl App {
                 self.compose_mode = ComposeMode::Normal;
                 self.typing_sent = None;
                 if open_id.is_some() {
-                    let draft = self
+                    let (draft, new_id) = self
                         .rooms
                         .get_mut(self.active)
-                        .map(|room| std::mem::take(&mut room.draft))
-                        .unwrap_or_default();
+                        .map(|room| (std::mem::take(&mut room.draft), Some(room.id.clone())))
+                        .unwrap_or((String::new(), None));
                     self.composer.set_text(&draft);
+                    if let Some(id) = new_id {
+                        self.restore_room_marks(&id);
+                    } else {
+                        self.clear_completion_marks();
+                    }
                 }
                 self.request_timeline();
+                self.request_members_for_open_room();
             }
         }
         if let Some(index) = position(&self.rooms, &cursor_id)
@@ -2046,6 +2101,7 @@ impl App {
             let had_files = self.clear_attachments();
             if !self.composer.is_empty() {
                 self.composer.take();
+                self.clear_completion_marks();
                 self.cancel_compose();
             } else if !had_files {
                 self.show_toast("Press Ctrl-Q to quit");
@@ -2058,12 +2114,16 @@ impl App {
             Pane::Timeline => Context::Timeline,
             Pane::Composer => Context::Composer,
         };
+        if self.focus == Pane::Composer && self.complete_key(code, mods) {
+            return;
+        }
         let width = self.composer_view.width;
         if self.focus == Pane::Composer
             && (code, mods) == (KeyCode::Up, KeyModifiers::NONE)
             && !self.composer.on_first_row(width)
         {
             self.composer.up(width);
+            self.sync_completion();
             return;
         }
         if self.focus == Pane::Composer && self.attach_key(code, mods) {
@@ -2106,6 +2166,7 @@ impl App {
         let width = self.composer_view.width;
         let ctrl = mods.contains(KeyModifiers::CONTROL);
         let alt = mods.contains(KeyModifiers::ALT);
+        let before = self.composer.text().to_owned();
         match code {
             KeyCode::Char(c) if !ctrl && !alt => self.type_char(c),
             KeyCode::Char('b') if alt => self.composer.word_left(),
@@ -2124,6 +2185,11 @@ impl App {
             KeyCode::Home => self.composer.home(width),
             KeyCode::End => self.composer.end(width),
             _ => {}
+        }
+        if self.composer.text() != before {
+            self.allow_text_edit_reopen_completion();
+        } else {
+            self.sync_completion();
         }
     }
 
@@ -2183,6 +2249,7 @@ impl App {
             _ => {
                 self.set_focus(Pane::Composer);
                 self.composer.insert(&text);
+                self.allow_text_edit_reopen_completion();
             }
         }
     }
@@ -2267,6 +2334,7 @@ impl App {
                         let row = (mouse.row - view.area.y) as usize + view.first_row;
                         let col = (mouse.column - view.area.x) as usize;
                         self.composer.place(view.width, row, col);
+                        self.sync_completion();
                     }
                     Some(HitId::Button(button)) => self.perform(match button {
                         Button::Help => Action::ToggleHelp,
@@ -2283,6 +2351,9 @@ impl App {
                     Some(HitId::Thread(index)) => self.open_thread(index),
                     Some(HitId::Attachment(index)) => self.remove_attachment(index),
                     Some(HitId::Palette(index)) => self.run_palette_at(index),
+                    Some(HitId::Complete(index)) => {
+                        self.accept_completion(Some(index));
+                    }
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -2833,6 +2904,7 @@ mod tests {
             mention: false,
             unread: notifications > 0,
             avatar: None,
+            alias: None,
         }
     }
 

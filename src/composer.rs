@@ -27,6 +27,10 @@ impl Composer {
         &self.text
     }
 
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
@@ -34,6 +38,24 @@ impl Composer {
     pub fn set_text(&mut self, text: &str) {
         self.text = text.to_owned();
         self.cursor = self.text.len();
+    }
+
+    /// Replaces `range` with `with` (sanitized like [`Self::insert`]) and moves the cursor
+    /// to the end of the replacement.
+    pub fn replace_range(&mut self, range: Range<usize>, with: &str) {
+        let start = range.start.min(self.text.len());
+        let end = range.end.min(self.text.len()).max(start);
+        let clean: String = with
+            .chars()
+            .flat_map(|c| match c {
+                '\t' => vec![' '; 4],
+                '\n' => vec!['\n'],
+                c if c.is_control() => vec![],
+                c => vec![c],
+            })
+            .collect();
+        self.text.replace_range(start..end, &clean);
+        self.cursor = start + clean.len();
     }
 
     pub fn take(&mut self) -> String {
