@@ -25,6 +25,8 @@ pub struct Config {
     pub notifications: crate::notify::NotifyMode,
     /// Show the text of the message in notifications.
     pub notification_preview: bool,
+    /// Show the latest message under each room in the room list (two lines a room).
+    pub room_previews: bool,
     /// Where saved attachments go. Empty: the desktop's download folder.
     pub download_dir: String,
     /// How pictures are shown: "auto", "halfblocks" or "off".
@@ -53,6 +55,7 @@ impl Default for Config {
             read_receipts: true,
             notifications: crate::notify::NotifyMode::Auto,
             notification_preview: true,
+            room_previews: true,
             download_dir: String::new(),
             images: ImageMode::Auto,
         }

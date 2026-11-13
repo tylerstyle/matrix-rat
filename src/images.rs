@@ -330,11 +330,16 @@ fn encode(
 
 /// A room picture for its two cells in the room list: cut to the shape of those cells
 /// around its middle, so that it fills them without being squeezed.
-fn encode_avatar(pixels: &DynamicImage, graphics: Graphics, kitty_id: u32) -> Option<Encoded> {
+fn encode_avatar(
+    pixels: &DynamicImage,
+    graphics: Graphics,
+    kitty_id: u32,
+    cells: (u16, u16),
+) -> Option<Encoded> {
     let Some(Protocol::Kitty { .. }) = graphics.protocol else {
         return None;
     };
-    let (cols, rows) = AVATAR_CELLS;
+    let (cols, rows) = cells;
     let width = u32::from(cols) * u32::from(graphics.font.0.max(1));
     let height = u32::from(rows) * u32::from(graphics.font.1.max(1));
     let (crop_width, crop_height) = cover_crop((pixels.width(), pixels.height()), (width, height));
@@ -349,7 +354,7 @@ fn encode_avatar(pixels: &DynamicImage, graphics: Graphics, kitty_id: u32) -> Op
     let bytes = fitted.as_bytes().len() / 3 * 4;
     let kitty = Kitty::new(fitted, Size::new(cols, rows), kitty_id, false, false).ok()?;
     Some(Encoded {
-        size: AVATAR_CELLS,
+        size: cells,
         protocol: SlicedProtocol::Kitty(kitty),
         kitty_id: Some(kitty_id),
         shown: false,
@@ -531,6 +536,8 @@ pub struct ImageStore {
     /// limit, apart from the pictures in messages.
     avatars: HashMap<String, Avatar>,
     avatar_requests: Vec<String>,
+    /// The size room pictures are drawn at.
+    avatar_cells: (u16, u16),
 }
 
 impl std::fmt::Debug for ImageStore {
@@ -566,6 +573,7 @@ impl ImageStore {
             encoder: None,
             avatars: HashMap::new(),
             avatar_requests: Vec::new(),
+            avatar_cells: AVATAR_CELLS,
         }
     }
 
@@ -761,12 +769,27 @@ impl ImageStore {
     /// The picture of a room ready to draw into its two cells, if there is one yet.
     /// Asks for it otherwise. Only with real graphics: two cells of half blocks are
     /// four pixels. `covered` as for [`ImageStore::inline`].
+    /// Sets the size of room pictures in cells. Pictures encoded for another size are
+    /// made again.
+    pub fn set_avatar_cells(&mut self, cells: (u16, u16)) {
+        if self.avatar_cells == cells {
+            return;
+        }
+        self.avatar_cells = cells;
+        for avatar in self.avatars.values_mut() {
+            if let AvatarState::Ready { encoded, .. } = &mut avatar.state {
+                Self::discard(&mut self.garbage, encoded.take());
+            }
+        }
+    }
+
     pub fn avatar(&mut self, url: &str, covered: bool) -> Option<&mut Encoded> {
         if !self.is_kitty() {
             return None;
         }
         let graphics = self.graphics;
         let frame = self.frame;
+        let cells = self.avatar_cells;
         let wanted = match self.avatars.get(url).map(|avatar| &avatar.state) {
             None => true,
             Some(AvatarState::Loading { since }) => since.elapsed() >= REQUEST_TIMEOUT,
@@ -800,7 +823,7 @@ impl ImageStore {
             if covered {
                 return None;
             }
-            *encoded = encode_avatar(pixels, graphics, id);
+            *encoded = encode_avatar(pixels, graphics, id, cells);
         }
         encoded.as_mut().filter(|encoded| encoded.shown || !covered)
     }
@@ -1421,9 +1444,9 @@ mod tests {
         assert!(decode_avatar(b"junk").is_err());
 
         // Encoded for two cells at this font: 2x10 by 20 pixels.
-        let encoded = encode_avatar(&avatar.pixels, kitty(), 7).unwrap();
+        let encoded = encode_avatar(&avatar.pixels, kitty(), 7, AVATAR_CELLS).unwrap();
         assert_eq!(encoded.size, (2, 1));
-        assert!(encode_avatar(&avatar.pixels, Graphics::halfblocks(), 7).is_none());
+        assert!(encode_avatar(&avatar.pixels, Graphics::halfblocks(), 7, AVATAR_CELLS).is_none());
     }
 
     #[test]

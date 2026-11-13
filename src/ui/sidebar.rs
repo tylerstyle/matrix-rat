@@ -98,8 +98,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let rows = app.sidebar_rows();
     let cursor_room = app.cursor_room();
 
-    // Keep the keyboard cursor on screen.
+    // Keep the keyboard cursor on screen (both of a room's lines, if it has two).
     let height = list.height as usize;
+    let wide = app.room_previews;
+    let lines = if wide { 2 } else { 1 };
+    let tile_cols: u16 = if wide { 4 } else { 2 };
+    app.images.set_avatar_cells((tile_cols, lines as u16));
     if app.sidebar.reveal_cursor {
         app.sidebar.reveal_cursor = false;
         if let Some(at) = rows
@@ -109,8 +113,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             if at < app.sidebar.scroll + 1 {
                 // Also show the section header above the first room.
                 app.sidebar.scroll = at.saturating_sub(1);
-            } else if at >= app.sidebar.scroll + height {
-                app.sidebar.scroll = at + 1 - height;
+            } else if at + lines > app.sidebar.scroll + height {
+                app.sidebar.scroll = (at + lines).saturating_sub(height);
             }
         }
     }
@@ -156,15 +160,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Role::Room
                 };
-                if active {
-                    frame.buffer_mut().set_style(rect, theme.style(base));
-                } else if focused && Some(*index) == cursor_room {
-                    frame
-                        .buffer_mut()
-                        .set_style(rect, theme.style(Role::RoomCursor));
-                } else if app.hover == Some(HitId::Room(*index)) {
-                    frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-                }
+                highlight(
+                    frame,
+                    app,
+                    rect,
+                    *index,
+                    focused && Some(*index) == cursor_room,
+                );
 
                 let badge = match room.unread {
                     0 => String::new(),
@@ -173,8 +175,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 };
                 let badge_width = width(&badge) as u16;
                 // A small coloured tile with the room's initial stands in for its
-                // picture: 1 column of margin, 2 of tile, 1 of gap.
-                let name_width = (rect.width.saturating_sub(5 + badge_width)) as usize;
+                // picture: 1 column of margin, the tile, 1 of gap.
+                let name_width = (rect.width.saturating_sub(3 + tile_cols + badge_width)) as usize;
                 let name_style = theme.style(base);
                 let tile = ratatui::style::Style::new()
                     .fg(theme.style(Role::UnreadBadge).fg.unwrap_or_default())
@@ -189,7 +191,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 };
                 let line = Line::from(vec![
                     marker,
-                    Span::styled(initial(&room.name), tile),
+                    Span::styled(
+                        if wide {
+                            format!(" {} ", initial(&room.name))
+                        } else {
+                            initial(&room.name)
+                        },
+                        tile,
+                    ),
                     Span::raw(" "),
                     Span::styled(
                         truncate(&room.name, name_width),
@@ -202,11 +211,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 ]);
                 frame.render_widget(&line, rect);
                 // The room's picture goes over the tile where the terminal can show one.
-                let (tile_width, _) = crate::images::AVATAR_CELLS;
-                if rect.width > tile_width + 1
+                // (With two lines per room it is drawn with the second line.)
+                if !wide
+                    && rect.width > tile_cols + 1
                     && let Some(url) = &room.avatar
                 {
-                    let cells = Rect::new(rect.x + 1, rect.y, tile_width, 1);
+                    let cells = Rect::new(rect.x + 1, rect.y, tile_cols, 1);
                     let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
                     super::image::draw_avatar(frame, &mut app.images, theme, url, cells, covered);
                 }
@@ -223,7 +233,77 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 app.hits.add(rect, HitId::Room(*index));
             }
+            SideRow::Preview(index) => {
+                let room = &app.rooms[*index];
+                highlight(
+                    frame,
+                    app,
+                    rect,
+                    *index,
+                    focused && Some(*index) == cursor_room,
+                );
+                let marker = if *index == app.active {
+                    Span::styled("▌", theme.style(Role::BorderFocused))
+                } else {
+                    Span::raw(" ")
+                };
+                let tile = ratatui::style::Style::new().bg(theme.user_color(&room.name));
+                let text_width = rect.width.saturating_sub(3 + tile_cols) as usize;
+                // Until the worker has said what the latest message is (and in the
+                // demo), the newest loaded one stands in.
+                let loaded = room
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| !m.sender.is_empty() && !m.body.is_empty())
+                    .map(|m| {
+                        let line = m.body.lines().next().unwrap_or_default();
+                        format!("{}: {line}", m.sender)
+                    });
+                let text = room
+                    .preview
+                    .as_deref()
+                    .or(loaded.as_deref())
+                    .unwrap_or_default();
+                let muted = ratatui::style::Style {
+                    fg: theme.style(Role::Muted).fg,
+                    ..ratatui::style::Style::new()
+                };
+                let line = Line::from(vec![
+                    marker,
+                    Span::styled(" ".repeat(tile_cols as usize), tile),
+                    Span::raw(" "),
+                    Span::styled(truncate(text, text_width), muted),
+                ]);
+                frame.render_widget(&line, rect);
+                // The picture covers the tile on both lines, when both are on screen.
+                if n > 0
+                    && rect.width > tile_cols + 1
+                    && let Some(url) = &room.avatar
+                {
+                    let cells = Rect::new(rect.x + 1, rect.y - 1, tile_cols, 2);
+                    let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
+                    super::image::draw_avatar(frame, &mut app.images, theme, url, cells, covered);
+                }
+                app.hits.add(rect, HitId::Room(*index));
+            }
         }
+    }
+}
+
+/// The background that marks the open room, the keyboard cursor or the pointer.
+fn highlight(frame: &mut Frame, app: &App, rect: Rect, index: usize, cursor: bool) {
+    let theme = &app.theme;
+    if index == app.active {
+        frame
+            .buffer_mut()
+            .set_style(rect, theme.style(Role::RoomActive));
+    } else if cursor {
+        frame
+            .buffer_mut()
+            .set_style(rect, theme.style(Role::RoomCursor));
+    } else if app.hover == Some(HitId::Room(index)) {
+        frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
     }
 }
 

@@ -765,6 +765,7 @@ mod tests {
                 server_notifications: 0,
                 mention: false,
                 unread: false,
+                preview: None,
                 avatar: Some(format!("mxc://example.org/avatar{n}")),
                 alias: None,
             })

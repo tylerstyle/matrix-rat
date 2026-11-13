@@ -168,6 +168,7 @@ impl EmojiPicker {
 pub enum Setting {
     Theme,
     SidebarWidth,
+    RoomPreviews,
     Mouse,
     TypingNotices,
     ReadReceipts,
@@ -179,9 +180,10 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 10] = [
+    pub const ALL: [Setting; 11] = [
         Setting::Theme,
         Setting::SidebarWidth,
+        Setting::RoomPreviews,
         Setting::Mouse,
         Setting::TypingNotices,
         Setting::ReadReceipts,
@@ -207,6 +209,7 @@ impl Setting {
         match self {
             Setting::Theme => "Theme",
             Setting::SidebarWidth => "Room list width",
+            Setting::RoomPreviews => "Room previews",
             Setting::Mouse => "Mouse",
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
@@ -224,6 +227,9 @@ impl Setting {
                 "Themes in the themes folder are listed too and reload when they change."
             }
             Setting::SidebarWidth => "You can also drag the line next to the room list.",
+            Setting::RoomPreviews => {
+                "Show the latest message under each room (and larger room pictures)."
+            }
             Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",

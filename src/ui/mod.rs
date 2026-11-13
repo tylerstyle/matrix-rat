@@ -178,6 +178,18 @@ mod tests {
     }
 
     #[test]
+    fn room_previews() {
+        let mut app = App::demo();
+        app.room_previews = true;
+        app.rooms[2].preview = Some("bob: are you coming tonight? we start at eight".into());
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+        // Narrow and low windows cut the lines but keep the pairs together.
+        for (width, height) in [(40, 9), (24, 6), (12, 4)] {
+            render(&mut app, width, height);
+        }
+    }
+
+    #[test]
     fn find_bar() {
         let mut app = App::demo();
         render(&mut app, 100, 30);

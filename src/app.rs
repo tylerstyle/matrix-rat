@@ -69,6 +69,8 @@ pub enum SideRow {
     Section(RoomKind),
     /// Index into `App::rooms`.
     Room(usize),
+    /// The second line of a room: its latest message.
+    Preview(usize),
 }
 
 #[derive(Debug, Default)]
@@ -162,6 +164,8 @@ pub struct App {
     /// detailed one arrives for the same room; and when each room last got one.
     count_notices: Vec<(Instant, crate::matrix::Notice)>,
     detailed_notices: std::collections::HashMap<String, Instant>,
+    /// Two lines per room in the room list, the second with the latest message.
+    pub room_previews: bool,
     /// The user's spaces, and the one the room list is narrowed to (by id).
     pub spaces: Vec<crate::matrix::SpaceSummary>,
     pub space: Option<String>,
@@ -243,6 +247,7 @@ impl App {
         app.read_receipts = config.read_receipts;
         app.mouse = config.mouse;
         app.download_dir = config.download_dir.clone();
+        app.room_previews = config.room_previews;
         app.notify_mode = config.notifications;
         if config.notifications != crate::notify::NotifyMode::Off {
             app.notify_mode_on = config.notifications;
@@ -299,6 +304,7 @@ impl App {
             notification_preview: true,
             count_notices: Vec::new(),
             detailed_notices: Default::default(),
+            room_previews: false,
             spaces: Vec::new(),
             space: None,
             space_at: None,
@@ -374,6 +380,9 @@ impl App {
                 rows.push(SideRow::Section(kind));
             }
             rows.push(SideRow::Room(index));
+            if self.room_previews {
+                rows.push(SideRow::Preview(index));
+            }
         }
         rows
     }
@@ -496,6 +505,7 @@ impl App {
         match setting {
             Setting::Theme => self.wanted_theme.clone(),
             Setting::SidebarWidth => self.sidebar.width.to_string(),
+            Setting::RoomPreviews => switch(self.room_previews),
             Setting::Mouse => switch(self.mouse),
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
@@ -536,6 +546,11 @@ impl App {
             Setting::ReadReceipts => {
                 self.read_receipts = !self.read_receipts;
                 self.save_setting("read_receipts", self.read_receipts);
+            }
+            Setting::RoomPreviews => {
+                self.room_previews = !self.room_previews;
+                self.sidebar.reveal_cursor = true;
+                self.save_setting("room_previews", self.room_previews);
             }
             Setting::Notifications => {
                 use crate::notify::NotifyMode;
@@ -1995,6 +2010,7 @@ impl App {
                 room.bold = summary.unread;
                 room.mention = summary.mention;
                 room.avatar = summary.avatar;
+                room.preview = summary.preview;
                 room.alias = summary.alias;
                 room
             })
@@ -2981,6 +2997,7 @@ mod tests {
             name: name.into(),
             category,
             notifications,
+            preview: None,
             server_notifications: notifications,
             mention: false,
             unread: notifications > 0,
@@ -3844,6 +3861,14 @@ mod tests {
         assert_eq!(app.sidebar.width, width + 2);
         app.on_event(key(KeyCode::Enter));
         assert_eq!(app.sidebar.width, width + 2);
+        // Room previews: a second line per room in the list.
+        app.on_event(key(KeyCode::Down));
+        let rows = app.sidebar_rows().len();
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.room_previews);
+        assert!(app.sidebar_rows().len() > rows);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.sidebar_rows().len(), rows);
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Enter));
         assert!(!app.mouse);

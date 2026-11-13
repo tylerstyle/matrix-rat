@@ -293,6 +293,8 @@ pub struct Room {
     pub draft: String,
     /// `mxc://` address of the room's picture.
     pub avatar: Option<String>,
+    /// The latest message in one line, for the room list.
+    pub preview: Option<String>,
     /// The server's notification count as last seen, to notice when it rises.
     pub server_count: u64,
     /// Canonical room alias (e.g. `#rust:matrix.org`), if any.
@@ -337,6 +339,7 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         messages,
         draft: String::new(),
         avatar: None,
+        preview: None,
         server_count: 0,
         alias: None,
     }

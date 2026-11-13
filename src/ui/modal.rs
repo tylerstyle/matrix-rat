@@ -216,6 +216,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
             Setting::Mouse
             | Setting::TypingNotices
             | Setting::ReadReceipts
+            | Setting::RoomPreviews
             | Setting::Notifications => {
                 let on = value == "on";
                 let role = if on { Role::StatusOk } else { Role::Muted };
