@@ -62,6 +62,9 @@ pub enum Action {
     /// Verify this device with another of the user's devices (or offer what fits:
     /// the recovery key, or setting up cross-signing).
     StartVerification,
+    /// Open the room above or below the open one in the list, from anywhere.
+    RoomPrev,
+    RoomNext,
     /// Save the selected message's file or picture to the download folder.
     Save,
     /// A control of the device verification popup.

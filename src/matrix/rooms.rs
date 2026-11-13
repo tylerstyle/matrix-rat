@@ -39,12 +39,15 @@ pub struct Timelines {
     /// The running request for older messages, if any.
     paginator: Option<JoinHandle<()>>,
     media: super::media::Media,
+    /// Running requests for member lists (for sender names).
+    member_fetches: tokio::task::JoinSet<()>,
 }
 
 impl Timelines {
     pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
         Self {
             media: super::media::Media::new(client.clone(), events.clone()),
+            member_fetches: tokio::task::JoinSet::new(),
             client,
             events,
             cache: VecDeque::new(),
@@ -60,6 +63,7 @@ impl Timelines {
         {
             task.abort();
         }
+        self.member_fetches.abort_all();
     }
 
     fn room(&self, room_id: &str) -> Result<Room> {
@@ -91,8 +95,13 @@ impl Timelines {
         // Sync only delivers the members it thinks are needed, which leaves many
         // senders (bridged users above all) without a name. Fetch the member list once;
         // the timeline then fills in the names of what is already shown.
-        let members = timeline.clone();
-        tokio::spawn(async move { members.fetch_members().await });
+        // Skipped when the list is already complete, and stopped with the session.
+        if !room.are_members_synced() {
+            let members = timeline.clone();
+            while self.member_fetches.try_join_next().is_some() {}
+            self.member_fetches
+                .spawn(async move { members.fetch_members().await });
+        }
         self.cache.push_back((room_id.to_owned(), timeline.clone()));
         while self.cache.len() > KEEP_TIMELINES {
             self.cache.pop_front();

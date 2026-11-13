@@ -11,7 +11,7 @@ expression: screen(&terminal)
 "│ B  bob            2  ││                                                                          │"
 "│ C  carol             ││                                                                          │"
 "│ Rooms                ││───────────────────────────────── Today ───────────────────────────────── │"
-"│ D  design            ││● erin  07:55                                                             │"
+"│▌D  design            ││● erin  07:55                                                             │"
 "│ N  nixos             ││  New palette is up for review.                                           │"
 "│ O  off-topic     12  ││  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                                │"
 "│                      ││  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀                                │"

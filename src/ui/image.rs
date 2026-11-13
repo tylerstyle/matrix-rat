@@ -76,9 +76,15 @@ pub fn draw_avatar(
     // letter goes.
     frame
         .buffer_mut()
-        .set_style(area, Style::new().remove_modifier(Modifier::BOLD));
+        .set_style(area, Style::new().remove_modifier(Modifier::all()));
     render(frame, theme, encoded, area, 0);
-    if pending {
+    // Two rooms can share a picture. Only the first one drawn carries the data; the
+    // others just refer to it and must not be mistaken for a failed transmission.
+    let carries_data = frame
+        .buffer_mut()
+        .cell((area.x, area.y))
+        .is_some_and(|cell| cell.symbol().starts_with('\x1b'));
+    if pending && carries_data {
         images.sent_avatar(url, area.x, area.y);
     }
 }

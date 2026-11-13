@@ -500,6 +500,33 @@ impl Worker {
         self.emit(MatrixEvent::LoggedIn { user_id });
         self.emit(MatrixEvent::Sync(SyncStatus::Connecting));
 
+        // Refreshed tokens replace the old ones on the server at once, so they must
+        // reach the disk at once too: a session file with a used-up refresh token logs
+        // the user out at the next start. Listening begins before the first request
+        // (the very first sync usually refreshes), in a task of its own so that no slow
+        // step of the main loop can delay a save.
+        let mut session_changes = client.subscribe_to_session_changes();
+        let token_saver = {
+            let mut changes = client.subscribe_to_session_changes();
+            let (paths, client, passphrase) =
+                (self.paths.clone(), client.clone(), passphrase.to_owned());
+            tokio::spawn(async move {
+                use tokio::sync::broadcast::error::RecvError;
+                loop {
+                    match changes.recv().await {
+                        // Having missed news means tokens may have changed: save.
+                        Ok(SessionChange::TokensRefreshed) | Err(RecvError::Lagged(_)) => {
+                            if let Err(err) = session::save(&paths, &client, &passphrase) {
+                                tracing::error!(?err, "could not save refreshed tokens");
+                            }
+                        }
+                        Ok(SessionChange::UnknownToken { .. }) => {}
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+            })
+        };
+
         // Offline mode: the service notices a lost connection, reports `Offline` and
         // resumes by itself when the server is reachable again.
         let sync = SyncService::builder(client.clone())
@@ -522,7 +549,6 @@ impl Worker {
         let mut sync_state = sync.state();
         // The subscriber only reports changes; the service may already be running.
         self.emit(MatrixEvent::Sync(sync_status(&sync_state.get())));
-        let mut session_changes = client.subscribe_to_session_changes();
         let recovery = client.encryption().recovery();
         let recovery_states = recovery.state_stream();
         pin_mut!(recovery_states);
@@ -547,13 +573,12 @@ impl Worker {
                     self.emit(MatrixEvent::Recovery(recovery_status(state)));
                 }
                 change = session_changes.recv() => match change {
-                    Ok(SessionChange::TokensRefreshed) => {
-                        if let Err(err) = session::save(&self.paths, client, passphrase) {
-                            tracing::error!(?err, "could not save refreshed tokens");
-                        }
+                    Ok(SessionChange::UnknownToken(info)) => {
+                        tracing::warn!(?info, "the server no longer accepts this session");
+                        break SessionEnd::Expired;
                     }
-                    Ok(SessionChange::UnknownToken { .. }) => break SessionEnd::Expired,
-                    Err(_) => {}
+                    // Saving is the token saver's job.
+                    Ok(SessionChange::TokensRefreshed) | Err(_) => {}
                 },
                 command = self.commands.recv() => match command {
                     Some(MatrixCmd::Recover { key }) => {
@@ -579,6 +604,13 @@ impl Worker {
         timelines.close();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
+        token_saver.abort();
+        // Once more on the way out, in case a refresh happened during the shutdown.
+        if matches!(end, SessionEnd::Shutdown)
+            && let Err(err) = session::save(&self.paths, client, passphrase)
+        {
+            tracing::error!(?err, "could not save the session");
+        }
         Ok(end)
     }
 }
@@ -609,11 +641,13 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
         if room.is_space() {
             continue;
         }
-        let category = if room.state() == RoomState::Invited {
+        let invited = room.state() == RoomState::Invited;
+        let direct = room.is_direct().await.unwrap_or(false);
+        let category = if invited {
             RoomCategory::Invite
         } else if room.is_favourite() {
             RoomCategory::Favourite
-        } else if room.is_direct().await.unwrap_or(false) {
+        } else if direct {
             RoomCategory::Person
         } else {
             RoomCategory::Room
@@ -626,14 +660,22 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
                 .map(|name| name.to_string())
                 .unwrap_or_else(|_| room.room_id().to_string()),
         };
-        let avatar = room.avatar_url().or_else(|| {
-            // Known from the room's summary, no members have to be loaded for it.
-            let info = (category == RoomCategory::Person).then(|| room.clone_info())?;
-            match info.heroes() {
+        // No picture for invitations: fetching one would tell a stranger's server
+        // that the invitation was seen, before the user decided anything.
+        let avatar = if invited {
+            None
+        } else if let Some(avatar) = room.avatar_url() {
+            Some(avatar)
+        } else if direct {
+            // The other person's picture, known from the room's summary: no members
+            // have to be loaded for it.
+            match room.heroes().await.as_slice() {
                 [other] => other.avatar_url.clone(),
                 _ => None,
             }
-        });
+        } else {
+            None
+        };
         let notifications = room.num_unread_notifications();
         summaries.push(RoomSummary {
             id: room.room_id().to_string(),
@@ -643,8 +685,13 @@ async fn summarize(rooms: &Vector<RoomListItem>) -> Vec<RoomSummary> {
             mention: room.num_unread_mentions() > 0,
             unread: notifications > 0 || room.num_unread_messages() > 0 || room.is_marked_unread(),
             avatar: avatar
-                .map(|uri| crate::text::sanitize_line(uri.as_str()))
-                .filter(|uri| uri.starts_with("mxc://")),
+                .filter(|uri| {
+                    uri.parts().is_ok_and(|(server, id)| {
+                        !matches!(server.as_str(), "" | "." | "..") && !id.is_empty()
+                    })
+                })
+                .map(|uri| uri.to_string())
+                .filter(|uri| !uri.contains(|c: char| c.is_control() || c.is_whitespace())),
         });
     }
     summaries

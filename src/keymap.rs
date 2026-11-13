@@ -183,6 +183,22 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Global,
+        KeyCode::Up,
+        CTRL,
+        Action::RoomPrev,
+        "Ctrl-↑",
+        "Previous room",
+    ),
+    bind(
+        Global,
+        KeyCode::Down,
+        CTRL,
+        Action::RoomNext,
+        "Ctrl-↓",
+        "Next room",
+    ),
+    bind(
+        Global,
         Char('k'),
         CTRL,
         Action::FocusRoomFilter,
@@ -303,6 +319,7 @@ pub const DEFAULT: &[Binding] = &[
         "s",
         "Save file or picture",
     ),
+    bind(Timeline, Char('v'), NONE, Action::Open, "v", "View picture"),
     bind(
         Timeline,
         Char('o'),

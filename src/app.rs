@@ -565,6 +565,31 @@ impl App {
         self.set_focus(Pane::Composer);
     }
 
+    /// Ctrl-↑/↓: opens the neighbouring room in the list, wrapping at the ends, and
+    /// leaves the focus where it was.
+    fn step_room(&mut self, delta: isize) {
+        let rooms = self.visible_rooms();
+        if rooms.is_empty() {
+            return;
+        }
+        let next = match rooms.iter().position(|index| *index == self.active) {
+            Some(at) => (at as isize + delta).rem_euclid(rooms.len() as isize) as usize,
+            None => 0,
+        };
+        let focus = self.focus;
+        self.open_room(rooms[next]);
+        // The list follows, so the open room is always in view.
+        self.sidebar.cursor = self
+            .visible_rooms()
+            .iter()
+            .position(|index| *index == self.active)
+            .unwrap_or(0);
+        self.sidebar.reveal_cursor = true;
+        if focus != Pane::Composer {
+            self.set_focus(focus);
+        }
+    }
+
     fn move_sidebar_cursor(&mut self, delta: isize) {
         let count = self.visible_rooms().len();
         if count == 0 {
@@ -1199,6 +1224,8 @@ impl App {
                     self.open_modal(Modal::Settings(SettingsMenu::default()));
                 }
             }
+            Action::RoomPrev => self.step_room(-1),
+            Action::RoomNext => self.step_room(1),
             Action::Save => {
                 if !self.save_attachment(false) {
                     self.show_toast("Nothing to save in this message");
@@ -3361,6 +3388,30 @@ mod tests {
         app.on_event(click(0, 0));
         assert!(app.modal.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ctrl_arrows_walk_through_the_rooms_from_anywhere() {
+        let (mut app, mut terminal) = drawn();
+        let order = app.visible_rooms();
+        assert_eq!(app.active, order[0]);
+        assert_eq!(app.focus, Pane::Composer);
+        type_text(&mut app, "draft");
+        app.on_event(key_mod(KeyCode::Down, KeyModifiers::CONTROL));
+        assert_eq!(app.active, order[1]);
+        assert_eq!(app.focus, Pane::Composer);
+        assert!(app.composer.is_empty());
+        // Back again: the draft waited in its room; the top wraps to the bottom.
+        app.on_event(key_mod(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(app.composer.text(), "draft");
+        app.on_event(key_mod(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(app.active, *order.last().unwrap());
+        assert_eq!(app.cursor_room(), Some(app.active));
+        // From the room list the focus stays in the list.
+        app.on_event(key_mod(KeyCode::Char('1'), KeyModifiers::ALT));
+        app.on_event(key_mod(KeyCode::Down, KeyModifiers::CONTROL));
+        assert_eq!((app.active, app.focus), (order[0], Pane::Sidebar));
+        redraw(&mut app, &mut terminal);
     }
 
     #[test]

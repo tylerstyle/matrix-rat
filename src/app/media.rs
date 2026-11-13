@@ -907,6 +907,31 @@ mod tests {
     }
 
     #[test]
+    fn two_rooms_sharing_a_picture_send_it_once() {
+        let (mut app, mut terminal, _commands) = app_with_rooms(kitty(), 3);
+        app.rooms[1].avatar = app.rooms[0].avatar.clone();
+        app.on_matrix(avatar(0, true));
+        frame(&mut app, &mut terminal);
+        let transmissions = |terminal: &Terminal<TestBackend>| {
+            kitty_cells(terminal.backend().buffer())
+                .iter()
+                .filter(|cell| cell.2.starts_with("\x1b_G"))
+                .count()
+        };
+        // Both rooms show it (4 cells), the data travels in one of them.
+        assert_eq!(kitty_cells(terminal.backend().buffer()).len(), 4);
+        assert_eq!(transmissions(&terminal), 1);
+        // And it stays sent: later frames neither delete nor repeat it.
+        for _ in 0..3 {
+            app.dirty = true;
+            frame(&mut app, &mut terminal);
+            assert_eq!(kitty_cells(terminal.backend().buffer()).len(), 4);
+            assert_eq!(transmissions(&terminal), 0);
+            assert!(app.images.cleanup_sequence(false).is_empty());
+        }
+    }
+
+    #[test]
     fn without_real_graphics_rooms_keep_their_tiles() {
         for graphics in [Graphics::halfblocks(), Graphics::off()] {
             let (mut app, mut terminal, mut commands) = app_with_rooms(graphics, 5);

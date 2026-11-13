@@ -86,6 +86,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 ("Esc", "back", Some(A::Back)),
             ],
             Pane::Timeline => vec![
+                ("v", "view", Some(A::Open)),
                 ("Enter", "reply", Some(A::Reply)),
                 ("e", "edit", Some(A::Edit)),
                 ("r", "react", Some(A::React)),
@@ -103,6 +104,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         // Saving is only offered where there is something to save.
         let can_save = app.can_save();
         hints.retain(|(_, text, _)| *text != "save" || can_save);
+        let picture = app
+            .timeline
+            .selected
+            .and_then(|i| app.room()?.messages.get(i))
+            .is_some_and(|message| message.image.is_some());
+        hints.retain(|(_, text, _)| *text != "view" || picture);
         let mut col = area.x + spans.iter().map(|s| width(&s.content) as u16).sum::<u16>();
         for (k, text, action) in hints {
             let label = format!(" {text}  ");

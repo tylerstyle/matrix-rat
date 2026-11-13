@@ -31,6 +31,7 @@ use crate::model::{Attachment, MediaRef};
 /// Downloads running at the same time.
 const PARALLEL: usize = 4;
 const TIMEOUT: Duration = Duration::from_secs(60);
+const AVATAR_TIMEOUT: Duration = Duration::from_secs(20);
 /// Saving is asked for by the user and may be a large file.
 const SAVE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Below this size the file itself is fetched instead of a thumbnail: it is needed for
@@ -49,6 +50,7 @@ pub struct Media {
     /// What is being fetched right now: key and whether it is the whole file.
     busy: Arc<Mutex<HashSet<(String, bool)>>>,
     slots: Arc<Semaphore>,
+    avatar_slots: Arc<Semaphore>,
     /// Saving holds a whole file in memory, so only one runs at a time.
     save_slot: Arc<Semaphore>,
     /// The running picture fetches. They end with the session: dropping this stops them.
@@ -62,6 +64,7 @@ impl Media {
             events,
             busy: Arc::default(),
             slots: Arc::new(Semaphore::new(PARALLEL)),
+            avatar_slots: Arc::new(Semaphore::new(2)),
             save_slot: Arc::new(Semaphore::new(1)),
             fetches: Mutex::default(),
         }
@@ -109,13 +112,15 @@ impl Media {
         let client = self.client.clone();
         let events = self.events.clone();
         let busy = self.busy.clone();
-        let slots = self.slots.clone();
+        // Their own, smaller budget: slow room pictures must not hold up the pictures
+        // in the open chat.
+        let slots = self.avatar_slots.clone();
         let mut fetches = self.fetches.lock().expect("not poisoned");
         while fetches.try_join_next().is_some() {}
         fetches.spawn(async move {
             let result = async {
                 let _slot = slots.acquire().await.map_err(|_| FAILED.to_owned())?;
-                match tokio::time::timeout(TIMEOUT, load_avatar(&client, &url)).await {
+                match tokio::time::timeout(AVATAR_TIMEOUT, load_avatar(&client, &url)).await {
                     Ok(result) => result,
                     Err(_) => Err(FAILED.to_owned()),
                 }
@@ -196,7 +201,9 @@ async fn load_avatar(client: &Client, url: &str) -> Result<Decoded, String> {
     let thumb = Some(Thumb::crop(AVATAR_PIXELS));
     let bytes = match get(client, &source, thumb, AVATAR_DOWNLOAD).await {
         Ok(bytes) => bytes,
-        Err(_) => get(client, &source, None, AVATAR_DOWNLOAD)
+        // A thumbnail over the limit means the file is too: no second try.
+        Err(refused @ Refused::TooLarge(_)) => return Err(refused.reason()),
+        Err(Refused::Failed) => get(client, &source, None, AVATAR_DOWNLOAD)
             .await
             .map_err(|refused| refused.reason())?,
     };

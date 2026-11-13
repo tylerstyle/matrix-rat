@@ -16,9 +16,13 @@ fn initial(name: &str) -> String {
         .graphemes(true)
         .next()
         .unwrap_or("?");
-    match width(first) {
-        1 => format!("{} ", first.to_uppercase()),
-        2 => first.to_owned(),
+    // Upper case first: it can change the width ("ß" becomes "SS").
+    let upper = first.to_uppercase();
+    match (width(&upper), width(first)) {
+        (1, _) => format!("{upper} "),
+        (2, _) => upper,
+        (_, 1) => format!("{first} "),
+        (_, 2) => first.to_owned(),
         _ => "? ".to_owned(),
     }
 }
@@ -142,8 +146,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     .fg(theme.style(Role::UnreadBadge).fg.unwrap_or_default())
                     .bg(theme.user_color(&room.name))
                     .add_modifier(ratatui::style::Modifier::BOLD);
+                // The open room keeps a bright bar at the edge, so it is easy to find
+                // wherever the focus is.
+                let marker = if active {
+                    Span::styled("▌", theme.style(Role::BorderFocused))
+                } else {
+                    Span::raw(" ")
+                };
                 let line = Line::from(vec![
-                    Span::raw(" "),
+                    marker,
                     Span::styled(initial(&room.name), tile),
                     Span::raw(" "),
                     Span::styled(
@@ -178,6 +189,26 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 app.hits.add(rect, HitId::Room(*index));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initials_are_always_two_columns() {
+        for (name, tile) in [
+            ("rust", "R "),
+            ("#matrix", "M "),
+            ("ßtraße", "SS"),
+            ("日本語", "日"),
+            ("", "? "),
+            ("🐀 rats", "🐀"),
+        ] {
+            assert_eq!(initial(name), tile, "{name}");
+            assert_eq!(width(&initial(name)), 2, "{name}");
         }
     }
 }
