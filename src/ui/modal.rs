@@ -209,7 +209,10 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &SettingsMenu) {
                 app.hits
                     .add(Rect::new(end, rect.y, 2, 1), HitId::Setting(index, 1));
             }
-            Setting::Mouse | Setting::TypingNotices | Setting::ReadReceipts => {
+            Setting::Mouse
+            | Setting::TypingNotices
+            | Setting::ReadReceipts
+            | Setting::Notifications => {
                 let on = value == "on";
                 let role = if on { Role::StatusOk } else { Role::Muted };
                 let dot = if on { "● " } else { "○ " };

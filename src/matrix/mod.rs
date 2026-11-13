@@ -3,10 +3,12 @@
 
 mod convert;
 mod media;
+mod notify;
 mod rooms;
 mod session;
 mod verify;
 
+pub use notify::Notice;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
     VerifyStage, VerifyUpdate,
@@ -253,6 +255,8 @@ pub enum MatrixEvent {
     Verification(VerifyUpdate),
     /// Outcome of [`VerifyCmd::SetUp`].
     CrossSigningSetUp(SetUpOutcome),
+    /// A message the account's notification rules consider worth a notification.
+    Notice(Notice),
     /// Outcome of [`MatrixCmd::SaveFile`]: where the file is now, or what went wrong.
     FileSaved {
         key: String,
@@ -311,6 +315,7 @@ impl std::fmt::Debug for MatrixEvent {
             Self::CrossSigningSetUp(result) => {
                 write!(f, "CrossSigningSetUp({result:?})")
             }
+            Self::Notice(notice) => write!(f, "{notice:?}"),
             Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
         }
     }
@@ -505,6 +510,7 @@ impl Worker {
         // the user out at the next start. Listening begins before the first request
         // (the very first sync usually refreshes), in a task of its own so that no slow
         // step of the main loop can delay a save.
+        let _notices = notify::watch(client, self.events.clone()).await;
         let mut session_changes = client.subscribe_to_session_changes();
         let token_saver = {
             let mut changes = client.subscribe_to_session_changes();
@@ -556,6 +562,7 @@ impl Worker {
 
         let mut rooms: Vector<RoomListItem> = Vector::new();
         let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
+        let mut own_members = notify::OwnMembers::default();
         let mut verifier = verify::Verifier::start(client, self.events.clone());
         let end = loop {
             tokio::select! {
@@ -564,6 +571,7 @@ impl Worker {
                     for diff in diffs {
                         diff.apply(&mut rooms);
                     }
+                    own_members.ensure(&rooms).await;
                     self.emit(MatrixEvent::Rooms(summarize(&rooms).await));
                 }
                 Some(state) = sync_state.next() => {

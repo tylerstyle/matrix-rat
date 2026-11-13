@@ -15,6 +15,7 @@ mod logging;
 mod matrix;
 mod modal;
 mod model;
+mod notify;
 mod paths;
 mod rich;
 mod terminal;

@@ -202,6 +202,8 @@ pub struct Room {
     pub draft: String,
     /// `mxc://` address of the room's picture.
     pub avatar: Option<String>,
+    /// The server's notification count as last seen, to notice when it rises.
+    pub server_count: u64,
 }
 
 pub const OWN_NAME: &str = "you";
@@ -242,6 +244,7 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         messages,
         draft: String::new(),
         avatar: None,
+        server_count: 0,
     }
 }
 

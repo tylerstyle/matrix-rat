@@ -171,6 +171,7 @@ pub enum Setting {
     Mouse,
     TypingNotices,
     ReadReceipts,
+    Notifications,
     DownloadDir,
     Keys,
     Encryption,
@@ -178,12 +179,13 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 9] = [
+    pub const ALL: [Setting; 10] = [
         Setting::Theme,
         Setting::SidebarWidth,
         Setting::Mouse,
         Setting::TypingNotices,
         Setting::ReadReceipts,
+        Setting::Notifications,
         Setting::DownloadDir,
         Setting::Keys,
         Setting::Encryption,
@@ -208,6 +210,7 @@ impl Setting {
             Setting::Mouse => "Mouse",
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
+            Setting::Notifications => "Notifications",
             Setting::DownloadDir => "Download folder",
             Setting::Keys => "Key bindings",
             Setting::Encryption => "Encryption",
@@ -224,6 +227,9 @@ impl Setting {
             Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",
+            Setting::Notifications => {
+                "Tell you about new messages while you are in another room or window."
+            }
             Setting::DownloadDir => {
                 "Where s saves files and pictures. Enter to change; empty for the default."
             }
