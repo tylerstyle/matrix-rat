@@ -508,6 +508,7 @@ impl App {
         self.verify = Default::default();
         self.saving.clear();
         self.confirm_large = None;
+        self.images.clear();
         self.sync = Some(SyncStatus::Stopped);
     }
 
@@ -2006,13 +2007,12 @@ fn open_in_browser(url: &str) {
 
 pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     let guard = TerminalGuard::enter(config.mouse)?;
-    // Terminal queries (image protocol, background colour) go here, before the event stream.
-    let mut terminal = guard.activate()?;
-    // What can this terminal draw? Asked on the alternate screen (where a terminal that
-    // prints the question instead of answering does no harm) and before anything else
-    // reads stdin.
+    // Terminal queries (image protocol, background colour) go here: on the alternate
+    // screen, where a terminal that prints a question instead of answering does no
+    // harm, but before mouse and focus reports are on and before the event stream.
+    guard.alternate_screen()?;
     let graphics = crate::images::Graphics::detect(config.images);
-    terminal.clear()?;
+    let mut terminal = guard.activate()?;
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -2033,8 +2033,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     while !app.should_quit {
         if app.suspend_requested {
             app.suspend_requested = false;
+            // The terminal frees its copies of the pictures now, in case we are
+            // never resumed; they are sent again when drawn.
+            app.flush_images(true);
             terminal::suspend(&mut terminal)?;
-            app.images.forget_encoded();
             app.dirty = true;
         }
         terminal::set_mouse(app.mouse)?;

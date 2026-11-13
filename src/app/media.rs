@@ -659,6 +659,95 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_dropped_from_the_cache_is_tried_again() {
+        let (mut app, mut terminal, mut commands) = app_with(
+            Graphics::halfblocks(),
+            vec![
+                picture("1", remote_image(KEY, Some((320, 200)))),
+                text("2", "after"),
+            ],
+        );
+        app.on_matrix(MatrixEvent::Image {
+            key: KEY.into(),
+            full: false,
+            result: Err("could not be loaded".into()),
+        });
+        frame(&mut app, &mut terminal);
+        let line = row_of(&terminal, "could not be loaded");
+        assert_eq!(row_of(&terminal, "after"), line + 1);
+        fetches(&mut commands);
+
+        // Many other pictures come and go until the cache drops the failure.
+        for n in 0..300 {
+            let other = remote_image(&format!("mxc://example.org/other{n}"), None);
+            app.images.begin_frame();
+            app.images.request(&other);
+            app.images.on_loaded(&other.key, false, Err("no".into()));
+        }
+        app.images.take_requests();
+        assert!(!app.images.is_loading(KEY));
+        // The row does not keep saying "could not be loaded" for a picture nobody
+        // remembers failing: its space is back and it is asked for again.
+        frame(&mut app, &mut terminal);
+        assert!(!screen(&terminal).contains("could not be loaded"));
+        assert!(row_of(&terminal, "after") - row_of(&terminal, "cat.png") > 2);
+        assert_eq!(fetches(&mut commands), ["FetchImage(full: false)"]);
+    }
+
+    #[test]
+    fn logging_out_forgets_all_pictures_and_closes_the_viewer() {
+        let (mut app, mut terminal, mut commands) = app_with(
+            kitty(),
+            vec![picture("1", remote_image(KEY, Some((320, 200))))],
+        );
+        app.on_matrix(loaded(320, 200));
+        frame(&mut app, &mut terminal);
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Char('o')));
+        app.on_matrix(MatrixEvent::Image {
+            key: KEY.into(),
+            full: true,
+            result: Ok(decoded(640, 400)),
+        });
+        frame(&mut app, &mut terminal);
+        assert!(app.images.viewer_open());
+        assert!(!kitty_cells(terminal.backend().buffer()).is_empty());
+        app.images.cleanup_sequence(false);
+        fetches(&mut commands);
+
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert!(!app.images.viewer_open());
+        frame(&mut app, &mut terminal);
+        assert!(kitty_cells(terminal.backend().buffer()).is_empty());
+        // The terminal is told to free both pictures it was sent.
+        assert_eq!(
+            app.images
+                .cleanup_sequence(false)
+                .matches("a=d,d=I")
+                .count(),
+            2
+        );
+
+        // The next account starts from nothing: a result that was still on its way
+        // is ignored, and the same picture would be fetched anew.
+        app.on_matrix(loaded(320, 200));
+        app.on_matrix(MatrixEvent::Image {
+            key: KEY.into(),
+            full: true,
+            result: Ok(decoded(640, 400)),
+        });
+        assert!(!app.images.viewer_open());
+        let info = remote_image(KEY, None);
+        assert_eq!(
+            app.images.slot(&info, 80),
+            crate::images::Slot::Cells(24, 8)
+        );
+        app.images.begin_frame();
+        app.images.request(&info);
+        assert_eq!(app.images.take_requests().len(), 1);
+    }
+
+    #[test]
     fn image_messages_cannot_be_edited_into_text() {
         let mut message = picture("1", remote_image(KEY, Some((320, 200))));
         message.own = true;

@@ -1,9 +1,12 @@
 //! Entering and leaving the terminal's TUI state, in one place.
 //!
 //! Startup order matters (see docs/PLAN.md §4): terminal queries that read replies from
-//! stdin (image protocol, background colour) must run after raw mode is on and before the
-//! crossterm event stream exists. `TerminalGuard::enter` does the first half; callers run
-//! their queries, then call `activate`.
+//! stdin (image protocol, background colour) must run after raw mode is on, before mouse
+//! and focus reports are switched on (they would arrive among the replies) and before
+//! the crossterm event stream exists. `TerminalGuard::enter` turns on raw mode;
+//! `alternate_screen` may follow so that a terminal that prints a query instead of
+//! answering it does so where it does no harm; callers run their queries, then call
+//! `activate`.
 
 use std::io::{self, Stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +49,15 @@ impl TerminalGuard {
         let enhanced = supports_keyboard_enhancement().unwrap_or(false);
         KEYBOARD_ENHANCED.store(enhanced, Ordering::SeqCst);
         Ok(Self { _private: () })
+    }
+
+    /// Optional step between the two: only the alternate screen, nothing that makes
+    /// the terminal send reports. `activate` clears whatever a query left on it.
+    pub fn alternate_screen(&self) -> Result<()> {
+        // Set first, so that `restore` leaves the screen even if the write fails halfway.
+        ACTIVE.store(true, Ordering::SeqCst);
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(())
     }
 
     /// Step 2: alternate screen, mouse, paste, focus events and (where supported) the
