@@ -220,12 +220,17 @@ pub struct Incoming {
     fresh: bool,
 }
 
-/// A request older than this has expired (the SDK gives them ten minutes; a few
-/// minutes of clock difference are allowed for).
+/// A request or step further in the past or future than this is ignored (the SDK
+/// allows ten minutes past and five minutes ahead; a few minutes of clock
+/// difference are allowed for).
 const FRESH_MS: u64 = 5 * 60 * 1000;
 
-fn age_ms(sent: MilliSecondsSinceUnixEpoch) -> u64 {
-    u64::from(MilliSecondsSinceUnixEpoch::now().get()).saturating_sub(sent.get().into())
+fn is_fresh_at(now: MilliSecondsSinceUnixEpoch, sent: MilliSecondsSinceUnixEpoch) -> bool {
+    u64::from(now.get()).abs_diff(sent.get().into()) < FRESH_MS
+}
+
+fn is_fresh(sent: MilliSecondsSinceUnixEpoch) -> bool {
+    is_fresh_at(MilliSecondsSinceUnixEpoch::now(), sent)
 }
 
 struct Running {
@@ -274,8 +279,8 @@ fn in_room_step(event: &AnySyncMessageLikeEvent, own: Option<&UserId>) -> bool {
             | T::KeyVerificationDone
             | T::KeyVerificationCancel
     ) && Some(event.sender()) != own
-        // Not history that comes in when a room is first loaded.
-        && age_ms(event.origin_server_ts()) < FRESH_MS
+        // Not history that comes in when a room is first loaded, nor skewed far into the future.
+        && is_fresh(event.origin_server_ts())
 }
 
 /// Makes the SDK send what its verification code has queued, each time `wake` is
@@ -367,7 +372,7 @@ impl Verifier {
                     let _ = tx.send(Incoming {
                         sender: ev.sender,
                         flow_id: ev.content.transaction_id.to_string(),
-                        fresh: age_ms(ev.content.timestamp) < FRESH_MS,
+                        fresh: is_fresh(ev.content.timestamp),
                     });
                 }
             });
@@ -381,7 +386,7 @@ impl Verifier {
                     let _ = tx.send(Incoming {
                         sender: ev.sender,
                         flow_id: ev.event_id.to_string(),
-                        fresh: age_ms(ev.origin_server_ts) < FRESH_MS,
+                        fresh: is_fresh(ev.origin_server_ts),
                     });
                 }
             }
@@ -1329,16 +1334,24 @@ mod tests {
             let live = event(kind, them, now);
             assert_eq!(live.event_type().to_string(), kind);
             assert!(in_room_step(&live, Some(me)), "{kind}");
-            // Just loaded, but sent a while ago.
+            // Just loaded, but sent a while ago (or slightly ahead on an offset clock).
             assert!(in_room_step(
                 &event(kind, them, now - FRESH_MS / 2),
                 Some(me)
             ));
+            assert!(in_room_step(
+                &event(kind, them, now + FRESH_MS / 2),
+                Some(me)
+            ));
             // Our own steps (this device's, or another one's) need no answer from here.
             assert!(!in_room_step(&event(kind, me.as_str(), now), Some(me)));
-            // History.
+            // History or far in the future.
             assert!(!in_room_step(
                 &event(kind, them, now - 2 * FRESH_MS),
+                Some(me)
+            ));
+            assert!(!in_room_step(
+                &event(kind, them, now + 2 * FRESH_MS),
                 Some(me)
             ));
         }
@@ -1347,6 +1360,22 @@ mod tests {
             assert_eq!(other.event_type().to_string(), kind);
             assert!(!in_room_step(&other, Some(me)), "{kind}");
         }
+    }
+
+    #[test]
+    fn freshness_window_is_symmetric() {
+        use matrix_sdk::ruma::UInt;
+
+        let ts = |ms: u64| MilliSecondsSinceUnixEpoch(UInt::new_saturating(ms));
+        let now = ts(1_700_000_000_000);
+        let at = now.get();
+        let at_ms = u64::from(at);
+
+        assert!(is_fresh_at(now, now));
+        assert!(is_fresh_at(now, ts(at_ms - (FRESH_MS - 1))));
+        assert!(!is_fresh_at(now, ts(at_ms - FRESH_MS)));
+        assert!(is_fresh_at(now, ts(at_ms + (FRESH_MS - 1))));
+        assert!(!is_fresh_at(now, ts(at_ms + FRESH_MS)));
     }
 
     #[test]
