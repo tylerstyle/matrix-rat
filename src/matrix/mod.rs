@@ -2,6 +2,7 @@
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
 mod convert;
+mod drafts;
 mod keyring;
 mod manage;
 mod media;
@@ -176,6 +177,13 @@ pub enum MatrixCmd {
     },
     /// Re-authenticate a soft-logged-out session via browser, keeping the existing device id.
     ReauthBrowser,
+    /// Write the unsent text of a room to the store, to have it back after a restart
+    /// (see [`MatrixEvent::Draft`]). Empty text removes what is stored. Inside
+    /// [`MatrixCmd::InThread`] it is that thread's draft.
+    SaveDraft {
+        room_id: String,
+        text: String,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -221,6 +229,10 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Manage(command) => write!(f, "Manage({command:?})"),
             Self::ReauthPassword { .. } => f.write_str("ReauthPassword"),
             Self::ReauthBrowser => f.write_str("ReauthBrowser"),
+            // A draft is message text.
+            Self::SaveDraft { room_id, text } => {
+                write!(f, "SaveDraft({room_id}, {} bytes)", text.len())
+            }
         }
     }
 }
@@ -358,6 +370,14 @@ pub enum MatrixEvent {
         target: ReauthTarget,
         reason: String,
     },
+    /// The draft the store holds for a room, or for the thread starting at `thread`;
+    /// empty if there is none. Sent once per session, when the room or thread is
+    /// opened for the first time.
+    Draft {
+        room_id: String,
+        thread: Option<String>,
+        text: String,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -425,6 +445,15 @@ impl std::fmt::Debug for MatrixEvent {
             Self::NeedReauth { target, .. } => {
                 write!(f, "NeedReauth({} dev={})", target.user_id, target.device_id)
             }
+            // A draft is message text.
+            Self::Draft {
+                room_id,
+                thread,
+                text,
+            } => match thread {
+                Some(root) => write!(f, "Draft({room_id}, {root}, {} bytes)", text.len()),
+                None => write!(f, "Draft({room_id}, {} bytes)", text.len()),
+            },
         }
     }
 }

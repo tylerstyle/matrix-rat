@@ -189,6 +189,7 @@ action_table! {
     Action::Send => ("send", Context::Composer, "Send"),
     Action::Newline => ("newline", Context::Composer, "Line break"),
     Action::CancelCompose => ("cancel_compose", Context::Composer, "Cancel reply or edit"),
+    Action::EditLast => ("edit_last", Context::Composer, "Edit last message, or select"),
 }
 
 pub fn action_by_name(name: &str) -> Option<ActionSpec> {
@@ -613,13 +614,15 @@ pub const DEFAULT: &[Binding] = &[
         "Alt-Enter",
         "Line break (fallback)",
     ),
+    // The keymap cannot say "only when empty": the action itself goes on to select a
+    // message when there is text (the cursor being on the first line) or nothing to edit.
     bind(
         Composer,
         KeyCode::Up,
         NONE,
-        Action::SelectOlder,
+        Action::EditLast,
         "↑",
-        "First line: select a message",
+        "Edit last message, or select",
     ),
 ];
 

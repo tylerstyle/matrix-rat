@@ -49,6 +49,9 @@ pub enum Action {
     Send,
     Newline,
     CancelCompose,
+    /// In an empty composer: edit the user's own latest message. With text in it (or
+    /// no such message) it does what `SelectOlder` does, so both can share a key.
+    EditLast,
 
     OpenEmoji,
     AcceptInvite,

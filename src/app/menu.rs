@@ -518,6 +518,11 @@ mod tests {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
+    /// Alt-↑: from the composer to the newest message, whatever the composer holds.
+    fn alt_up() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT))
+    }
+
     fn mouse(button: MouseButton, column: u16, row: u16) -> Event {
         Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(button),
@@ -810,7 +815,7 @@ mod tests {
     #[test]
     fn the_key_opens_the_same_menu_for_the_selected_message() {
         let (mut app, mut terminal) = demo();
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         app.on_event(key(KeyCode::Up));
         assert_eq!(app.timeline.selected, Some(5));
         screen(&mut app, &mut terminal);
@@ -1285,7 +1290,7 @@ mod tests {
         let (code, mods) = crate::keymap::parse_key(Context::Timeline, "x").unwrap();
         app.keymap
             .apply_rebind(Context::Timeline, Action::ContextMenu, code, mods);
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         screen(&mut app, &mut terminal);
         app.on_event(key(KeyCode::Char('m')));
         assert!(app.modal.is_none());
@@ -1532,7 +1537,7 @@ mod tests {
             let mut app = App::demo();
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             screen(&mut app, &mut terminal);
-            app.on_event(key(KeyCode::Up));
+            app.on_event(alt_up());
             screen(&mut app, &mut terminal);
             app.on_event(key(KeyCode::Char('m')));
             assert!(app.modal.is_some(), "{width}x{height}");
@@ -1561,7 +1566,7 @@ mod tests {
         }
         // At the right edge of a normal window the whole menu is visible.
         let (mut app, mut terminal) = demo();
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         screen(&mut app, &mut terminal);
         app.on_event(key(KeyCode::Char('m')));
         if let Some(Modal::Menu(menu)) = &mut app.modal {
@@ -1586,7 +1591,7 @@ mod tests {
         let (column, row) = find(&text, "Good to know, thanks.");
         app.on_event(right(column, row));
         assert!(app.modal.is_none());
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         screen(&mut app, &mut terminal);
         app.on_event(key(KeyCode::Char('m')));
         assert!(app.modal.is_some());

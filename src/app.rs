@@ -2,6 +2,7 @@
 
 mod attach;
 mod complete;
+mod drafts;
 mod files;
 mod keybinds;
 mod media;
@@ -250,6 +251,8 @@ pub struct App {
     pub threads: thread::Threads,
     /// Files waiting in the composer to be sent.
     pub attach: attach::AttachState,
+    /// What of the unsent text is in the store, to have it back after a restart.
+    drafts: drafts::Drafts,
     /// Composer completions and tracked mentions/room links.
     pub complete: complete::CompleteState,
     /// Joining, creating and leaving rooms.
@@ -407,6 +410,7 @@ impl App {
             images: crate::images::ImageStore::new(crate::images::Graphics::halfblocks()),
             threads: Default::default(),
             attach: Default::default(),
+            drafts: Default::default(),
             complete: Default::default(),
             manage: Default::default(),
             keymap: Keymap::default(),
@@ -980,6 +984,7 @@ impl App {
         self.confirm_large = None;
         self.images.clear();
         self.attach.clear();
+        self.drafts = Default::default();
         self.complete.reset_session();
         self.manage = Default::default();
         self.sync = Some(SyncStatus::Stopped);
@@ -1026,6 +1031,8 @@ impl App {
                     typing: false,
                 });
             }
+            // What is unsent here goes to the store, in case we do not come back.
+            self.save_draft();
             // An edit belongs to its room; a plain draft waits there until we come back.
             self.cancel_compose();
             let draft = self.composer.take();
@@ -1215,7 +1222,10 @@ impl App {
             self.composer.take();
             self.clear_completion_marks();
             if matches!(self.compose_mode, ComposeMode::Edit(_)) {
+                // The draft that waited behind the edit is back, and still unsent.
                 self.end_edit();
+            } else {
+                self.forget_sent_draft();
             }
             self.compose_mode = ComposeMode::Normal;
             self.timeline.scroll = 0;
@@ -1473,6 +1483,33 @@ impl App {
             }
             _ => ComposeMode::Normal,
         };
+    }
+
+    /// The user's own latest message that can be edited, if the composer is free for
+    /// it: empty, and neither answering nor editing. This is what `Action::EditLast`
+    /// (↑ in the composer) edits.
+    pub fn last_editable(&self) -> Option<usize> {
+        if !self.composer.is_empty() || self.compose_mode != ComposeMode::Normal {
+            return None;
+        }
+        let last = self.messages().iter().rposition(Message::editable)?;
+        // One that could not be sent wants sending again or discarding first, which
+        // is offered on the message itself; an older one is not "the last".
+        (self.messages()[last].state != SendState::Failed).then_some(last)
+    }
+
+    /// Starts editing the message at `index` with its text in the composer.
+    fn edit_message(&mut self, index: usize) {
+        let Some(message) = self.messages().get(index) else {
+            return;
+        };
+        // An action stays an action when edited.
+        let text = if message.kind == MsgKind::Emote {
+            format!("/me {}", message.body)
+        } else {
+            message.body.clone()
+        };
+        self.begin_edit(index, &text);
     }
 
     /// Starts editing: the unsent draft is put aside and comes back afterwards.
@@ -1750,27 +1787,18 @@ impl App {
             Action::Edit => {
                 let selected = self.timeline.selected;
                 match selected.and_then(|i| self.messages().get(i).map(|m| (i, m))) {
-                    Some((_, message))
-                        if message.own
-                            && (message.image.is_some()
-                                || message.file.is_some()
-                                || !matches!(message.kind, MsgKind::Text | MsgKind::Emote)) =>
-                    {
+                    Some((i, message)) if message.editable() => self.edit_message(i),
+                    Some((_, message)) if message.own => {
                         self.show_toast("This message cannot be edited");
-                    }
-                    Some((i, message)) if message.own => {
-                        // An action stays an action when edited.
-                        let text = if message.kind == MsgKind::Emote {
-                            format!("/me {}", message.body)
-                        } else {
-                            message.body.clone()
-                        };
-                        self.begin_edit(i, &text);
                     }
                     Some(_) => self.show_toast("You can only edit your own messages"),
                     None => {}
                 }
             }
+            Action::EditLast => match self.last_editable() {
+                Some(i) => self.edit_message(i),
+                None => self.perform(Action::SelectOlder),
+            },
             Action::React => {
                 if let Some(i) = self.timeline.selected
                     && self.modal.is_none()
@@ -2230,6 +2258,16 @@ impl App {
                 members,
                 can_mention_room,
             } => self.on_room_members(room_id, members, can_mention_room),
+            MatrixEvent::Draft {
+                room_id,
+                thread,
+                text,
+            } => {
+                // Not one of a session that has ended.
+                if !self.logged_out {
+                    self.on_stored_draft(room_id, thread, text);
+                }
+            }
             // Answers to requests of a session that has ended.
             MatrixEvent::Manage(_) if self.logged_out => {}
             MatrixEvent::Manage(event) => self.on_manage(event),
@@ -2402,14 +2440,17 @@ impl App {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 self.on_key(key);
                 self.update_typing();
+                self.note_draft();
             }
             Event::Mouse(mouse) => {
                 self.on_mouse(mouse);
                 self.update_typing();
+                self.note_draft();
             }
             Event::Paste(text) => {
                 self.on_paste(&text);
                 self.update_typing();
+                self.note_draft();
             }
             Event::Resize(..) => {
                 // A resized terminal may have dropped the pictures it was sent.
@@ -2974,6 +3015,7 @@ impl App {
     fn on_tick(&mut self) {
         self.verify_tick();
         self.release_count_notices(COUNT_NOTICE_WAIT);
+        self.save_idle_draft(drafts::IDLE);
         if self
             .toast
             .as_ref()
@@ -3099,7 +3141,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     app.flush_images(true);
     // Let the worker stop syncing cleanly, but never hang on the way out.
     if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
-        matrix.send(MatrixCmd::Shutdown);
+        // The worker takes commands in order: the draft is written before it stops.
+        app.shut_down_worker();
         // Close every command sender so the worker also sees the channel end.
         drop(matrix);
         drop(app);
@@ -3121,6 +3164,11 @@ mod tests {
 
     fn key_mod(code: KeyCode, mods: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, mods))
+    }
+
+    /// Alt-↑: from the composer to the newest message, whatever the composer holds.
+    fn alt_up() -> Event {
+        key_mod(KeyCode::Up, KeyModifiers::ALT)
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
@@ -3212,10 +3260,10 @@ mod tests {
     }
 
     #[test]
-    fn up_from_composer_walks_messages_and_down_returns() {
+    fn alt_up_from_composer_walks_messages_and_down_returns() {
         let (mut app, _) = drawn();
         let last = app.rooms[0].messages.len() - 1;
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         assert_eq!(app.focus, Pane::Timeline);
         assert_eq!(app.timeline.selected, Some(last));
         app.on_event(key(KeyCode::Up));
@@ -3241,11 +3289,167 @@ mod tests {
         assert_eq!(app.focus, Pane::Timeline);
     }
 
+    /// The demo's first room with these messages instead: `(own, text)`.
+    fn with_messages(messages: &[(bool, &str)]) -> App {
+        let (mut app, _) = drawn();
+        app.rooms[0].messages = messages
+            .iter()
+            .enumerate()
+            .map(|(n, (own, body))| Message {
+                id: n.to_string(),
+                sender: if *own { OWN_NAME } else { "ann" }.to_owned(),
+                body: (*body).to_owned(),
+                own: *own,
+                ..Message::default()
+            })
+            .collect();
+        app
+    }
+
+    #[test]
+    fn up_in_an_empty_composer_edits_the_own_latest_message() {
+        let mut app = with_messages(&[
+            (false, "hello"),
+            (true, "first"),
+            (true, "second"),
+            (true, "a file"),
+            (true, "gone"),
+            (false, "bye"),
+        ]);
+        // Not everything of ours can be edited: the newest that can is taken.
+        app.rooms[0].messages[3].file = Some(crate::model::Attachment {
+            key: "k".into(),
+            name: "a.pdf".into(),
+            size: None,
+            source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
+                "mxc://example.org/a".into(),
+            )),
+        });
+        app.rooms[0].messages[4].kind = MsgKind::Redacted;
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Edit(2));
+        assert_eq!(app.composer.text(), "second");
+        assert_eq!(app.focus, Pane::Composer);
+        assert_eq!(app.timeline.selected, None);
+
+        // It is an edit like any other: Enter changes the message, nothing is added.
+        type_text(&mut app, "!");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.rooms[0].messages.len(), 6);
+        let edited = &app.rooms[0].messages[2];
+        assert_eq!((edited.body.as_str(), edited.edited), ("second!", true));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(app.composer.is_empty());
+
+        // Esc gives it up and leaves the composer empty again.
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Edit(2));
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(app.composer.is_empty());
+
+        // While editing, Up is not "edit the last one" again: it goes to the messages.
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Edit(2));
+        assert_eq!(app.focus, Pane::Timeline);
+    }
+
+    #[test]
+    fn up_edits_an_action_as_an_action() {
+        let mut app = with_messages(&[(true, "waves")]);
+        app.rooms[0].messages[0].kind = MsgKind::Emote;
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Edit(0));
+        assert_eq!(app.composer.text(), "/me waves");
+    }
+
+    #[test]
+    fn up_with_text_in_the_composer_selects_a_message_as_before() {
+        let mut app = with_messages(&[(true, "mine"), (false, "theirs")]);
+        type_text(&mut app, "draft");
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.composer.text(), "draft");
+        assert_eq!(app.focus, Pane::Timeline);
+        assert_eq!(app.timeline.selected, Some(1));
+
+        // Nor does it start an edit in the middle of a reply.
+        let mut app = with_messages(&[(true, "mine"), (false, "theirs")]);
+        app.timeline.selected = Some(1);
+        app.perform(Action::Reply);
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Reply(1));
+        assert_eq!(app.focus, Pane::Timeline);
+    }
+
+    #[test]
+    fn up_leaves_a_message_that_was_not_sent_to_the_messages_pane() {
+        let mut app = with_messages(&[(true, "sent"), (true, "not sent")]);
+        app.rooms[0].messages[1].state = SendState::Failed;
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.focus, Pane::Timeline);
+        assert_eq!(app.timeline.selected, Some(1));
+
+        // One that is still on its way can be corrected.
+        app.rooms[0].messages[1].state = SendState::Sending;
+        app.perform(Action::Focus(Pane::Composer));
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Edit(1));
+    }
+
+    #[test]
+    fn up_without_an_own_message_selects_a_message_as_before() {
+        let mut app = with_messages(&[(false, "one"), (false, "two")]);
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(app.composer.is_empty());
+        assert_eq!(app.focus, Pane::Timeline);
+        assert_eq!(app.timeline.selected, Some(1));
+    }
+
+    #[test]
+    fn edit_last_follows_its_key() {
+        let mut app = with_messages(&[(true, "mine"), (false, "theirs")]);
+        app.keymap.apply_rebind(
+            Context::Composer,
+            Action::EditLast,
+            KeyCode::F(8),
+            KeyModifiers::NONE,
+        );
+        // Up has no meaning of its own in the composer now.
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.focus, Pane::Composer);
+        app.on_event(key(KeyCode::F(8)));
+        assert_eq!(app.compose_mode, ComposeMode::Edit(0));
+        assert_eq!(app.composer.text(), "mine");
+    }
+
+    #[test]
+    fn up_edits_in_the_vim_preset_too() {
+        let mut app = with_messages(&[(true, "mine"), (false, "theirs")]);
+        app.keymap = Keymap::from_preset(keymap::Preset::Vim);
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Edit(0));
+        // Esc is "to the messages" there and leaves the edit as it is, like one begun
+        // with `e`; Ctrl-C gives it up.
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.focus, Pane::Timeline);
+        assert_eq!(app.compose_mode, ComposeMode::Edit(0));
+        app.on_event(key(KeyCode::Char('i')));
+        assert_eq!(app.focus, Pane::Composer);
+        app.on_event(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(app.composer.is_empty());
+    }
+
     #[test]
     fn reply_edit_delete_react() {
         let (mut app, _) = drawn();
         // Reply to the newest message.
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         app.on_event(key(KeyCode::Enter));
         assert_eq!(app.focus, Pane::Composer);
         assert!(matches!(app.compose_mode, ComposeMode::Reply(_)));
@@ -3256,7 +3460,7 @@ mod tests {
         assert_eq!(app.compose_mode, ComposeMode::Normal);
 
         // Edit it.
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         app.on_event(key(KeyCode::Char('e')));
         assert_eq!(app.composer.text(), "congrats");
         type_text(&mut app, "!");
@@ -3267,7 +3471,7 @@ mod tests {
         assert_eq!((edited.body.as_str(), edited.edited), ("congrats!", true));
 
         // React, then un-react.
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         app.on_event(key(KeyCode::Char('r')));
         assert!(matches!(&app.modal, Some(Modal::Emoji(p)) if p.react_to.is_some()));
         app.on_event(key(KeyCode::Enter));
@@ -3317,7 +3521,7 @@ mod tests {
         app.on_event(key(KeyCode::Esc));
         assert!(!app.help_open);
 
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(app.compose_mode, ComposeMode::Reply(_)));
         app.on_event(key(KeyCode::Esc));
@@ -3393,7 +3597,7 @@ mod tests {
     #[test]
     fn status_hints_are_clickable() {
         let (mut app, mut terminal) = drawn();
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         redraw(&mut app, &mut terminal);
         let (col, row) = find(&terminal, "reply");
         app.on_event(click(col, row));
@@ -3793,7 +3997,7 @@ mod tests {
             &app,
             vec![remote("1", "ann", "first"), remote("2", "me", "second")],
         ));
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         app.on_event(key(KeyCode::Up));
         assert_eq!(app.timeline.selected, Some(0));
         app.on_event(key(KeyCode::Enter));
@@ -3841,8 +4045,8 @@ mod tests {
         assert_eq!(app.compose_mode, ComposeMode::Normal);
 
         // If the message being edited disappears, its text is not left as a draft.
+        // (Up in the empty composer edits our latest message.)
         app.on_event(key(KeyCode::Up));
-        app.on_event(key(KeyCode::Char('e')));
         assert_eq!(app.composer.text(), "second");
         app.on_matrix(timeline(&app, vec![remote("0", "ann", "older")]));
         assert_eq!(app.compose_mode, ComposeMode::Normal);
@@ -3857,7 +4061,7 @@ mod tests {
             vec![remote("1", "ann", "theirs"), remote("2", "me", "mine")],
         ));
         drain(&mut commands);
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         app.on_event(key(KeyCode::Char('r')));
         app.on_event(key(KeyCode::Enter));
         app.on_event(key(KeyCode::Delete));
@@ -3983,8 +4187,8 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         let seen = drain(&mut commands);
         assert_eq!(
-            seen[seen.len() - 2..],
-            ["Send(!b)", "Typing(!b, false)"],
+            seen[seen.len() - 3..],
+            ["Send(!b)", "SaveDraft(!b, 0 bytes)", "Typing(!b, false)"],
             "{seen:?}"
         );
 
@@ -4901,7 +5105,7 @@ mod tests {
         }
         assert_eq!(app.theme.name, first);
 
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         app.on_event(Event::Paste("a\r\nb".into()));
         assert_eq!(app.focus, Pane::Composer);
         assert_eq!(app.composer.text(), "a\nb");

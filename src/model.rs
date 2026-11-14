@@ -285,6 +285,15 @@ impl Message {
         }
     }
 
+    /// Whether the user can change this message: their own text or `/me` action, not
+    /// a file, a picture or something deleted.
+    pub fn editable(&self) -> bool {
+        self.own
+            && self.image.is_none()
+            && self.file.is_none()
+            && matches!(self.kind, MsgKind::Text | MsgKind::Emote)
+    }
+
     /// What saving this message would write to disk, if anything.
     pub fn attachment(&self) -> Option<Attachment> {
         if let Some(file) = &self.file {

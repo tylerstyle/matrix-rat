@@ -99,6 +99,8 @@ impl App {
         };
         let root_message = message.clone();
 
+        // The room's unsent text goes to the store while it still is the open draft.
+        self.save_draft();
         // An edit belongs to the room's messages; the room's draft waits for the return.
         self.cancel_compose();
         let room_draft = self.composer.take();
@@ -160,6 +162,10 @@ impl App {
     /// Puts the room's view back without asking for its messages (for callers that
     /// do so themselves). False if no thread was open.
     pub(super) fn leave_thread(&mut self) -> bool {
+        if self.thread_open() {
+            // The thread's unsent text goes to the store while it still is the open draft.
+            self.save_draft();
+        }
         let Some(view) = self.threads.open.take() else {
             return false;
         };
@@ -234,6 +240,35 @@ impl App {
         true
     }
 
+    /// A draft from the store for a conversation that is not the one being written
+    /// in: it waits where that conversation's unsent text waits, unless there is some
+    /// already. `thread` is the event the thread starts at; `None` means the room.
+    pub(super) fn keep_stored_draft(
+        &mut self,
+        room_id: String,
+        thread: Option<String>,
+        text: String,
+    ) {
+        match thread {
+            Some(root) => {
+                self.threads.drafts.entry((room_id, root)).or_insert(text);
+            }
+            None => {
+                let Some(index) = self.rooms.iter().position(|room| room.id == room_id) else {
+                    return;
+                };
+                // The open room's draft is put aside while one of its threads is shown.
+                let draft = match &mut self.threads.open {
+                    Some(view) if index == self.active => &mut view.room_draft,
+                    _ => &mut self.rooms[index].draft,
+                };
+                if draft.is_empty() {
+                    *draft = text;
+                }
+            }
+        }
+    }
+
     /// Addresses a command about messages to the open thread, if there is one.
     pub(super) fn in_thread(&self, command: MatrixCmd) -> MatrixCmd {
         let view = self.threads.open.as_ref();
@@ -259,7 +294,8 @@ impl App {
                 | MatrixCmd::Retry { .. }
                 | MatrixCmd::Paginate { .. }
                 | MatrixCmd::MarkRead { .. }
-                | MatrixCmd::SendFiles { .. }),
+                | MatrixCmd::SendFiles { .. }
+                | MatrixCmd::SaveDraft { .. }),
             ) => MatrixCmd::InThread {
                 root,
                 command: Box::new(command),
@@ -397,17 +433,20 @@ mod tests {
         (app, terminal, commands)
     }
 
-    /// The next command that is not a typing notice.
+    /// The next command that is not a typing notice or the saving of a draft (in a
+    /// thread or not; `app::drafts` tests those).
     fn next(commands: &mut UnboundedReceiver<MatrixCmd>) -> Option<MatrixCmd> {
         loop {
             match commands.try_recv().ok()? {
-                MatrixCmd::Typing { .. } => {}
+                MatrixCmd::Typing { .. } | MatrixCmd::SaveDraft { .. } => {}
+                MatrixCmd::InThread { command, .. }
+                    if matches!(*command, MatrixCmd::SaveDraft { .. }) => {}
                 command => return Some(command),
             }
         }
     }
 
-    /// The commands sent so far, without typing notices.
+    /// The commands sent so far, without typing notices and saved drafts.
     fn drain(commands: &mut UnboundedReceiver<MatrixCmd>) -> Vec<String> {
         let mut seen = Vec::new();
         while let Some(command) = next(commands) {
@@ -853,5 +892,22 @@ mod tests {
         app.delete_message(0);
         app.close_thread();
         assert_eq!(app.timeline.selected, Some(own - 1));
+    }
+
+    #[test]
+    fn up_in_the_empty_composer_edits_the_own_latest_reply_of_the_thread() {
+        let (mut app, _terminal, mut commands) = connected();
+        app.open_thread(5);
+        let mut loaded = thread_messages();
+        loaded[1].own = true;
+        app.on_matrix(update(&app, 2, loaded));
+        drain(&mut commands);
+
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, crate::app::ComposeMode::Edit(1));
+        assert_eq!(app.composer.text(), "first reply");
+        type_text(&mut app, "!");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(drain(&mut commands), ["InThread($ev5, Edit(!a))"]);
     }
 }

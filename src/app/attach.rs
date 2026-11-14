@@ -49,6 +49,11 @@ impl AttachState {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// The draft put aside in `scope` for an `/upload` command; empty if none was.
+    pub fn stashed(&self, scope: &Scope) -> &str {
+        self.stash.get(scope).map_or("", String::as_str)
+    }
+
     pub fn clear(&mut self) {
         *self = Self::default();
     }
@@ -384,6 +389,8 @@ impl App {
         self.composer.take();
         self.clear_completion_marks();
         self.compose_mode = ComposeMode::Normal;
+        // The caption was the draft.
+        self.forget_sent_draft();
         self.timeline.scroll = 0;
         true
     }

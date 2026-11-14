@@ -464,7 +464,9 @@ fn include_keymap_action(action: Action) -> ActionInclusion {
         | Action::RoomPrev
         | Action::RoomNext
         | Action::Send
-        | Action::Newline => ActionInclusion::Skip,
+        | Action::Newline
+        // A composer key that depends on what is typed; "Edit" covers it by name.
+        | Action::EditLast => ActionInclusion::Skip,
         _ => ActionInclusion::Include,
     }
 }
