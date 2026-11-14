@@ -9,8 +9,10 @@ use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
 use matrix_sdk::sync::Notification;
 use matrix_sdk::{Client, Room};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 
 use super::MatrixEvent;
+use super::safety::{IgnoredSet, is_ignored_in};
 use crate::text::{sanitize_line, truncate};
 
 /// Messages older than this when they arrive are history catching up, not news.
@@ -73,7 +75,11 @@ impl Drop for Watch {
 }
 
 /// Registers the handler for this session.
-pub async fn watch(client: &Client, events: UnboundedSender<MatrixEvent>) -> Watch {
+pub async fn watch(
+    client: &Client,
+    events: UnboundedSender<MatrixEvent>,
+    ignored: watch::Receiver<IgnoredSet>,
+) -> Watch {
     let state = std::sync::Arc::new(std::sync::Mutex::new(WatchState {
         events: Some(events),
         ..WatchState::default()
@@ -97,12 +103,19 @@ pub async fn watch(client: &Client, events: UnboundedSender<MatrixEvent>) -> Wat
                     state.events.clone()
                 }
             };
+            let ignored = ignored.clone();
             async move {
                 let Some(events) = events else {
                     return;
                 };
-                if let Some(notice) = notice(notification, &room, &client).await {
-                    let _ = events.send(MatrixEvent::Notice(notice));
+                match notice(notification, &room, &client, &ignored).await {
+                    NoticeOutcome::Show(notice) => {
+                        let _ = events.send(MatrixEvent::Notice(notice));
+                    }
+                    NoticeOutcome::Suppressed(room_id) => {
+                        let _ = events.send(MatrixEvent::SuppressedNotice { room_id });
+                    }
+                    NoticeOutcome::Ignore => {}
                 }
             }
         })
@@ -110,13 +123,24 @@ pub async fn watch(client: &Client, events: UnboundedSender<MatrixEvent>) -> Wat
     watch
 }
 
-async fn notice(notification: Notification, room: &Room, client: &Client) -> Option<Notice> {
+enum NoticeOutcome {
+    Show(Notice),
+    Suppressed(String),
+    Ignore,
+}
+
+async fn notice(
+    notification: Notification,
+    room: &Room,
+    client: &Client,
+    ignored: &watch::Receiver<IgnoredSet>,
+) -> NoticeOutcome {
     if !notification
         .actions
         .iter()
         .any(|action| action.should_notify())
     {
-        return None;
+        return NoticeOutcome::Ignore;
     }
     let highlight = notification
         .actions
@@ -130,14 +154,19 @@ async fn notice(notification: Notification, room: &Room, client: &Client) -> Opt
     let (sender, body) = match &notification.event {
         RawAnySyncOrStrippedTimelineEvent::Sync(raw) => {
             thread = thread_of(raw.json().get());
-            let event = raw.deserialize().ok()?;
+            let Ok(event) = raw.deserialize() else {
+                return NoticeOutcome::Ignore;
+            };
             if Some(event.sender()) == client.user_id() {
-                return None;
+                return NoticeOutcome::Ignore;
             }
             let sent = UNIX_EPOCH + Duration::from_millis(event.origin_server_ts().0.into());
             let age = SystemTime::now().duration_since(sent).unwrap_or_default();
             if age > FRESH {
-                return None;
+                return NoticeOutcome::Ignore;
+            }
+            if is_ignored_in(ignored, event.sender()) {
+                return NoticeOutcome::Suppressed(room.room_id().to_string());
             }
             let sender = match room.get_member_no_sync(event.sender()).await {
                 Ok(Some(member)) => member.name().to_owned(),
@@ -146,11 +175,23 @@ async fn notice(notification: Notification, room: &Room, client: &Client) -> Opt
             (sender, describe(&event))
         }
         // An invitation: only the bare facts are known.
-        RawAnySyncOrStrippedTimelineEvent::Stripped(_) => {
+        RawAnySyncOrStrippedTimelineEvent::Stripped(raw) => {
+            let inviter: Option<matrix_sdk::ruma::OwnedUserId> = match room.invite_details().await {
+                Ok(invite) => Some(invite.inviter_id),
+                Err(_) => serde_json::from_str::<serde_json::Value>(raw.json().get())
+                    .ok()
+                    .and_then(|value| value.get("sender")?.as_str()?.try_into().ok()),
+            };
+            if inviter
+                .as_ref()
+                .is_some_and(|user| is_ignored_in(ignored, user))
+            {
+                return NoticeOutcome::Suppressed(room.room_id().to_string());
+            }
             (String::new(), "You are invited to this room".to_owned())
         }
     };
-    Some(Notice {
+    NoticeOutcome::Show(Notice {
         room_id: room.room_id().to_string(),
         room: sanitize_line(&room_name),
         sender: sanitize_line(&sender),

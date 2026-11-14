@@ -15,8 +15,10 @@ use crate::manage::{
     Click, Confirm, InfoPopup, InfoRow, NewPopup, Stage, confirm_keys, notify_label, role_label,
 };
 use crate::matrix::RoomMember;
-use crate::text::{truncate, width, wrap};
+use crate::text::{sanitize_line, truncate, width, wrap};
 use crate::theme::{Role, Theme};
+
+const USER_SEARCH_MAX_ROWS: usize = 5;
 
 /// The `+` at the right end of the room list's title: new chat or room.
 pub fn new_button(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -141,6 +143,12 @@ fn message(frame: &mut Frame, theme: &Theme, form: &NewPopup, inner: Rect, top: 
 fn footer(form: &NewPopup) -> &'static str {
     if form.busy.is_some() {
         "Esc close"
+    } else if matches!(form.stage, Stage::Direct | Stage::Invite) && !form.user_results.is_empty() {
+        if form.single {
+            "↑↓ pick · Enter · Esc close"
+        } else {
+            "↑↓ pick · Enter · Esc back"
+        }
     } else if form.single {
         "Enter continue · Esc close"
     } else {
@@ -149,7 +157,16 @@ fn footer(form: &NewPopup) -> &'static str {
 }
 
 fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
-    let Some(rect) = centered(area, 66, 11) else {
+    let show_search = matches!(form.stage, Stage::Direct | Stage::Invite)
+        && form.busy.is_none()
+        && (!form.user_results.is_empty() || form.user_searching);
+    let list_rows = if show_search {
+        form.user_results.len().clamp(1, USER_SEARCH_MAX_ROWS) as u16
+    } else {
+        0
+    };
+    let height = 11 + list_rows + u16::from(show_search);
+    let Some(rect) = centered(area, 66, height) else {
         return;
     };
     let inner = popup(frame, app, area, rect, form.stage.title(), footer(form));
@@ -164,15 +181,14 @@ fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) 
         ),
         Stage::Invite => (
             format!(
-                "Who to invite to {}? A user ID looks like @name:server.",
+                "Who to invite to {}? Search by name or enter @name:server.",
                 form.room.as_ref().map_or("this room", |(_, name)| name)
             ),
             "User ID",
             " Invite ",
         ),
         _ => (
-            "The user ID of the person, like @name:server. If you already have a chat with \
-             them, it is opened."
+            "Search by name or enter a user ID like @name:server. Any existing chat is opened."
                 .to_owned(),
             "User ID",
             " Start chat ",
@@ -196,16 +212,97 @@ fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) 
         app.hits
             .add(value_rect, HitId::Input(InputTarget::NewField(0)));
     }
-    let buttons = row(inner, 5);
+    if show_search {
+        user_search_rows(frame, app, &theme, inner, form);
+    }
+    let btn_row = if show_search { 5 + list_rows } else { 5 };
+    let buttons = row(inner, btn_row);
     if !busy && buttons.width > 0 {
         let w = (width(action) as u16).min(buttons.width);
         let rect = Rect::new(buttons.x, buttons.y, w, 1);
         button(frame, &theme, rect, action, true);
         app.hits.add(rect, hit(Click::Submit));
     }
-    message(frame, &theme, form, inner, 7);
+    message(frame, &theme, form, inner, btn_row + 2);
     if let Some(cursor) = cursor {
         frame.set_cursor_position(cursor);
+    }
+}
+
+fn user_search_rows(frame: &mut Frame, app: &mut App, theme: &Theme, inner: Rect, form: &NewPopup) {
+    if form.user_results.is_empty() {
+        let r = row(inner, 4);
+        if r.width > 0 {
+            frame.render_widget(
+                Line::from(Span::styled("  Searching…", theme.style(Role::Muted))),
+                r,
+            );
+        }
+        return;
+    }
+    for (i, person) in form
+        .user_results
+        .iter()
+        .take(USER_SEARCH_MAX_ROWS)
+        .enumerate()
+    {
+        let r = row(inner, 4 + i as u16);
+        if r.width == 0 {
+            continue;
+        }
+        let selected = form.user_selected == Some(i);
+        let hovered = app.hover == Some(HitId::UserSearchRow(i));
+        let marker = if selected { "› " } else { "  " };
+        let clean_name = person
+            .display_name
+            .as_deref()
+            .map(sanitize_line)
+            .filter(|s| !s.is_empty());
+        let clean_id = sanitize_line(&person.user_id);
+        let tile_text = clean_name.as_deref().unwrap_or(&clean_id);
+        let tile_style = ratatui::style::Style::new()
+            .fg(theme.style(Role::UnreadBadge).fg.unwrap_or_default())
+            .bg(theme.user_color(&person.user_id))
+            .add_modifier(Modifier::BOLD);
+        let mut used = 2usize;
+        let mut spans = vec![Span::styled(marker, theme.style(Role::TitleFocused))];
+        if r.width > 5 {
+            spans.push(Span::styled(super::sidebar::initial(tile_text), tile_style));
+            spans.push(Span::raw(" "));
+            used += 3;
+        }
+        let avail = (r.width as usize).saturating_sub(used);
+        let text_style = if selected {
+            theme.style(Role::TitleFocused)
+        } else if hovered {
+            theme.style(Role::Hover)
+        } else {
+            theme.style(Role::Text)
+        };
+        match clean_name {
+            Some(name) => {
+                let id_len = width(&clean_id);
+                if avail > id_len + 4 {
+                    let name_max = avail - id_len - 2;
+                    spans.push(Span::styled(truncate(&name, name_max), text_style));
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(clean_id, theme.style(Role::Muted)));
+                } else {
+                    spans.push(Span::styled(truncate(&name, avail), text_style));
+                }
+            }
+            None => {
+                spans.push(Span::styled(truncate(&clean_id, avail), text_style));
+            }
+        }
+        frame.render_widget(Line::from(spans), r);
+        app.hits.add(r, HitId::UserSearchRow(i));
+        if r.width > 5
+            && let Some(url) = &person.avatar
+        {
+            let cells = Rect::new(r.x + 2, r.y, 2, 1);
+            super::image::draw_avatar(frame, &mut app.images, theme, url, cells, 0, false);
+        }
     }
 }
 
@@ -649,6 +746,14 @@ fn confirm_prompt(info: &InfoPopup) -> Option<String> {
             "Del again to remove, Esc to keep · {} will be out of the room",
             name(user_id)
         ),
+        Confirm::Ignore(user_id) => format!(
+            "Confirm ignore, Esc to stay · {}'s messages and invites will be hidden",
+            name(user_id)
+        ),
+        Confirm::Unignore(user_id) => format!(
+            "Confirm unignore, Esc to stay · {}'s messages will show again",
+            name(user_id)
+        ),
         Confirm::NewChat(user_id) => format!(
             "Enter again to start one, Esc to stay · no chat with {} yet; they get an invitation",
             name(user_id)
@@ -686,9 +791,9 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
         Some(row @ InfoRow::Member(_)) => match info.member(row) {
             Some(member) if member.own => "This is you.",
             Some(member) if member.removable => {
-                "Enter: open your chat with them · Del: remove from the room"
+                "Enter: chat · Alt-I: ignore/unignore · Del: remove from the room"
             }
-            Some(_) => "Enter: open your chat with them",
+            Some(_) => "Enter: open your chat with them · Alt-I: ignore/unignore",
             None => "",
         },
         None => "",
@@ -845,8 +950,9 @@ fn member_row(
     name_style: ratatui::style::Style,
     with_buttons: bool,
 ) {
+    let ignored = app.is_user_ignored(&member.user_id);
     let room = (rect.width as usize).saturating_sub(2);
-    // Right end: the role or "invited"; on the selected row what can be done.
+    // Right end: the role, "invited" or "ignored"; on the selected row what can be done.
     let mut tag = role_label(member.role).to_owned();
     if member.invited {
         tag = if tag.is_empty() {
@@ -855,9 +961,20 @@ fn member_row(
             format!("{tag} · invited")
         };
     }
+    if ignored {
+        tag = if tag.is_empty() {
+            "ignored".to_owned()
+        } else {
+            format!("{tag} · ignored")
+        };
+    }
     let mut buttons: Vec<(&str, Click)> = Vec::new();
     if with_buttons && !member.own {
         buttons.push((" chat ", Click::MemberChat));
+        buttons.push((
+            if ignored { " unignore " } else { " ignore " },
+            Click::MemberIgnore,
+        ));
         if member.removable {
             buttons.push((" remove ", Click::MemberRemove));
         }
@@ -896,7 +1013,9 @@ fn member_row(
         Span::styled(name, name_style),
         Span::styled(id, theme.style(Role::Muted)),
     ];
-    let role = if member.role > crate::matrix::MemberRole::User {
+    let role = if ignored {
+        Role::Error
+    } else if member.role > crate::matrix::MemberRole::User {
         Role::StatusKey
     } else {
         Role::Muted

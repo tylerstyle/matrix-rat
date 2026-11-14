@@ -9,6 +9,7 @@ mod media;
 mod notify;
 mod receipts;
 mod rooms;
+mod safety;
 pub(crate) mod search;
 mod session;
 mod spaces;
@@ -234,6 +235,27 @@ pub enum MatrixCmd {
         room_id: String,
         threads: Vec<String>,
     },
+    /// Adds a user to `m.ignored_user_list`.
+    IgnoreUser {
+        user_id: String,
+    },
+    /// Removes a user from `m.ignored_user_list`.
+    UnignoreUser {
+        user_id: String,
+    },
+    /// Reports an offending message to the homeserver.
+    ReportContent {
+        room_id: String,
+        event_id: String,
+        reason: Option<String>,
+    },
+    /// Searches the homeserver's user directory by name or MXID.
+    SearchUsers {
+        generation: u64,
+        query: String,
+    },
+    /// Cancels any running user directory search.
+    CancelUserSearch,
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -304,6 +326,13 @@ impl std::fmt::Debug for MatrixCmd {
             Self::ForgetDrafts { room_id, threads } => {
                 write!(f, "ForgetDrafts({room_id}, {} threads)", threads.len())
             }
+            Self::IgnoreUser { .. } => f.write_str("IgnoreUser"),
+            Self::UnignoreUser { .. } => f.write_str("UnignoreUser"),
+            Self::ReportContent { room_id, .. } => write!(f, "ReportContent({room_id})"),
+            Self::SearchUsers { generation, .. } => {
+                write!(f, "SearchUsers(generation {generation})")
+            }
+            Self::CancelUserSearch => f.write_str("CancelUserSearch"),
         }
     }
 }
@@ -358,6 +387,24 @@ pub struct RoomSummary {
     pub avatar: Option<String>,
     /// Canonical alias (e.g. `#rust:matrix.org`), when set.
     pub alias: Option<String>,
+}
+
+/// A user returned by the homeserver's user directory search.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UserMatch {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    /// Safe `mxc://` address of the user's avatar, if any.
+    pub avatar: Option<String>,
+}
+
+impl std::fmt::Debug for UserMatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserMatch")
+            .field("has_name", &self.display_name.is_some())
+            .field("has_avatar", &self.avatar.is_some())
+            .finish()
+    }
 }
 
 /// Metadata attached to [`MatrixEvent::Timeline`] when it shows a detached
@@ -441,6 +488,12 @@ pub enum MatrixEvent {
     Spaces(Vec<SpaceSummary>),
     /// A message the account's notification rules consider worth a notification.
     Notice(Notice),
+    /// A notifying message or invite arrived for this room, but was suppressed because
+    /// its sender or inviter is on the ignored list. Keeps count-based notification
+    /// fallbacks from firing a generic "New message" toast for it.
+    SuppressedNotice {
+        room_id: String,
+    },
     /// The user clicked the desktop notification shown for this room. Comes from the
     /// notification service, not from the worker.
     NoticeClicked {
@@ -490,6 +543,21 @@ pub enum MatrixEvent {
         room_id: String,
         thread: Option<String>,
         text: String,
+    },
+    /// Current sorted list of ignored Matrix user IDs from `m.ignored_user_list`.
+    IgnoredUsers(Vec<String>),
+    /// Outcome of [`MatrixCmd::IgnoreUser`] or [`MatrixCmd::UnignoreUser`].
+    IgnoreResult {
+        user_id: String,
+        ignored: bool,
+        result: Result<(), String>,
+    },
+    /// Outcome of [`MatrixCmd::ReportContent`].
+    ReportResult(Result<(), String>),
+    /// Outcome of [`MatrixCmd::SearchUsers`].
+    UserSearchResults {
+        generation: u64,
+        results: Vec<UserMatch>,
     },
 }
 
@@ -553,6 +621,7 @@ impl std::fmt::Debug for MatrixEvent {
             }
             Self::Spaces(spaces) => write!(f, "Spaces({})", spaces.len()),
             Self::Notice(notice) => write!(f, "{notice:?}"),
+            Self::SuppressedNotice { room_id } => write!(f, "SuppressedNotice({room_id})"),
             Self::NoticeClicked { room_id } => write!(f, "NoticeClicked({room_id})"),
             Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
             Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
@@ -592,6 +661,23 @@ impl std::fmt::Debug for MatrixEvent {
                 Some(root) => write!(f, "Draft({room_id}, {root}, {} bytes)", text.len()),
                 None => write!(f, "Draft({room_id}, {} bytes)", text.len()),
             },
+            Self::IgnoredUsers(users) => write!(f, "IgnoredUsers({})", users.len()),
+            Self::IgnoreResult {
+                ignored, result, ..
+            } => write!(
+                f,
+                "IgnoreResult(ignored: {ignored}, ok: {})",
+                result.is_ok()
+            ),
+            Self::ReportResult(result) => write!(f, "ReportResult(ok: {})", result.is_ok()),
+            Self::UserSearchResults {
+                generation,
+                results,
+            } => write!(
+                f,
+                "UserSearchResults(generation {generation}, {} results)",
+                results.len()
+            ),
         }
     }
 }
@@ -959,7 +1045,10 @@ impl Worker {
         // the user out at the next start. Listening begins before the first request
         // (the very first sync usually refreshes), in a task of its own so that no slow
         // step of the main loop can delay a save.
-        let _notices = notify::watch(client, self.events.clone()).await;
+        let ignore_tracker =
+            safety::IgnoreTracker::start(client.clone(), self.events.clone()).await;
+        let mut ignored = ignore_tracker.subscribe();
+        let _notices = notify::watch(client, self.events.clone(), ignored.clone()).await;
         let mut session_changes = client.subscribe_to_session_changes();
         let token_saver = {
             let mut changes = client.subscribe_to_session_changes();
@@ -994,7 +1083,10 @@ impl Worker {
             .context("could not set up sync")?;
         // Start listening for redecryption reports before sync begins so any
         // newly decrypted UTDs are forwarded into the search index.
-        let mut searcher = search::Searcher::new(client.clone(), self.events.clone());
+        let mut searcher =
+            search::Searcher::new(client.clone(), self.events.clone(), ignored.clone());
+        let mut user_searcher =
+            safety::UserSearcher::new(client.clone(), self.events.clone(), ignored.clone());
         sync.start().await;
 
         let room_list = sync
@@ -1024,7 +1116,8 @@ impl Worker {
         self.emit(MatrixEvent::Recovery(recovery_status(recovery.state())));
 
         let mut rooms: Vector<RoomListItem> = Vector::new();
-        let mut timelines = rooms::Timelines::new(client.clone(), self.events.clone());
+        let mut timelines =
+            rooms::Timelines::new(client.clone(), self.events.clone(), ignored.clone());
         let mut own_members = notify::OwnMembers::default();
         let mut previews = Previews::default();
         let mut verifier = verify::Verifier::start(client, self.events.clone());
@@ -1053,7 +1146,16 @@ impl Worker {
                     // asked to; ask once for each (it needs the event cache running).
                     previews.listen(client, &rooms);
                     _notices.arm();
-                    self.emit(MatrixEvent::Rooms(summarize(&rooms, &mut previews).await));
+                    self.emit(MatrixEvent::Rooms(
+                        summarize(&rooms, &mut previews, &ignored).await,
+                    ));
+                }
+                Ok(()) = ignored.changed() => {
+                    previews.lines.clear();
+                    timelines.clear_cache();
+                    self.emit(MatrixEvent::Rooms(
+                        summarize(&rooms, &mut previews, &ignored).await,
+                    ));
                 }
                 () = own_members.finished() => own_members.ensure(&rooms).await,
                 Some(opened) = timelines.next_opened() => timelines.on_opened(opened).await,
@@ -1102,7 +1204,9 @@ impl Worker {
                         if previews.enabled != wanted {
                             previews.enabled = wanted;
                             previews.listen(client, &rooms);
-                            self.emit(MatrixEvent::Rooms(summarize(&rooms, &mut previews).await));
+                            self.emit(MatrixEvent::Rooms(
+                                summarize(&rooms, &mut previews, &ignored).await,
+                            ));
                         }
                     }
                     Some(MatrixCmd::Verification(command)) => verifier.handle(command).await,
@@ -1111,6 +1215,26 @@ impl Worker {
                         searcher.start(generation, query);
                     }
                     Some(MatrixCmd::CancelSearch) => searcher.cancel(),
+                    Some(MatrixCmd::IgnoreUser { user_id }) => ignore_tracker.set(user_id, true),
+                    Some(MatrixCmd::UnignoreUser { user_id }) => {
+                        ignore_tracker.set(user_id, false);
+                    }
+                    Some(MatrixCmd::ReportContent {
+                        room_id,
+                        event_id,
+                        reason,
+                    }) => {
+                        let client = client.clone();
+                        let events = self.events.clone();
+                        tokio::spawn(async move {
+                            safety::report_content(client, events, room_id, event_id, reason)
+                                .await;
+                        });
+                    }
+                    Some(MatrixCmd::SearchUsers { generation, query }) => {
+                        user_searcher.start(generation, query);
+                    }
+                    Some(MatrixCmd::CancelUserSearch) => user_searcher.cancel(),
                     Some(command) => timelines.handle(command).await,
                 },
             }
@@ -1118,6 +1242,8 @@ impl Worker {
         verifier.stop().await;
         manager.stop();
         searcher.stop();
+        user_searcher.stop();
+        ignore_tracker.stop();
         timelines.close();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
@@ -1133,7 +1259,11 @@ impl Worker {
 }
 
 /// What the room list shows under a room's name: who wrote last, and what.
-async fn latest_message(room: &RoomListItem, direct: bool) -> Option<String> {
+async fn latest_message(
+    room: &RoomListItem,
+    direct: bool,
+    ignored: &tokio::sync::watch::Receiver<safety::IgnoredSet>,
+) -> Option<String> {
     use matrix_sdk_ui::timeline::{LatestEventValue, RoomExt};
     let (own, sender, profile, content) = match room.latest_event().await {
         LatestEventValue::Remote {
@@ -1151,6 +1281,9 @@ async fn latest_message(room: &RoomListItem, direct: bool) -> Option<String> {
         } => (true, sender, profile, content),
         LatestEventValue::RemoteInvite { .. } | LatestEventValue::None => return None,
     };
+    if !own && safety::is_ignored_in(ignored, &sender) {
+        return None;
+    }
     let text = convert::preview(&content);
     if text.is_empty() {
         return None;
@@ -1241,7 +1374,12 @@ impl Previews {
         });
     }
 
-    async fn line(&mut self, room: &RoomListItem, direct: bool) -> Option<String> {
+    async fn line(
+        &mut self,
+        room: &RoomListItem,
+        direct: bool,
+        ignored: &tokio::sync::watch::Receiver<safety::IgnoredSet>,
+    ) -> Option<String> {
         if !self.enabled {
             return None;
         }
@@ -1252,13 +1390,17 @@ impl Previews {
         {
             return line.clone();
         }
-        let line = latest_message(room, direct).await;
+        let line = latest_message(room, direct, ignored).await;
         self.lines.insert(id.to_owned(), (stamp, line.clone()));
         line
     }
 }
 
-async fn summarize(rooms: &Vector<RoomListItem>, previews: &mut Previews) -> Vec<RoomSummary> {
+async fn summarize(
+    rooms: &Vector<RoomListItem>,
+    previews: &mut Previews,
+    ignored: &tokio::sync::watch::Receiver<safety::IgnoredSet>,
+) -> Vec<RoomSummary> {
     let mut summaries = Vec::with_capacity(rooms.len());
     for room in rooms {
         // Spaces get their own navigation later; they are not chats.
@@ -1266,6 +1408,12 @@ async fn summarize(rooms: &Vector<RoomListItem>, previews: &mut Previews) -> Vec
             continue;
         }
         let invited = room.state() == RoomState::Invited;
+        if invited
+            && let Ok(invite) = room.invite_details().await
+            && safety::is_ignored_in(ignored, &invite.inviter_id)
+        {
+            continue;
+        }
         let direct = room.is_direct().await.unwrap_or(false);
         let category = if invited {
             RoomCategory::Invite
@@ -1300,25 +1448,22 @@ async fn summarize(rooms: &Vector<RoomListItem>, previews: &mut Previews) -> Vec
         } else {
             None
         };
+        // Server push-rule counts intentionally remain faithful to `/sync` (so ignored
+        // senders still count until marked read): subtracting them reliably would require
+        // fetching unread history for every room and would otherwise mask real unread
+        // messages sitting before an ignored latest message.
         let notifications = room.num_unread_notifications();
         summaries.push(RoomSummary {
             id: room.room_id().to_string(),
             name: crate::text::sanitize_line(&name),
             category,
             notifications,
-            preview: previews.line(room, direct).await,
+            preview: previews.line(room, direct, ignored).await,
             server_notifications: room.unread_notification_counts().notification_count,
             mention: room.num_unread_mentions() > 0,
             unread: notifications > 0 || room.num_unread_messages() > 0,
             marked_unread: room.is_marked_unread(),
-            avatar: avatar
-                .filter(|uri| {
-                    uri.parts().is_ok_and(|(server, id)| {
-                        !matches!(server.as_str(), "" | "." | "..") && !id.is_empty()
-                    })
-                })
-                .map(|uri| uri.to_string())
-                .filter(|uri| !uri.contains(|c: char| c.is_control() || c.is_whitespace())),
+            avatar: avatar.as_deref().and_then(safety::safe_mxc),
             alias: room
                 .canonical_alias()
                 .map(|alias| crate::text::sanitize_line(alias.as_str())),

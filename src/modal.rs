@@ -318,10 +318,12 @@ pub enum Setting {
     ThemeLight,
     /// Whether separate dark and light theme slots are enabled and shown.
     ThemePairing,
+    /// Manage users whose messages, previews and invitations are hidden.
+    IgnoredUsers,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 15] = [
+    pub const ALL: [Setting; 16] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -336,6 +338,7 @@ impl Setting {
         Setting::DownloadDir,
         Setting::Keys,
         Setting::Encryption,
+        Setting::IgnoredUsers,
         Setting::Logout,
     ];
 
@@ -366,6 +369,7 @@ impl Setting {
             Setting::DownloadDir => "Download folder",
             Setting::Keys => "Key bindings",
             Setting::Encryption => "Encryption",
+            Setting::IgnoredUsers => "Ignored users",
             Setting::Logout => "Log out",
         }
     }
@@ -397,6 +401,9 @@ impl Setting {
             }
             Setting::Encryption => {
                 "Verify this device with another of your devices, or see its status."
+            }
+            Setting::IgnoredUsers => {
+                "View or unignore users whose messages and invitations are hidden."
             }
             Setting::Logout => {
                 "Ends this session. Encrypted history needs your recovery key again."
@@ -464,6 +471,181 @@ impl SettingsMenu {
     }
 }
 
+/// Pop-up showing the account's `m.ignored_user_list` with search and unignore.
+#[derive(Clone)]
+pub struct IgnoredUsersPopup {
+    pub filter: LineEdit,
+    pub all: Vec<String>,
+    pub filtered: Vec<usize>,
+    pub selected: usize,
+    pub scroll: usize,
+    pub page: usize,
+    pub reveal: bool,
+}
+
+impl std::fmt::Debug for IgnoredUsersPopup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IgnoredUsersPopup")
+            .field("count", &self.all.len())
+            .field("shown", &self.filtered.len())
+            .field("selected", &self.selected)
+            .finish()
+    }
+}
+
+impl IgnoredUsersPopup {
+    pub fn new<'a>(users: impl IntoIterator<Item = &'a String>) -> Self {
+        let mut all: Vec<String> = users.into_iter().cloned().collect();
+        all.sort();
+        all.dedup();
+        let filtered: Vec<usize> = (0..all.len()).collect();
+        Self {
+            filter: LineEdit::new().with_max_bytes(256),
+            all,
+            filtered,
+            selected: 0,
+            scroll: 0,
+            page: 0,
+            reveal: false,
+        }
+    }
+
+    pub fn sync_users<'a>(&mut self, users: impl IntoIterator<Item = &'a String>) {
+        let keep = self.selected_user().map(str::to_owned);
+        let mut all: Vec<String> = users.into_iter().cloned().collect();
+        all.sort();
+        all.dedup();
+        self.all = all;
+        self.refilter_preserving(keep.as_deref());
+    }
+
+    pub fn refilter(&mut self) {
+        let keep = self.selected_user().map(str::to_owned);
+        self.refilter_preserving(keep.as_deref());
+    }
+
+    fn refilter_preserving(&mut self, keep: Option<&str>) {
+        let query = self.filter.as_str().trim().to_lowercase();
+        self.filtered = if query.is_empty() {
+            (0..self.all.len()).collect()
+        } else {
+            self.all
+                .iter()
+                .enumerate()
+                .filter(|(_, user)| user.to_lowercase().contains(&query))
+                .map(|(index, _)| index)
+                .collect()
+        };
+        self.selected = keep
+            .and_then(|wanted| {
+                self.filtered
+                    .iter()
+                    .position(|&idx| self.all.get(idx).map(String::as_str) == Some(wanted))
+            })
+            .unwrap_or_else(|| self.selected.min(self.filtered.len().saturating_sub(1)));
+        self.reveal = true;
+    }
+
+    pub fn selected_user(&self) -> Option<&str> {
+        self.filtered
+            .get(self.selected)
+            .and_then(|&idx| self.all.get(idx))
+            .map(String::as_str)
+    }
+
+    pub fn step(&mut self, delta: isize) {
+        let len = self.filtered.len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        let max = (len - 1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+        self.reveal = true;
+    }
+
+    pub fn scroll_by(&mut self, lines: isize) {
+        self.scroll = (self.scroll as isize + lines).max(0) as usize;
+        self.reveal = false;
+    }
+}
+
+/// Pop-up for reporting an offending message to the homeserver.
+#[derive(Clone)]
+pub struct ReportForm {
+    pub room_id: String,
+    pub event_id: String,
+    pub sender_id: Option<String>,
+    pub sender_name: String,
+    pub reason: LineEdit,
+    pub can_ignore: bool,
+    pub also_ignore: bool,
+    pub focus: usize,
+    pub error: Option<String>,
+}
+
+/// Hand-written: event IDs, user IDs, names, and reasons stay out of logs.
+impl std::fmt::Debug for ReportForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReportForm")
+            .field("room_id", &self.room_id)
+            .field("can_ignore", &self.can_ignore)
+            .field("also_ignore", &self.also_ignore)
+            .field("focus", &self.focus)
+            .field("reason_bytes", &self.reason.as_str().len())
+            .finish()
+    }
+}
+
+impl ReportForm {
+    pub const REASON: usize = 0;
+    pub const REASON_MAX_BYTES: usize = 512;
+
+    pub fn new(
+        room_id: String,
+        event_id: String,
+        sender_id: Option<String>,
+        sender_name: String,
+        already_ignored: bool,
+    ) -> Self {
+        let can_ignore = sender_id.is_some() && !already_ignored;
+        Self {
+            room_id,
+            event_id,
+            sender_id,
+            sender_name,
+            reason: LineEdit::new().with_max_bytes(Self::REASON_MAX_BYTES),
+            can_ignore,
+            also_ignore: false,
+            focus: 0,
+            error: None,
+        }
+    }
+
+    pub fn slots(&self) -> usize {
+        if self.can_ignore { 3 } else { 2 }
+    }
+
+    pub fn toggle_slot(&self) -> Option<usize> {
+        self.can_ignore.then_some(1)
+    }
+
+    pub fn submit_slot(&self) -> usize {
+        if self.can_ignore { 2 } else { 1 }
+    }
+
+    pub fn step(&mut self, delta: isize) {
+        let count = self.slots() as isize;
+        self.focus = (self.focus as isize + delta).rem_euclid(count) as usize;
+    }
+
+    pub fn flip_ignore(&mut self) {
+        if self.can_ignore {
+            self.also_ignore = !self.also_ignore;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Modal {
     Login(LoginForm),
@@ -482,6 +664,10 @@ pub enum Modal {
     Menu(crate::menu::Menu),
     /// Configure key bindings and preset.
     Keybinds(crate::keymap::Editor),
+    /// Manage the account's ignored users list.
+    IgnoredUsers(IgnoredUsersPopup),
+    /// Report an offending message to the homeserver.
+    Report(ReportForm),
 }
 
 #[cfg(test)]

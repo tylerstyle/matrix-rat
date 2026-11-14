@@ -14,15 +14,17 @@ use matrix_sdk::ruma::events::room::message::{
 };
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, RoomId};
 use matrix_sdk::{Client, Room, RoomMemberships};
-use matrix_sdk_ui::eyeball_im::Vector;
+use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     MsgLikeKind, RoomExt, Timeline, TimelineDetails, TimelineEventFocusThreadMode,
     TimelineEventItemId, TimelineFocus, TimelineItem, TimelineReadReceiptTracking,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::convert::convert;
+use super::safety::{IgnoredSet, is_ignored_in};
 use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
 use crate::format::Outgoing;
 use crate::model::ItemRef;
@@ -89,11 +91,17 @@ pub struct Timelines {
     /// Rooms and threads (named as by `threads::key`) whose stored draft the UI was
     /// told.
     drafts_told: HashSet<String>,
+    /// Current ignored users (`m.ignored_user_list`), shared with open timelines.
+    ignored: watch::Receiver<IgnoredSet>,
     unread_flags: UnreadFlags,
 }
 
 impl Timelines {
-    pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
+    pub fn new(
+        client: Client,
+        events: UnboundedSender<MatrixEvent>,
+        ignored: watch::Receiver<IgnoredSet>,
+    ) -> Self {
         let (open_tx, open_rx) = unbounded_channel();
         Self {
             media: super::media::Media::new(client.clone(), events.clone()),
@@ -112,9 +120,15 @@ impl Timelines {
             thread: None,
             read_marks: Default::default(),
             drafts_told: HashSet::new(),
+            ignored,
             unread_flags: UnreadFlags::start(events.clone()),
             events,
         }
+    }
+
+    /// Drops cached live timelines so the next room open reflects a changed ignore list.
+    pub fn clear_cache(&mut self) {
+        self.cache.clear();
     }
 
     pub(super) async fn next_opened(&mut self) -> Option<OpenedTimeline> {
@@ -324,6 +338,9 @@ impl Timelines {
         if let Some(at) = self.cache.iter().position(|(id, _)| *id == cache_key) {
             let cached = self.cache[at].1.clone();
             if let Some(item) = cached.item_by_event_id(&parsed_event).await {
+                if is_ignored_in(&self.ignored, item.sender()) {
+                    return jump_failed("That message is from an ignored user.".to_owned());
+                }
                 if item.content().is_redacted() {
                     return jump_failed("That message was deleted.".to_owned());
                 }
@@ -342,6 +359,7 @@ impl Timelines {
                     thread_root,
                     self.read_marks.clone(),
                     None,
+                    self.ignored.clone(),
                 )));
                 return;
             }
@@ -349,7 +367,31 @@ impl Timelines {
 
         self.pending_open_event_gen = Some(generation);
         let open_tx = self.open_tx.clone();
+        let ignored = self.ignored.clone();
         self.event_opener = Some(tokio::spawn(async move {
+            // Check the target event before opening a `TimelineFocus::Event` cache so an
+            // ignored, MSC4406-blocked, or missing event fails cleanly without leaving a
+            // broken `event_focused` entry behind in the SDK's `EventCache`.
+            match room.event(&parsed_event, None).await {
+                Ok(ev) => {
+                    if let Some(sender) = ev.sender()
+                        && is_ignored_in(&ignored, &sender)
+                    {
+                        let _ = open_tx.send(OpenedTimeline::Failed {
+                            generation,
+                            reason: "That message is from an ignored user.".to_owned(),
+                        });
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = open_tx.send(OpenedTimeline::Failed {
+                        generation,
+                        reason: friendly_jump_message(&format!("{err:#}")),
+                    });
+                    return;
+                }
+            }
             let thread_mode = match &thread_root {
                 Some(_) => TimelineEventFocusThreadMode::ForceThread,
                 None => TimelineEventFocusThreadMode::Automatic {
@@ -388,6 +430,13 @@ impl Timelines {
                 });
                 return;
             };
+            if is_ignored_in(&ignored, target.sender()) {
+                let _ = open_tx.send(OpenedTimeline::Failed {
+                    generation,
+                    reason: "That message is from an ignored user.".to_owned(),
+                });
+                return;
+            }
             if matches!(
                 target.content().as_msglike().map(|c| &c.kind),
                 Some(MsgLikeKind::Redacted)
@@ -482,6 +531,7 @@ impl Timelines {
                         reached_start,
                         reached_end,
                     }),
+                    self.ignored.clone(),
                 )));
             }
         }
@@ -514,6 +564,7 @@ impl Timelines {
                             self.thread.clone(),
                             self.read_marks.clone(),
                             None,
+                            self.ignored.clone(),
                         )));
                     }
                     Err(err) => self.fail("Could not open the room", format!("{err:#}")),
@@ -896,7 +947,12 @@ impl Timelines {
             | MatrixCmd::Verification(_)
             | MatrixCmd::Manage(_)
             | MatrixCmd::SearchMessages { .. }
-            | MatrixCmd::CancelSearch => {}
+            | MatrixCmd::CancelSearch
+            | MatrixCmd::IgnoreUser { .. }
+            | MatrixCmd::UnignoreUser { .. }
+            | MatrixCmd::ReportContent { .. }
+            | MatrixCmd::SearchUsers { .. }
+            | MatrixCmd::CancelUserSearch => {}
         }
     }
 }
@@ -1038,6 +1094,26 @@ async fn mark_room_read(
             tracing::debug!(?err, "could not load messages to mark as read");
         }
         if timeline.latest_event_id().await.is_none() {
+            // If no visible timeline item exists (e.g. a server that omits ignored events
+            // from timeline pagination), fall back to the room's latest event or raw history
+            // so marking as read still clears server unread counts.
+            let room = timeline.room();
+            if let Some(event_id) = fallback_latest_event_id(room).await {
+                use matrix_sdk::ruma::events::receipt::ReceiptThread;
+                let r = room
+                    .send_single_receipt(receipt, ReceiptThread::Unthreaded, event_id.clone())
+                    .await;
+                let m = room
+                    .send_single_receipt(
+                        ReceiptType::FullyRead,
+                        ReceiptThread::Unthreaded,
+                        event_id,
+                    )
+                    .await;
+                r?;
+                m?;
+                return Ok(());
+            }
             bail!("no message to mark as read");
         }
     }
@@ -1046,6 +1122,24 @@ async fn mark_room_read(
     receipt?;
     marker?;
     Ok(())
+}
+
+/// Finds the newest event id in `room` when its timeline holds no visible message items.
+async fn fallback_latest_event_id(room: &Room) -> Option<matrix_sdk::ruma::OwnedEventId> {
+    if let Some(id) = std::ops::Deref::deref(room).latest_event().event_id() {
+        return Some(id);
+    }
+    let options = matrix_sdk::room::MessagesOptions::backward();
+    match room.messages(options).await {
+        Ok(page) => page
+            .chunk
+            .iter()
+            .find_map(|event| event.event_id().map(ToOwned::to_owned)),
+        Err(err) => {
+            tracing::debug!(?err, "could not query room messages to mark as read");
+            None
+        }
+    }
 }
 
 /// Sets and takes back "marked as unread" (`m.marked_unread` in a room's account
@@ -1122,9 +1216,14 @@ impl UnreadFlags {
 }
 
 fn friendly_jump_error(err: &matrix_sdk_ui::timeline::Error) -> String {
-    let msg = format!("{err:#}");
+    friendly_jump_message(&format!("{err:#}"))
+}
+
+fn friendly_jump_message(msg: &str) -> String {
     if msg.contains("404") || msg.contains("M_NOT_FOUND") {
         "Message could not be found.".to_owned()
+    } else if msg.contains("SENDER_IGNORED") || msg.contains("You have ignored this sender") {
+        "That message is from an ignored user.".to_owned()
     } else if msg.contains("403") || msg.contains("M_FORBIDDEN") {
         "You do not have permission to view that message.".to_owned()
     } else {
@@ -1144,6 +1243,7 @@ async fn forward(
     thread: Option<String>,
     read_marks: threads::ReadMarks,
     detached: Option<DetachedForward>,
+    mut ignored: watch::Receiver<IgnoredSet>,
 ) {
     let in_thread = thread.is_some();
     let own = room.own_user_id().to_owned();
@@ -1212,21 +1312,53 @@ async fn forward(
     };
     fetch_replies(&items);
     let marks = unread(&items).await;
-    let mut messages = convert(&items, &own);
+    let mut messages = convert(&items, &own, &ignored.borrow());
     readers.annotate(&room, &mut messages, &items, &own).await;
     if events.send(snapshot(&items, marks, messages)).is_err() {
         return;
     }
+    let mut clear_paginators = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             diffs = changes.next() => {
                 let Some(diffs) = diffs else { return };
+                let saw_clear = diffs.iter().any(|diff| matches!(diff, VectorDiff::Clear));
                 for diff in diffs {
                     diff.apply(&mut items);
                 }
+                while clear_paginators.try_join_next().is_some() {}
+                if saw_clear
+                    && items.is_empty()
+                    && detached.is_none()
+                    && room.state() == matrix_sdk::RoomState::Joined
+                {
+                    // Ignoring or unignoring someone makes the SDK clear the room's event cache;
+                    // load a page immediately so the open chat recovers instead of waiting blank.
+                    let timeline = timeline.clone();
+                    let events = events.clone();
+                    clear_paginators.spawn(async move {
+                        if let Ok(true) = timeline.paginate_backwards(PAGE).await {
+                            let _ = events.send(MatrixEvent::Paginated {
+                                generation,
+                                reached_start: true,
+                            });
+                        }
+                    });
+                }
                 fetch_replies(&items);
                 let marks = unread(&items).await;
-                let mut messages = convert(&items, &own);
+                let mut messages = convert(&items, &own, &ignored.borrow());
+                readers.annotate(&room, &mut messages, &items, &own).await;
+                if events.send(snapshot(&items, marks, messages)).is_err() {
+                    return;
+                }
+            }
+            changed = ignored.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let marks = unread(&items).await;
+                let mut messages = convert(&items, &own, &ignored.borrow());
                 readers.annotate(&room, &mut messages, &items, &own).await;
                 if events.send(snapshot(&items, marks, messages)).is_err() {
                     return;
@@ -1236,6 +1368,7 @@ async fn forward(
                 let names = match users {
                     Ok(users) => users
                         .iter()
+                        .filter(|u| !is_ignored_in(&ignored, u))
                         .map(|u| crate::text::sanitize_line(u.localpart()))
                         .collect(),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

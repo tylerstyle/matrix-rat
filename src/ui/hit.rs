@@ -28,6 +28,8 @@ pub enum InputTarget {
     InfoEdit(crate::manage::InfoRow),
     InfoFilter,
     VerifyPassword,
+    IgnoredFilter,
+    ReportReason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,16 @@ pub enum HitId {
     KeybindRow(usize),
     /// A button in the key-bindings editor.
     KeybindBtn(crate::keymap::EditorButton),
+    /// A row in the ignored-users popup.
+    IgnoredRow(usize),
+    /// The stop-ignoring button on a row of the ignored-users popup.
+    IgnoredUnignore(usize),
+    /// Toggle for "Also ignore this user" in the report popup.
+    ReportIgnoreToggle,
+    /// Send report button in the report popup.
+    ReportSubmit,
+    /// A match in the user directory dropdown inside the direct-chat / invite popup.
+    UserSearchRow(usize),
 }
 
 #[derive(Debug, Default)]

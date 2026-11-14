@@ -105,6 +105,9 @@ impl App {
         if self.images.viewer_open() {
             return;
         }
+        if matches!(self.modal, Some(Modal::New(ref popup)) if popup.busy.is_none()) {
+            self.cancel_user_search();
+        }
         if let Some(Modal::New(popup)) = &mut self.modal {
             if popup.busy.is_none() {
                 popup.go(stage);
@@ -214,8 +217,11 @@ impl App {
         };
         match prepared {
             Ok((command, busy)) => {
-                popup.busy = Some(busy);
-                popup.request = Some(request);
+                self.cancel_user_search();
+                if let Some(Modal::New(popup)) = &mut self.modal {
+                    popup.busy = Some(busy);
+                    popup.request = Some(request);
+                }
                 if !self.manage(command)
                     && let Some(Modal::New(popup)) = &mut self.modal
                 {
@@ -252,6 +258,26 @@ impl App {
             }
             return;
         }
+        let search_stage = matches!(popup.stage, Stage::Direct | Stage::Invite);
+        if search_stage && !popup.user_results.is_empty() {
+            match code {
+                KeyCode::Down => {
+                    popup.step_user_search(1);
+                    return;
+                }
+                KeyCode::Up => {
+                    popup.step_user_search(-1);
+                    return;
+                }
+                KeyCode::Enter if popup.user_selected.is_some() => {
+                    if let Some(selected) = popup.user_selected {
+                        self.pick_user_search(selected);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         match code {
             KeyCode::Tab | KeyCode::Down => popup.step(1),
             KeyCode::BackTab | KeyCode::Up => popup.step(-1),
@@ -268,6 +294,9 @@ impl App {
                     && field.handle_key(code, mods, EditKeys::FULL).changed()
                 {
                     popup.error = None;
+                    if search_stage {
+                        self.on_user_search_input_changed();
+                    }
                 }
             }
         }
@@ -298,6 +327,9 @@ impl App {
 
     /// Closes either room popup. What is under way on the server carries on.
     pub(super) fn close_manage(&mut self) {
+        if matches!(self.modal, Some(Modal::New(_))) {
+            self.cancel_user_search();
+        }
         if matches!(self.modal, Some(Modal::RoomInfo(_))) {
             self.manage(ManageCmd::StopInfo);
         }
@@ -308,14 +340,20 @@ impl App {
 
     /// Esc: one step back.
     pub(super) fn manage_escape(&mut self) {
-        match &mut self.modal {
-            Some(Modal::New(popup)) => {
-                if popup.busy.is_none() && !popup.single && popup.stage != Stage::Choose {
-                    popup.go(Stage::Choose);
-                } else {
-                    self.close_manage();
-                }
+        let back_to_choose = matches!(
+            &self.modal,
+            Some(Modal::New(popup))
+                if popup.busy.is_none() && !popup.single && popup.stage != Stage::Choose
+        );
+        if back_to_choose {
+            self.cancel_user_search();
+            if let Some(Modal::New(popup)) = &mut self.modal {
+                popup.go(Stage::Choose);
             }
+            return;
+        }
+        match &mut self.modal {
+            Some(Modal::New(_)) => self.close_manage(),
             Some(Modal::RoomInfo(info)) => {
                 if info.editing.take().is_some() || info.confirm.take().is_some() {
                     // Stepped back from typing or from the question.
@@ -332,10 +370,14 @@ impl App {
     pub(super) fn on_manage_paste(&mut self, first_line: &str) {
         match &mut self.modal {
             Some(Modal::New(popup)) if popup.busy.is_none() => {
+                let search_stage = matches!(popup.stage, Stage::Direct | Stage::Invite);
                 if let Some(field) = popup.field_mut()
                     && field.paste(first_line).changed()
                 {
                     popup.error = None;
+                    if search_stage {
+                        self.on_user_search_input_changed();
+                    }
                 }
             }
             Some(Modal::RoomInfo(info)) => match &mut info.editing {
@@ -400,6 +442,11 @@ impl App {
                 }
             }
             KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) => self.remove_member(),
+            KeyCode::Char('i')
+                if mods == KeyModifiers::ALT && matches!(row, Some(InfoRow::Member(_))) =>
+            {
+                self.toggle_ignore_member();
+            }
             _ => {
                 let keys = EditKeys {
                     arrows: row != Some(InfoRow::Notify),
@@ -472,6 +519,7 @@ impl App {
                 }
             }
             Click::MemberRemove => self.remove_member(),
+            Click::MemberIgnore => self.toggle_ignore_member(),
             Click::Favourite => {
                 let Some(room) = self.target_room().and_then(|index| self.rooms.get(index)) else {
                     self.show_toast("No room is open");
@@ -638,6 +686,48 @@ impl App {
         info.wait_for(Pending::Change(Change::Kick), "Removing…");
         let room_id = info.room_id.clone();
         self.manage(ManageCmd::Kick { room_id, user_id });
+    }
+
+    fn toggle_ignore_member(&mut self) {
+        let connected = self.matrix.is_some();
+        let already = {
+            let Some(Modal::RoomInfo(info)) = &self.modal else {
+                return;
+            };
+            info.selected_member()
+                .is_some_and(|member| self.ignored_users.contains(&member.user_id))
+        };
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || info.editing.is_some() {
+            return;
+        }
+        info.error = None;
+        let Some(member) = info.selected_member().cloned() else {
+            return;
+        };
+        if member.own {
+            info.confirm = None;
+            info.error = Some("You cannot ignore your own account.".to_owned());
+            return;
+        }
+        let user_id = member.user_id;
+        let expected = if already {
+            Confirm::Unignore(user_id.clone())
+        } else {
+            Confirm::Ignore(user_id.clone())
+        };
+        if info.confirm.as_ref() != Some(&expected) {
+            info.confirm = Some(expected);
+            return;
+        }
+        info.confirm = None;
+        if !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        self.send_ignore_user(user_id, !already);
     }
 
     /// Enter while the name or topic is being typed.
@@ -1901,7 +1991,7 @@ mod tests {
         // What Enter does is on the border and on the bottom line.
         let text = screen(&mut app, &mut terminal);
         find(&text, "Enter chat");
-        find(&text, "Enter: open your chat with them");
+        find(&text, "Enter: chat");
         // The first Enter only looks for a chat that exists.
         app.on_event(key(KeyCode::Enter));
         let asked = sent(&mut commands);

@@ -100,6 +100,7 @@ pub struct PaletteContext {
     pub notifications: bool,
     pub download_dir: String,
     pub verify_status: &'static str,
+    pub ignored_users: usize,
     pub wanted_theme: String,
     pub theme_dark: Option<String>,
     pub theme_light: Option<String>,
@@ -745,6 +746,17 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::IgnoredUsers)),
+            title: Setting::IgnoredUsers.label(),
+            hint: Some(match ctx.ignored_users {
+                0 => "none".to_owned(),
+                1 => "1 user".to_owned(),
+                n => format!("{n} users"),
+            }),
+            aliases: &["blocked users", "mute", "safety", "setting"],
+            enabled: ctx.connected,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::Logout)),
             title: Setting::Logout.label(),
             hint: ctx.user_id.clone(),
@@ -884,6 +896,7 @@ mod tests {
             notifications: true,
             download_dir: "~/Downloads".to_owned(),
             verify_status: "unknown",
+            ignored_users: 0,
             target: Some(("rust".to_owned(), false)),
             wanted_theme: "rat-dark".to_owned(),
             theme_dark: None,

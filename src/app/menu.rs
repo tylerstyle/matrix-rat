@@ -139,6 +139,10 @@ impl App {
             permalink: event.is_some_and(|event| {
                 menu::permalink(&target.room_id, event, self.user_id.as_deref()).is_some()
             }),
+            sender_ignored: message
+                .sender_id
+                .as_deref()
+                .is_some_and(|id| self.is_user_ignored(id)),
         };
         let items = menu::message_items(message, facts, &self.keymap);
         self.show_menu(Target::Message(target), "", items, at);
@@ -392,6 +396,17 @@ impl App {
                         };
                         self.show_menu(Target::Message(target), "Read by", items, menu.anchor);
                     }
+                    Run::IgnoreUser => {
+                        if let Some(user_id) = self.messages()[index].sender_id.clone() {
+                            self.send_ignore_user(user_id, true);
+                        }
+                    }
+                    Run::UnignoreUser => {
+                        if let Some(user_id) = self.messages()[index].sender_id.clone() {
+                            self.send_ignore_user(user_id, false);
+                        }
+                    }
+                    Run::Report => self.open_report_modal(index),
                     _ => {}
                 }
             }

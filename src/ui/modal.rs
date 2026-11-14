@@ -12,7 +12,10 @@ use crate::app::App;
 use crate::keymap::Context;
 use crate::lineedit::LineEdit;
 use crate::matrix::ReauthKind;
-use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, Setting, SettingsMenu};
+use crate::modal::{
+    EmojiPicker, IgnoredUsersPopup, LoginForm, Modal, RecoveryForm, ReportForm, Setting,
+    SettingsMenu,
+};
 use crate::text::{sanitize, sanitize_line, truncate, width};
 use crate::theme::{Role, Theme};
 
@@ -37,6 +40,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::RoomInfo(info) => super::roominfo::draw_info(frame, app, area, info),
         Modal::Menu(menu) => super::menu::draw(frame, app, area, menu),
         Modal::Keybinds(editor) => super::keybinds::draw(frame, app, area, editor),
+        Modal::IgnoredUsers(popup) => ignored_users(frame, app, area, popup),
+        Modal::Report(form) => report(frame, app, area, form),
     }
     app.modal = Some(modal);
 }
@@ -293,6 +298,14 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
                     Role::Error
                 } else {
                     Role::Muted
+                };
+                spans.push(Span::styled(truncate(&value, room), theme.style(role)));
+            }
+            Setting::IgnoredUsers => {
+                let role = if value == "none" {
+                    Role::Muted
+                } else {
+                    Role::Text
                 };
                 spans.push(Span::styled(truncate(&value, room), theme.style(role)));
             }
@@ -739,5 +752,253 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
             )),
             row(inner, inner.height - 1),
         );
+    }
+}
+
+fn ignored_users(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    popup_state: &mut IgnoredUsersPopup,
+) {
+    let list_rows = popup_state.filtered.len().clamp(3, 12) as u16;
+    let Some(rect) = centered(area, 64, list_rows + 6) else {
+        return;
+    };
+    let inner = popup(
+        frame,
+        app,
+        area,
+        rect,
+        "Ignored users",
+        "Enter / Del unignore · ↑↓ select · Esc close",
+    );
+    let theme = app.theme.clone();
+    let (cursor, filter_rect) = field(
+        frame,
+        &theme,
+        row(inner, 0),
+        "Filter",
+        &mut popup_state.filter,
+        false,
+        true,
+    );
+    app.hits
+        .add(filter_rect, HitId::Input(InputTarget::IgnoredFilter));
+
+    let count_line = if popup_state.all.is_empty() {
+        "No ignored users".to_owned()
+    } else if popup_state.filter.as_str().trim().is_empty() {
+        match popup_state.all.len() {
+            1 => "1 ignored user".to_owned(),
+            n => format!("{n} ignored users"),
+        }
+    } else {
+        format!(
+            "{} of {} matching",
+            popup_state.filtered.len(),
+            popup_state.all.len()
+        )
+    };
+    frame.render_widget(
+        Line::from(Span::styled(
+            truncate(&count_line, inner.width as usize),
+            theme.style(Role::Muted),
+        )),
+        row(inner, 1),
+    );
+
+    let list_y = 2u16;
+    let rows = inner.height.saturating_sub(list_y) as usize;
+    popup_state.page = rows;
+    if rows == 0 {
+        if let Some(cursor) = cursor {
+            frame.set_cursor_position(cursor);
+        }
+        return;
+    }
+    if popup_state.reveal {
+        popup_state.reveal = false;
+        if popup_state.selected < popup_state.scroll {
+            popup_state.scroll = popup_state.selected;
+        } else if popup_state.selected >= popup_state.scroll + rows {
+            popup_state.scroll = popup_state.selected + 1 - rows;
+        }
+    }
+    popup_state.scroll = popup_state
+        .scroll
+        .min(popup_state.filtered.len().saturating_sub(rows));
+
+    if popup_state.filtered.is_empty() {
+        let empty = if popup_state.all.is_empty() {
+            "Use the message menu or Room info to ignore someone."
+        } else {
+            "No matching users."
+        };
+        frame.render_widget(
+            Line::from(Span::styled(
+                truncate(empty, inner.width as usize),
+                theme.style(Role::Muted),
+            )),
+            row(inner, list_y),
+        );
+    } else {
+        let button_label = " unignore ";
+        let button_w = width(button_label) as u16;
+        for (offset, &all_idx) in popup_state
+            .filtered
+            .iter()
+            .skip(popup_state.scroll)
+            .take(rows)
+            .enumerate()
+        {
+            let index = popup_state.scroll + offset;
+            let rect = row(inner, list_y + offset as u16);
+            if rect.width == 0 {
+                continue;
+            }
+            let selected = index == popup_state.selected;
+            let marker = if selected { "› " } else { "  " };
+            let user = popup_state
+                .all
+                .get(all_idx)
+                .map(|s| sanitize_line(s))
+                .unwrap_or_default();
+            let hovered = app.hover == Some(HitId::IgnoredRow(index));
+            let text_style = if selected {
+                theme.style(Role::TitleFocused)
+            } else if hovered {
+                theme.style(Role::Hover)
+            } else {
+                theme.style(Role::Text)
+            };
+            let show_button = selected || hovered;
+            let label_max = (rect.width as usize).saturating_sub(
+                2 + if show_button {
+                    button_w as usize + 1
+                } else {
+                    0
+                },
+            );
+            let spans = vec![
+                Span::styled(marker, theme.style(Role::TitleFocused)),
+                Span::styled(truncate(&user, label_max), text_style),
+            ];
+            frame.render_widget(Line::from(spans), rect);
+            app.hits.add(rect, HitId::IgnoredRow(index));
+
+            if show_button && rect.width > button_w + 4 {
+                let btn_rect = Rect::new(rect.right() - button_w, rect.y, button_w, 1);
+                let btn_role = if app.hover == Some(HitId::IgnoredUnignore(index)) {
+                    Role::Hover
+                } else {
+                    Role::Pill
+                };
+                frame.render_widget(
+                    Line::from(Span::styled(button_label, theme.style(btn_role))),
+                    btn_rect,
+                );
+                app.hits.add(btn_rect, HitId::IgnoredUnignore(index));
+            }
+        }
+    }
+
+    if let Some(cursor) = cursor {
+        frame.set_cursor_position(cursor);
+    }
+}
+
+fn report(frame: &mut Frame, app: &mut App, area: Rect, form: &mut ReportForm) {
+    let height = if form.can_ignore { 11 } else { 9 };
+    let Some(rect) = centered(area, 64, height) else {
+        return;
+    };
+    let footer = if form.can_ignore {
+        "Tab move · Space toggle · Enter send · Esc cancel"
+    } else {
+        "Tab move · Enter send · Esc cancel"
+    };
+    let inner = popup(frame, app, area, rect, "Report message", footer);
+    let theme = app.theme.clone();
+
+    let prompt = format!(
+        "Report {}'s message to the homeserver administrators.",
+        sanitize_line(&form.sender_name)
+    );
+    frame.render_widget(
+        Paragraph::new(prompt)
+            .style(theme.style(Role::Muted))
+            .wrap(Wrap { trim: true }),
+        Rect::new(inner.x, inner.y, inner.width, 2.min(inner.height)),
+    );
+
+    let reason_rect = row(inner, 2);
+    app.hits.add(reason_rect, HitId::Field(ReportForm::REASON));
+    let (cursor, value_rect) = field(
+        frame,
+        &theme,
+        reason_rect,
+        "Reason",
+        &mut form.reason,
+        false,
+        form.focus == ReportForm::REASON,
+    );
+    app.hits
+        .add(value_rect, HitId::Input(InputTarget::ReportReason));
+
+    let submit_row = if let Some(toggle_slot) = form.toggle_slot() {
+        let rect = row(inner, 4);
+        if rect.width > 0 {
+            let focused = form.focus == toggle_slot;
+            let mark = if form.also_ignore { "[x]" } else { "[ ]" };
+            let label_style = if focused {
+                theme.style(Role::TitleFocused)
+            } else {
+                theme.style(Role::Text)
+            };
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(
+                        format!("{mark} "),
+                        theme.style(if form.also_ignore {
+                            Role::StatusOk
+                        } else {
+                            Role::Muted
+                        }),
+                    ),
+                    Span::styled("Also ignore this user", label_style),
+                ]),
+                rect,
+            );
+            app.hits.add(rect, HitId::ReportIgnoreToggle);
+        }
+        6
+    } else {
+        4
+    };
+
+    let btn_row = row(inner, submit_row);
+    let label = " Send report ";
+    if btn_row.width > 0 {
+        let w = (width(label) as u16).min(btn_row.width);
+        let btn_rect = Rect::new(btn_row.x, btn_row.y, w, 1);
+        let btn_focused =
+            form.focus == form.submit_slot() || app.hover == Some(HitId::ReportSubmit);
+        button(frame, &theme, btn_rect, label, btn_focused);
+        app.hits.add(btn_rect, HitId::ReportSubmit);
+    }
+
+    if let Some(error) = &form.error {
+        frame.render_widget(
+            Line::from(Span::styled(
+                truncate(&sanitize_line(error), inner.width as usize),
+                theme.style(Role::Error),
+            )),
+            row(inner, submit_row + 1),
+        );
+    }
+
+    if let Some(cursor) = cursor {
+        frame.set_cursor_position(cursor);
     }
 }

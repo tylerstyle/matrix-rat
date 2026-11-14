@@ -390,6 +390,8 @@ pub enum Click {
     MemberChat,
     /// Remove the selected member from the room (asks first).
     MemberRemove,
+    /// Ignore or stop ignoring the selected member (asks first).
+    MemberIgnore,
     /// Favourite on or off for the room in question, without a popup.
     Favourite,
     /// Room info for the open room, whatever has the focus (its name was clicked).
@@ -420,6 +422,14 @@ pub struct NewPopup {
     pub room: Option<(String, String)>,
     /// Number of the request whose answer is awaited; answers to others are not ours.
     pub request: Option<u64>,
+    /// Type-ahead user search matches shown under the user ID field.
+    pub user_results: Vec<crate::matrix::UserMatch>,
+    /// Highlighted row inside `user_results`, if the user stepped into the dropdown.
+    pub user_selected: Option<usize>,
+    /// True while a debounced/worker user directory lookup is pending for this input.
+    pub user_searching: bool,
+    /// Generation of the most recent user search started from this popup.
+    pub user_search_gen: Option<u64>,
 }
 
 /// Hand-written: what is typed here (names, topics, who is being written to) is private.
@@ -457,6 +467,10 @@ impl NewPopup {
             error: None,
             room: None,
             request: None,
+            user_results: Vec::new(),
+            user_selected: None,
+            user_searching: false,
+            user_search_gen: None,
         }
     }
 
@@ -507,6 +521,30 @@ impl NewPopup {
         self.stage = stage;
         self.focus = 0;
         self.error = None;
+        self.clear_user_search();
+    }
+
+    pub fn clear_user_search(&mut self) {
+        self.user_results.clear();
+        self.user_selected = None;
+        self.user_searching = false;
+        self.user_search_gen = None;
+    }
+
+    pub fn step_user_search(&mut self, delta: isize) {
+        let len = self.user_results.len();
+        if len == 0 {
+            self.user_selected = None;
+            return;
+        }
+        self.user_selected = match self.user_selected {
+            None if delta > 0 => Some(0),
+            None if delta < 0 => Some(len - 1),
+            Some(i) if delta > 0 => Some((i + 1).min(len - 1)),
+            Some(0) if delta < 0 => None,
+            Some(i) if delta < 0 => Some(i - 1),
+            other => other,
+        };
     }
 }
 
@@ -531,6 +569,10 @@ pub enum Confirm {
     Leave,
     /// Remove the member with this user id.
     Remove(String),
+    /// Ignore the member with this user id.
+    Ignore(String),
+    /// Stop ignoring the member with this user id.
+    Unignore(String),
     /// There is no direct chat with this user yet: create one and invite them.
     NewChat(String),
 }
@@ -541,6 +583,8 @@ impl std::fmt::Debug for Confirm {
         f.write_str(match self {
             Self::Leave => "Confirm::Leave",
             Self::Remove(_) => "Confirm::Remove",
+            Self::Ignore(_) => "Confirm::Ignore",
+            Self::Unignore(_) => "Confirm::Unignore",
             Self::NewChat(_) => "Confirm::NewChat",
         })
     }
@@ -781,7 +825,9 @@ impl InfoPopup {
         };
         let keep = match &self.confirm {
             Some(Confirm::Remove(user_id)) => still(user_id, true),
-            Some(Confirm::NewChat(user_id)) => still(user_id, false),
+            Some(
+                Confirm::Ignore(user_id) | Confirm::Unignore(user_id) | Confirm::NewChat(user_id),
+            ) => still(user_id, false),
             Some(Confirm::Leave) | None => true,
         };
         if !keep {

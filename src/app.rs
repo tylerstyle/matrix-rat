@@ -10,6 +10,7 @@ mod media;
 mod menu;
 mod palette;
 mod rooms;
+mod safety;
 pub mod search;
 mod thread;
 mod unread;
@@ -39,7 +40,9 @@ use crate::matrix::{
     self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
     SyncStatus,
 };
-use crate::modal::{EmojiPicker, LoginForm, Modal, RecoveryForm, Setting, SettingsMenu};
+use crate::modal::{
+    EmojiPicker, LoginForm, Modal, RecoveryForm, ReportForm, Setting, SettingsMenu,
+};
 use crate::model::{
     ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, SendState, demo_rooms,
 };
@@ -119,6 +122,9 @@ pub struct TimelineState {
     pub drawn: bool,
     /// Event id of the newest message a read receipt was sent for.
     pub marked_read: Option<String>,
+    /// Server unread state last marked as read for the open room, to avoid resending
+    /// `MarkRead` every frame when unread messages are all ignored/hidden.
+    pub hidden_read_state: Option<(String, u64, u32, bool, bool)>,
     /// Set when viewing an event-focused `/context` slice instead of the live tail.
     pub detached: bool,
     /// Set by the draw when the newest loaded row of a detached slice is on screen.
@@ -289,6 +295,12 @@ pub struct App {
     startup_target: Option<String>,
     /// True once at least one `MatrixEvent::Rooms` list was received in this session.
     rooms_received: bool,
+    /// Matrix user IDs currently ignored by this account (`m.ignored_user_list`).
+    pub ignored_users: std::collections::BTreeSet<String>,
+    /// Monotonic counter for active/debounced user directory searches.
+    pub(super) user_search_gen: u64,
+    /// Deadline timer start for debounced user directory lookups in `NewPopup`.
+    pub(super) user_search_debounce: Option<std::time::Instant>,
 }
 
 impl App {
@@ -450,6 +462,9 @@ impl App {
             pending_jump: None,
             startup_target: None,
             rooms_received: false,
+            ignored_users: std::collections::BTreeSet::new(),
+            user_search_gen: 0,
+            user_search_debounce: None,
         }
     }
 
@@ -765,6 +780,11 @@ impl App {
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
+            Setting::IgnoredUsers => match self.ignored_users.len() {
+                0 => "None".to_owned(),
+                1 => "1 user".to_owned(),
+                n => format!("{n} users"),
+            },
             Setting::Logout => self.user_id.clone().unwrap_or_default(),
         }
     }
@@ -843,6 +863,11 @@ impl App {
                 if delta == 0 {
                     self.modal = None;
                     self.start_verification();
+                }
+            }
+            Setting::IgnoredUsers => {
+                if delta == 0 {
+                    self.open_ignored_users();
                 }
             }
             Setting::Logout => {
@@ -1075,7 +1100,16 @@ impl App {
         self.pending_jump = None;
         self.rooms_received = false;
         self.search_gen += 1;
-        if matches!(self.modal, Some(Modal::GlobalSearch(_))) {
+        self.ignored_users.clear();
+        self.user_search_gen += 1;
+        self.user_search_debounce = None;
+        if let Some(Modal::New(popup)) = &mut self.modal {
+            popup.clear_user_search();
+        }
+        if matches!(
+            self.modal,
+            Some(Modal::GlobalSearch(_) | Modal::IgnoredUsers(_) | Modal::Report(_))
+        ) {
             self.modal = None;
         }
         self.sync = Some(SyncStatus::Stopped);
@@ -1694,11 +1728,27 @@ impl App {
             Some(ItemRef::Event(id)) => Some(id.clone()),
             _ => None,
         });
-        if newest.is_none() || newest == self.timeline.marked_read {
+        let hidden_unread = self.room().is_some_and(|r| {
+            r.kind != RoomKind::Invite && !r.marked_unread && (r.unread > 0 || r.bold || r.mention)
+        });
+        let unread_state = self
+            .room()
+            .map(|r| (r.id.clone(), r.server_count, r.unread, r.bold, r.mention));
+        if newest.is_some() && newest != self.timeline.marked_read {
+            self.note_read(newest.as_deref());
+            self.timeline.marked_read = newest;
+            self.timeline.hidden_read_state = unread_state;
+        } else if self.has_pending_unread_mark()
+            || (hidden_unread && unread_state != self.timeline.hidden_read_state)
+        {
+            // The bottom of the room is on screen with no new visible messages, yet the
+            // room opened unread, settled at a trailing marker, or the server still counts
+            // unread messages (e.g. from ignored senders): send a read receipt to clear them.
+            self.note_read(newest.as_deref());
+            self.timeline.hidden_read_state = unread_state;
+        } else {
             return;
         }
-        self.note_read(newest.as_deref());
-        self.timeline.marked_read = newest;
         if let Some(room_id) = self.room_id() {
             self.send_matrix(MatrixCmd::MarkRead {
                 room_id,
@@ -2348,7 +2398,14 @@ impl App {
                 self.show_toast("Encrypted history stays locked until you enter the key");
                 self.maybe_open_startup_target();
             }
-            Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_) | Modal::Keybinds(_)) => {
+            Some(
+                Modal::Emoji(_)
+                | Modal::Settings(_)
+                | Modal::Palette(_)
+                | Modal::Keybinds(_)
+                | Modal::IgnoredUsers(_)
+                | Modal::Report(_),
+            ) => {
                 self.modal = None;
             }
             Some(Modal::Search(_)) => self.close_search(),
@@ -2478,6 +2535,8 @@ impl App {
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.on_manage_key(code, mods),
             Some(Modal::Menu(_)) => self.on_menu_key(key, code, mods),
             Some(Modal::Keybinds(_)) => self.on_keybinds_key(key, code, mods),
+            Some(Modal::IgnoredUsers(_)) => self.on_ignored_users_key(code, mods),
+            Some(Modal::Report(_)) => self.on_report_key(code, mods),
             None => {}
         }
     }
@@ -2572,10 +2631,15 @@ impl App {
                 } else if generation == self.generation
                     && self.room_id().as_deref() == Some(&room_id)
                 {
+                    let empty_reset = messages.is_empty() && !reached_start;
                     let messages = self.place_unread_line(messages, detached.is_some());
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
                     self.search_sync();
+                    if empty_reset {
+                        self.timeline.reached_start = false;
+                        self.timeline.empty_batches = 0;
+                    }
                     self.timeline.reached_start |= reached_start;
                     match detached {
                         Some(info) => {
@@ -2652,6 +2716,12 @@ impl App {
                     .retain(|(_, waiting)| waiting.room_id != notice.room_id);
                 self.on_notice(notice);
             }
+            MatrixEvent::SuppressedNotice { room_id } => {
+                self.detailed_notices
+                    .insert(room_id.clone(), Instant::now());
+                self.count_notices
+                    .retain(|(_, waiting)| waiting.room_id != room_id);
+            }
             MatrixEvent::NoticeClicked { room_id } => self.on_notice_click(&room_id),
             MatrixEvent::FileSaved { key, open, result } => self.on_file_saved(key, open, result),
             MatrixEvent::Security(security) => self.on_security(security),
@@ -2683,6 +2753,17 @@ impl App {
                 done,
                 note,
             } => self.on_search_results(generation, hits, done, note),
+            MatrixEvent::IgnoredUsers(users) => self.on_ignored_users_list(users),
+            MatrixEvent::IgnoreResult {
+                user_id,
+                ignored,
+                result,
+            } => self.on_ignore_result(user_id, ignored, result),
+            MatrixEvent::ReportResult(result) => self.on_report_result(result),
+            MatrixEvent::UserSearchResults {
+                generation,
+                results,
+            } => self.on_user_search_results(generation, results),
         }
         // A menu about something that is gone closes.
         self.menu_follow();
@@ -2788,6 +2869,13 @@ impl App {
         match position(&self.rooms, &open_id) {
             Some(index) => {
                 self.active = index;
+                if self
+                    .rooms
+                    .get(index)
+                    .is_some_and(|r| r.unread == 0 && !r.bold && !r.mention)
+                {
+                    self.timeline.hidden_read_state = None;
+                }
                 // An accepted invitation becomes a room with messages to load.
                 if was_invite && self.rooms[index].kind != RoomKind::Invite {
                     self.timeline = TimelineState::default();
@@ -3112,6 +3200,8 @@ impl App {
             // A paste is not an answer to a menu.
             Some(Modal::Menu(_)) => return,
             Some(Modal::Keybinds(_)) => return,
+            Some(Modal::IgnoredUsers(_)) => return self.on_ignored_users_paste(first_line),
+            Some(Modal::Report(_)) => return self.on_report_paste(first_line),
             None => {}
         }
         // The picture viewer and the help cover the composer: nothing is pasted
@@ -3166,6 +3256,8 @@ impl App {
                                     | Modal::Settings(_)
                                     | Modal::Palette(_)
                                     | Modal::Keybinds(_)
+                                    | Modal::IgnoredUsers(_)
+                                    | Modal::Report(_)
                             )
                         ) {
                             self.modal = None;
@@ -3183,6 +3275,9 @@ impl App {
                         Some(Modal::Verify(popup)) => {
                             popup.field_focused = true;
                             popup.focus = None;
+                        }
+                        Some(Modal::Report(form)) if slot < form.slots() => {
+                            form.focus = slot;
                         }
                         _ => {}
                     },
@@ -3299,6 +3394,24 @@ impl App {
                     Some(HitId::Menu(_)) => {}
                     Some(HitId::KeybindRow(index)) => self.click_keybind_row(index),
                     Some(HitId::KeybindBtn(button)) => self.click_keybind_button(button),
+                    Some(HitId::IgnoredRow(index)) => {
+                        if let Some(Modal::IgnoredUsers(popup)) = &mut self.modal
+                            && index < popup.filtered.len()
+                        {
+                            popup.selected = index;
+                        }
+                    }
+                    Some(HitId::IgnoredUnignore(index)) => self.unignore_at(index),
+                    Some(HitId::ReportIgnoreToggle) => {
+                        if let Some(Modal::Report(form)) = &mut self.modal {
+                            if let Some(slot) = form.toggle_slot() {
+                                form.focus = slot;
+                            }
+                            form.flip_ignore();
+                        }
+                    }
+                    Some(HitId::ReportSubmit) => self.submit_report(),
+                    Some(HitId::UserSearchRow(index)) => self.pick_user_search(index),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -3326,6 +3439,7 @@ impl App {
                             | Modal::GlobalSearch(_)
                             | Modal::RoomInfo(_)
                             | Modal::Keybinds(_)
+                            | Modal::IgnoredUsers(_)
                     )
                 ) =>
             {
@@ -3340,6 +3454,7 @@ impl App {
                     Some(Modal::GlobalSearch(search)) => search.scroll_by(delta),
                     Some(Modal::RoomInfo(_)) => self.manage_scroll(delta),
                     Some(Modal::Keybinds(editor)) => editor.scroll_by(delta),
+                    Some(Modal::IgnoredUsers(_)) => self.scroll_ignored_users(delta),
                     _ => {}
                 }
                 self.dirty = true;
@@ -3479,6 +3594,17 @@ impl App {
                     popup.field_focused = true;
                     popup.focus = None;
                     password.place(rel_col, true);
+                }
+            }
+            InputTarget::IgnoredFilter => {
+                if let Some(Modal::IgnoredUsers(popup)) = &mut self.modal {
+                    popup.filter.place(rel_col, false);
+                }
+            }
+            InputTarget::ReportReason => {
+                if let Some(Modal::Report(form)) = &mut self.modal {
+                    form.focus = ReportForm::REASON;
+                    form.reason.place(rel_col, false);
                 }
             }
         }
@@ -3632,6 +3758,12 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                     None => std::future::pending().await,
                 }
             } => app.tick_global_search(),
+            _ = async {
+                match app.user_search_debounce_deadline() {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => app.tick_user_search(),
             _ = tick.tick() => app.on_tick(),
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
             _ = sigterm.recv() => app.should_quit = true,
@@ -5378,6 +5510,7 @@ mod tests {
         assert!(app.toast.is_some());
 
         // "Key bindings" opens the key-bindings editor; the backdrop closes popups.
+        app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Enter));

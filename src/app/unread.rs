@@ -8,7 +8,7 @@
 //! room is opened again, while the SDK's marker moves on as soon as our own receipt
 //! is through.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use super::App;
@@ -28,6 +28,27 @@ const WISH_HOLDS: Duration = Duration::from_secs(10);
 /// in the room's messages a moment after the sync is reported.
 const CATCH_UP: Duration = Duration::from_millis(700);
 
+/// Where the SDK's read marker stood in the latest timeline snapshot.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+enum Marker {
+    /// Absent (not loaded yet, above loaded history, or already past all events).
+    #[default]
+    Missing,
+    /// Present right before the remote message with this event id.
+    Before(String),
+    /// Present in the timeline with no visible events after it (e.g. only ignored or
+    /// hidden events remain unread).
+    AtEnd,
+}
+
+/// An unread message identity so the "new" line can step past a sender that is ignored
+/// while the room is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnreadTarget {
+    id: String,
+    sender: Option<String>,
+}
+
 /// The "new" line of the open room.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 enum Line {
@@ -39,15 +60,15 @@ enum Line {
     Waiting {
         /// The number of notifying messages the room had when it was opened.
         count: u32,
-        /// Where the SDK's read marker was in the messages that arrived last: the
-        /// event id of the message after it.
-        marker: Option<String>,
+        /// Where the SDK's read marker was in the messages that arrived last.
+        marker: Marker,
         /// Opened before the session's first sync was through: the messages that
         /// were there then are those of the last run.
         early: bool,
     },
-    /// Above the message with this event id, wherever that is now.
-    At(String),
+    /// Above the first surviving message in `targets` (the frozen id, plus later
+    /// unread candidates in order).
+    At(Vec<UnreadTarget>),
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +80,9 @@ pub struct Unread {
     /// Rooms the user just marked as unread (`true`) or took the mark from, and
     /// when: see `WISH_HOLDS`.
     wishes: HashMap<String, (bool, Instant)>,
+    /// Room that opened unread or settled with a trailing `Marker::AtEnd`, so a read
+    /// receipt is still sent on first view even if zero visible messages remain.
+    pending_mark: Option<String>,
     /// Between the login and the first sync of the session.
     catching_up: bool,
     /// When that first sync was through.
@@ -83,6 +107,9 @@ impl Unread {
     pub(super) fn forget(&mut self, room_id: &str) {
         self.read.remove(room_id);
         self.wishes.remove(room_id);
+        if self.pending_mark.as_deref() == Some(room_id) {
+            self.pending_mark = None;
+        }
     }
 
     /// Logged in: what the worker shows first is what it knew at the end of the
@@ -114,11 +141,46 @@ fn event_id(message: &Message) -> Option<&str> {
     }
 }
 
-/// A message of someone else that can be new to the user.
-fn countable(message: &Message) -> bool {
+/// A message of someone else (and not ignored) that can be new to the user.
+fn countable(message: &Message, ignored: &BTreeSet<String>) -> bool {
     !message.own
         && !matches!(message.kind, MsgKind::System | MsgKind::ReadMarker)
         && event_id(message).is_some()
+        && message
+            .sender_id
+            .as_deref()
+            .is_none_or(|sender| !ignored.contains(sender))
+}
+
+fn targets_from(
+    messages: &[Message],
+    from: usize,
+    ignored: &BTreeSet<String>,
+) -> Vec<UnreadTarget> {
+    messages[from..]
+        .iter()
+        .filter(|message| countable(message, ignored))
+        .filter_map(|message| {
+            event_id(message).map(|id| UnreadTarget {
+                id: id.to_owned(),
+                sender: message.sender_id.clone(),
+            })
+        })
+        .collect()
+}
+
+fn prune_ignored_targets(line: &mut Line, ignored: &BTreeSet<String>) {
+    if let Line::At(targets) = line {
+        targets.retain(|target| {
+            target
+                .sender
+                .as_deref()
+                .is_none_or(|sender| !ignored.contains(sender))
+        });
+        if targets.is_empty() {
+            *line = Line::Off;
+        }
+    }
 }
 
 /// The first unread message among `messages` (which hold no marker).
@@ -133,13 +195,14 @@ fn first_unread(
     marker: Option<usize>,
     count: u32,
     read: Option<&str>,
+    ignored: &BTreeSet<String>,
 ) -> Option<usize> {
     let by_count = || {
         messages
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, message)| countable(message))
+            .filter(|(_, message)| countable(message, ignored))
             .map(|(at, _)| at)
             .take(count as usize)
             .last()
@@ -150,7 +213,7 @@ fn first_unread(
     {
         from = from.max(at + 1);
     }
-    (from..messages.len()).find(|at| countable(&messages[*at]))
+    (from..messages.len()).find(|at| countable(&messages[*at], ignored))
 }
 
 impl App {
@@ -163,14 +226,19 @@ impl App {
         }
         let Some(room) = self.rooms.get_mut(self.active) else {
             self.unread.line = Line::Off;
+            self.unread.pending_mark = None;
             return;
         };
+        let pending = room.kind != RoomKind::Invite
+            && !room.marked_unread
+            && (room.unread > 0 || room.bold || room.mention);
+        self.unread.pending_mark = pending.then(|| room.id.clone());
         // What is kept from the last visit is shown until the messages arrive; the
         // line of the last visit is not part of that.
         room.messages.retain(|message| message.id != LINE_ID);
         self.unread.line = Line::Waiting {
             count: room.unread,
-            marker: None,
+            marker: Marker::Missing,
             early: self.unread.catching_up,
         };
         self.timeline_rev += 1;
@@ -182,11 +250,22 @@ impl App {
         matches!(self.unread.line, Line::Waiting { .. }) && !self.thread_open()
     }
 
+    /// Whether the currently open room opened unread or had a trailing read marker so
+    /// `maybe_mark_read` should still clear server unread state if no visible events exist.
+    pub(super) fn has_pending_unread_mark(&self) -> bool {
+        !self.thread_open()
+            && self.unread.pending_mark.as_deref() == self.room_id().as_deref()
+            && self
+                .room()
+                .is_some_and(|r| r.kind != RoomKind::Invite && !r.marked_unread)
+    }
+
     /// A receipt is about to be sent for the open conversation, up to this event.
     pub(super) fn note_read(&mut self, newest: Option<&str>) {
         if self.thread_open() {
             return;
         }
+        self.unread.pending_mark = None;
         if let (Some(room_id), Some(newest)) = (self.room_id(), newest) {
             self.unread.read.insert(room_id, newest.to_owned());
         }
@@ -204,12 +283,18 @@ impl App {
         mut messages: Vec<Message>,
         detached: bool,
     ) -> Vec<Message> {
-        let after_marker = messages
+        let saw_marker = match messages
             .iter()
             .position(|message| message.kind == MsgKind::ReadMarker)
-            .and_then(|at| messages[at..].iter().find_map(event_id))
-            .map(str::to_owned);
+        {
+            Some(at) => match messages[at..].iter().find_map(event_id) {
+                Some(id) => Marker::Before(id.to_owned()),
+                None => Marker::AtEnd,
+            },
+            None => Marker::Missing,
+        };
         messages.retain(|message| message.kind != MsgKind::ReadMarker);
+        prune_ignored_targets(&mut self.unread.line, &self.ignored_users);
         if self.thread_open() {
             return messages;
         }
@@ -218,7 +303,7 @@ impl App {
         }
         // The newest word on where the marker is counts.
         if let Line::Waiting { marker, .. } = &mut self.unread.line {
-            *marker = after_marker;
+            *marker = saw_marker;
         }
         self.with_unread_line(messages)
     }
@@ -226,50 +311,85 @@ impl App {
     /// Decides where the line goes, if that is open and can be told from these
     /// messages (which hold no marker), and puts the line among them.
     fn with_unread_line(&mut self, messages: Vec<Message>) -> Vec<Message> {
+        prune_ignored_targets(&mut self.unread.line, &self.ignored_users);
+        if let Line::At(targets) = &mut self.unread.line
+            && let Some(first) = targets.first()
+            && let Some(at) = messages.iter().position(|m| event_id(m) == Some(&first.id))
+        {
+            let refreshed = targets_from(&messages, at, &self.ignored_users);
+            if refreshed.is_empty() {
+                self.unread.line = Line::Off;
+            } else {
+                *targets = refreshed;
+            }
+        }
         if let Line::Waiting {
             count,
             marker,
             early,
         } = &self.unread.line
-            // Nothing is decided without messages: they are yet to load. Nor
-            // while those of the last run are all there is.
-            && messages.iter().any(|message| event_id(message).is_some())
-            && (!early || self.unread.settled())
         {
-            let room = self.room();
-            let read = room
-                .and_then(|room| self.unread.read.get(&room.id))
-                .map(String::as_str);
-            let marker = marker
-                .as_deref()
-                .and_then(|id| messages.iter().position(|m| event_id(m) == Some(id)));
-            // A room opened early had the count of the last run then.
-            let count = match (early, room) {
-                (true, Some(room)) => room.unread.max(*count),
-                _ => *count,
-            };
-            let first = first_unread(&messages, marker, count, read)
-                .and_then(|at| event_id(&messages[at]))
-                .map(str::to_owned);
-            self.unread.line = match first {
-                Some(id) => {
+            let settled = !early || self.unread.settled();
+            if settled && matches!(marker, Marker::AtEnd) {
+                self.unread.line = Line::Off;
+                if self
+                    .room()
+                    .is_some_and(|r| r.kind != RoomKind::Invite && !r.marked_unread)
+                {
+                    self.unread.pending_mark = self.room_id();
+                }
+            } else if settled && messages.iter().any(|message| event_id(message).is_some()) {
+                let room = self.room();
+                let read = room
+                    .and_then(|room| self.unread.read.get(&room.id))
+                    .map(String::as_str);
+                let marker_pos = match marker {
+                    Marker::Before(id) => messages.iter().position(|m| event_id(m) == Some(id)),
+                    Marker::Missing | Marker::AtEnd => None,
+                };
+                // A room opened early had the count of the last run then.
+                let count = match (early, room) {
+                    (true, Some(room)) => room.unread.max(*count),
+                    _ => *count,
+                };
+                let targets = first_unread(&messages, marker_pos, count, read, &self.ignored_users)
+                    .map(|at| targets_from(&messages, at, &self.ignored_users))
+                    .unwrap_or_default();
+                self.unread.line = if targets.is_empty() {
+                    Line::Off
+                } else {
                     // The view starts at the line, unless the user (or a jump to
                     // a search hit) has already gone somewhere in the meantime.
                     self.timeline.reveal_unread = self.timeline.scroll == 0
                         && self.timeline.selected.is_none()
                         && self.pending_jump.is_none();
-                    Line::At(id)
-                }
-                None => Line::Off,
-            };
+                    Line::At(targets)
+                };
+            }
         }
         self.insert_unread_line(messages)
     }
 
+    /// Re-places or clears the "new" line when the ignored user list changes while a room is open.
+    pub(super) fn refresh_unread_line_for_ignored(&mut self) {
+        if self.thread_open() {
+            return;
+        }
+        prune_ignored_targets(&mut self.unread.line, &self.ignored_users);
+        let Some(room) = self.rooms.get(self.active) else {
+            return;
+        };
+        let mut messages = room.messages.clone();
+        messages.retain(|message| message.id != LINE_ID);
+        let updated = self.insert_unread_line(messages);
+        self.apply_timeline(updated);
+    }
+
     /// Puts the line, if it is placed, above its message among `messages`.
     fn insert_unread_line(&self, mut messages: Vec<Message>) -> Vec<Message> {
-        if let Line::At(id) = &self.unread.line
-            && let Some(at) = messages.iter().position(|m| event_id(m) == Some(id))
+        if let Line::At(targets) = &self.unread.line
+            && let Some(first) = targets.first()
+            && let Some(at) = messages.iter().position(|m| event_id(m) == Some(&first.id))
         {
             messages.insert(
                 at,
@@ -286,9 +406,16 @@ impl App {
     /// Called now and then: a room that was open before the session had caught up
     /// gets its line once it has, also if no more messages arrive for it.
     pub(super) fn settle_unread_line(&mut self) {
+        let empty_at_end = matches!(
+            self.unread.line,
+            Line::Waiting {
+                marker: Marker::AtEnd,
+                ..
+            }
+        );
         if !self.unread_line_pending()
             || !self.unread.settled()
-            || self.messages().is_empty()
+            || (self.messages().is_empty() && !empty_at_end)
             // What is shown is not the room's newest messages, or soon will not be.
             || self.timeline.detached
         {
@@ -405,6 +532,13 @@ impl App {
     pub(super) fn no_unread_line_after_marking_read(&mut self, index: usize) {
         if index == self.active && matches!(self.unread.line, Line::Waiting { .. }) {
             self.unread.line = Line::Off;
+        }
+        if self
+            .rooms
+            .get(index)
+            .is_some_and(|r| self.unread.pending_mark.as_deref() == Some(r.id.as_str()))
+        {
+            self.unread.pending_mark = None;
         }
     }
 
@@ -611,26 +745,33 @@ mod tests {
     #[test]
     fn the_first_unread_message_by_marker_by_count_and_by_what_was_read() {
         let all = others(0..5);
+        let ignored = BTreeSet::new();
         // Where the marker was.
-        assert_eq!(first_unread(&all, Some(3), 0, None), Some(3));
+        assert_eq!(first_unread(&all, Some(3), 0, None, &ignored), Some(3));
         // Our own messages and system lines after it are not new to us.
         let mut mixed = all.clone();
         mixed[2].own = true;
         mixed[3].kind = MsgKind::System;
-        assert_eq!(first_unread(&mixed, Some(2), 0, None), Some(4));
-        assert_eq!(first_unread(&mixed[..4], Some(2), 0, None), None);
+        assert_eq!(first_unread(&mixed, Some(2), 0, None, &ignored), Some(4));
+        assert_eq!(first_unread(&mixed[..4], Some(2), 0, None, &ignored), None);
         // Without a marker the count says how many of the last are new; no more
         // than there are.
-        assert_eq!(first_unread(&all, None, 2, None), Some(3));
-        assert_eq!(first_unread(&mixed, None, 2, None), Some(1));
-        assert_eq!(first_unread(&all, None, 9, None), Some(0));
-        assert_eq!(first_unread(&all, None, 0, None), None);
+        assert_eq!(first_unread(&all, None, 2, None, &ignored), Some(3));
+        assert_eq!(first_unread(&mixed, None, 2, None, &ignored), Some(1));
+        assert_eq!(first_unread(&all, None, 9, None, &ignored), Some(0));
+        assert_eq!(first_unread(&all, None, 0, None, &ignored), None);
         // A receipt we sent ourselves beats an older marker and a stale count.
-        assert_eq!(first_unread(&all, Some(1), 0, Some("$e2")), Some(3));
-        assert_eq!(first_unread(&all, None, 4, Some("$e3")), Some(4));
-        assert_eq!(first_unread(&all, Some(1), 3, Some("$e4")), None);
+        assert_eq!(
+            first_unread(&all, Some(1), 0, Some("$e2"), &ignored),
+            Some(3)
+        );
+        assert_eq!(first_unread(&all, None, 4, Some("$e3"), &ignored), Some(4));
+        assert_eq!(first_unread(&all, Some(1), 3, Some("$e4"), &ignored), None);
         // One for a message that is not loaded says nothing.
-        assert_eq!(first_unread(&all, Some(1), 0, Some("$gone")), Some(1));
+        assert_eq!(
+            first_unread(&all, Some(1), 0, Some("$gone"), &ignored),
+            Some(1)
+        );
     }
 
     #[test]
@@ -1320,5 +1461,150 @@ mod tests {
         app.on_matrix(MatrixEvent::NeedLogin { reason: None });
         assert!(app.unread.wishes.is_empty());
         assert_eq!(app.unread.line, Line::Off);
+    }
+
+    fn from(n: usize, sender: &str) -> Message {
+        let mut msg = message(n, false);
+        msg.sender = sender.to_owned();
+        msg.sender_id = Some(format!("@{sender}:example.org"));
+        msg
+    }
+
+    #[test]
+    fn ignored_unread_messages_place_the_line_accurately() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::IgnoredUsers(vec!["@bob:example.org".into()]));
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            listed("!a", "Alpha"),
+            unread("!b", "Beta", 2),
+        ]));
+
+        // First unread message was from an ignored user (dropped by `convert`);
+        // line lands above the next non-ignored unread message.
+        app.perform(Action::OpenRoom(1));
+        sent(&mut commands);
+        arrive(&mut app, vec![from(0, "carol"), marker(), from(2, "dave")]);
+        assert_eq!(shown(&app), ["m0", "--", "m2"]);
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::ALT);
+        assert_eq!(app.messages()[app.timeline.selected.unwrap()].id, "m2");
+
+        // Also if an un-dropped slice still carried an ignored sender, `first_unread`
+        // skips it cleanly.
+        assert_eq!(
+            first_unread(
+                &[from(0, "carol"), from(1, "bob"), from(2, "dave")],
+                Some(1),
+                0,
+                None,
+                &app.ignored_users,
+            ),
+            Some(2)
+        );
+
+        // ALL unread messages are from an ignored user: `convert` preserves trailing
+        // `ReadMarker` so the line settles to `Off` instead of falling back to
+        // `by_count` and sitting above already-read `m0`.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            listed("!a", "Alpha"),
+            unread("!b", "Beta", 2),
+        ]));
+        app.perform(Action::OpenRoom(1));
+        sent(&mut commands);
+        arrive(&mut app, vec![from(0, "carol"), marker()]);
+        assert_eq!(shown(&app), ["m0"]);
+        assert!(!app.unread_line_pending());
+        assert_eq!(app.unread.line, Line::Off);
+        draw(&mut app, &mut terminal);
+        assert_eq!(sent(&mut commands), ["MarkRead(!b)"]);
+
+        // Room with ZERO visible messages (only ReadMarker + ignored unread messages):
+        // must not remain stuck waiting or sit above nothing, and clears via MarkRead.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            listed("!a", "Alpha"),
+            unread("!b", "Beta", 1),
+        ]));
+        app.perform(Action::OpenRoom(1));
+        sent(&mut commands);
+        arrive(&mut app, vec![marker()]);
+        assert!(shown(&app).is_empty());
+        assert!(!app.unread_line_pending());
+        assert_eq!(app.unread.line, Line::Off);
+        draw(&mut app, &mut terminal);
+        assert_eq!(sent(&mut commands), ["MarkRead(!b)"]);
+    }
+
+    #[test]
+    fn ignoring_a_sender_while_the_room_is_open_advances_or_clears_the_unread_line() {
+        let (mut app, _terminal, _commands) = connected();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            listed("!a", "Alpha"),
+            unread("!b", "Beta", 2),
+        ]));
+        app.perform(Action::OpenRoom(1));
+        arrive(
+            &mut app,
+            vec![from(0, "carol"), marker(), from(1, "bob"), from(2, "dave")],
+        );
+        assert_eq!(shown(&app), ["m0", "--", "m1", "m2"]);
+
+        // Ignore @bob while Beta is open: even with an intermediate empty `Clear`
+        // timeline update before repagination, the line advances to @dave's message.
+        app.on_matrix(MatrixEvent::IgnoredUsers(vec!["@bob:example.org".into()]));
+        arrive(&mut app, Vec::new());
+        arrive(&mut app, vec![from(0, "carol"), from(2, "dave")]);
+        assert_eq!(shown(&app), ["m0", "--", "m2"]);
+
+        // Now ignore @dave as well, testing the reverse order where `Timeline`
+        // arrives right before `IgnoredUsers`: the line clears cleanly to `Off`.
+        arrive(&mut app, vec![from(0, "carol")]);
+        app.on_matrix(MatrixEvent::IgnoredUsers(vec![
+            "@bob:example.org".into(),
+            "@dave:example.org".into(),
+        ]));
+        assert_eq!(shown(&app), ["m0"]);
+        assert_eq!(app.unread.line, Line::Off);
+    }
+
+    #[test]
+    fn ignored_only_unread_updates_in_open_and_listed_rooms_mark_read() {
+        let (mut app, mut terminal, mut commands) = connected();
+        arrive(&mut app, vec![from(0, "carol")]);
+        draw(&mut app, &mut terminal);
+        assert_eq!(sent(&mut commands), ["MarkRead(!a)"]);
+
+        // Ignored user sends a message in the already-open room Alpha: no new visible
+        // message arrives, only the server unread state rises -> one MarkRead goes out.
+        let mut bumped = unread("!a", "Alpha", 1);
+        bumped.server_notifications = 1;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            bumped.clone(),
+            unread("!b", "Beta", 1),
+        ]));
+        draw(&mut app, &mut terminal);
+        assert_eq!(sent(&mut commands), ["MarkRead(!a)"]);
+        // Redrawing before `/sync` settles must not loop MarkRead.
+        draw(&mut app, &mut terminal);
+        assert_eq!(sent(&mut commands), Vec::<String>::new());
+
+        // Once `/sync` clears it and a second ignored message bumps it again, it clears
+        // once more.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            listed("!a", "Alpha"),
+            unread("!b", "Beta", 1),
+        ]));
+        let mut bumped2 = unread("!a", "Alpha", 1);
+        bumped2.server_notifications = 1;
+        app.on_matrix(MatrixEvent::Rooms(vec![bumped2, unread("!b", "Beta", 1)]));
+        draw(&mut app, &mut terminal);
+        assert_eq!(sent(&mut commands), ["MarkRead(!a)"]);
+
+        // Unread count on another room whose only unread messages are ignored can
+        // still be cleared in the room list with "Mark this room as read" or
+        // "Mark all rooms as read".
+        assert!(in_bold(&mut app, &mut terminal, "Beta"));
+        app.mark_room_read(1);
+        assert!(!app.rooms[1].shows_unread());
+        assert!(!in_bold(&mut app, &mut terminal, "Beta"));
+        assert!(sent(&mut commands).contains(&"MarkRead(!b)".to_owned()));
     }
 }
