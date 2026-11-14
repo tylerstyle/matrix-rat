@@ -113,4 +113,11 @@ pub enum Action {
     SidebarTop,
     /// Move the room-list cursor to the last visible room.
     SidebarBottom,
+    /// Go to the "new" line of the open room: the first message that was unread
+    /// when the room was opened.
+    JumpToUnread,
+    /// Mark the open room as read if it shows as unread, else as unread.
+    ToggleUnread,
+    /// Mark every room as read.
+    MarkAllRead,
 }

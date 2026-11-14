@@ -422,6 +422,7 @@ impl App {
                 match run {
                     Run::OpenRoom => self.perform(Action::OpenRoom(index)),
                     Run::MarkRead => self.mark_room_read(index),
+                    Run::MarkUnread => self.mark_room_unread(index),
                     Run::Notifications => self.open_info(Some(index), Some(InfoRow::Notify)),
                     Run::Do(action) => self.perform_for_room(at, action),
                     _ => {}
@@ -468,8 +469,10 @@ impl App {
 
     /// Tells the server that everything in that room has been read. The room need
     /// not be the open one.
-    fn mark_room_read(&mut self, index: usize) {
+    pub(super) fn mark_room_read(&mut self, index: usize) {
         let public = self.read_receipts;
+        // The worker takes the mark back along with the receipt.
+        self.unmark_unread(index);
         let Some(room) = self.rooms.get_mut(index) else {
             return;
         };
@@ -625,6 +628,7 @@ mod tests {
             preview: None,
             server_notifications: 0,
             unread: false,
+            marked_unread: false,
             mention: false,
             avatar: None,
             alias: None,
@@ -1033,6 +1037,7 @@ mod tests {
             [
                 "Open",
                 "Room info",
+                "Mark as unread",
                 "Add to favourites",
                 "Notification mode…",
                 "Leave…"
@@ -1110,6 +1115,24 @@ mod tests {
         assert_eq!(sent(&mut commands), ["MarkRead(!b:example.org)"]);
         assert_eq!(app.rooms[1].unread, 0);
         assert!(!app.rooms[1].bold);
+        // Read now, so the other way round is offered: unread, by hand.
+        right_click(&mut app, &mut terminal, "Beta");
+        assert!(!labels(&app).contains(&"Mark as read".to_owned()));
+        choose(&mut app, &mut terminal, "Mark as unread");
+        assert_eq!(sent(&mut commands), ["SetUnread(!b:example.org, true)"]);
+        assert!(app.rooms[1].marked_unread && !app.rooms[1].bold);
+        assert_eq!(app.rooms[1].unread, 0);
+        // ...and back, which also takes the mark from the server (the worker does
+        // that along with the receipt).
+        right_click(&mut app, &mut terminal, "Beta");
+        assert!(!labels(&app).contains(&"Mark as unread".to_owned()));
+        choose(&mut app, &mut terminal, "Mark as read");
+        assert_eq!(sent(&mut commands), ["MarkRead(!b:example.org)"]);
+        assert!(!app.rooms[1].bold && !app.rooms[1].marked_unread);
+        // An invitation is neither.
+        let invite = crate::model::Room::new("!i:example.org", "Invited", RoomKind::Invite);
+        let offered = menu::room_items(&invite, &app.keymap);
+        assert!(offered.iter().all(|item| !item.label.starts_with("Mark")));
         // With previews a room takes two lines; the second belongs to it as well.
         app.room_previews = true;
         app.rooms[1].preview = Some("bob: the second line".into());

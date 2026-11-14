@@ -641,6 +641,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     view.page = height;
     view.scroll = view.scroll.min(max_scroll);
     let mut top = max_scroll - view.scroll;
+    if view.reveal_unread {
+        view.reveal_unread = false;
+        // The "new" line goes to the top of the view when what is below it does not
+        // fit; when it does, the newest message stays at the bottom.
+        if let Some(at) = room
+            .messages
+            .iter()
+            .position(|m| m.kind == MsgKind::ReadMarker)
+            && let Some(line) = rows.iter().position(|row| row.source == at)
+        {
+            top = line.min(max_scroll);
+            view.scroll = max_scroll - top;
+        }
+    }
     if view.reveal_selected {
         view.reveal_selected = false;
         if let Some(selected) = view.selected {

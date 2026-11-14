@@ -8,6 +8,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use ratatui::style::Color;
@@ -289,6 +290,8 @@ struct DesktopJob {
     preview: bool,
     icon: NotifyIcon,
     cache: Option<(Arc<IconCache>, u64)>,
+    /// The room to open when the notification is clicked, and whom to tell.
+    click: Option<(String, Clicks)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,18 +321,20 @@ fn prepare_desktop(job: &DesktopJob) -> PreparedDesktop {
 /// Shows a notification. Never blocks and never fails loudly: a notification that
 /// cannot be shown is only logged. For desktop notifications, attaches an optional room
 /// picture or generated letter tile (`preview = false` and terminal modes ignore `icon`
-/// and never touch `cache`).
+/// and never touch `cache`). With `clicks`, a click on a desktop notification sends
+/// the id of the notice's room there, where the notification service can do that.
 pub fn show(
     mode: NotifyMode,
     notice: &Notice,
     preview: bool,
     icon: &NotifyIcon,
     cache: Option<(Arc<IconCache>, u64)>,
+    clicks: Option<&Clicks>,
 ) {
     let (title, text) = title_and_text(notice, preview);
     match mode.resolved() {
         NotifyMode::Desktop => {
-            let _ = desktop().send(DesktopJob {
+            let _ = desktop().unbounded_send(DesktopJob {
                 title,
                 text,
                 urgent: notice.highlight,
@@ -340,6 +345,7 @@ pub fn show(
                     NotifyIcon::Generic
                 },
                 cache: if preview { cache } else { None },
+                click: clicks.map(|clicks| (notice.room_id.clone(), clicks.clone())),
             });
         }
         NotifyMode::Terminal => {
@@ -355,36 +361,298 @@ pub fn show(
 
 static SERIAL: AtomicU32 = AtomicU32::new(1);
 
+/// Where the room ids of clicked notifications go: to the event loop.
+pub type Clicks = tokio::sync::mpsc::UnboundedSender<String>;
+
+const SERVICE: &str = "org.freedesktop.Notifications";
+const SERVICE_PATH: &str = "/org/freedesktop/Notifications";
+/// Notifications whose click is still listened for. Older ones stay on screen, but a
+/// click on them does nothing any more.
+const CLICKABLE_MOST: usize = 64;
+/// Signals of the notification service that may wait to be looked at.
+const SIGNALS_MOST: std::num::NonZeroUsize = std::num::NonZeroUsize::new(1024).unwrap();
+/// After the notification service could not be reached, clicks are not tried again
+/// for this long (the notifications themselves are, each time, as before).
+const RETRY_AFTER: Duration = Duration::from_secs(60);
+
 /// One thread shows all desktop notifications, one after the other: the service may be
 /// slow or absent, which must not hold up the interface, and a burst must not start a
-/// thread and a bus connection each.
-fn desktop() -> &'static std::sync::mpsc::Sender<DesktopJob> {
-    static SENDER: std::sync::OnceLock<std::sync::mpsc::Sender<DesktopJob>> =
+/// thread and a bus connection each. The same thread hears of clicks on them.
+fn desktop() -> &'static futures::channel::mpsc::UnboundedSender<DesktopJob> {
+    static SENDER: std::sync::OnceLock<futures::channel::mpsc::UnboundedSender<DesktopJob>> =
         std::sync::OnceLock::new();
     SENDER.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::channel::<DesktopJob>();
+        let (sender, mut jobs) = futures::channel::mpsc::unbounded::<DesktopJob>();
         std::thread::spawn(move || {
-            for job in receiver {
-                let prepared = prepare_desktop(&job);
-                let mut notification = notify_rust::Notification::new();
-                notification
-                    .appname("matrix-rat")
-                    .summary(&prepared.summary)
-                    .body(&prepared.body)
-                    .icon("mail-message-new");
-                if let Some(path) = prepared.icon_path.as_deref().and_then(|p| p.to_str()) {
-                    notification.image_path(path);
+            use futures::StreamExt;
+            use futures::future::Either;
+            let mut clickable = Clickable::new(None);
+            futures::executor::block_on(async {
+                loop {
+                    // Whichever comes first: something to show, or news from the
+                    // notification service about what was shown.
+                    let event = {
+                        let signal = std::pin::pin!(clickable.next_signal());
+                        match futures::future::select(jobs.next(), signal).await {
+                            Either::Left((job, _)) => Either::Left(job),
+                            Either::Right((signal, _)) => Either::Right(signal),
+                        }
+                    };
+                    match event {
+                        Either::Left(Some(job)) => show_desktop(job, &mut clickable).await,
+                        Either::Left(None) => break,
+                        Either::Right(Some(signal)) => clickable.on_signal(&signal).await,
+                        Either::Right(None) => {}
+                    }
                 }
-                if prepared.urgent {
-                    notification.urgency(notify_rust::Urgency::Critical);
-                }
-                if let Err(err) = notification.show() {
-                    tracing::debug!(%err, "could not show a desktop notification");
-                }
-            }
+            });
         });
         sender
     })
+}
+
+fn desktop_notification(prepared: &PreparedDesktop) -> notify_rust::Notification {
+    let mut notification = notify_rust::Notification::new();
+    notification
+        .appname("matrix-rat")
+        .summary(&prepared.summary)
+        .body(&prepared.body)
+        .icon("mail-message-new");
+    if let Some(path) = prepared.icon_path.as_deref().and_then(|p| p.to_str()) {
+        notification.image_path(path);
+    }
+    if prepared.urgent {
+        notification.urgency(notify_rust::Urgency::Critical);
+    }
+    notification
+}
+
+async fn show_desktop(job: DesktopJob, clickable: &mut Clickable) {
+    let prepared = prepare_desktop(&job);
+    let notification = desktop_notification(&prepared);
+    if let Some((room_id, clicks)) = job.click {
+        // The same notification with a default action: what a click on it does.
+        let mut with_action = notification.clone();
+        with_action.action("default", "Open");
+        if clickable.show(&with_action, room_id, clicks).await {
+            return;
+        }
+    }
+    // Without clicks (the service does not do them, or our own connection to it
+    // failed): exactly as before there were any.
+    if let Err(err) = notification.show() {
+        tracing::debug!(%err, "could not show a desktop notification");
+    }
+}
+
+/// Our own connection to the notification service, for notifications that can be
+/// clicked. The service tells the connection that showed a notification when it is
+/// clicked or closed (some services tell nobody else), so those are sent from here
+/// and not through `notify_rust`, which opens a connection per notification and
+/// would need a waiting thread for each. This is one connection and no thread.
+struct Clickable {
+    link: Link,
+    /// The bus to use instead of the session's (tests).
+    address: Option<String>,
+    /// What was shown and can still be clicked: the service's id for it, the room,
+    /// and where to report the click. Oldest first.
+    shown: VecDeque<(u32, String, Clicks)>,
+}
+
+enum Link {
+    Untried,
+    Up(Box<Live>),
+    /// Not reachable when last tried.
+    Down(Instant),
+    /// The service shows notifications but knows no actions.
+    NoActions,
+}
+
+struct Live {
+    connection: zbus::Connection,
+    signals: zbus::MessageStream,
+    /// The connection the service has on the bus; signals of anyone else are not
+    /// the service's.
+    owner: Option<String>,
+}
+
+impl Clickable {
+    fn new(address: Option<String>) -> Self {
+        Self {
+            link: Link::Untried,
+            address,
+            shown: VecDeque::new(),
+        }
+    }
+
+    async fn connect(address: Option<&str>) -> zbus::Result<Link> {
+        let connection = match address {
+            Some(address) => zbus::connection::Builder::address(address).build().await?,
+            None => zbus::Connection::session().await?,
+        };
+        let capabilities: Vec<String> = connection
+            .call_method(
+                Some(SERVICE),
+                SERVICE_PATH,
+                Some(SERVICE),
+                "GetCapabilities",
+                &(),
+            )
+            .await?
+            .body()
+            .deserialize()?;
+        if !capabilities
+            .iter()
+            .any(|capability| capability == "actions")
+        {
+            return Ok(Link::NoActions);
+        }
+        let rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender(SERVICE)
+            .interface(SERVICE)
+            .path(SERVICE_PATH)
+            .build()?;
+        // The connection stops reading (answers to our own calls too) while this
+        // queue is full, and it is only emptied between two notifications: room
+        // for more signals than can arrive in that time.
+        let signals =
+            zbus::MessageStream::for_match_rule(rule, &connection, Some(SIGNALS_MOST)).await?;
+        let owner = Self::owner(&connection).await;
+        Ok(Link::Up(Box::new(Live {
+            connection,
+            signals,
+            owner,
+        })))
+    }
+
+    async fn owner(connection: &zbus::Connection) -> Option<String> {
+        let bus = zbus::fdo::DBusProxy::new(connection).await.ok()?;
+        let name = zbus::names::BusName::try_from(SERVICE).ok()?;
+        Some(bus.get_name_owner(name).await.ok()?.to_string())
+    }
+
+    /// Shows a notification that has an action and remembers whose it is. False if
+    /// it was not shown, so that it can be shown the plain way.
+    async fn show(
+        &mut self,
+        notification: &notify_rust::Notification,
+        room_id: String,
+        clicks: Clicks,
+    ) -> bool {
+        let retry = match &self.link {
+            Link::Untried => true,
+            Link::Down(since) => since.elapsed() >= RETRY_AFTER,
+            Link::Up(_) | Link::NoActions => false,
+        };
+        if retry {
+            self.link = match Self::connect(self.address.as_deref()).await {
+                Ok(link) => link,
+                Err(err) => {
+                    tracing::debug!(%err, "no connection for notification clicks");
+                    Link::Down(Instant::now())
+                }
+            };
+        }
+        let Link::Up(live) = &self.link else {
+            return false;
+        };
+        // What `notify_rust` would send, with the same hints.
+        let hints: std::collections::HashMap<&str, zbus::Variant<'_>> =
+            notification.hints.iter().map(Into::into).collect();
+        let sent = live
+            .connection
+            .call_method(
+                Some(SERVICE),
+                SERVICE_PATH,
+                Some(SERVICE),
+                "Notify",
+                &(
+                    &notification.appname,
+                    0u32,
+                    &notification.icon,
+                    &notification.summary,
+                    &notification.body,
+                    &notification.actions,
+                    hints,
+                    i32::from(notification.timeout),
+                ),
+            )
+            .await
+            .and_then(|reply| reply.body().deserialize::<u32>());
+        match sent {
+            Ok(id) => {
+                self.shown.retain(|(shown, _, _)| *shown != id);
+                self.shown.push_back((id, room_id, clicks));
+                while self.shown.len() > CLICKABLE_MOST {
+                    self.shown.pop_front();
+                }
+                true
+            }
+            Err(err) => {
+                tracing::debug!(%err, "could not show a notification with an action");
+                self.lost();
+                false
+            }
+        }
+    }
+
+    /// The connection is gone, and with it the clicks on what was shown through it.
+    fn lost(&mut self) {
+        self.link = Link::Down(Instant::now());
+        self.shown.clear();
+    }
+
+    /// The next signal of the notification service. Never resolves while there is
+    /// no connection; `None` when the connection just ended.
+    async fn next_signal(&mut self) -> Option<zbus::Message> {
+        use futures::StreamExt;
+        let Link::Up(live) = &mut self.link else {
+            return std::future::pending().await;
+        };
+        match live.signals.next().await {
+            Some(Ok(message)) => Some(message),
+            Some(Err(_)) | None => {
+                self.lost();
+                None
+            }
+        }
+    }
+
+    /// A notification was clicked (its room goes to the event loop) or closed (it
+    /// is forgotten).
+    async fn on_signal(&mut self, message: &zbus::Message) {
+        let Link::Up(live) = &mut self.link else {
+            return;
+        };
+        let header = message.header();
+        let sender = header.sender().map(|name| name.as_str());
+        if live.owner.as_deref() != sender {
+            // The service may have been restarted under another name on the bus.
+            live.owner = Self::owner(&live.connection).await;
+            if live.owner.as_deref() != sender {
+                return;
+            }
+        }
+        let body = message.body();
+        match header.member().map(|member| member.as_str()) {
+            Some("ActionInvoked") => {
+                if let Ok((id, action)) = body.deserialize::<(u32, String)>()
+                    && action == "default"
+                    && let Some((_, room_id, clicks)) =
+                        self.shown.iter().find(|(shown, _, _)| *shown == id)
+                {
+                    let _ = clicks.send(room_id.clone());
+                }
+            }
+            Some("NotificationClosed") => {
+                if let Ok((id, _reason)) = body.deserialize::<(u32, u32)>() {
+                    self.shown.retain(|(shown, _, _)| *shown != id);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn ensure_safe_dir(dir: &Path) -> std::io::Result<()> {
@@ -908,6 +1176,7 @@ mod tests {
             preview: false,
             icon: tile.clone(),
             cache: Some((Arc::clone(&cache), epoch)),
+            click: None,
         });
         assert_eq!(hidden.icon_path, None);
         assert!(!dir.exists());
@@ -919,6 +1188,7 @@ mod tests {
             true,
             &tile,
             Some((Arc::clone(&cache), epoch)),
+            None,
         );
         assert!(!dir.exists());
 
@@ -933,11 +1203,257 @@ mod tests {
             preview: true,
             icon: tile,
             cache: Some((cache, epoch)),
+            click: None,
         });
         assert_eq!(prepared.summary, "ann in Rust");
         assert_eq!(prepared.body, "hello");
         assert!(prepared.urgent);
         assert_eq!(prepared.icon_path, None);
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    /// A message bus of its own for a test, with a stand-in for the desktop's
+    /// notification service on it. `None` where there is no `dbus-daemon` to run.
+    struct TestBus {
+        daemon: std::process::Child,
+        address: String,
+        _dir: TempDir,
+    }
+
+    impl Drop for TestBus {
+        fn drop(&mut self) {
+            let _ = self.daemon.kill();
+            let _ = self.daemon.wait();
+        }
+    }
+
+    /// What the stand-in service was asked to show: its id for it, who asked (the
+    /// connection's name on the bus) and the actions.
+    type Shown = (u32, String, Vec<String>);
+
+    impl TestBus {
+        fn start(name: &str) -> Option<Self> {
+            use std::io::BufRead;
+            let dir = TempDir::new(name);
+            let mut daemon = std::process::Command::new("dbus-daemon")
+                .arg("--session")
+                .arg("--nofork")
+                .arg("--print-address")
+                .arg(format!(
+                    "--address=unix:path={}",
+                    dir.0.join("bus").display()
+                ))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            let mut address = String::new();
+            let read = std::io::BufReader::new(daemon.stdout.take()?).read_line(&mut address);
+            let bus = Self {
+                daemon,
+                address: address.trim().to_owned(),
+                _dir: dir,
+            };
+            (read.is_ok() && !bus.address.is_empty()).then_some(bus)
+        }
+
+        /// Starts the service with these capabilities. Gives its connection (to send
+        /// signals as the service) and what it is asked to show.
+        async fn serve(
+            &self,
+            capabilities: &'static [&'static str],
+        ) -> (
+            zbus::Connection,
+            tokio::sync::mpsc::UnboundedReceiver<Shown>,
+        ) {
+            use futures::StreamExt;
+            type Notify = (
+                String,
+                u32,
+                String,
+                String,
+                String,
+                Vec<String>,
+                std::collections::HashMap<String, zbus::OwnedVariant>,
+                i32,
+            );
+            let service = zbus::connection::Builder::address(self.address.as_str())
+                .name(SERVICE)
+                .build()
+                .await
+                .expect("the stand-in service");
+            let (shown, asked) = tokio::sync::mpsc::unbounded_channel();
+            let connection = service.clone();
+            tokio::spawn(async move {
+                let mut calls = zbus::MessageStream::from(&service);
+                let mut next_id = 7u32;
+                while let Some(Ok(call)) = calls.next().await {
+                    let header = call.header();
+                    if header.message_type() != zbus::message::Type::MethodCall {
+                        continue;
+                    }
+                    match header.member().map(|member| member.as_str()) {
+                        Some("GetCapabilities") => {
+                            service.reply(&header, &capabilities).await.unwrap();
+                        }
+                        Some("Notify") => {
+                            let body = call.body();
+                            let notify: Notify = body.deserialize().unwrap();
+                            next_id += 1;
+                            service.reply(&header, &next_id).await.unwrap();
+                            let sender = header.sender().unwrap().to_string();
+                            let _ = shown.send((next_id, sender, notify.5));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            (connection, asked)
+        }
+    }
+
+    fn clickable_notification() -> notify_rust::Notification {
+        let mut notification = desktop_notification(&PreparedDesktop {
+            summary: "ann in Rust".into(),
+            body: "hello".into(),
+            urgent: true,
+            icon_path: None,
+        });
+        notification.action("default", "Open");
+        notification
+    }
+
+    /// The next signal of the service, handled; panics if none comes.
+    async fn hear(clickable: &mut Clickable) {
+        let signal = tokio::time::timeout(Duration::from_secs(10), clickable.next_signal())
+            .await
+            .expect("no signal arrived")
+            .expect("the connection ended");
+        clickable.on_signal(&signal).await;
+    }
+
+    async fn signal<B>(from: &zbus::Connection, to: &str, name: &str, body: &B)
+    where
+        B: serde::Serialize + zbus::zvariant::DynamicType,
+    {
+        from.emit_signal(Some(to), SERVICE_PATH, SERVICE, name, body)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_click_on_a_notification_reports_its_room_until_it_is_closed() {
+        let Some(bus) = TestBus::start("notify-click") else {
+            eprintln!("no dbus-daemon to run: not tested");
+            return;
+        };
+        let (service, mut asked) = bus.serve(&["body", "actions"]).await;
+        let (clicks, mut clicked) = tokio::sync::mpsc::unbounded_channel();
+        let mut clickable = Clickable::new(Some(bus.address.clone()));
+
+        let notification = clickable_notification();
+        assert!(
+            clickable
+                .show(&notification, "!rust:example.org".into(), clicks.clone())
+                .await
+        );
+        assert!(
+            clickable
+                .show(&notification, "!other:example.org".into(), clicks.clone())
+                .await
+        );
+        let (first, us, actions) = asked.recv().await.unwrap();
+        let (second, _, _) = asked.recv().await.unwrap();
+        assert_eq!(actions, ["default", "Open"]);
+
+        // Clicked: the room it was shown for is reported, each time.
+        signal(&service, &us, "ActionInvoked", &(first, "default")).await;
+        hear(&mut clickable).await;
+        assert_eq!(clicked.try_recv().unwrap(), "!rust:example.org");
+        signal(&service, &us, "ActionInvoked", &(second, "default")).await;
+        hear(&mut clickable).await;
+        assert_eq!(clicked.try_recv().unwrap(), "!other:example.org");
+        // Another action, or a notification that is not ours: nothing.
+        signal(&service, &us, "ActionInvoked", &(first, "reply")).await;
+        hear(&mut clickable).await;
+        signal(&service, &us, "ActionInvoked", &(first + 100, "default")).await;
+        hear(&mut clickable).await;
+        assert!(clicked.try_recv().is_err());
+        // Someone else on the bus pretending to be the service: nothing.
+        let stranger = zbus::connection::Builder::address(bus.address.as_str())
+            .build()
+            .await
+            .unwrap();
+        signal(&stranger, &us, "ActionInvoked", &(first, "default")).await;
+        hear(&mut clickable).await;
+        assert!(clicked.try_recv().is_err());
+
+        // Closed (clicked away, or timed out): forgotten, a late click does nothing.
+        signal(&service, &us, "NotificationClosed", &(first, 2u32)).await;
+        hear(&mut clickable).await;
+        assert_eq!(clickable.shown.len(), 1);
+        signal(&service, &us, "ActionInvoked", &(first, "default")).await;
+        hear(&mut clickable).await;
+        assert!(clicked.try_recv().is_err());
+
+        // However many are shown and never closed, only so many are remembered.
+        for _ in 0..CLICKABLE_MOST + 5 {
+            assert!(
+                clickable
+                    .show(&notification, "!rust:example.org".into(), clicks.clone())
+                    .await
+            );
+        }
+        assert_eq!(clickable.shown.len(), CLICKABLE_MOST);
+
+        // The service goes away: what was shown cannot be clicked any more, and the
+        // next notification is shown the plain way.
+        drop(bus);
+        let ended = tokio::time::timeout(Duration::from_secs(10), async {
+            while clickable.next_signal().await.is_some() {}
+        });
+        ended.await.expect("the end of the bus went unnoticed");
+        assert!(clickable.shown.is_empty());
+        assert!(matches!(clickable.link, Link::Down(_)));
+        assert!(
+            !clickable
+                .show(&notification, "!rust:example.org".into(), clicks)
+                .await
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_service_without_actions_is_left_to_the_plain_way() {
+        let Some(bus) = TestBus::start("notify-plain") else {
+            eprintln!("no dbus-daemon to run: not tested");
+            return;
+        };
+        let (_service, mut asked) = bus.serve(&["body"]).await;
+        let (clicks, _clicked) = tokio::sync::mpsc::unbounded_channel();
+        let mut clickable = Clickable::new(Some(bus.address.clone()));
+        let notification = clickable_notification();
+        for _ in 0..2 {
+            assert!(
+                !clickable
+                    .show(&notification, "!rust:example.org".into(), clicks.clone())
+                    .await
+            );
+        }
+        // Nothing was shown with an action, and it is not asked about again.
+        assert!(matches!(clickable.link, Link::NoActions));
+        assert!(asked.try_recv().is_err());
+        // Nor is there anything to wait for.
+        let waiting = tokio::time::timeout(Duration::from_millis(50), clickable.next_signal());
+        assert!(waiting.await.is_err());
+
+        // No bus at all: the same, and tried again only after a while.
+        let mut nowhere = Clickable::new(Some("unix:path=/nonexistent/matrix-rat-bus".into()));
+        assert!(
+            !nowhere
+                .show(&notification, "!rust:example.org".into(), clicks)
+                .await
+        );
+        assert!(matches!(nowhere.link, Link::Down(_)));
     }
 }

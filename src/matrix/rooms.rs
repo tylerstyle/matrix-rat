@@ -50,6 +50,7 @@ pub struct Timelines {
     /// Rooms and threads (named as by `threads::key`) whose stored draft the UI was
     /// told.
     drafts_told: HashSet<String>,
+    unread_flags: UnreadFlags,
 }
 
 impl Timelines {
@@ -59,13 +60,14 @@ impl Timelines {
             member_fetches: tokio::task::JoinSet::new(),
             uploads: super::upload::Uploads::new(client.clone(), events.clone()),
             client,
-            events,
             cache: VecDeque::new(),
             forwarder: None,
             paginator: None,
             thread: None,
             read_marks: Default::default(),
             drafts_told: HashSet::new(),
+            unread_flags: UnreadFlags::start(events.clone()),
+            events,
         }
     }
 
@@ -103,17 +105,7 @@ impl Timelines {
             self.cache.push_back((key, timeline.clone()));
             return Ok(timeline);
         }
-        let timeline = room
-            .timeline_builder()
-            .with_focus(TimelineFocus::Live {
-                // Replies in a thread are shown in the thread (see `threads`).
-                hide_threaded_events: true,
-            })
-            .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
-            .build()
-            .await
-            .context("could not open the room's messages")?;
-        let timeline = Arc::new(timeline);
+        let timeline = Arc::new(room_timeline(&room).await?);
         // Sync only delivers the members it thinks are needed, which leaves many
         // senders (bridged users above all) without a name. Fetch the member list once;
         // the timeline then fills in the names of what is already shown.
@@ -345,11 +337,7 @@ impl Timelines {
                 }
             }
             MatrixCmd::MarkRead { room_id, public } => {
-                let receipt = if public {
-                    ReceiptType::Read
-                } else {
-                    ReceiptType::ReadPrivate
-                };
+                let receipt = receipt_type(public);
                 let thread = self
                     .thread
                     .as_deref()
@@ -367,13 +355,19 @@ impl Timelines {
                         None => None,
                     };
                     let marks = self.read_marks.clone();
+                    let flags = self.unread_flags.clone();
                     tokio::spawn(async move {
+                        let Some((key, ticket, newest)) = mark else {
+                            // The room itself: the read marker follows the receipt.
+                            if let Err(err) = mark_room_read(&timeline, receipt, &flags).await {
+                                tracing::debug!(?err, "could not mark the room as read");
+                            }
+                            return;
+                        };
                         match timeline.mark_as_read(receipt).await {
                             // Also when nothing had to be sent: it was read already.
                             Ok(_) => {
-                                if let Some((key, ticket, newest)) = mark
-                                    && !newest.is_empty()
-                                {
+                                if !newest.is_empty() {
                                     marks.set(key, ticket, newest);
                                 }
                             }
@@ -381,6 +375,51 @@ impl Timelines {
                         }
                     });
                 }
+            }
+            MatrixCmd::SetUnread { room_id, unread } => match self.room(&room_id) {
+                Ok(room) => self.unread_flags.set(room, unread),
+                Err(err) => self.fail("Could not mark the room", err),
+            },
+            MatrixCmd::MarkRoomsRead { room_ids, public } => {
+                let receipt = receipt_type(public);
+                // Timelines that are open anyway are used; the others are opened for
+                // the moment only, so they do not push the recently used ones out.
+                let rooms: Vec<(Room, Option<Arc<Timeline>>)> = room_ids
+                    .iter()
+                    .filter_map(|room_id| {
+                        let room = self.room(room_id).ok()?;
+                        let open = self
+                            .cache
+                            .iter()
+                            .find(|(id, _)| id == room_id)
+                            .map(|(_, timeline)| timeline.clone());
+                        Some((room, open))
+                    })
+                    .collect();
+                let flags = self.unread_flags.clone();
+                self.spawn("Could not mark everything as read", async move {
+                    let mut failed = 0;
+                    for (room, open) in rooms {
+                        if room.state() != matrix_sdk::RoomState::Joined {
+                            continue;
+                        }
+                        let done = async {
+                            let timeline = match open {
+                                Some(timeline) => timeline,
+                                None => Arc::new(room_timeline(&room).await?),
+                            };
+                            mark_room_read(&timeline, receipt.clone(), &flags).await
+                        };
+                        if let Err(err) = done.await {
+                            tracing::debug!(?err, "could not mark a room as read");
+                            failed += 1;
+                        }
+                    }
+                    if failed > 0 {
+                        bail!("{failed} rooms could not be marked");
+                    }
+                    Ok(())
+                });
             }
             MatrixCmd::Join { room_id } => match self.room(&room_id) {
                 Ok(room) => self.spawn("Could not join", async move {
@@ -593,6 +632,118 @@ fn apply_mentions(
 
 fn content_without_relation(message: &Outgoing) -> Result<RoomMessageEventContentWithoutRelation> {
     Ok(content(message)?.into())
+}
+
+/// The timeline of a room as the app shows it.
+async fn room_timeline(room: &Room) -> Result<Timeline> {
+    room.timeline_builder()
+        .with_focus(TimelineFocus::Live {
+            // Replies in a thread are shown in the thread (see `threads`).
+            hide_threaded_events: true,
+        })
+        .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
+        .build()
+        .await
+        .context("could not open the room's messages")
+}
+
+fn receipt_type(public: bool) -> ReceiptType {
+    if public {
+        ReceiptType::Read
+    } else {
+        ReceiptType::ReadPrivate
+    }
+}
+
+/// Marks a room as read up to its newest message: the receipt (public or private),
+/// the read marker (`m.fully_read`, which only the user's own clients see: it is
+/// where the "new" line of the next visit comes from) and the "marked as unread"
+/// flag, which is taken back. Each is only sent if it changes something, and each
+/// is tried whatever became of the others.
+async fn mark_room_read(
+    timeline: &Timeline,
+    receipt: ReceiptType,
+    flags: &UnreadFlags,
+) -> Result<()> {
+    // In line behind a mark that is still on its way to the server.
+    flags.set(timeline.room().clone(), false);
+    let receipt = timeline.mark_as_read(receipt).await;
+    let marker = timeline.mark_as_read(ReceiptType::FullyRead).await;
+    receipt?;
+    marker?;
+    Ok(())
+}
+
+/// Sets and takes back "marked as unread" (`m.marked_unread` in a room's account
+/// data). One request after the other, in the order they were asked for: marking a
+/// room and opening it right away must not reach the server the other way round.
+///
+/// What the SDK knows of the flag is what the last sync said, which lags behind
+/// what was sent from here a moment ago. So what was last sent counts until a sync
+/// has confirmed it (or for a while at most), and a request is only skipped when
+/// the room is known to be that way already.
+#[derive(Clone)]
+struct UnreadFlags(UnboundedSender<(Room, bool)>);
+
+impl UnreadFlags {
+    /// For this long at most what we sent is taken to be the state, whatever the
+    /// last sync said.
+    const TRUST_SENT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Ends when the last copy of the handle is dropped.
+    fn start(events: UnboundedSender<MatrixEvent>) -> Self {
+        use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
+        let (queue, mut wanted) = tokio::sync::mpsc::unbounded_channel::<(Room, bool)>();
+        tokio::spawn(async move {
+            let mut sent: std::collections::HashMap<
+                matrix_sdk::ruma::OwnedRoomId,
+                (bool, std::time::Instant),
+            > = Default::default();
+            while let Some((room, unread)) = wanted.recv().await {
+                sent.retain(|_, (_, at)| at.elapsed() < Self::TRUST_SENT);
+                let synced = room.is_marked_unread();
+                // The sync has caught up with what we sent: from here on it is
+                // the one that knows (another client may change the flag too).
+                if sent
+                    .get(room.room_id())
+                    .is_some_and(|(ours, _)| *ours == synced)
+                {
+                    sent.remove(room.room_id());
+                }
+                let now = match sent.get(room.room_id()) {
+                    Some((ours, _)) => *ours,
+                    None => synced,
+                };
+                if now == unread {
+                    continue;
+                }
+                match room
+                    .set_account_data(MarkedUnreadEventContent::new(unread))
+                    .await
+                {
+                    Ok(_) => {
+                        let at = std::time::Instant::now();
+                        sent.insert(room.room_id().to_owned(), (unread, at));
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "could not change the unread mark");
+                        // Only the mark itself is worth a word: taking one back is
+                        // a side effect of reading, which went fine.
+                        if unread {
+                            let _ = events.send(MatrixEvent::ActionFailed(format!(
+                                "Could not mark the room as unread: {err}"
+                            )));
+                        }
+                    }
+                }
+            }
+        });
+        Self(queue)
+    }
+
+    fn set(&self, room: Room, unread: bool) {
+        let _ = self.0.send((room, unread));
+    }
 }
 
 /// Sends the whole timeline to the UI whenever it changes, and who is typing.
@@ -920,6 +1071,439 @@ mod tests {
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = bob.matrix_auth().logout().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// "Marked as unread" is shared between the clients of an account: a mark set by
+    /// another client of the test user shows in the worker's room list and one set
+    /// through the worker shows in the other client, and likewise when taken back.
+    /// Marking a room as read takes the mark back too, and moves the read marker
+    /// (`m.fully_read`), which is where the "new" line of the next visit comes from.
+    /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=... cargo test -- --ignored`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver (scripts/dev-homeserver.sh)"]
+    async fn a_room_marked_unread_shows_in_the_users_other_clients() {
+        use std::time::Duration;
+
+        use matrix_sdk::config::SyncSettings;
+        use matrix_sdk::ruma::RoomId;
+        use matrix_sdk::ruma::events::fully_read::FullyReadEventContent;
+        use matrix_sdk::{Client, Room};
+
+        use crate::matrix::{MatrixEvent, RoomCategory, spawn};
+        use crate::model::ItemRef;
+        use crate::paths::Paths;
+
+        let var = |name: &str| std::env::var(name).ok();
+        let homeserver =
+            var("MATRIX_RAT_TEST_HOMESERVER").unwrap_or_else(|| "http://127.0.0.1:6167".into());
+        let username = var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+
+        // The same user in another client.
+        let other = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .expect("client");
+        other
+            .matrix_auth()
+            .login_username(&username, &password)
+            .initial_device_display_name("matrix-rat unread test")
+            .send()
+            .await
+            .expect("login of the second client");
+        let quick = || SyncSettings::default().timeout(Duration::from_secs(1));
+        other.sync_once(quick()).await.expect("sync");
+
+        let root = std::env::temp_dir().join(format!("matrix-rat-unread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password,
+        });
+
+        // Waits for a room list in which the room is marked or not, as wanted.
+        // `None` for the room: any joined room that both clients know.
+        async fn listed(
+            events: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixEvent>,
+            other: &Client,
+            room_id: Option<&str>,
+            marked: bool,
+        ) -> String {
+            let wait = async {
+                loop {
+                    match events.recv().await.expect("worker stopped") {
+                        MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                        MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                        MatrixEvent::Rooms(rooms) => {
+                            let found = rooms.iter().find(|summary| match room_id {
+                                Some(id) => summary.id == id,
+                                None => {
+                                    summary.category != RoomCategory::Invite
+                                        && RoomId::parse(&summary.id)
+                                            .ok()
+                                            .and_then(|id| other.get_room(&id))
+                                            .is_some_and(|room| {
+                                                room.state() == matrix_sdk::RoomState::Joined
+                                            })
+                                }
+                            });
+                            if let Some(summary) = found
+                                && (room_id.is_none() || summary.marked_unread == marked)
+                            {
+                                return summary.id.clone();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(30), wait)
+                .await
+                .unwrap_or_else(|_| panic!("the room list never said marked: {marked}"))
+        }
+
+        // Syncs the other client until it sees the room marked or not, as wanted.
+        async fn seen(other: &Client, room: &Room, marked: bool) {
+            let quick = SyncSettings::default().timeout(Duration::from_secs(1));
+            for _ in 0..30 {
+                other.sync_once(quick.clone()).await.expect("sync");
+                if room.is_marked_unread() == marked {
+                    return;
+                }
+            }
+            panic!("the other client never saw marked: {marked}");
+        }
+
+        let room_id = listed(&mut events, &other, None, false).await;
+        let other_room = other.get_room(&RoomId::parse(&room_id).unwrap()).unwrap();
+        // Start from a room that is not marked, whatever an earlier run left.
+        other_room.set_unread_flag(false).await.expect("unmark");
+        seen(&other, &other_room, false).await;
+        listed(&mut events, &other, Some(&room_id), false).await;
+
+        // Marked in the other client: the worker's room list says so.
+        other_room.set_unread_flag(true).await.expect("mark");
+        listed(&mut events, &other, Some(&room_id), true).await;
+        // Taken back through the worker: the other client sees it gone.
+        handle.send(MatrixCmd::SetUnread {
+            room_id: room_id.clone(),
+            unread: false,
+        });
+        seen(&other, &other_room, false).await;
+        listed(&mut events, &other, Some(&room_id), false).await;
+
+        // Marked through the worker: the other client sees it, and so does the list.
+        handle.send(MatrixCmd::SetUnread {
+            room_id: room_id.clone(),
+            unread: true,
+        });
+        seen(&other, &other_room, true).await;
+        listed(&mut events, &other, Some(&room_id), true).await;
+        // Taken back there. (The other client goes by what its last sync said, so
+        // it syncs before it is asked for the next change.)
+        other_room.set_unread_flag(false).await.expect("unmark");
+        listed(&mut events, &other, Some(&room_id), false).await;
+        seen(&other, &other_room, false).await;
+
+        // Marking many rooms as read takes the mark back as well, without the room
+        // being open; a room that is not known is passed over.
+        other_room.set_unread_flag(true).await.expect("mark");
+        listed(&mut events, &other, Some(&room_id), true).await;
+        handle.send(MatrixCmd::MarkRoomsRead {
+            room_ids: vec!["!nowhere:example.org".into(), room_id.clone()],
+            public: false,
+        });
+        seen(&other, &other_room, false).await;
+        listed(&mut events, &other, Some(&room_id), false).await;
+
+        // Marked once more, and then read here: a message is sent first, so that
+        // there is a newest message that is known for certain.
+        other_room.set_unread_flag(true).await.expect("mark");
+        listed(&mut events, &other, Some(&room_id), true).await;
+        let text = format!("unread test {}", std::process::id());
+        handle.send(MatrixCmd::OpenRoom {
+            room_id: room_id.clone(),
+            generation: 1,
+        });
+        handle.send(MatrixCmd::Send {
+            room_id: room_id.clone(),
+            message: crate::format::parse(&text),
+            reply_to: None,
+        });
+        let sent = async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::Timeline { messages, .. } => {
+                        let ours = messages.iter().find(|m| m.body == text);
+                        if let Some(ItemRef::Event(id)) = ours.and_then(|m| m.item.as_ref()) {
+                            return id.clone();
+                        }
+                    }
+                    MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        };
+        let newest = tokio::time::timeout(Duration::from_secs(30), sent)
+            .await
+            .expect("our message was not sent");
+        handle.send(MatrixCmd::MarkRead {
+            room_id: room_id.clone(),
+            public: false,
+        });
+        seen(&other, &other_room, false).await;
+        listed(&mut events, &other, Some(&room_id), false).await;
+        // The read marker is on the newest message, for all clients of the user.
+        // (Our message counts as the room's newest once the server has sent it
+        // back; marking again until then is what reading on does in the app.)
+        let mut marker = None;
+        for _ in 0..30 {
+            handle.send(MatrixCmd::MarkRead {
+                room_id: room_id.clone(),
+                public: false,
+            });
+            other.sync_once(quick()).await.expect("sync");
+            marker = other_room
+                .account_data_static::<FullyReadEventContent>()
+                .await
+                .expect("account data")
+                .and_then(|raw| raw.deserialize().ok())
+                .map(|event| event.content.event_id.to_string());
+            if marker.as_deref() == Some(newest.as_str()) {
+                break;
+            }
+        }
+        assert_eq!(marker.as_deref(), Some(newest.as_str()));
+
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = other.matrix_auth().logout().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Where the "new" line comes from: the timeline carries a read marker in front
+    /// of what someone else wrote since the room was last marked as read, also when
+    /// the room is opened afresh; marking the room as read takes it away.
+    /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=... cargo test -- --ignored`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver (scripts/dev-homeserver.sh)"]
+    async fn the_read_marker_stands_before_what_was_not_read() {
+        use matrix_sdk::Client;
+        use matrix_sdk::ruma::RoomId;
+        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+
+        use crate::model::{Message, MsgKind};
+
+        let var = |name: &str| std::env::var(name).ok();
+        let homeserver =
+            var("MATRIX_RAT_TEST_HOMESERVER").unwrap_or_else(|| "http://127.0.0.1:6167".into());
+        let username = var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let other_name = var("MATRIX_RAT_TEST_USER2").unwrap_or_else(|| "bob".into());
+        let other_password = var("MATRIX_RAT_TEST_PASSWORD2").unwrap_or_else(|| "bobpass".into());
+
+        let other = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .expect("client");
+        other
+            .matrix_auth()
+            .login_username(&other_name, &other_password)
+            .initial_device_display_name("matrix-rat marker test")
+            .send()
+            .await
+            .expect("login of the second user");
+        other
+            .sync_once(SyncSettings::default())
+            .await
+            .expect("sync");
+
+        let root = std::env::temp_dir().join(format!("matrix-rat-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password,
+        });
+
+        // A room both have joined, without encryption (the other client is a plain
+        // one and could not write there). By then the worker has also said that the
+        // first sync is through.
+        let find_room = async {
+            let mut caught_up = false;
+            let mut found = None;
+            loop {
+                if let (true, Some(room_id)) = (caught_up, &found) {
+                    return String::clone(room_id);
+                }
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    MatrixEvent::CaughtUp => {
+                        assert!(!caught_up, "reported twice");
+                        caught_up = true;
+                    }
+                    MatrixEvent::Rooms(rooms) => {
+                        let shared = rooms.iter().find(|summary| {
+                            summary.category != RoomCategory::Invite
+                                && RoomId::parse(&summary.id)
+                                    .ok()
+                                    .and_then(|id| other.get_room(&id))
+                                    .is_some_and(|room| {
+                                        room.state() == matrix_sdk::RoomState::Joined
+                                            && !room.encryption_state().is_encrypted()
+                                    })
+                        });
+                        if let Some(summary) = shared {
+                            found = Some(summary.id.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let room_id = tokio::time::timeout(Duration::from_secs(30), find_room)
+            .await
+            .expect(
+                "no unencrypted room that both users have joined, or no word of the first sync",
+            );
+        let other_room = other.get_room(&RoomId::parse(&room_id).unwrap()).unwrap();
+
+        // Waits for messages of the room, as asked for with `generation`, that
+        // `check` accepts.
+        async fn until<T>(
+            events: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixEvent>,
+            generation: u64,
+            what: &str,
+            check: impl Fn(&[Message]) -> Option<T>,
+        ) -> T {
+            let wait = async {
+                loop {
+                    match events.recv().await.expect("worker stopped") {
+                        MatrixEvent::Timeline {
+                            messages,
+                            generation: of,
+                            ..
+                        } if of == generation => {
+                            if let Some(found) = check(&messages) {
+                                return found;
+                            }
+                        }
+                        MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                        _ => {}
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(30), wait)
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+        }
+        let markers = |messages: &[Message]| {
+            messages
+                .iter()
+                .filter(|m| m.kind == MsgKind::ReadMarker)
+                .count()
+        };
+
+        // We write and have read everything.
+        let run = std::process::id();
+        let ours = format!("marker test {run}: ours");
+        handle.send(MatrixCmd::OpenRoom {
+            room_id: room_id.clone(),
+            generation: 1,
+        });
+        handle.send(MatrixCmd::Send {
+            room_id: room_id.clone(),
+            message: crate::format::parse(&ours),
+            reply_to: None,
+        });
+        until(&mut events, 1, "our message to be sent", |messages| {
+            let sent = messages.iter().find(|m| m.body == ours)?;
+            matches!(sent.item, Some(crate::model::ItemRef::Event(_))).then_some(())
+        })
+        .await;
+        handle.send(MatrixCmd::MarkRead {
+            room_id: room_id.clone(),
+            public: false,
+        });
+
+        // Reading is not answered: give it the time to reach the server, or what
+        // comes next would be read along with the rest.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // The other user writes twice: the marker stands right before the first.
+        let first = format!("marker test {run}: first");
+        let second = format!("marker test {run}: second");
+        for text in [&first, &second] {
+            other_room
+                .send(RoomMessageEventContent::text_plain(text.as_str()))
+                .await
+                .expect("message of the second user");
+        }
+        let before_first = |messages: &[Message]| {
+            let at = messages.iter().position(|m| m.body == first)?;
+            messages.iter().find(|m| m.body == second)?;
+            (at > 0 && messages[at - 1].kind == MsgKind::ReadMarker && markers(messages) == 1)
+                .then_some(())
+        };
+        until(&mut events, 1, "the marker before the news", before_first).await;
+
+        // Opened afresh (as after going to another room and back), the first thing
+        // the worker sends has it there as well: that is what the app places its
+        // "new" line by.
+        handle.send(MatrixCmd::OpenRoom {
+            room_id: room_id.clone(),
+            generation: 2,
+        });
+        let at_once = until(&mut events, 2, "the room's messages", |messages| {
+            Some(before_first(messages).is_some())
+        })
+        .await;
+        assert!(at_once, "the first update after opening had no marker");
+
+        // Read: the marker goes (to the end, where it is not shown).
+        handle.send(MatrixCmd::MarkRead {
+            room_id: room_id.clone(),
+            public: false,
+        });
+        until(&mut events, 2, "the marker to go", |messages| {
+            (markers(messages) == 0).then_some(())
+        })
+        .await;
+        handle.send(MatrixCmd::OpenRoom {
+            room_id: room_id.clone(),
+            generation: 3,
+        });
+        let gone = until(&mut events, 3, "the room's messages", |messages| {
+            Some(markers(messages) == 0)
+        })
+        .await;
+        assert!(gone, "a marker though everything was read");
+
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = other.matrix_auth().logout().await;
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -173,7 +173,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 let active = *index == app.active;
                 let base = if active {
                     Role::RoomActive
-                } else if room.bold {
+                } else if room.bold || room.marked_unread {
                     Role::RoomUnread
                 } else {
                     Role::Room
