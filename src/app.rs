@@ -3,6 +3,7 @@
 mod attach;
 mod complete;
 mod files;
+pub mod global_search;
 mod keybinds;
 mod media;
 mod menu;
@@ -256,6 +257,10 @@ pub struct App {
     manage: rooms::ManageState,
     /// Active key bindings and preset.
     pub keymap: Keymap,
+    /// Monotonic counter for active/debounced global search requests.
+    search_gen: u64,
+    /// Cross-room search jump waiting for room timeline load/pagination.
+    pending_jump: Option<global_search::PendingJump>,
 }
 
 impl App {
@@ -410,6 +415,8 @@ impl App {
             complete: Default::default(),
             manage: Default::default(),
             keymap: Keymap::default(),
+            search_gen: 0,
+            pending_jump: None,
         }
     }
 
@@ -982,6 +989,11 @@ impl App {
         self.attach.clear();
         self.complete.reset_session();
         self.manage = Default::default();
+        self.pending_jump = None;
+        self.search_gen += 1;
+        if matches!(self.modal, Some(Modal::GlobalSearch(_))) {
+            self.modal = None;
+        }
         self.sync = Some(SyncStatus::Stopped);
     }
 
@@ -1015,6 +1027,7 @@ impl App {
             return;
         }
         self.auto_opened = false;
+        self.pending_jump = None;
         // A thread belongs to its room; picking a room (even the same one) leaves it.
         self.leave_thread();
         if index != self.active {
@@ -1846,6 +1859,7 @@ impl App {
                 }
             }
             Action::Search => self.open_search(),
+            Action::SearchEverywhere => self.open_global_search(),
             Action::SpaceNext => self.step_space(1),
             Action::SpacePrev => self.step_space(-1),
             Action::RoomPrev => self.step_room(-1),
@@ -1972,6 +1986,7 @@ impl App {
                 self.modal = None;
             }
             Some(Modal::Search(_)) => self.close_search(),
+            Some(Modal::GlobalSearch(_)) => self.close_global_search(),
             Some(Modal::Verify(_)) => self.verify_escape(),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_escape(),
             Some(Modal::Menu(_)) => self.modal = None,
@@ -2093,6 +2108,7 @@ impl App {
             Some(Modal::Verify(_)) => self.on_verify_key(code, mods),
             Some(Modal::Palette(_)) => self.on_palette_key(code, mods),
             Some(Modal::Search(_)) => self.on_search_key(code, mods),
+            Some(Modal::GlobalSearch(_)) => self.on_global_search_key(code, mods),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.on_manage_key(code, mods),
             Some(Modal::Menu(_)) => self.on_menu_key(key, code, mods),
             Some(Modal::Keybinds(_)) => self.on_keybinds_key(key, code, mods),
@@ -2175,6 +2191,7 @@ impl App {
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
                     self.search_sync();
+                    self.on_jump_timeline();
                     self.timeline.reached_start |= reached_start;
                 }
             }
@@ -2192,6 +2209,7 @@ impl App {
                         > view.count_at_request;
                     view.empty_batches = if grew { 0 } else { view.empty_batches + 1 };
                     self.search_after_load();
+                    self.try_apply_pending_jump();
                 }
             }
             MatrixEvent::Typing { generation, names } => {
@@ -2233,6 +2251,12 @@ impl App {
             // Answers to requests of a session that has ended.
             MatrixEvent::Manage(_) if self.logged_out => {}
             MatrixEvent::Manage(event) => self.on_manage(event),
+            MatrixEvent::SearchResults {
+                generation,
+                hits,
+                done,
+                note,
+            } => self.on_search_results(generation, hits, done, note),
         }
         // A menu about something that is gone closes.
         self.menu_follow();
@@ -2630,6 +2654,7 @@ impl App {
                 return;
             }
             Some(Modal::Search(_)) => return self.search_paste(first_line),
+            Some(Modal::GlobalSearch(_)) => return self.global_search_paste(first_line),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => return self.on_manage_paste(first_line),
             // A paste is not an answer to a menu.
             Some(Modal::Menu(_)) => return,
@@ -2693,6 +2718,9 @@ impl App {
                         }
                         if matches!(self.modal, Some(Modal::Search(_))) {
                             self.close_search();
+                        }
+                        if matches!(self.modal, Some(Modal::GlobalSearch(_))) {
+                            self.close_global_search();
                         }
                         self.close_manage();
                     }
@@ -2789,6 +2817,7 @@ impl App {
                     Some(HitId::Thread(index)) => self.open_thread(index),
                     Some(HitId::Attachment(index)) => self.remove_attachment(index),
                     Some(HitId::Palette(index)) => self.run_palette_at(index),
+                    Some(HitId::GlobalSearch(index)) => self.activate_global_search(index),
                     Some(HitId::Complete(index)) => {
                         self.accept_completion(Some(index));
                     }
@@ -2820,6 +2849,7 @@ impl App {
                     Some(
                         Modal::Emoji(_)
                             | Modal::Palette(_)
+                            | Modal::GlobalSearch(_)
                             | Modal::RoomInfo(_)
                             | Modal::Keybinds(_)
                     )
@@ -2833,6 +2863,7 @@ impl App {
                 match &mut self.modal {
                     Some(Modal::Emoji(picker)) => picker.scroll_by(delta),
                     Some(Modal::Palette(palette)) => palette.scroll_by(delta),
+                    Some(Modal::GlobalSearch(search)) => search.scroll_by(delta),
                     Some(Modal::RoomInfo(_)) => self.manage_scroll(delta),
                     Some(Modal::Keybinds(editor)) => editor.scroll_by(delta),
                     _ => {}
@@ -2929,6 +2960,11 @@ impl App {
                     bar.query.place(rel_col, false);
                 }
             }
+            InputTarget::GlobalSearchQuery => {
+                if let Some(Modal::GlobalSearch(search)) = &mut self.modal {
+                    search.query.place(rel_col, false);
+                }
+            }
             InputTarget::NewField(slot) => {
                 if let Some(Modal::New(popup)) = &mut self.modal
                     && popup.busy.is_none()
@@ -2973,6 +3009,7 @@ impl App {
 
     fn on_tick(&mut self) {
         self.verify_tick();
+        self.tick_global_search();
         self.release_count_notices(COUNT_NOTICE_WAIT);
         if self
             .toast
@@ -3090,6 +3127,12 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
             _ = theme_watch.changed() => app.reload_theme(),
             scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),
+            _ = async {
+                match app.search_debounce_deadline() {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => app.tick_global_search(),
             _ = tick.tick() => app.on_tick(),
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
             _ = sigterm.recv() => app.should_quit = true,

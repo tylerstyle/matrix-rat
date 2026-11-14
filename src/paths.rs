@@ -75,6 +75,10 @@ impl Paths {
         self.data_dir.join("store")
     }
 
+    pub fn search_dir(&self) -> PathBuf {
+        self.data_dir.join("search")
+    }
+
     pub fn lock_file(&self) -> PathBuf {
         self.data_dir.join("lock")
     }
@@ -122,6 +126,7 @@ mod tests {
         let b = Paths::new("b").unwrap();
         assert_ne!(a.data_dir, b.data_dir);
         assert_ne!(a.pid_file(), b.pid_file());
+        assert_ne!(a.search_dir(), b.search_dir());
         assert_ne!(a.notify_icons_dir(), b.notify_icons_dir());
         assert_eq!(a.config_dir, b.config_dir);
     }

@@ -381,6 +381,10 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             Action::Reply if ctx.selection.failed_retry => {
                 ("Try sending again", &["retry failed message", "reply"])
             }
+            Action::SearchEverywhere => (
+                binding.description,
+                &["search messages", "global search", "find across rooms"],
+            ),
             Action::FocusRoomFilter => (binding.description, &["filter rooms", "alt-r"]),
             Action::Open => (binding.description, &["view picture"]),
             Action::OpenThread => (binding.description, &["thread", "replies"]),

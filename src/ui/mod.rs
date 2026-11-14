@@ -3,6 +3,7 @@
 mod attach;
 mod complete;
 mod composer;
+mod global_search;
 mod help;
 pub mod hit;
 mod image;
@@ -673,6 +674,41 @@ mod tests {
     }
 
     #[test]
+    fn global_search() {
+        use crate::matrix::SearchHit;
+        use crate::modal::Modal;
+
+        let mut app = App::demo();
+        app.perform(Action::SearchEverywhere);
+        insta::assert_snapshot!("global_search_empty", render(&mut app, 100, 30));
+
+        if let Some(Modal::GlobalSearch(s)) = &mut app.modal {
+            s.query.set("deadline");
+            s.active_query = "deadline".into();
+            s.hits = vec![
+                SearchHit {
+                    room_id: "!design:example.org".into(),
+                    event_id: "$1".into(),
+                    room_name: "Design".into(),
+                    sender: "Nora".into(),
+                    date: "Today".into(),
+                    snippet: "We should keep the Friday deadline after all".into(),
+                },
+                SearchHit {
+                    room_id: "!ops:example.org".into(),
+                    event_id: "$2".into(),
+                    room_name: "Ops & Releases".into(),
+                    sender: "Ben".into(),
+                    date: "12 Nov".into(),
+                    snippet: "Wait until everyone signs off on the release checklist before moving the deadline into next week".into(),
+                },
+            ];
+            s.selected = 0;
+        }
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+    }
+
+    #[test]
     fn composer_completions() {
         let mut app = App::demo();
         for c in "hey @".chars() {
@@ -692,9 +728,9 @@ mod tests {
         let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
         let mut app = App::demo();
         let last = app.keymap.bindings().last().unwrap().description;
-        // At the size the overlay was made for, everything is there at once.
+        // When tall enough, everything is there at once; smaller windows scroll.
         app.perform(Action::ToggleHelp);
-        let text = render(&mut app, 100, 30);
+        let text = render(&mut app, 100, 32);
         for binding in app.keymap.bindings() {
             assert!(
                 text.contains(binding.description),
@@ -706,7 +742,7 @@ mod tests {
         assert!(!text.contains("scroll"));
         // In smaller windows what does not fit is a few presses away, in both
         // layouts, and the way back as well.
-        for (w, h) in [(100, 24), (80, 24), (60, 12)] {
+        for (w, h) in [(100, 30), (100, 24), (80, 24), (60, 12)] {
             let mut app = App::demo();
             app.perform(Action::ToggleHelp);
             let text = render(&mut app, w, h);
@@ -768,6 +804,9 @@ mod tests {
         let mut with_palette = App::demo();
         with_palette.perform(Action::OpenPalette);
         let palette_modal = with_palette.modal.take();
+        let mut with_global_search = App::demo();
+        with_global_search.perform(Action::SearchEverywhere);
+        let global_search_modal = with_global_search.modal.take();
         use crate::manage::{InfoPopup, NewPopup, Stage};
         let mut create = NewPopup::new(Stage::Create);
         create.error = Some("an error".into());
@@ -808,6 +847,7 @@ mod tests {
             ))),
             Some(Modal::Recovery(RecoveryForm::default())),
             palette_modal,
+            global_search_modal,
             with_keybinds,
             Some(Modal::New(NewPopup::new(Stage::Choose))),
             Some(Modal::New(NewPopup::new(Stage::Join))),

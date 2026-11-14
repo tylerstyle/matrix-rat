@@ -8,6 +8,7 @@ mod media;
 mod notify;
 mod receipts;
 mod rooms;
+pub(crate) mod search;
 mod session;
 mod spaces;
 mod threads;
@@ -19,6 +20,7 @@ pub use manage::{
     Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomMember,
 };
 pub use notify::Notice;
+pub use search::SearchHit;
 pub use session::{ReauthKind, ReauthTarget};
 pub use spaces::SpaceSummary;
 pub use verify::{
@@ -176,6 +178,13 @@ pub enum MatrixCmd {
     },
     /// Re-authenticate a soft-logged-out session via browser, keeping the existing device id.
     ReauthBrowser,
+    /// Searches indexed messages across joined rooms.
+    SearchMessages {
+        generation: u64,
+        query: String,
+    },
+    /// Cancels any running global message search.
+    CancelSearch,
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -221,6 +230,11 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Manage(command) => write!(f, "Manage({command:?})"),
             Self::ReauthPassword { .. } => f.write_str("ReauthPassword"),
             Self::ReauthBrowser => f.write_str("ReauthBrowser"),
+            // Query text is private too.
+            Self::SearchMessages { generation, .. } => {
+                write!(f, "SearchMessages(generation {generation})")
+            }
+            Self::CancelSearch => f.write_str("CancelSearch"),
         }
     }
 }
@@ -358,6 +372,13 @@ pub enum MatrixEvent {
         target: ReauthTarget,
         reason: String,
     },
+    /// Results (partial or complete) from [`MatrixCmd::SearchMessages`].
+    SearchResults {
+        generation: u64,
+        hits: Vec<SearchHit>,
+        done: bool,
+        note: Option<String>,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -425,6 +446,17 @@ impl std::fmt::Debug for MatrixEvent {
             Self::NeedReauth { target, .. } => {
                 write!(f, "NeedReauth({} dev={})", target.user_id, target.device_id)
             }
+            Self::SearchResults {
+                generation,
+                hits,
+                done,
+                note,
+            } => write!(
+                f,
+                "SearchResults(generation {generation}, {} hits, done: {done}, note: {})",
+                hits.len(),
+                note.is_some()
+            ),
         }
     }
 }
@@ -814,9 +846,13 @@ impl Worker {
         // resumes by itself when the server is reachable again.
         let sync = SyncService::builder(client.clone())
             .with_offline_mode()
+            .with_room_list_timeline_limit(20)
             .build()
             .await
             .context("could not set up sync")?;
+        // Start listening for redecryption reports before sync begins so any
+        // newly decrypted UTDs are forwarded into the search index.
+        let mut searcher = search::Searcher::new(client.clone(), self.events.clone());
         sync.start().await;
 
         let room_list = sync
@@ -914,12 +950,17 @@ impl Worker {
                     }
                     Some(MatrixCmd::Verification(command)) => verifier.handle(command).await,
                     Some(MatrixCmd::Manage(command)) => manager.handle(command),
+                    Some(MatrixCmd::SearchMessages { generation, query }) => {
+                        searcher.start(generation, query);
+                    }
+                    Some(MatrixCmd::CancelSearch) => searcher.cancel(),
                     Some(command) => timelines.handle(command).await,
                 },
             }
         };
         verifier.stop().await;
         manager.stop();
+        searcher.stop();
         timelines.close();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;

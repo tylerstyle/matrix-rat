@@ -435,7 +435,9 @@ impl Timelines {
             | MatrixCmd::Previews(_)
             | MatrixCmd::Shutdown
             | MatrixCmd::Verification(_)
-            | MatrixCmd::Manage(_) => {}
+            | MatrixCmd::Manage(_)
+            | MatrixCmd::SearchMessages { .. }
+            | MatrixCmd::CancelSearch => {}
         }
     }
 }

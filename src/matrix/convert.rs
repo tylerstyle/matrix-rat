@@ -81,7 +81,7 @@ pub(super) fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) ->
     }
 }
 
-fn local_time(timestamp: MilliSecondsSinceUnixEpoch) -> Option<DateTime<Local>> {
+pub(super) fn local_time(timestamp: MilliSecondsSinceUnixEpoch) -> Option<DateTime<Local>> {
     let millis = i64::try_from(u64::from(timestamp.get())).ok()?;
     Local.timestamp_millis_opt(millis).single()
 }
