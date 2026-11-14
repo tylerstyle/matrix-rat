@@ -689,6 +689,7 @@ mod tests {
                 SearchHit {
                     room_id: "!design:example.org".into(),
                     event_id: "$1".into(),
+                    thread_root: None,
                     room_name: "Design".into(),
                     sender: "Nora".into(),
                     date: "Today".into(),
@@ -697,6 +698,7 @@ mod tests {
                 SearchHit {
                     room_id: "!ops:example.org".into(),
                     event_id: "$2".into(),
+                    thread_root: None,
                     room_name: "Ops & Releases".into(),
                     sender: "Ben".into(),
                     date: "12 Nov".into(),

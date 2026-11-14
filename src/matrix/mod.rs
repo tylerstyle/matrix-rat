@@ -616,7 +616,12 @@ impl Worker {
     ) -> bool {
         let outcome = self.run_session(&active, post_notice).await;
         match outcome {
-            Ok(SessionEnd::Shutdown) => return false,
+            Ok(SessionEnd::Shutdown) => {
+                let joined = search::joined_room_ids(&active.client);
+                drop(active);
+                search::prune_search_dir(&self.paths.search_dir(), &joined);
+                return false;
+            }
             Ok(SessionEnd::SoftLogout) => {
                 let target = active.target.clone();
                 let passphrase = active.passphrase.clone();
@@ -624,7 +629,9 @@ impl Worker {
                 if let Err(err) = session::mark_soft_logout(&self.paths, &active) {
                     tracing::warn!(?err, "could not record soft logout state");
                 }
+                let joined = search::joined_room_ids(&active.client);
                 drop(active);
+                search::prune_search_dir(&self.paths.search_dir(), &joined);
                 *pending = Some(PendingAuth::Reauth {
                     target,
                     passphrase,

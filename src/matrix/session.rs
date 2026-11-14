@@ -466,6 +466,7 @@ pub async fn restore_with<K: KeyringBackend>(
             "Could not restore your session: {err:#}. Your local store was kept intact."
         ));
     }
+    super::search::prune_stale_search_indexes(&client, &paths.search_dir());
 
     RestoreOutcome::Restored(ActiveSession {
         client,
@@ -554,6 +555,7 @@ async fn commit_preserved_reauth<K: KeyringBackend>(
 
     let client = offline_client(paths, &homeserver, existing_passphrase).await?;
     client.restore_session(auth_session).await?;
+    super::search::prune_stale_search_indexes(&client, &paths.search_dir());
     let saved = Saved {
         homeserver,
         passphrase: file_passphrase,

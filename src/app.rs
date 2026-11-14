@@ -32,7 +32,7 @@ use crate::composer::Composer;
 use crate::config::Config;
 use crate::format::Outgoing;
 use crate::keymap::{self, Context, Keymap};
-use crate::lineedit::{EditKeys, LineEdit};
+use crate::lineedit::{EditKeys, EditOutcome, LineEdit};
 use crate::matrix::{
     self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
     SyncStatus,
@@ -1618,6 +1618,9 @@ impl App {
 
     pub fn perform(&mut self, action: Action) {
         self.dirty = true;
+        if !matches!(action, Action::Quit | Action::Suspend) {
+            self.pending_jump = None;
+        }
         match action {
             Action::Quit => self.should_quit = true,
             Action::Suspend => self.suspend_requested = true,
@@ -1904,6 +1907,7 @@ impl App {
 
     /// Only one popup is shown at a time; the help overlay makes way too.
     fn open_modal(&mut self, modal: Modal) {
+        self.pending_jump = None;
         self.help_open = false;
         self.modal = Some(modal);
     }
@@ -2191,8 +2195,8 @@ impl App {
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
                     self.search_sync();
-                    self.on_jump_timeline();
                     self.timeline.reached_start |= reached_start;
+                    self.on_jump_timeline();
                 }
             }
             MatrixEvent::Paginated {
@@ -2508,11 +2512,14 @@ impl App {
                     .or_else(|| self.keymap.label_for(Action::Quit))
                     .unwrap_or("Ctrl-Q");
                 self.show_toast(format!("Press {quit} to quit"));
+            } else {
+                self.pending_jump = None;
             }
             return;
         }
 
         if self.focus == Pane::Composer && self.complete_key(code, mods) {
+            self.pending_jump = None;
             return;
         }
         let width = self.composer_view.width;
@@ -2520,11 +2527,13 @@ impl App {
             && (code, mods) == (KeyCode::Up, KeyModifiers::NONE)
             && !self.composer.on_first_row(width)
         {
+            self.pending_jump = None;
             self.composer.up(width);
             self.sync_completion();
             return;
         }
         if self.focus == Pane::Composer && self.attach_key(code, mods) {
+            self.pending_jump = None;
             return;
         }
         if let Some(action) = self.keymap.lookup(context, key) {
@@ -2534,12 +2543,11 @@ impl App {
         match self.focus {
             Pane::Composer => self.edit_composer(code, mods),
             Pane::Sidebar => {
-                if self
-                    .sidebar
-                    .filter
-                    .handle_key(code, mods, EditKeys::FULL)
-                    .changed()
-                {
+                let outcome = self.sidebar.filter.handle_key(code, mods, EditKeys::FULL);
+                if !matches!(outcome, EditOutcome::Ignored) {
+                    self.pending_jump = None;
+                }
+                if outcome.changed() {
                     self.sidebar.cursor = 0;
                     self.sidebar.reveal_cursor = true;
                 }
@@ -2566,6 +2574,7 @@ impl App {
     pub fn type_char(&mut self, c: char) {
         match self.focus {
             Pane::Sidebar => {
+                self.pending_jump = None;
                 let mut buf = [0u8; 4];
                 if self
                     .sidebar
@@ -2577,7 +2586,10 @@ impl App {
                     self.sidebar.reveal_cursor = true;
                 }
             }
-            Pane::Composer => self.composer.insert(c.encode_utf8(&mut [0; 4])),
+            Pane::Composer => {
+                self.pending_jump = None;
+                self.composer.insert(c.encode_utf8(&mut [0; 4]));
+            }
             Pane::Timeline => {}
         }
     }
@@ -2588,6 +2600,7 @@ impl App {
         let alt = mods.contains(KeyModifiers::ALT);
         let before = self.composer.text().to_owned();
         let before_cursor = self.composer.cursor();
+        let mut handled = true;
         match code {
             KeyCode::Char(c) if !ctrl && !alt => self.type_char(c),
             KeyCode::Char('b') if alt => self.composer.word_left(),
@@ -2605,7 +2618,10 @@ impl App {
             KeyCode::Down => self.composer.down(width),
             KeyCode::Home => self.composer.home(width),
             KeyCode::End => self.composer.end(width),
-            _ => {}
+            _ => handled = false,
+        }
+        if handled {
+            self.pending_jump = None;
         }
         if self.composer.text() != before {
             self.adjust_marks_for_cursor_edit(before_cursor, before.len());
@@ -2666,6 +2682,7 @@ impl App {
         if self.help_open || self.images.viewer_open() {
             return;
         }
+        self.pending_jump = None;
         // Files dropped on the terminal arrive as a paste of their paths.
         if self.attach_pasted(&text) {
             return;
@@ -2764,6 +2781,7 @@ impl App {
                     Some(HitId::Splitter) => self.dragging_splitter = true,
                     Some(HitId::Room(index)) => self.open_room(index),
                     Some(HitId::RoomFilter) => {
+                        self.pending_jump = None;
                         self.set_focus(Pane::Sidebar);
                         if let Some((rect, _)) = hit_rect {
                             let rel_col =
@@ -2772,12 +2790,14 @@ impl App {
                         }
                     }
                     Some(HitId::Message(index)) => {
+                        self.pending_jump = None;
                         self.set_focus(Pane::Timeline);
                         if self.selectable(index) {
                             self.timeline.selected = Some(index);
                         }
                     }
                     Some(HitId::Reaction(msg, reaction)) => {
+                        self.pending_jump = None;
                         let key = self
                             .messages()
                             .get(msg)
@@ -2788,6 +2808,7 @@ impl App {
                         }
                     }
                     Some(HitId::Link(message, n)) => {
+                        self.pending_jump = None;
                         self.set_focus(Pane::Timeline);
                         if self.selectable(message) {
                             self.timeline.selected = Some(message);
@@ -2795,6 +2816,7 @@ impl App {
                         self.open_link(message, n);
                     }
                     Some(HitId::ComposerText) => {
+                        self.pending_jump = None;
                         self.set_focus(Pane::Composer);
                         let view = self.composer_view;
                         let row = (mouse.row - view.area.y) as usize + view.first_row;
@@ -2811,14 +2833,21 @@ impl App {
                         Button::Palette => Action::OpenPalette,
                     }),
                     Some(HitId::Do(action)) => self.perform(action),
-                    Some(HitId::Pane(pane)) => self.set_focus(pane),
+                    Some(HitId::Pane(pane)) => {
+                        self.pending_jump = None;
+                        self.set_focus(pane);
+                    }
                     Some(HitId::Overlay) | None => {}
                     Some(HitId::Image(index)) => self.click_image(index),
                     Some(HitId::Thread(index)) => self.open_thread(index),
-                    Some(HitId::Attachment(index)) => self.remove_attachment(index),
+                    Some(HitId::Attachment(index)) => {
+                        self.pending_jump = None;
+                        self.remove_attachment(index);
+                    }
                     Some(HitId::Palette(index)) => self.run_palette_at(index),
                     Some(HitId::GlobalSearch(index)) => self.activate_global_search(index),
                     Some(HitId::Complete(index)) => {
+                        self.pending_jump = None;
                         self.accept_completion(Some(index));
                     }
                     // Handled by `menu_mouse` above.
@@ -2895,6 +2924,7 @@ impl App {
                 // The wheel scrolls what is under the pointer, wherever the focus is.
                 match self.hits.pane_at(mouse.column, mouse.row) {
                     Some(Pane::Timeline) => {
+                        self.pending_jump = None;
                         self.timeline.older_armed |= up;
                         self.timeline.scroll = if up {
                             self.timeline.scroll + WHEEL_LINES
@@ -2903,6 +2933,7 @@ impl App {
                         };
                     }
                     Some(Pane::Sidebar) => {
+                        self.pending_jump = None;
                         // A room at a time, also when rooms take two lines.
                         let step = if self.room_previews { 2 } else { 1 };
                         self.sidebar.scroll = if up {

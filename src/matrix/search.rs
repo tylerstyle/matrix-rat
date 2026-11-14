@@ -1,21 +1,24 @@
 //! Global full-text search over locally indexed messages across joined rooms.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::path::Path;
 
 use chrono::{DateTime, Local};
 use futures::StreamExt;
 use matrix_sdk::deserialized_responses::TimelineEvent;
-use matrix_sdk::event_cache::RedecryptorReport;
+use matrix_sdk::event_cache::{RedecryptorReport, RoomEventCache};
 use matrix_sdk::ruma::events::relation::RelationType;
+use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::room::message::{
     MessageType, Relation, RoomMessageEventContent, SyncRoomMessageEvent,
 };
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncTimelineEvent, OriginalSyncMessageLikeEvent,
 };
-use matrix_sdk::ruma::{EventId, OwnedRoomId, OwnedUserId, UserId};
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId};
 use matrix_sdk::{Client, Room, RoomState};
+use matrix_sdk_base::event_cache::store::EventCacheStoreLockState;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use unicode_segmentation::UnicodeSegmentation;
@@ -30,6 +33,7 @@ const MAX_SNIPPET_CHARS: usize = 400;
 pub struct SearchHit {
     pub room_id: String,
     pub event_id: String,
+    pub thread_root: Option<String>,
     pub room_name: String,
     pub sender: String,
     pub date: String,
@@ -39,8 +43,56 @@ pub struct SearchHit {
 /// Never logs room names, sender display names, or message snippets.
 impl fmt::Debug for SearchHit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SearchHit({}, {})", self.room_id, self.event_id)
+        write!(
+            f,
+            "SearchHit({}, {}, thread={})",
+            self.room_id,
+            self.event_id,
+            self.thread_root.as_deref().unwrap_or("-")
+        )
     }
+}
+
+/// Removes persisted per-room search index directories whose room IDs are no longer
+/// joined. Called when no `RoomIndex` handles are open (startup before sync/search, and
+/// session shutdown after dropping the `Client`) because `matrix-sdk 0.19.1` keeps an
+/// in-memory `HashMap<OwnedRoomId, RoomIndex>` without a public room-removal API.
+pub(crate) fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<String>) {
+    let Ok(entries) = std::fs::read_dir(search_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if RoomId::parse(&name).is_ok()
+            && !joined_room_ids.contains(&name)
+            && let Err(err) = std::fs::remove_dir_all(entry.path())
+        {
+            tracing::debug!(%err, room = %name, "could not prune stale search index");
+        }
+    }
+}
+
+/// Returns the IDs of every currently joined room.
+pub(crate) fn joined_room_ids(client: &Client) -> HashSet<String> {
+    client
+        .joined_rooms()
+        .into_iter()
+        .map(|room| room.room_id().to_string())
+        .collect()
+}
+
+/// Prunes non-joined room search index directories using the client's restored room list.
+pub(crate) fn prune_stale_search_indexes(client: &Client, search_dir: &Path) {
+    let joined = joined_room_ids(client);
+    prune_search_dir(search_dir, &joined);
 }
 
 pub(super) struct Searcher {
@@ -115,7 +167,15 @@ async fn index_redecrypted(client: Client) {
         };
         let mut resolved = Vec::with_capacity(events.len());
         for event_id in events {
-            if let Ok(Some(event)) = room_cache.find_event(&event_id).await {
+            let Ok(Some(mut event)) = room_cache.find_event(&event_id).await else {
+                continue;
+            };
+            if event.kind.is_utd()
+                && let Some(decrypted) = try_decrypt_utd(&room, &event).await
+            {
+                event = decrypted;
+            }
+            if !event.kind.is_utd() {
                 resolved.push(event);
             }
         }
@@ -123,19 +183,92 @@ async fn index_redecrypted(client: Client) {
             continue;
         }
         let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
-        let mut guard = client.search_index().lock().await;
-        if let Err(err) = guard
-            .bulk_handle_timeline_event(
-                resolved.into_iter(),
-                &room_cache,
-                &room_id,
-                &redaction_rules,
-            )
-            .await
-        {
-            tracing::warn!(%err, %room_id, "failed to index redecrypted events");
+        let mut pending = resolved;
+        for _ in 0..3 {
+            for event in &pending {
+                ensure_decrypted_in_store(&client, &room_id, &room_cache, event).await;
+            }
+            {
+                let mut guard = client.search_index().lock().await;
+                if let Err(err) = guard
+                    .bulk_handle_timeline_event(
+                        pending.iter().cloned(),
+                        &room_cache,
+                        &room_id,
+                        &redaction_rules,
+                    )
+                    .await
+                {
+                    tracing::warn!(%err, %room_id, "failed to index redecrypted events");
+                    break;
+                }
+            }
+            // In matrix-sdk 0.19.1, `post_process_upserted_events` saves
+            // `bundled_latest_thread_event` with `INSERT OR REPLACE INTO events`,
+            // which can overwrite a decrypted thread reply in SQLite with an
+            // encrypted UTD copy and make `get_most_recent_edit` skip indexing it.
+            let mut overwritten = Vec::new();
+            for event in pending {
+                if store_missing_or_utd(&room_cache, &event).await {
+                    overwritten.push(event);
+                }
+            }
+            if overwritten.is_empty() {
+                break;
+            }
+            pending = overwritten;
         }
     }
+}
+
+async fn store_missing_or_utd(room_cache: &RoomEventCache, event: &TimelineEvent) -> bool {
+    let Some(event_id) = event.event_id() else {
+        return false;
+    };
+    !matches!(
+        room_cache
+            .find_event_with_relations(event_id, Some(vec![RelationType::Replacement]))
+            .await,
+        Ok(Some((stored, _))) if !stored.kind.is_utd()
+    )
+}
+
+async fn ensure_decrypted_in_store(
+    client: &Client,
+    room_id: &RoomId,
+    room_cache: &RoomEventCache,
+    event: &TimelineEvent,
+) {
+    if event.kind.is_utd() || !store_missing_or_utd(room_cache, event).await {
+        return;
+    }
+    if let Ok(lock_state) = client.event_cache_store().lock().await {
+        let (EventCacheStoreLockState::Clean(store) | EventCacheStoreLockState::Dirty(store)) =
+            lock_state;
+        let _ = store.save_event(room_id, event.clone()).await;
+    }
+}
+
+async fn try_decrypt_utd(room: &Room, event: &TimelineEvent) -> Option<TimelineEvent> {
+    if !event.kind.is_utd() {
+        return None;
+    }
+    let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(enc))) =
+        event.raw().deserialize()
+    else {
+        return None;
+    };
+    enc.as_original()?;
+    let decrypted = room
+        .decrypt_event(
+            event
+                .raw()
+                .cast_ref_unchecked::<OriginalSyncRoomEncryptedEvent>(),
+            None,
+        )
+        .await
+        .ok()?;
+    (!decrypted.kind.is_utd()).then_some(decrypted)
 }
 
 async fn run_search(
@@ -158,6 +291,7 @@ async fn run_search(
     let now = Local::now();
     let mut room_names = HashMap::new();
     let mut sender_names = HashMap::new();
+    let mut seen: HashSet<(OwnedRoomId, String)> = HashSet::new();
     let mut batch = Vec::with_capacity(SEARCH_BATCH_SIZE);
     let mut emitted_any = false;
     let mut resolved_count = 0usize;
@@ -203,6 +337,9 @@ async fn run_search(
             else {
                 continue;
             };
+            if !seen.insert((room_id, hit.event_id.clone())) {
+                continue;
+            }
 
             if resolved_count >= MAX_SEARCH_RESULTS {
                 note = Some(format!(
@@ -247,12 +384,27 @@ async fn resolve_hit(
         return None;
     }
 
-    let (event, relations) = load_event_with_replacements(&room, event_id).await?;
+    let (mut event, mut relations) = load_event_with_replacements(&room, event_id).await?;
+    let mut resolved_event_id = event_id.to_owned();
+    // When a message has been edited, the search index returns the edit event's ID as
+    // primary key. Unwrap to the original target event so SearchHit carries its
+    // canonical ItemRef event ID, thread root relation, timestamp, and validated text.
+    if let Some(target_id) = replacement_target(&event)
+        && target_id != resolved_event_id
+        && let Some((orig_event, orig_relations)) =
+            load_event_with_replacements(&room, &target_id).await
+    {
+        event = orig_event;
+        relations = orig_relations;
+        resolved_event_id = target_id;
+    }
+
     let body = extract_event_text(&event, &relations)?;
     let snippet = window_snippet(&body, query);
     if snippet.is_empty() {
         return None;
     }
+    let thread_root = extract_thread_root(&event);
 
     let sender_id = event.sender()?;
     let room_name = cached_room_name(&room, room_names).await;
@@ -265,7 +417,8 @@ async fn resolve_hit(
 
     Some(SearchHit {
         room_id: room_id.to_string(),
-        event_id: event_id.to_string(),
+        event_id: resolved_event_id.to_string(),
+        thread_root,
         room_name,
         sender,
         date,
@@ -273,16 +426,83 @@ async fn resolve_hit(
     })
 }
 
+fn replacement_target(event: &TimelineEvent) -> Option<OwnedEventId> {
+    let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(msg))) =
+        event.raw().deserialize()
+    else {
+        return None;
+    };
+    let orig = msg.as_original()?;
+    match &orig.content.relates_to {
+        Some(Relation::Replacement(re)) => Some(re.event_id.clone()),
+        _ => None,
+    }
+}
+
+fn extract_thread_root(event: &TimelineEvent) -> Option<String> {
+    let Ok(AnySyncTimelineEvent::MessageLike(msg)) = event.raw().deserialize() else {
+        return None;
+    };
+    if let AnySyncMessageLikeEvent::RoomMessage(room_msg) = msg {
+        let orig = room_msg.as_original()?;
+        return match &orig.content.relates_to {
+            Some(Relation::Thread(thread)) => Some(thread.event_id.to_string()),
+            _ => None,
+        };
+    }
+    thread_root_from_raw(event.raw().json().get())
+}
+
+fn thread_root_from_raw(raw_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw_json).ok()?;
+    let rel = value.get("content")?.get("m.relates_to")?;
+    if rel.get("rel_type")?.as_str()? != "m.thread" {
+        return None;
+    }
+    let id = rel.get("event_id")?.as_str()?;
+    EventId::parse(id).ok().map(|ev| ev.to_string())
+}
+
+async fn heal_utd_event(
+    room: &Room,
+    cache: &RoomEventCache,
+    mut event: TimelineEvent,
+) -> TimelineEvent {
+    if !event.kind.is_utd() {
+        return event;
+    }
+    if let Some(id) = event.event_id()
+        && let Ok(Some(cached)) = cache.find_event(id).await
+        && !cached.kind.is_utd()
+    {
+        event = cached;
+    } else if let Some(decrypted) = try_decrypt_utd(room, &event).await {
+        event = decrypted;
+    }
+    if !event.kind.is_utd() {
+        let client = room.client();
+        ensure_decrypted_in_store(&client, room.room_id(), cache, &event).await;
+    }
+    event
+}
+
 async fn load_event_with_replacements(
     room: &Room,
     event_id: &EventId,
 ) -> Option<(TimelineEvent, Vec<TimelineEvent>)> {
     if let Ok((cache, _drops)) = room.event_cache().await
-        && let Ok(Some(found)) = cache
+        && let Ok(Some((event, mut edits))) = cache
             .find_event_with_relations(event_id, Some(vec![RelationType::Replacement]))
             .await
     {
-        return Some(found);
+        let event = heal_utd_event(room, &cache, event).await;
+        for edit in &mut edits {
+            if edit.kind.is_utd() {
+                let replacement = heal_utd_event(room, &cache, edit.clone()).await;
+                *edit = replacement;
+            }
+        }
+        return Some((event, edits));
     }
 
     room.load_or_fetch_event(event_id, None)
@@ -572,6 +792,7 @@ mod tests {
         let hit = SearchHit {
             room_id: "!room:example.org".into(),
             event_id: "$ev1:example.org".into(),
+            thread_root: Some("$root:example.org".into()),
             room_name: "Top Secret Room".into(),
             sender: "Secret Sender".into(),
             date: "Today".into(),
@@ -583,6 +804,7 @@ mod tests {
         assert!(!dbg.contains("private message body"));
         assert!(dbg.contains("!room:example.org"));
         assert!(dbg.contains("$ev1:example.org"));
+        assert!(dbg.contains("$root:example.org"));
 
         let cmd = MatrixCmd::SearchMessages {
             generation: 7,
@@ -600,6 +822,133 @@ mod tests {
         let ev_dbg = format!("{ev:?}");
         assert!(!ev_dbg.contains("private message body"), "{ev_dbg}");
         assert!(!ev_dbg.contains("note detail"), "{ev_dbg}");
+    }
+
+    #[test]
+    fn extract_thread_root_and_replacement_target_parse_relations() {
+        let make = |raw: serde_json::Value| {
+            let raw_ev: matrix_sdk::ruma::serde::Raw<AnySyncTimelineEvent> =
+                serde_json::from_value(raw).expect("valid raw timeline event");
+            TimelineEvent::from_plaintext(raw_ev)
+        };
+
+        let plain = make(serde_json::json!({
+            "type": "m.room.message",
+            "event_id": "$plain:example.org",
+            "sender": "@alice:example.org",
+            "origin_server_ts": 1000,
+            "content": { "msgtype": "m.text", "body": "hi" }
+        }));
+        assert_eq!(extract_thread_root(&plain), None);
+        assert_eq!(replacement_target(&plain), None);
+
+        let reply_only = make(serde_json::json!({
+            "type": "m.room.message",
+            "event_id": "$reply:example.org",
+            "sender": "@alice:example.org",
+            "origin_server_ts": 1001,
+            "content": {
+                "msgtype": "m.text",
+                "body": "reply",
+                "m.relates_to": { "m.in_reply_to": { "event_id": "$root:example.org" } }
+            }
+        }));
+        assert_eq!(extract_thread_root(&reply_only), None);
+
+        let threaded = make(serde_json::json!({
+            "type": "m.room.message",
+            "event_id": "$thr:example.org",
+            "sender": "@alice:example.org",
+            "origin_server_ts": 1002,
+            "content": {
+                "msgtype": "m.text",
+                "body": "in thread",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$root:example.org",
+                    "m.in_reply_to": { "event_id": "$root:example.org" },
+                    "is_falling_back": true
+                }
+            }
+        }));
+        assert_eq!(
+            extract_thread_root(&threaded).as_deref(),
+            Some("$root:example.org")
+        );
+
+        let edited = make(serde_json::json!({
+            "type": "m.room.message",
+            "event_id": "$edit:example.org",
+            "sender": "@alice:example.org",
+            "origin_server_ts": 1003,
+            "content": {
+                "msgtype": "m.text",
+                "body": "* edited",
+                "m.new_content": { "msgtype": "m.text", "body": "edited" },
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$thr:example.org"
+                }
+            }
+        }));
+        assert_eq!(
+            replacement_target(&edited).as_ref().map(|id| id.as_str()),
+            Some("$thr:example.org")
+        );
+
+        let threaded_sticker = make(serde_json::json!({
+            "type": "m.sticker",
+            "event_id": "$stk:example.org",
+            "sender": "@alice:example.org",
+            "origin_server_ts": 1004,
+            "content": {
+                "body": "wave",
+                "url": "mxc://example.org/abc",
+                "info": {},
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$root2:example.org"
+                }
+            }
+        }));
+        assert_eq!(
+            extract_thread_root(&threaded_sticker).as_deref(),
+            Some("$root2:example.org")
+        );
+    }
+
+    #[test]
+    fn prune_search_dir_removes_only_non_joined_room_dirs() {
+        let dir = std::env::temp_dir().join(format!(
+            "matrix-rat-prune-search-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let kept_dir = dir.join("!joined:example.org");
+        let left_dir = dir.join("!left:example.org");
+        let other_dir = dir.join("not-a-room-id");
+        let stray_file = dir.join("!strayfile:example.org");
+        std::fs::create_dir_all(&kept_dir).unwrap();
+        std::fs::create_dir_all(&left_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(left_dir.join("seg"), b"data").unwrap();
+        std::fs::write(&stray_file, b"keep").unwrap();
+
+        let joined = HashSet::from(["!joined:example.org".to_owned()]);
+        prune_search_dir(&dir, &joined);
+
+        assert!(kept_dir.exists(), "joined room index must remain");
+        assert!(!left_dir.exists(), "left room index must be pruned");
+        assert!(other_dir.exists(), "non-room directory must not be touched");
+        assert!(
+            stray_file.exists(),
+            "non-directory files must not be removed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn walk_contains(dir: &std::path::Path, needle: &[u8]) -> Option<std::path::PathBuf> {
@@ -805,6 +1154,26 @@ mod tests {
             .send(RoomMessageEventContent::text_plain(&utd_needle))
             .await
             .expect("utd enc");
+        let utd_thread_root_text = format!("utd_thread_root_spike_{stamp}");
+        let utd_thread_reply_text = format!("utd_thread_reply_spike_{stamp}");
+        let utd_thread_root_ev = enc_room
+            .send(RoomMessageEventContent::text_plain(&utd_thread_root_text))
+            .await
+            .expect("utd thread root");
+        let utd_thread_root_id = utd_thread_root_ev.response.event_id.to_string();
+        let mut utd_thread_reply_content =
+            RoomMessageEventContent::text_plain(&utd_thread_reply_text);
+        utd_thread_reply_content.relates_to = Some(Relation::Thread(
+            matrix_sdk::ruma::events::relation::Thread::plain(
+                utd_thread_root_ev.response.event_id.clone(),
+                utd_thread_root_ev.response.event_id.clone(),
+            ),
+        ));
+        let utd_thread_reply_ev = enc_room
+            .send(utd_thread_reply_content)
+            .await
+            .expect("utd thread reply");
+        let utd_thread_reply_id = utd_thread_reply_ev.response.event_id.to_string();
         a.encryption()
             .backups()
             .wait_for_steady_state()
@@ -921,6 +1290,8 @@ mod tests {
         let edit_before = format!("edit_before_spike_{stamp}");
         let edit_after = format!("edit_after_spike_{stamp}");
         let redact_needle = format!("redact_spike_{stamp}");
+        let thread_root_text = format!("thread_root_spike_{stamp}");
+        let thread_reply_text = format!("thread_reply_spike_{stamp}");
 
         plain_room
             .send(RoomMessageEventContent::text_plain(&live_plain))
@@ -934,6 +1305,23 @@ mod tests {
             .send(RoomMessageEventContent::text_plain(&edit_before))
             .await
             .expect("send edit target");
+        let thread_root_ev = enc_room
+            .send(RoomMessageEventContent::text_plain(&thread_root_text))
+            .await
+            .expect("send thread root");
+        let thread_root_id = thread_root_ev.response.event_id.to_string();
+        let mut thread_reply_content = RoomMessageEventContent::text_plain(&thread_reply_text);
+        thread_reply_content.relates_to = Some(Relation::Thread(
+            matrix_sdk::ruma::events::relation::Thread::plain(
+                thread_root_ev.response.event_id.clone(),
+                thread_root_ev.response.event_id.clone(),
+            ),
+        ));
+        let thread_reply_ev = enc_room
+            .send(thread_reply_content)
+            .await
+            .expect("send thread reply");
+        let thread_reply_id = thread_reply_ev.response.event_id.to_string();
         let red_ev = plain_room
             .send(RoomMessageEventContent::text_plain(&redact_needle))
             .await
@@ -958,8 +1346,27 @@ mod tests {
             &live_enc,
             "live enc",
             |h| {
-                h.iter()
-                    .any(|x| x.room_id == enc_room_id && x.snippet.contains(&live_enc))
+                h.iter().any(|x| {
+                    x.room_id == enc_room_id
+                        && x.thread_root.is_none()
+                        && x.snippet.contains(&live_enc)
+                })
+            },
+        )
+        .await;
+        poll_search_until(
+            &b,
+            &mut events,
+            &mut search_gen,
+            &thread_reply_text,
+            "encrypted thread reply",
+            |h| {
+                h.iter().any(|x| {
+                    x.room_id == enc_room_id
+                        && x.event_id == thread_reply_id
+                        && x.thread_root.as_deref() == Some(thread_root_id.as_str())
+                        && x.snippet.contains(&thread_reply_text)
+                })
             },
         )
         .await;
@@ -973,12 +1380,19 @@ mod tests {
         )
         .await;
 
-        // UTD message should NOT be searchable while locked.
+        // UTD messages should NOT be searchable while locked.
         search_gen += 1;
         let (utd_before, _) = run_search_cmd(&b, &mut events, search_gen, &utd_needle).await;
         assert!(
             utd_before.is_empty(),
             "locked UTD message must not match before verification: {utd_before:?}"
+        );
+        search_gen += 1;
+        let (utd_reply_before, _) =
+            run_search_cmd(&b, &mut events, search_gen, &utd_thread_reply_text).await;
+        assert!(
+            utd_reply_before.is_empty(),
+            "locked UTD thread reply must not match before verification: {utd_reply_before:?}"
         );
 
         // 2. Back-pagination indexes older history in plain_room.
@@ -1058,7 +1472,7 @@ mod tests {
         .await;
         let replacement = RoomMessageEventContent::text_plain(&edit_after).make_replacement(
             matrix_sdk::ruma::events::room::message::ReplacementMetadata::new(
-                edited_ev.response.event_id,
+                edited_ev.response.event_id.clone(),
                 None,
             ),
         );
@@ -1196,6 +1610,22 @@ mod tests {
             },
         )
         .await;
+        poll_search_until(
+            &b,
+            &mut events,
+            &mut search_gen,
+            &utd_thread_reply_text,
+            "late decrypted UTD thread reply",
+            |h| {
+                h.iter().any(|x| {
+                    x.room_id == enc_room_id
+                        && x.event_id == utd_thread_reply_id
+                        && x.thread_root.as_deref() == Some(utd_thread_root_id.as_str())
+                        && x.snippet.contains(&utd_thread_reply_text)
+                })
+            },
+        )
+        .await;
 
         // 6. On-disk search index files contain no plaintext needles.
         for needle in [
@@ -1203,7 +1633,9 @@ mod tests {
             &live_enc,
             &old_needle,
             &utd_needle,
+            &utd_thread_reply_text,
             &edit_after,
+            &thread_reply_text,
         ] {
             if let Some(leaked) = walk_contains(&paths.search_dir(), needle.as_bytes()) {
                 panic!(
@@ -1237,6 +1669,7 @@ mod tests {
             &old_needle,
             &utd_needle,
             &edit_after,
+            &thread_reply_text,
         ] {
             poll_search_until(
                 &b2,
@@ -1248,13 +1681,76 @@ mod tests {
             )
             .await;
         }
+        let edited_id_str = edited_ev.response.event_id.to_string();
+        let (edited_hits, _) = run_search_cmd(&b2, &mut events2, gen2 + 1, &edit_after).await;
+        gen2 += 1;
+        assert!(
+            edited_hits
+                .iter()
+                .any(|x| x.room_id == enc_room_id && x.event_id == edited_id_str),
+            "edited search hit must carry original event_id {edited_id_str}: {edited_hits:?}"
+        );
+        let (thr_hits, _) = run_search_cmd(&b2, &mut events2, gen2 + 1, &thread_reply_text).await;
+        gen2 += 1;
+        assert!(
+            thr_hits.iter().any(|x| {
+                x.room_id == enc_room_id
+                    && x.event_id == thread_reply_id
+                    && x.thread_root.as_deref() == Some(thread_root_id.as_str())
+            }),
+            "restarted search must preserve thread_root {thread_root_id}: {thr_hits:?}"
+        );
+
+        // 7b. Leaving a room excludes its hits immediately and prunes its index directory.
+        b2.send(MatrixCmd::Leave {
+            room_id: plain_room_id.clone(),
+        });
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let MatrixEvent::Rooms(rooms) = events2.recv().await.expect("worker2 stopped")
+                    && !rooms.iter().any(|r| r.id == plain_room_id)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for left room to leave room list");
+        gen2 += 1;
+        let (left_hits, _) = run_search_cmd(&b2, &mut events2, gen2, &live_plain).await;
+        assert!(
+            left_hits.is_empty(),
+            "left room must not return search hits: {left_hits:?}"
+        );
+        b2.send(MatrixCmd::Shutdown);
+        while events2.recv().await.is_some() {}
+        assert!(
+            !paths.search_dir().join(&plain_room_id).exists(),
+            "left room index directory must be pruned on shutdown"
+        );
+        assert!(
+            paths.search_dir().join(&enc_room_id).exists(),
+            "joined room index directory must remain"
+        );
 
         // 8. Logout removes search_dir() completely.
-        b2.send(MatrixCmd::Logout);
+        let (b3, mut events3) = spawn(paths.clone());
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let MatrixEvent::Rooms(rooms) = events3.recv().await.expect("worker3 stopped")
+                    && rooms.iter().any(|r| r.id == enc_room_id)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("timed out restoring worker3 before logout");
+        b3.send(MatrixCmd::Logout);
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 if matches!(
-                    events2.recv().await.expect("worker2 stopped"),
+                    events3.recv().await.expect("worker3 stopped"),
                     MatrixEvent::NeedLogin { .. }
                 ) {
                     break;
@@ -1272,8 +1768,8 @@ mod tests {
             "store_dir should be removed on Logout"
         );
 
-        b2.send(MatrixCmd::Shutdown);
-        while events2.recv().await.is_some() {}
+        b3.send(MatrixCmd::Shutdown);
+        while events3.recv().await.is_some() {}
         syncing_a.abort();
         let _ = std::fs::remove_dir_all(root);
     }

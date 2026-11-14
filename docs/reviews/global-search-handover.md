@@ -58,7 +58,45 @@
   - `src/ui/global_search.rs` (new), `src/ui/mod.rs`: `78x22` popup, live `"searching…"`/`"N matches"`/`"no matches"`, 2-line hit cards (`room · sender` + right-aligned `date` + column-windowed highlighted snippet), `tiny_sizes_do_not_panic` coverage, and `insta` snapshots.
   - `README.md`: added `Ctrl-G` and `search_all`.
 
-## Verification
+## Verification (Initial Handover `5937964`)
 - `./scripts/check.sh` — **passed** (exit `0`): `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (**456 passed; 0 failed; 19 ignored**), `cargo build`.
 - `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test matrix:: -- --ignored --test-threads=1` against local continuwuity (`http://127.0.0.1:6167`) — **18 passed; 0 failed**.
 - `hpfury` `nix-shell shell.nix --run "cargo build --profile release"` — **passed** (`69,423,720` bytes stripped binary, `694 s`).
+
+---
+
+## Review Fixes (post-`5937964`)
+
+1. **[MEDIUM] Thread-reply hits (`src/matrix/search.rs`, `src/ui/global_search.rs`, `src/app/global_search.rs`, `src/app/thread.rs`, `src/app.rs`):**
+   - **Canonical event ID & thread root extraction (`src/matrix/search.rs`):**
+     - Added `pub thread_root: Option<String>` to `SearchHit` (included in `Debug` as `thread={}` while keeping `room_name`, `sender`, `date`, and `snippet` redacted).
+     - `matrix-sdk 0.19.1`'s Tantivy `SearchIndex` stores `IndexableEvent.primary_key` as the latest edit event ID (`m.replace`) when a message is edited, whereas timelines key the message by its original `ItemRef::Event($orig)` and `m.relates_to` (`rel_type: "m.thread"`) lives on the original event. `resolve_hit` now unwraps `Relation::Replacement` via `replacement_target` to the original event, extracts `thread_root` via `extract_thread_root` / `thread_root_from_raw` (covering both typed `Relation::Thread` on `RoomMessage` and generic JSON `content["m.relates_to"]` with `rel_type == "m.thread"`), resolves the canonical `event_id` + original timestamp + validated latest replacement text, and `run_search` deduplicates by `(room_id, hit.event_id)`.
+   - **UI indicator (`src/ui/global_search.rs`):**
+     - Hit header lines render `" · thread"` (` · ` muted + `thread` with `Role::Link`) when `hit.thread_root.is_some()` and `head_avail >= date_w + 15`, subtracting `thread_w` from `meta_cap` before `split_header`. Added unit test `draw_marks_thread_reply_hits_without_marking_plain_hits`.
+   - **Two-stage thread jump (`src/app/global_search.rs`, `src/app/thread.rs`, `src/app.rs`):**
+     - Extended `PendingJump` with `thread_root: Option<String>` (and updated demo search hits `demo:{idx}:{ridx}` for thread replies).
+     - `activate_global_search` reuses the already-open matching thread (`self.thread_key() == root`), or reuses the already-open room timeline, or switches rooms first (`open_room`).
+     - `try_apply_pending_jump` handles two stages when `thread_root` is `Some(root)`: locate or backward-paginate up to `MAX_JUMP_DIG` rounds for `root` in the main room timeline -> call `self.open_thread(root_pos)` -> locate or backward-paginate `MatrixCmd::Paginate { kind: PaginationKind::InThread { root }, .. }` for the target reply `event_id`.
+     - Moved `self.timeline.reached_start |= reached_start;` ahead of `self.on_jump_timeline();` in `src/app.rs`'s `MatrixEvent::Timeline` handler so reaching the start of history stops digging on that update.
+     - Tested at app level (`thread_reply_hit_opens_room_digs_for_root_opens_thread_and_selects_reply`, plus demo-mode thread jump check) and in the live continuwuity test (`global_search_spike_encrypted_edits_redactions_and_restart`: encrypted thread root + thread reply persisted across restart, edited hit resolves canonical original `event_id`).
+
+2. **[LOW] Stale `pending_jump` cancellation (`src/app.rs`, `src/app/thread.rs`, `src/app/media.rs`, `src/app/global_search.rs`):**
+   - Cleared `self.pending_jump = None` on user actions while digging: `perform` (all actions except `Quit` / `Suspend`), `open_modal`, `open_thread`, `leave_thread`, `open_image`, `click_image`, `on_key` (`Ctrl-C` / completion / composer / sidebar filter `EditOutcome != Ignored`), `type_char`, `edit_composer`, `on_paste` outside modals, and `on_mouse` (interactive left-clicks and timeline/sidebar wheel scrolling).
+   - Added app-level test `pending_jump_dropped_on_selection_typing_scroll_and_popup_while_digging`.
+
+3. **Left-room hits & on-disk search index pruning (`src/matrix/search.rs`, `src/matrix/session.rs`, `src/matrix/mod.rs`):**
+   - **Can hits from a left/forgotten room appear?** **No.** In `matrix-sdk 0.19.1`, `GlobalSearchBuilder::new` (`src/message_search.rs`) queries `client.rooms_filtered(RoomStateFilter::JOINED)`, and `resolve_hit` (`src/matrix/search.rs`) also skips any room where `room.state() != RoomState::Joined`.
+   - **Does the SDK prune `<search_dir>/<room_id>` when a room is left or forgotten?** **No.** `Room::forget` calls `base_client().forget_room(room_id)` and `event_cache().forget_room(room_id)`, neither of which touches `SearchIndex`, and `SearchIndex` keeps its `room_indexes` map private with no room-removal method. Removing a room directory while `Client` is live would leave a dangling in-memory `RoomIndex` handle if the user rejoined the room in the same session.
+   - **Fix implemented:** Added `prune_search_dir`, `joined_room_ids`, and `prune_stale_search_indexes` in `src/matrix/search.rs` to delete stale `<search_dir>/<room_id>` directories for non-joined rooms safely at lifecycle boundaries where `SearchIndex` has no open writers/handles for those rooms: right after `client.restore_session(...)` (before sync/search starts) in `resume_with` / `commit_preserved_reauth` (`src/matrix/session.rs`), and in `Worker::run_active_session` (`src/matrix/mod.rs`) on `SessionEnd::Shutdown` and `SessionEnd::SoftLogout` after capturing `joined_room_ids` and dropping `active`. Covered by unit test `prune_search_dir_removes_only_non_joined_room_dirs` and live server assertions (leaving `plain_room` immediately excludes its hits from results and prunes `<search_dir>/<plain_room_id>` on `Shutdown` while retaining `<search_dir>/<enc_room_id>`).
+
+4. **Intermittent unindexed encrypted thread replies (`matrix-sdk 0.19.1` `bundled_latest_thread_event` UTD overwrite bug, `src/matrix/search.rs`):**
+   - **Root cause:** When an encrypted thread root and thread reply arrive before the room key (either during live sync racing `m.room_key` or before backup unlock) and are decrypted later via `Redecryptor`, `TimelineEvent::from_bundled_latest_event` returns an `m.room.encrypted` UTD if the parent root's `unsigned.m.relations.m.thread.latest_event` lacks `unsigned_encryption_info`. Inside `post_process_upserted_events` (`caches/room/state.rs` / `caches/thread/state.rs`), the SDK unconditionally calls `save_events([bundled_thread])` (`INSERT OR REPLACE INTO events`), overwriting the already-decrypted thread reply row in SQLite `EventCacheStore` with the encrypted UTD copy while keeping the decrypted event in memory (`room_linked_chunk`). Because `matrix_sdk::search_index::handle_room_message` / `get_most_recent_edit` reads `cache.find_event_with_relations` (which queries `EventCacheStore` directly), it observes `m.room.encrypted` in SQLite and silently skips indexing the thread reply with no error.
+   - **Fix implemented:**
+     - `index_redecrypted`: resolves any UTD via `try_decrypt_utd`, ensures every decrypted event is present and non-UTD in `EventCacheStore` (`store_missing_or_utd` / `ensure_decrypted_in_store`) before each `bulk_handle_timeline_event` call (acquiring and dropping `client.search_index().lock()` strictly outside `event_cache_store().lock()` / `room_cache` calls), and re-checks up to 3 times if concurrent `post_process_upserted_events` clobbers the SQLite row.
+     - `load_event_with_replacements`: uses `heal_utd_event` when `cache.find_event_with_relations` returns a UTD event or replacement, recovering from `cache.find_event` or `try_decrypt_utd` and healing `EventCacheStore` so snippet extraction during search resolution is likewise immune to SQLite UTD clobbering.
+   - **Test coverage:** `global_search_spike_encrypted_edits_redactions_and_restart` now also sends a pre-B encrypted thread root + thread reply before backup unlock so `Redecryptor` decryption of a thread reply with `bundled_latest_thread_event` runs deterministically on every test execution.
+
+### Verification (After Review Fixes)
+- `./scripts/check.sh` — **passed** (exit `0`): `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (**461 passed; 0 failed; 19 ignored**), `cargo build`.
+- `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test -- --ignored --test-threads=1 global_search_spike_encrypted_edits_redactions_and_restart` — **5/5 consecutive runs passed** (`8.70s`, `10.54s`, `10.23s`, `10.54s`, `9.51s`).
+- `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test matrix:: -- --ignored --test-threads=1` — **18 passed; 0 failed** (`61.40s`).

@@ -170,10 +170,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, state: &mut GlobalSear
             String::new()
         };
         let date_w = width(&date_str);
-        let meta_cap = if date_w > 0 {
-            head_avail.saturating_sub(date_w + 2)
+        let thread_tag = if hit.thread_root.is_some() && head_avail >= date_w + 15 {
+            " · thread"
         } else {
-            head_avail
+            ""
+        };
+        let thread_w = width(thread_tag);
+        let meta_cap = if date_w > 0 {
+            head_avail.saturating_sub(date_w + thread_w + 2)
+        } else {
+            head_avail.saturating_sub(thread_w)
         };
         let (room_label, sender_label) = split_header(&hit.room_name, &hit.sender, meta_cap);
         let used_meta = width(&room_label)
@@ -181,7 +187,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, state: &mut GlobalSear
                 0
             } else {
                 3 + width(&sender_label)
-            };
+            }
+            + thread_w;
         let gap = if date_w > 0 {
             head_avail.saturating_sub(used_meta + date_w)
         } else {
@@ -205,6 +212,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, state: &mut GlobalSear
                 sender_label,
                 theme.style(Role::Text).add_modifier(Modifier::BOLD),
             ));
+        }
+        if !thread_tag.is_empty() {
+            head_spans.push(Span::styled(" · ", theme.style(Role::Muted)));
+            head_spans.push(Span::styled("thread", theme.style(Role::Link)));
         }
         if date_w > 0 {
             head_spans.push(Span::raw(" ".repeat(gap)));
@@ -436,5 +447,54 @@ mod tests {
         assert!(win.contains("world"), "{win}");
         assert!(width(&win) <= 22, "width {} > 22", width(&win));
         assert_eq!(&win[span.unwrap()], "world");
+    }
+
+    #[test]
+    fn draw_marks_thread_reply_hits_without_marking_plain_hits() {
+        use crate::app::App;
+        use crate::app::global_search::GlobalSearch;
+        use crate::matrix::SearchHit;
+        use crate::modal::Modal;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::demo();
+        let mut gs = GlobalSearch::new(1);
+        gs.query.set("needle");
+        gs.active_query = "needle".into();
+        gs.hits = vec![
+            SearchHit {
+                room_id: "!a:example.org".into(),
+                event_id: "$1".into(),
+                thread_root: None,
+                room_name: "Alpha".into(),
+                sender: "alice".into(),
+                date: "Today".into(),
+                snippet: "plain needle hit".into(),
+            },
+            SearchHit {
+                room_id: "!b:example.org".into(),
+                event_id: "$2".into(),
+                thread_root: Some("$root".into()),
+                room_name: "Beta".into(),
+                sender: "bob".into(),
+                date: "Today".into(),
+                snippet: "thread needle hit".into(),
+            },
+        ];
+        app.modal = Some(Modal::GlobalSearch(gs));
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let screen = format!("{}", terminal.backend());
+        let alpha_line = screen
+            .lines()
+            .find(|l| l.contains("Alpha") && l.contains("alice"))
+            .expect("alpha hit header");
+        let beta_line = screen
+            .lines()
+            .find(|l| l.contains("Beta") && l.contains("bob"))
+            .expect("beta hit header");
+        assert!(!alpha_line.contains("thread"), "{alpha_line}");
+        assert!(beta_line.contains("thread"), "{beta_line}");
     }
 }
