@@ -458,20 +458,25 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         );
     }
 
-    // Without a key of its own by default, so it is not among the bindings above.
-    push_entry(
-        out,
-        Target::Action(Action::EditLast),
-        Category::Action,
-        "Edit your last message",
-        ctx.keymap
-            .label_in(keymap::Context::Composer, Action::EditLast)
-            .map(str::to_owned),
-        "Edit your last message",
-        &["edit last", "correct", "fix typo"],
-        ctx.can_edit_last,
-        0,
-    );
+    // Without a key of its own by default, so it is not among the bindings above;
+    // given one, it is, and must not be listed twice.
+    if ctx
+        .keymap
+        .label_in(keymap::Context::Composer, Action::EditLast)
+        .is_none()
+    {
+        push_entry(
+            out,
+            Target::Action(Action::EditLast),
+            Category::Action,
+            "Edit your last message",
+            None,
+            "Edit your last message",
+            &["edit last", "correct", "fix typo"],
+            ctx.can_edit_last,
+            0,
+        );
+    }
 
     // Marking rooms has no key by default; named for what it would do right now.
     let key_of = |action| ctx.keymap.label_for(action).map(str::to_owned);

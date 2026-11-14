@@ -80,3 +80,39 @@ Ran `scripts/check.sh` (`cargo fmt --check`, `cargo clippy --all-targets -- -D w
 | `focus-click` | `ff40be5` | `551 passed; 0 failed; 26 ignored` (`3.50s`) | `0` |
 | `up-selects` | `cba1bc9` | `547 passed; 0 failed; 26 ignored` (`3.46s`) | `0` |
 | `notify-timeout` | `12d348f` | `546 passed; 0 failed; 26 ignored` (`3.52s`) | `0` |
+
+---
+
+## Re-check: branch `m16` (`ee0c0ac`)
+
+**Branch state reviewed:** `m16` at `ee0c0ac` (`main` `bb29b92` → `56ccb11` Merge focus-click → `04495e1` Merge up-selects → `d5ffd92` Notifications timeout cherry-pick → `ee0c0ac` Review fixes (M16)).
+*(Line references below are on commit `ee0c0ac`.)*
+
+### Re-check Verdict
+
+**Changes requested (`1` `[MEDIUM]` remaining bug, `2` `[Note]` items):**
+- **`focus-click` fixes:** Verified resolved.
+- **`notify-timeout` fixes:** Verified resolved (`d5ffd92` cleanly drops the empty `src/focus.rs`, `+13 / -4` in `src/notify.rs` only, and `ee0c0ac` guards the `notify_rust` fallback).
+- **`up-selects` fixes:** Palette entry, enablement, `EditLast` fallback/toasts, and `README.md` are mostly good, **except `[MEDIUM]` binding `edit_last` (as documented in `README.md`) duplicates `"Edit your last message"` in the Command Palette (`src/palette.rs:393, 462-474`)**.
+
+### Detailed Verification
+
+1. **`focus-click` — Resolved:**
+   - **`App::new` clears click command (`src/app.rs:319-324`):** `#[cfg(test)] App::new` sets `app.notification_click_command = None;`. Every test helper constructs via `App::new`; `App::new_in_scheme` is only called directly by runtime startup (`src/app.rs:3822`) and three theme-persistence tests (`src/app.rs:5413, 5461, 5474`) that do not dispatch `NoticeClicked`.
+   - **`Stdio::null()` when output is ignored (`src/focus.rs:46-90, 95, 112`):** `run(mut command: Command, capture: bool)` uses `Stdio::null()` for `stdout` when `!capture`, passed by `run_user_command` and `niri msg action focus-window`. Covered by the lingering-child check in `a_program_that_never_ends_is_given_up_on` (`sh -c "sleep 30 & exit 0"` completes in `< 2 s`, `src/focus.rs:241-245`).
+
+2. **`notify-timeout` — Resolved:**
+   - **Clean cherry-pick (`d5ffd92`):** Only modifies `src/notify.rs` (`+13 / -4`); empty `src/focus.rs` is gone.
+   - **Backoff across plain fallback (`src/notify.rs:376, 433-444, 468-474, 559-630`):** `Clickable.stuck: Option<Instant>` records `Instant::now()` whenever `Self::connect` or `Notify` fails with `timed_out(&err)` (`zbus::Error::InputOutput(err)` where `err.kind() == std::io::ErrorKind::TimedOut`). `show_desktop` checks `clickable.service_stuck()` (`elapsed() < RETRY_AFTER`, `60 s`) both at function entry and right after `clickable.show(...)` returns `false`, skipping `notify_rust::Notification::show()` while stuck. Covered with `CALL_PATIENCE` (`5 s`, `line 494`) against a silent D-Bus name holder in `a_service_that_never_answers_is_given_up_on_and_left_alone_for_a_while` (`src/notify.rs:1464-1492`).
+
+3. **`up-selects` — `1` `[MEDIUM]` + `2` `[Note]`:**
+   - **Resolved parts:** `PaletteContext.can_edit_last` (`self.last_editable().is_some()`, `src/app/palette.rs:70`, `src/palette.rs:108`) gates `"Edit your last message"` via `action_enabled` (`src/palette.rs:551`) and explicit `push_entry` (`src/palette.rs:462-474`, snapshots updated `69 -> 70`). `Action::EditLast` (`src/app.rs:2298-2314`) now shows `"Finish what you are writing first"` / `"There is no message of yours to edit here"` instead of jumping into `Timeline`, keeping `Action::SelectOlder` only when the newest own editable message has `SendState::Failed` (covered by `edit_last_leaves_a_message_that_was_not_sent_to_the_messages_pane` at `src/app.rs:4172-4185`). `README.md:203` matches.
+   - **`[MEDIUM]` Binding `edit_last` duplicates `"Edit your last message"` in the Command Palette (`src/palette.rs:393, 462-474`).**
+     `collect_actions` initializes `seen` as `vec![Action::ToggleUnread, Action::MarkAllRead]` (`line 393`), `include_keymap_action` (`lines 512-536`) returns `ActionInclusion::Include` for `Action::EditLast`, and `push_entry` (`lines 273-303`) appends unconditionally without deduplicating. When a user configures `edit_last = "f8"` under `[keys.composer]` (as documented in `README.md:203`), the `active_bindings` loop (`lines 394-431`) pushes `"Edit your last message"` once (`empty_group = 1`, `aliases = &[]`, hint `Some("F8")`), and `lines 462-474` push `"Edit your last message"` a second time (`empty_group = 0`, aliases `&["edit last", "correct", "fix typo"]`, hint `Some("F8")`). (`Action::CloseThread` pushed explicitly at `lines 368-378` has the same `seen` omission if a user binds `close_thread`.)
+     - **Fix:** Add `Action::EditLast` and `Action::CloseThread` to `seen` at `src/palette.rs:393`.
+   - **`[Note]` Stale duplicate comment left in `src/app.rs:4896-4897`:** `// (EditLast edits our latest message.)` immediately above `// (Up in the empty composer edits our latest message.)`.
+   - **`[Note]` Missing unit test for the two new `Action::EditLast` toasts:** Neither `"Finish what you are writing first"` nor `"There is no message of yours to edit here"` (`src/app.rs:2300-2313`) has a dedicated test assertion yet.
+
+### Re-check Verification Scope
+- Reviewed by inspection of `m16` (`git show ee0c0ac`, `d5ffd92`, and full relevant files `src/palette.rs`, `src/app.rs`, `src/app/palette.rs`, `src/focus.rs`, `src/notify.rs`, `src/keymap.rs`, `README.md`, and updated snapshots).
+- `matrix-claude` reported `553` unit tests green on `hpfury` for `ee0c0ac` (`--server` skipped — no server tests changed); not independently re-executed in a separate worktree slot here.

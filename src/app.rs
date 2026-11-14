@@ -4209,6 +4209,57 @@ mod tests {
     }
 
     #[test]
+    fn edit_last_is_in_the_palette_once_with_or_without_a_key() {
+        let listed = |app: &mut App| {
+            app.perform(Action::OpenPalette);
+            let count = match &app.modal {
+                Some(Modal::Palette(palette)) => (0..)
+                    .map_while(|at| palette.entry_at(at))
+                    .filter(|entry| entry.title == "Edit your last message")
+                    .count(),
+                _ => panic!("no palette"),
+            };
+            app.modal = None;
+            count
+        };
+        let mut app = with_messages(&[(true, "mine"), (false, "theirs")]);
+        assert_eq!(listed(&mut app), 1);
+        app.keymap.apply_rebind(
+            Context::Composer,
+            Action::EditLast,
+            KeyCode::F(8),
+            KeyModifiers::NONE,
+        );
+        assert_eq!(listed(&mut app), 1);
+    }
+
+    #[test]
+    fn edit_last_says_why_when_there_is_nothing_to_edit() {
+        let toast = |app: &App| app.toast.as_ref().map(|(text, _)| text.clone());
+        // Nothing of ours in the room.
+        let mut app = with_messages(&[(false, "theirs")]);
+        app.perform(Action::EditLast);
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("There is no message of yours to edit here")
+        );
+        assert_eq!(app.focus, Pane::Composer);
+        assert_eq!(app.timeline.selected, None);
+        // Something is being written.
+        let mut app = with_messages(&[(true, "mine")]);
+        for c in "draft".chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        app.perform(Action::EditLast);
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("Finish what you are writing first")
+        );
+        assert_eq!(app.composer.text(), "draft");
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+    }
+
+    #[test]
     fn edit_last_works_in_the_vim_preset_too() {
         let mut app = with_messages(&[(true, "mine"), (false, "theirs")]);
         app.keymap = Keymap::from_preset(keymap::Preset::Vim);
@@ -4894,7 +4945,6 @@ mod tests {
         assert_eq!(app.compose_mode, ComposeMode::Normal);
 
         // (EditLast edits our latest message.)
-        // (Up in the empty composer edits our latest message.)
         app.perform(Action::EditLast);
         assert_eq!(app.composer.text(), "second");
         app.on_matrix(timeline(&app, vec![remote("0", "ann", "older")]));
