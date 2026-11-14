@@ -430,11 +430,15 @@ fn desktop_notification(prepared: &PreparedDesktop) -> notify_rust::Notification
 async fn show_desktop(job: DesktopJob, clickable: &mut Clickable) {
     let prepared = prepare_desktop(&job);
     let notification = desktop_notification(&prepared);
+    if clickable.service_stuck() {
+        tracing::debug!("the notification service does not answer: notification dropped");
+        return;
+    }
     if let Some((room_id, clicks)) = job.click {
         // The same notification with a default action: what a click on it does.
         let mut with_action = notification.clone();
         with_action.action("default", "Open");
-        if clickable.show(&with_action, room_id, clicks).await {
+        if clickable.show(&with_action, room_id, clicks).await || clickable.service_stuck() {
             return;
         }
     }
@@ -457,6 +461,16 @@ struct Clickable {
     /// What was shown and can still be clicked: the service's id for it, the room,
     /// and where to report the click. Oldest first.
     shown: VecDeque<(u32, String, Clicks)>,
+    /// When the service last failed to answer in time. For a while after that
+    /// nothing is sent to it at all, not the plain way either: that way has no
+    /// time limit of its own, and one silent service would hold up the thread that
+    /// shows notifications for good.
+    stuck: Option<Instant>,
+}
+
+/// Whether a call failed because the service did not answer in time.
+fn timed_out(err: &zbus::Error) -> bool {
+    matches!(err, zbus::Error::InputOutput(err) if err.kind() == std::io::ErrorKind::TimedOut)
 }
 
 enum Link {
@@ -485,6 +499,7 @@ impl Clickable {
             link: Link::Untried,
             address,
             shown: VecDeque::new(),
+            stuck: None,
         }
     }
 
@@ -539,6 +554,13 @@ impl Clickable {
         Some(bus.get_name_owner(name).await.ok()?.to_string())
     }
 
+    /// The service did not answer a moment ago: better to lose a notification than
+    /// to wait on it without end.
+    fn service_stuck(&self) -> bool {
+        self.stuck
+            .is_some_and(|since| since.elapsed() < RETRY_AFTER)
+    }
+
     /// Shows a notification that has an action and remembers whose it is. False if
     /// it was not shown, so that it can be shown the plain way.
     async fn show(
@@ -557,6 +579,9 @@ impl Clickable {
                 Ok(link) => link,
                 Err(err) => {
                     tracing::debug!(%err, "no connection for notification clicks");
+                    if timed_out(&err) {
+                        self.stuck = Some(Instant::now());
+                    }
                     Link::Down(Instant::now())
                 }
             };
@@ -598,6 +623,9 @@ impl Clickable {
             }
             Err(err) => {
                 tracing::debug!(%err, "could not show a notification with an action");
+                if timed_out(&err) {
+                    self.stuck = Some(Instant::now());
+                }
                 self.lost();
                 false
             }
@@ -1430,6 +1458,37 @@ mod tests {
                 .show(&notification, "!rust:example.org".into(), clicks)
                 .await
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_service_that_never_answers_is_given_up_on_and_left_alone_for_a_while() {
+        let Some(bus) = TestBus::start("notify-stuck") else {
+            eprintln!("no dbus-daemon to run: not tested");
+            return;
+        };
+        // It has the name, and answers nothing.
+        let _silent = zbus::connection::Builder::address(bus.address.as_str())
+            .name(SERVICE)
+            .build()
+            .await
+            .expect("the silent service");
+        let (clicks, _clicked) = tokio::sync::mpsc::unbounded_channel();
+        let mut clickable = Clickable::new(Some(bus.address.clone()));
+        assert!(!clickable.service_stuck());
+        let started = Instant::now();
+        assert!(
+            !clickable
+                .show(
+                    &clickable_notification(),
+                    "!rust:example.org".into(),
+                    clicks
+                )
+                .await
+        );
+        assert!(started.elapsed() >= CALL_PATIENCE);
+        assert!(started.elapsed() < CALL_PATIENCE + Duration::from_secs(5));
+        // Nothing more is sent its way for now, by either road.
+        assert!(clickable.service_stuck());
     }
 
     #[tokio::test(flavor = "multi_thread")]

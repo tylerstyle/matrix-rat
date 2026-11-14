@@ -104,6 +104,8 @@ pub struct PaletteContext {
     pub thread_open: bool,
     pub has_room: bool,
     pub has_messages: bool,
+    /// Whether "edit your last message" has something to edit right now.
+    pub can_edit_last: bool,
     /// Whether the open room shows as unread; `None` if there is no room to mark
     /// (none open, or an invitation).
     pub open_unread: Option<bool>,
@@ -456,6 +458,21 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         );
     }
 
+    // Without a key of its own by default, so it is not among the bindings above.
+    push_entry(
+        out,
+        Target::Action(Action::EditLast),
+        Category::Action,
+        "Edit your last message",
+        ctx.keymap
+            .label_in(keymap::Context::Composer, Action::EditLast)
+            .map(str::to_owned),
+        "Edit your last message",
+        &["edit last", "correct", "fix typo"],
+        ctx.can_edit_last,
+        0,
+    );
+
     // Marking rooms has no key by default; named for what it would do right now.
     let key_of = |action| ctx.keymap.label_for(action).map(str::to_owned);
     let toggle_title = match ctx.open_unread {
@@ -531,6 +548,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::OpenThread => sel.can_open_thread,
         Action::JumpToReply => sel.can_jump_to_reply,
         Action::CloseThread => ctx.thread_open,
+        Action::EditLast => ctx.can_edit_last,
         Action::Attach => {
             ctx.has_room && !ctx.in_invite && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
@@ -1008,6 +1026,7 @@ mod tests {
             thread_open: false,
             has_room: true,
             has_messages: true,
+            can_edit_last: true,
             open_unread: Some(false),
             connected: false,
             user_id: None,

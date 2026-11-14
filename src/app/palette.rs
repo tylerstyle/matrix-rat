@@ -67,6 +67,7 @@ impl App {
             thread_open,
             has_room: self.room().is_some(),
             has_messages: !self.messages().is_empty(),
+            can_edit_last: self.last_editable().is_some(),
             open_unread: self
                 .room()
                 .filter(|room| room.kind != RoomKind::Invite)

@@ -317,7 +317,10 @@ impl App {
     /// With `matrix` the app shows the account's rooms; without, built-in demo data.
     #[cfg(test)]
     pub fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
-        Self::new_in_scheme(config, themes_dir, matrix, ColorScheme::Dark)
+        let mut app = Self::new_in_scheme(config, themes_dir, matrix, ColorScheme::Dark);
+        // Tests may well run inside a desktop that would obey: no window is raised.
+        app.notification_click_command = None;
+        app
     }
 
     pub(crate) fn new_in_scheme(
@@ -2294,7 +2297,20 @@ impl App {
             }
             Action::EditLast => match self.last_editable() {
                 Some(i) => self.edit_message(i),
-                None => self.perform(Action::SelectOlder),
+                None if !self.composer.is_empty() || self.compose_mode != ComposeMode::Normal => {
+                    self.show_toast("Finish what you are writing first")
+                }
+                // The last one could not be sent: there it is, to be sent again or
+                // discarded, which is offered on the message itself.
+                None if self
+                    .messages()
+                    .iter()
+                    .rfind(|message| message.editable())
+                    .is_some_and(|message| message.state == SendState::Failed) =>
+                {
+                    self.perform(Action::SelectOlder)
+                }
+                None => self.show_toast("There is no message of yours to edit here"),
             },
             Action::React => {
                 if let Some(i) = self.timeline.selected

@@ -41,23 +41,31 @@ pub fn raise_window(command: &str) {
 }
 
 /// Runs a program to its end or until `PATIENCE` runs out, and returns what it wrote
-/// if it succeeded. Nothing of ours is passed to it on standard input.
-fn run(mut command: Command) -> Option<Vec<u8>> {
+/// (if `capture`; else nothing) if it succeeded. Nothing of ours is passed to it on
+/// standard input.
+fn run(mut command: Command, capture: bool) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        // Only read where the answer is wanted: a program that leaves something
+        // running with our pipe still open would otherwise keep us waiting for its end.
+        .stdout(if capture {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let mut stdout = child.stdout.take()?;
     // Read on a thread of its own, so that a program which never ends cannot hold
     // this one for longer than our patience.
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        // The lists we read are small; a program that writes without end is cut off.
-        let _ = (&mut stdout).take(4 * 1024 * 1024).read_to_end(&mut out);
-        out
+    let reader = child.stdout.take().map(|mut stdout| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            // The lists we read are small; a program that writes without end is cut off.
+            let _ = (&mut stdout).take(4 * 1024 * 1024).read_to_end(&mut out);
+            out
+        })
     });
     let started = std::time::Instant::now();
     let status = loop {
@@ -73,14 +81,18 @@ fn run(mut command: Command) -> Option<Vec<u8>> {
             }
         }
     };
-    let out = reader.join().ok()?;
-    status.filter(|status| status.success()).map(|_| out)
+    let status = status.filter(|status| status.success())?;
+    let _ = status;
+    match reader {
+        Some(reader) => reader.join().ok(),
+        None => Some(Vec::new()),
+    }
 }
 
 fn run_user_command(command: &str) {
     let mut shell = Command::new("sh");
     shell.arg("-c").arg(command);
-    if run(shell).is_none() {
+    if run(shell, false).is_none() {
         tracing::debug!("the notification click command failed or took too long");
     }
 }
@@ -88,7 +100,7 @@ fn run_user_command(command: &str) {
 fn raise_in_niri() {
     let mut list = Command::new("niri");
     list.args(["msg", "--json", "windows"]);
-    let Some(out) = run(list) else {
+    let Some(out) = run(list, true) else {
         return;
     };
     let Some(id) = niri_window(&out, &ancestors(std::process::id())) else {
@@ -97,7 +109,7 @@ fn raise_in_niri() {
     };
     let mut focus = Command::new("niri");
     focus.args(["msg", "action", "focus-window", "--id", &id.to_string()]);
-    let _ = run(focus);
+    let _ = run(focus, false);
 }
 
 /// The window among niri's that belongs to one of these processes (ours first, then
@@ -216,13 +228,20 @@ mod tests {
         let mut slow = Command::new("sleep");
         slow.arg("30");
         let started = std::time::Instant::now();
-        assert!(run(slow).is_none());
+        assert!(run(slow, true).is_none());
         assert!(started.elapsed() < PATIENCE + Duration::from_secs(2));
         let mut quick = Command::new("sh");
         quick.args(["-c", "printf hello"]);
-        assert_eq!(run(quick).as_deref(), Some(&b"hello"[..]));
+        assert_eq!(run(quick, true).as_deref(), Some(&b"hello"[..]));
         let mut failing = Command::new("sh");
         failing.args(["-c", "exit 3"]);
-        assert!(run(failing).is_none());
+        assert!(run(failing, true).is_none());
+        // Something left running with the output still open does not hold us when
+        // the output is not wanted.
+        let mut lingering = Command::new("sh");
+        lingering.args(["-c", "sleep 30 & exit 0"]);
+        let started = std::time::Instant::now();
+        assert_eq!(run(lingering, false), Some(Vec::new()));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
