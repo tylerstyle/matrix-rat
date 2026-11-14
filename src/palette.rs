@@ -85,14 +85,36 @@ pub struct SpaceItem {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MessageCaps {
     pub has_selection: bool,
-    pub own: bool,
+    pub pinned: bool,
     pub can_edit: bool,
+    pub can_redact: bool,
+    pub can_pin: bool,
+    pub can_forward: bool,
     pub can_copy: bool,
     pub can_save: bool,
     pub can_open: bool,
     pub can_open_thread: bool,
     pub can_jump_to_reply: bool,
     pub failed_retry: bool,
+}
+
+/// Source message details when the palette is acting as a "Forward to room" picker.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ForwardTarget {
+    pub from_room_id: String,
+    pub event_id: String,
+    pub preview: String,
+}
+
+impl std::fmt::Debug for ForwardTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ForwardTarget({}, {} chars)",
+            self.from_room_id,
+            self.preview.len()
+        )
+    }
 }
 
 /// Snapshot of application state used to construct palette entries and availability.
@@ -150,6 +172,8 @@ pub struct Palette {
     pub rows: usize,
     /// Keeps keyboard selection in view on the next draw.
     pub reveal: bool,
+    /// When `Some`, the palette picks a target room to forward the message to.
+    pub forward: Option<ForwardTarget>,
 }
 
 impl Palette {
@@ -171,6 +195,40 @@ impl Palette {
             scroll: 0,
             rows: 10,
             reveal: false,
+            forward: None,
+        };
+        palette.refilter();
+        palette
+    }
+
+    /// Opens the palette as a room picker for forwarding `target`.
+    pub fn open_forward(rooms: &[RoomItem], target: ForwardTarget) -> Self {
+        let mut entries = Vec::new();
+        for room in rooms {
+            let is_source = room.id == target.from_room_id;
+            let hint = is_source.then(|| "current".to_owned());
+            let alias = format!("forward {}", room.name);
+            push_entry(
+                &mut entries,
+                Target::Room(room.id.clone()),
+                Category::Room,
+                room.name.clone(),
+                hint,
+                room.name.clone(),
+                &[&alias],
+                true,
+                if is_source { 1 } else { 0 },
+            );
+        }
+        let mut palette = Self {
+            query: LineEdit::new(),
+            entries,
+            filtered: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            rows: 10,
+            reveal: false,
+            forward: Some(target),
         };
         palette.refilter();
         palette
@@ -387,8 +445,13 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         .count()
         > 1;
 
-    // Listed above already, whether a key is bound to them or not.
-    let mut seen: Vec<Action> = vec![Action::ToggleUnread, Action::MarkAllRead];
+    // Listed above already or handled dynamically below, whether a key is bound to them or not.
+    let mut seen: Vec<Action> = vec![
+        Action::ToggleUnread,
+        Action::MarkAllRead,
+        Action::PinMessage,
+        Action::ForwardMessage,
+    ];
     for binding in active_bindings {
         if include_keymap_action(binding.action) == ActionInclusion::Skip {
             continue;
@@ -484,6 +547,33 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         true,
         1,
     );
+    let pin_title = if ctx.selection.pinned {
+        "Unpin message"
+    } else {
+        "Pin message"
+    };
+    push_entry(
+        out,
+        Target::Action(Action::PinMessage),
+        Category::Action,
+        pin_title,
+        key_of(Action::PinMessage),
+        pin_title,
+        &["pin", "unpin", "pinned message"],
+        action_enabled(Action::PinMessage, ctx),
+        0,
+    );
+    push_entry(
+        out,
+        Target::Action(Action::ForwardMessage),
+        Category::Action,
+        "Forward message…",
+        key_of(Action::ForwardMessage),
+        "Forward message…",
+        &["forward", "share message", "send to room"],
+        action_enabled(Action::ForwardMessage, ctx),
+        0,
+    );
 }
 
 #[derive(PartialEq, Eq)]
@@ -526,7 +616,10 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Reply => sel.has_selection,
         Action::Edit => sel.can_edit,
         Action::React => sel.has_selection,
-        Action::Delete => sel.has_selection && sel.own,
+        Action::Delete => sel.has_selection && sel.can_redact,
+        Action::PinMessage => sel.can_pin,
+        Action::ForwardMessage => sel.can_forward,
+        Action::OpenPinned => ctx.has_room && !ctx.in_invite,
         Action::Copy => sel.can_copy,
         Action::Save => sel.can_save,
         Action::Open => sel.can_open,
@@ -603,6 +696,14 @@ fn action_meta<'a>(
             Cow::Borrowed(description),
             &["new messages", "unread line", "first new message"],
         ),
+        Action::OpenPinned => (
+            Cow::Borrowed(description),
+            &["pinned messages", "pins", "bookmarks"],
+        ),
+        Action::Delete => (
+            Cow::Borrowed(description),
+            &["delete", "redact", "remove message"],
+        ),
         _ => (Cow::Borrowed(description), &[]),
     }
 }
@@ -620,6 +721,9 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::Open
                 | Action::OpenThread
                 | Action::JumpToReply
+                | Action::PinMessage
+                | Action::ForwardMessage
+                | Action::OpenPinned
                 | Action::JumpToNewest
                 | Action::JumpToOldest
         ),
@@ -1136,7 +1240,6 @@ mod tests {
         ctx.focus = Pane::Timeline;
         ctx.selection = MessageCaps {
             has_selection: true,
-            own: false,
             can_edit: false,
             can_copy: true,
             can_save: false,
@@ -1144,6 +1247,7 @@ mod tests {
             can_open_thread: true,
             can_jump_to_reply: false,
             failed_retry: false,
+            ..MessageCaps::default()
         };
         let p = Palette::open(ctx);
         let first_disabled = p

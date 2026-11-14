@@ -1,6 +1,9 @@
 //! What the UI shows: rooms and messages. Filled with demo data until the Matrix
 //! worker arrives (milestone M2).
 
+use std::collections::HashMap;
+use std::fmt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomKind {
     Invite,
@@ -91,6 +94,7 @@ pub struct Message {
     pub body: String,
     pub own: bool,
     pub edited: bool,
+    pub pinned: bool,
     /// The formatted (HTML) version of the body, when the sender provided one.
     pub html: Option<String>,
     /// Sender and text of the message this one replies to.
@@ -281,6 +285,19 @@ impl ImageInfo {
 }
 
 impl Message {
+    /// Returns the Matrix event ID if this message corresponds to a confirmed timeline event.
+    pub fn event_id(&self) -> Option<&str> {
+        match &self.item {
+            Some(ItemRef::Event(id)) => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// True for non-interactive status or divider rows (`System` or `ReadMarker`).
+    pub fn is_system_or_marker(&self) -> bool {
+        matches!(self.kind, MsgKind::System | MsgKind::ReadMarker)
+    }
+
     /// What is shown after a message of ours that is on its way.
     pub fn sending_label(&self) -> String {
         match self.upload {
@@ -359,6 +376,102 @@ pub struct Room {
     pub direct: bool,
     /// True when the room's notification mode is `Mute` (excluded from space unread counts).
     pub muted: bool,
+    /// Power levels and moderation rights for the current user in this room.
+    pub power: RoomPower,
+    /// Event IDs listed in `m.room.pinned_events` (server order).
+    pub pinned_ids: Vec<String>,
+}
+
+/// Effective moderation and state permissions derived from the room's power levels.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct RoomPower {
+    pub own_level: i64,
+    pub own_is_creator: bool,
+    pub can_redact_other: bool,
+    pub can_ban: bool,
+    pub can_unban: bool,
+    pub can_kick: bool,
+    pub can_pin: bool,
+    pub can_change_roles: bool,
+    pub users_default: i64,
+    pub creators: Vec<String>,
+    pub member_levels: HashMap<String, i64>,
+}
+
+impl RoomPower {
+    pub fn is_creator(&self, user_id: &str) -> bool {
+        self.creators.iter().any(|c| c == user_id)
+    }
+
+    pub fn user_level(&self, user_id: &str) -> i64 {
+        self.member_levels
+            .get(user_id)
+            .copied()
+            .unwrap_or(self.users_default)
+    }
+
+    /// Whether the current user strictly outranks `target_user_id`.
+    pub fn outranks(&self, target_user_id: &str) -> bool {
+        if self.is_creator(target_user_id) {
+            return false;
+        }
+        if self.own_is_creator {
+            return true;
+        }
+        self.own_level > self.user_level(target_user_id)
+    }
+
+    /// Whether the current user can ban `target_user_id` right now.
+    pub fn can_ban_user(&self, own_user_id: Option<&str>, target_user_id: &str) -> bool {
+        self.can_ban && own_user_id != Some(target_user_id) && self.outranks(target_user_id)
+    }
+}
+
+/// Counts and flags only: never puts user IDs in logs.
+impl fmt::Debug for RoomPower {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RoomPower")
+            .field("own_level", &self.own_level)
+            .field("own_is_creator", &self.own_is_creator)
+            .field("can_redact_other", &self.can_redact_other)
+            .field("can_ban", &self.can_ban)
+            .field("can_unban", &self.can_unban)
+            .field("can_kick", &self.can_kick)
+            .field("can_pin", &self.can_pin)
+            .field("can_change_roles", &self.can_change_roles)
+            .field("users_default", &self.users_default)
+            .field("creators", &self.creators.len())
+            .field("member_levels", &self.member_levels.len())
+            .finish()
+    }
+}
+
+/// Summary of one pinned event for the Pinned Messages popup.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PinnedMessage {
+    pub event_id: String,
+    pub sender: String,
+    pub sender_id: Option<String>,
+    pub day: String,
+    pub time: String,
+    pub snippet: String,
+    pub redacted: bool,
+    pub undecryptable: bool,
+    pub ignored: bool,
+}
+
+/// Redacts event IDs, sender IDs, and message content.
+impl fmt::Debug for PinnedMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PinnedMessage({} chars, redacted: {}, undecryptable: {}, ignored: {})",
+            self.snippet.len(),
+            self.redacted,
+            self.undecryptable,
+            self.ignored
+        )
+    }
 }
 
 pub const OWN_NAME: &str = "you";
@@ -410,6 +523,8 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         alias: None,
         direct: kind == RoomKind::Person,
         muted: false,
+        power: RoomPower::default(),
+        pinned_ids: Vec::new(),
     }
 }
 

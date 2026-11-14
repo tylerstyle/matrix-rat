@@ -32,6 +32,7 @@ impl App {
             index,
             state: message.state,
             kind: message.kind,
+            pinned: message.pinned,
             on_server: matches!(message.item, Some(ItemRef::Event(_))),
         })
     }
@@ -132,6 +133,13 @@ impl App {
             Some(ItemRef::Event(id)) => Some(id.as_str()),
             _ => None,
         };
+        let room = self.room();
+        let can_redact_other =
+            room.is_some_and(|r| !message.own && Self::can_redact_message(r, message));
+        let can_pin = room.is_some_and(|r| Self::can_pin_message(r, message));
+        let can_ban_sender = room
+            .and_then(|r| Self::can_ban_sender(r, message, self.user_id.as_deref()))
+            .is_some();
         let facts = MessageFacts {
             connected: self.matrix.is_some(),
             in_thread: self.thread_open(),
@@ -143,6 +151,9 @@ impl App {
                 .sender_id
                 .as_deref()
                 .is_some_and(|id| self.is_user_ignored(id)),
+            can_redact_other,
+            can_pin,
+            can_ban_sender,
         };
         let items = menu::message_items(message, facts, &self.keymap);
         self.show_menu(Target::Message(target), "", items, at);
@@ -407,6 +418,7 @@ impl App {
                         }
                     }
                     Run::Report => self.open_report_modal(index),
+                    Run::BanUser => self.open_ban_confirm_from_message(index),
                     _ => {}
                 }
             }
@@ -721,7 +733,13 @@ mod tests {
         assert_eq!(app.timeline.selected, Some(6));
         assert_eq!(
             labels(&app),
-            ["Reply", "Reply in thread", "React…", "Copy text"]
+            [
+                "Reply",
+                "Reply in thread",
+                "React…",
+                "Copy text",
+                "Forward…"
+            ]
         );
         // Drawn next to the pointer, with the keys of the keymap, nothing dimmed.
         let (column, row) = find(&text, "Shipping a TUI client");
@@ -755,6 +773,7 @@ mod tests {
                 "React…",
                 "Edit",
                 "Copy text",
+                "Forward…",
                 "Delete"
             ]
         );
@@ -800,7 +819,7 @@ mod tests {
         let count = app.messages().len();
         right_click(&mut app, &mut terminal, "Good to know, thanks.");
         app.on_event(key(KeyCode::Char('d')));
-        assert_eq!(open_menu(&app).selected, 5);
+        assert_eq!(open_menu(&app).selected, 6);
         assert_eq!(app.messages().len(), count);
         // Enter asks, moving away takes the question back, Enter twice deletes.
         app.on_event(key(KeyCode::Enter));
@@ -848,11 +867,10 @@ mod tests {
         app.on_event(key(KeyCode::Char('m')));
         let by_key = labels(&app);
         let text = screen(&mut app, &mut terminal);
-        // Next to the message.
+        // Next to the message, covering none of it.
         let (_, row) = find(&text, "Good to know, thanks.");
         let (rect, _) = open_menu(&app).place(app.screen).unwrap();
-        // Right below it, covering none of it.
-        assert_eq!(rect.y, row + 1, "{text}");
+        assert!(rect.bottom() <= row || rect.y > row, "{text}");
         insta::assert_snapshot!("menu_by_key", text);
         // Esc closes it and leaves everything as it was.
         app.on_event(key(KeyCode::Esc));

@@ -51,6 +51,7 @@ pub struct MessageRef {
     pub kind: MsgKind,
     /// The server has it (it has an event id).
     pub on_server: bool,
+    pub pinned: bool,
 }
 
 impl MessageRef {
@@ -59,6 +60,7 @@ impl MessageRef {
         self.state == message.state
             && self.kind == message.kind
             && self.on_server == matches!(message.item, Some(ItemRef::Event(_)))
+            && self.pinned == message.pinned
     }
 }
 
@@ -84,6 +86,8 @@ pub enum Run {
     UnignoreUser,
     /// Report the message to the homeserver.
     Report,
+    /// Ban the message's sender from the room.
+    BanUser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +323,12 @@ pub struct MessageFacts {
     pub read_markers: bool,
     /// Whether the message's sender is currently in `m.ignored_user_list`.
     pub sender_ignored: bool,
+    /// Whether the current user can redact other users' messages in this room.
+    pub can_redact_other: bool,
+    /// Whether the current user can pin/unpin events in this room.
+    pub can_pin: bool,
+    /// Whether the current user can ban the message's sender.
+    pub can_ban_sender: bool,
 }
 
 /// The entries for a message. Empty for lines that are not messages.
@@ -414,12 +424,27 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
     if facts.read_markers && !message.read_by.is_empty() {
         items.push(Item::new("Read by…", "", Run::ReadBy));
     }
+    let undecryptable = message.kind == MsgKind::Undecryptable;
+    if sent && addressable && !deleted && !undecryptable {
+        items.push(Item::action(
+            keys,
+            "Forward…",
+            Timeline,
+            Action::ForwardMessage,
+        ));
+    }
+    if facts.can_pin && sent && addressable && (message.pinned || (!deleted && !undecryptable)) {
+        let label = if message.pinned { "Unpin" } else { "Pin" };
+        items.push(Item::action(keys, label, Timeline, Action::PinMessage));
+    }
     if message.own && !sent {
         // Deleting what has not been sent takes it out of the queue.
         items.push(Item::action(keys, "Discard", Timeline, Action::Delete));
     } else if message.own && addressable && !deleted {
         // A click lands on the wrong row more easily than a finger on Del.
         items.push(Item::action(keys, "Delete", Timeline, Action::Delete).asking());
+    } else if !message.own && facts.can_redact_other && sent && addressable && !deleted {
+        items.push(Item::action(keys, "Delete…", Timeline, Action::Delete));
     }
     if facts.connected && !message.own {
         if message.sender_id.is_some() {
@@ -433,6 +458,9 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
         }
         if on_server && sent {
             items.push(Item::new("Report…", "", Run::Report));
+        }
+        if on_server && facts.can_ban_sender && message.sender_id.is_some() {
+            items.push(Item::new("Ban user…", "", Run::BanUser));
         }
     }
     items
@@ -584,6 +612,9 @@ mod tests {
         permalink: true,
         read_markers: true,
         sender_ignored: false,
+        can_redact_other: false,
+        can_pin: false,
+        can_ban_sender: false,
     };
 
     fn file() -> Attachment {
@@ -610,6 +641,7 @@ mod tests {
                 "React…",
                 "Copy text",
                 "Copy link to message",
+                "Forward…",
                 "Report…",
             ]
         );
@@ -629,11 +661,12 @@ mod tests {
                 "Edit",
                 "Copy text",
                 "Copy link to message",
+                "Forward…",
                 "Delete"
             ]
         );
         assert_eq!(items[3].run, Some(Run::Do(Action::Edit)));
-        assert_eq!(items[6].run, Some(Run::Do(Action::Delete)));
+        assert_eq!(items[7].run, Some(Run::Do(Action::Delete)));
     }
 
     #[test]
@@ -645,6 +678,17 @@ mod tests {
                 continue;
             };
             let keys = keys();
+            if item.hint.is_empty() {
+                assert!(
+                    !keys.bindings().iter().any(|binding| {
+                        binding.action == action
+                            && matches!(binding.context, Context::Timeline | Context::Global)
+                    }),
+                    "{} has a binding in Timeline/Global but no hint",
+                    item.label
+                );
+                continue;
+            }
             let bound = keys.bindings().iter().any(|binding| {
                 binding.action == action
                     && binding.label == item.hint
@@ -785,6 +829,7 @@ mod tests {
                 "React…",
                 "Edit",
                 "Copy text",
+                "Forward…",
                 "Delete"
             ]
         );
@@ -1014,6 +1059,7 @@ mod tests {
             state: SendState::Sending,
             kind: MsgKind::Text,
             on_server: false,
+            pinned: false,
         };
         let mut message = text(true);
         message.item = Some(ItemRef::Transaction("t".into()));

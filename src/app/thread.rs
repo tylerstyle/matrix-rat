@@ -55,6 +55,34 @@ pub struct ThreadView {
     has_root_message: bool,
 }
 
+impl ThreadView {
+    pub(super) fn apply_pinned(
+        &mut self,
+        pinned_set: &std::collections::HashSet<&str>,
+        fallback: bool,
+    ) {
+        let matches = |msg: &Message| {
+            msg.event_id()
+                .or_else(|| (fallback && !msg.id.is_empty()).then_some(msg.id.as_str()))
+                .is_some_and(|id| pinned_set.contains(id))
+        };
+        self.root_message.pinned = matches(&self.root_message);
+        for msg in &mut self.room_messages {
+            msg.pinned = matches(msg);
+        }
+    }
+
+    pub(super) fn find_message(&self, event_id: &str) -> Option<&Message> {
+        self.room_messages
+            .iter()
+            .find(|m| m.id == event_id || m.event_id() == Some(event_id))
+            .or_else(|| {
+                (self.root_message.id == event_id || self.root_message.event_id() == Some(event_id))
+                    .then_some(&self.root_message)
+            })
+    }
+}
+
 impl App {
     /// Whether the messages pane shows a thread.
     pub fn thread_open(&self) -> bool {

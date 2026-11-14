@@ -486,7 +486,7 @@ fn thread_root_from_raw(raw_json: &str) -> Option<String> {
     EventId::parse(id).ok().map(|ev| ev.to_string())
 }
 
-async fn heal_utd_event(
+pub(super) async fn heal_utd_event(
     room: &Room,
     cache: &RoomEventCache,
     mut event: TimelineEvent,
@@ -509,7 +509,7 @@ async fn heal_utd_event(
     event
 }
 
-async fn load_event_with_replacements(
+pub(super) async fn load_event_with_replacements(
     room: &Room,
     event_id: &EventId,
 ) -> Option<(TimelineEvent, Vec<TimelineEvent>)> {
@@ -534,7 +534,10 @@ async fn load_event_with_replacements(
         .map(|event| (event, Vec::new()))
 }
 
-fn extract_event_text(event: &TimelineEvent, relations: &[TimelineEvent]) -> Option<String> {
+pub(super) fn extract_event_text(
+    event: &TimelineEvent,
+    relations: &[TimelineEvent],
+) -> Option<String> {
     let Ok(AnySyncTimelineEvent::MessageLike(msg)) = event.raw().deserialize() else {
         return None;
     };
@@ -571,7 +574,7 @@ fn extract_event_text(event: &TimelineEvent, relations: &[TimelineEvent]) -> Opt
     }
 }
 
-fn latest_replacement(
+pub(super) fn latest_replacement(
     relations: &[TimelineEvent],
     target_id: &EventId,
     orig_sender: &UserId,
@@ -599,7 +602,7 @@ fn latest_replacement(
     best.map(|(_, msgtype)| msgtype)
 }
 
-fn bundled_replacement(
+pub(super) fn bundled_replacement(
     replace: &Option<Box<OriginalSyncMessageLikeEvent<RoomMessageEventContent>>>,
     orig_sender: &UserId,
 ) -> Option<MessageType> {
@@ -631,7 +634,7 @@ async fn cached_room_name(room: &Room, cache: &mut HashMap<OwnedRoomId, String>)
     clean
 }
 
-async fn cached_sender_name(
+pub(super) async fn cached_sender_name(
     room: &Room,
     user_id: &UserId,
     cache: &mut HashMap<(OwnedRoomId, OwnedUserId), String>,

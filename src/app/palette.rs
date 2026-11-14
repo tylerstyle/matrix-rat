@@ -12,11 +12,10 @@ use crate::theme::Theme;
 
 impl App {
     /// Opens the command palette populated with actions, rooms, settings, and themes.
-    pub(super) fn open_palette(&mut self) {
-        if self.modal.is_some() || self.images.viewer_open() {
-            return;
+    pub(super) fn palette_context(&self) -> PaletteContext {
+        if self.theme_names.is_empty() {
+            // keep callers safe even without open_palette refresh
         }
-        self.theme_names = Theme::available(&self.themes_dir);
         let rooms = crate::model::RoomKind::SECTIONS
             .iter()
             .flat_map(|kind| {
@@ -36,6 +35,7 @@ impl App {
         let in_invite = self.room().is_some_and(|r| r.kind == RoomKind::Invite);
         let thread_open = self.thread_open();
         let selected = self.timeline.selected.and_then(|i| self.messages().get(i));
+        let room = self.room();
         let selection = match selected {
             Some(m) => {
                 let has_links = !crate::rich::Rich::of(m.html.as_deref(), &m.body)
@@ -43,7 +43,6 @@ impl App {
                     .is_empty();
                 MessageCaps {
                     has_selection: true,
-                    own: m.own,
                     can_edit: m.editable(),
                     can_copy: !m.body.is_empty(),
                     can_save: self.can_save(),
@@ -55,12 +54,16 @@ impl App {
                             || matches!(m.item, Some(crate::model::ItemRef::Event(_)))),
                     can_jump_to_reply: m.reply_event.is_some(),
                     failed_retry: self.matrix.is_some() && m.state == SendState::Failed,
+                    pinned: m.pinned,
+                    can_redact: room.is_some_and(|r| Self::can_redact_message(r, m)),
+                    can_pin: room.is_some_and(|r| Self::can_pin_message(r, m)),
+                    can_forward: Self::can_forward_message(m),
                 }
             }
             None => MessageCaps::default(),
         };
 
-        let ctx = PaletteContext {
+        PaletteContext {
             focus: self.focus,
             compose_mode: self.compose_mode,
             in_invite,
@@ -108,7 +111,15 @@ impl App {
             selection,
             target: self.manage_target(),
             keymap: self.keymap.clone(),
-        };
+        }
+    }
+
+    pub(super) fn open_palette(&mut self) {
+        if self.modal.is_some() || self.images.viewer_open() {
+            return;
+        }
+        self.theme_names = Theme::available(&self.themes_dir);
+        let ctx = self.palette_context();
         self.open_modal(Modal::Palette(Palette::open(ctx)));
     }
 
@@ -143,9 +154,16 @@ impl App {
     }
 
     pub(super) fn run_palette_at(&mut self, filtered_index: usize) {
-        let entry = match &self.modal {
-            Some(Modal::Palette(palette)) => palette.entry_at(filtered_index).cloned(),
-            _ => None,
+        let (entry, forward) = match &mut self.modal {
+            Some(Modal::Palette(palette)) => {
+                let entry = palette.entry_at(filtered_index).cloned();
+                let forward = entry
+                    .as_ref()
+                    .filter(|e| e.enabled && matches!(e.target, Target::Room(_)))
+                    .and_then(|_| palette.forward.take());
+                (entry, forward)
+            }
+            _ => (None, None),
         };
         let Some(entry) = entry else {
             return;
@@ -159,7 +177,9 @@ impl App {
         match entry.target {
             Target::Action(action) => self.perform(action),
             Target::Room(room_id) => {
-                if let Some(index) = self.rooms.iter().position(|r| r.id == room_id) {
+                if let Some(target) = forward {
+                    self.forward_to_room(target, room_id);
+                } else if let Some(index) = self.rooms.iter().position(|r| r.id == room_id) {
                     self.perform(Action::OpenRoom(index));
                 } else {
                     self.show_toast("That room is no longer available");

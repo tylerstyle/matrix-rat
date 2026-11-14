@@ -646,6 +646,222 @@ impl ReportForm {
     }
 }
 
+/// Pop-up listing a room's pinned messages (`m.room.pinned_events`).
+#[derive(Clone)]
+pub struct PinnedPopup {
+    pub room_id: String,
+    pub room_name: String,
+    pub items: Vec<crate::model::PinnedMessage>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub can_pin: bool,
+    pub selected: usize,
+    pub scroll: usize,
+    pub page: usize,
+    pub reveal: bool,
+}
+
+impl std::fmt::Debug for PinnedPopup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinnedPopup")
+            .field("room_id", &self.room_id)
+            .field("items", &self.items.len())
+            .field("loading", &self.loading)
+            .field("can_pin", &self.can_pin)
+            .finish()
+    }
+}
+
+impl PinnedPopup {
+    pub fn open(room_id: String, room_name: String, can_pin: bool) -> Self {
+        Self {
+            room_id,
+            room_name,
+            items: Vec::new(),
+            loading: true,
+            error: None,
+            can_pin,
+            selected: 0,
+            scroll: 0,
+            page: 10,
+            reveal: true,
+        }
+    }
+
+    pub fn set_items(&mut self, items: Vec<crate::model::PinnedMessage>, error: Option<String>) {
+        let prev_id = self.selected_item().map(|m| m.event_id.clone());
+        self.items = items;
+        self.loading = false;
+        self.error = error;
+        self.selected = prev_id
+            .and_then(|id| self.items.iter().position(|m| m.event_id == id))
+            .unwrap_or_else(|| self.selected.min(self.items.len().saturating_sub(1)));
+        self.reveal = true;
+    }
+
+    pub fn selected_item(&self) -> Option<&crate::model::PinnedMessage> {
+        self.items.get(self.selected)
+    }
+
+    pub fn remove_event(&mut self, event_id: &str) {
+        self.items.retain(|m| m.event_id != event_id);
+        self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        self.reveal = true;
+    }
+
+    pub fn step(&mut self, delta: isize) {
+        if self.items.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        let max = (self.items.len() - 1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+        self.reveal = true;
+    }
+
+    pub fn scroll_by(&mut self, lines: isize) {
+        self.scroll = (self.scroll as isize + lines).max(0) as usize;
+        self.reveal = false;
+    }
+
+    pub fn select_first(&mut self) {
+        self.selected = 0;
+        self.reveal = true;
+    }
+
+    pub fn select_last(&mut self) {
+        self.selected = self.items.len().saturating_sub(1);
+        self.reveal = true;
+    }
+
+    pub fn clamp_scroll(&mut self, visible: usize) {
+        if self.items.is_empty() {
+            self.selected = 0;
+            self.scroll = 0;
+            return;
+        }
+        self.selected = self.selected.min(self.items.len() - 1);
+        if self.reveal {
+            self.reveal = false;
+            if self.selected < self.scroll {
+                self.scroll = self.selected;
+            } else if self.selected >= self.scroll + visible {
+                self.scroll = self.selected + 1 - visible;
+            }
+        }
+        self.scroll = self.scroll.min(self.items.len().saturating_sub(visible));
+    }
+}
+
+/// Moderation confirmation prompt with an optional reason field.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ReasonConfirmKind {
+    Redact {
+        room_id: String,
+        item: crate::model::ItemRef,
+        sender_name: String,
+        preview: String,
+    },
+    Ban {
+        room_id: String,
+        user_id: String,
+        user_name: String,
+    },
+}
+
+impl std::fmt::Debug for ReasonConfirmKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Redact { room_id, .. } => write!(f, "ReasonConfirmKind::Redact({room_id})"),
+            Self::Ban { room_id, .. } => write!(f, "ReasonConfirmKind::Ban({room_id})"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ReasonConfirmPopup {
+    pub kind: ReasonConfirmKind,
+    pub reason: LineEdit,
+    /// Focus slot: `0` = reason input, `1` = confirm button, `2` = cancel button.
+    pub focus: usize,
+}
+
+impl std::fmt::Debug for ReasonConfirmPopup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReasonConfirmPopup")
+            .field("kind", &self.kind)
+            .field("reason_bytes", &self.reason.as_str().len())
+            .field("focus", &self.focus)
+            .finish()
+    }
+}
+
+impl ReasonConfirmPopup {
+    pub const REASON: usize = 0;
+    pub const CONFIRM: usize = 1;
+    pub const CANCEL: usize = 2;
+    pub const SLOTS: usize = 3;
+    pub const REASON_MAX_BYTES: usize = 256;
+
+    pub fn redact(
+        room_id: String,
+        item: crate::model::ItemRef,
+        sender_name: String,
+        preview: String,
+    ) -> Self {
+        Self {
+            kind: ReasonConfirmKind::Redact {
+                room_id,
+                item,
+                sender_name,
+                preview,
+            },
+            reason: LineEdit::new().with_max_bytes(Self::REASON_MAX_BYTES),
+            focus: Self::REASON,
+        }
+    }
+
+    pub fn ban(room_id: String, user_id: String, user_name: String) -> Self {
+        Self {
+            kind: ReasonConfirmKind::Ban {
+                room_id,
+                user_id,
+                user_name,
+            },
+            reason: LineEdit::new().with_max_bytes(Self::REASON_MAX_BYTES),
+            focus: Self::REASON,
+        }
+    }
+
+    pub fn step(&mut self, delta: isize) {
+        self.focus = (self.focus as isize + delta).rem_euclid(Self::SLOTS as isize) as usize;
+    }
+
+    pub fn on_reason(&self) -> bool {
+        self.focus == Self::REASON
+    }
+
+    pub fn on_submit(&self) -> bool {
+        self.focus == Self::CONFIRM
+    }
+
+    pub fn on_cancel(&self) -> bool {
+        self.focus == Self::CANCEL
+    }
+
+    pub fn focus_reason(&mut self) {
+        self.focus = Self::REASON;
+    }
+
+    pub fn flip_button(&mut self) {
+        self.focus = if self.focus == Self::CONFIRM {
+            Self::CANCEL
+        } else {
+            Self::CONFIRM
+        };
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Modal {
     Login(LoginForm),
@@ -659,7 +875,7 @@ pub enum Modal {
     GlobalSearch(crate::app::global_search::GlobalSearch),
     /// Join a room, start a direct chat, create a room, or invite someone.
     New(crate::manage::NewPopup),
-    RoomInfo(crate::manage::InfoPopup),
+    RoomInfo(Box<crate::manage::InfoPopup>),
     /// The context menu of a message, a room, a link or the composer.
     Menu(crate::menu::Menu),
     /// Configure key bindings and preset.
@@ -668,6 +884,10 @@ pub enum Modal {
     IgnoredUsers(IgnoredUsersPopup),
     /// Report an offending message to the homeserver.
     Report(ReportForm),
+    /// Pinned messages of the open room.
+    Pinned(PinnedPopup),
+    /// Moderation action confirmation with optional reason (redact other's message or ban user).
+    ReasonConfirm(ReasonConfirmPopup),
 }
 
 #[cfg(test)]
@@ -776,5 +996,88 @@ mod tests {
         assert!(picker.selected().is_none());
         picker.scroll_by(5);
         assert_eq!(picker.scroll, 0);
+    }
+
+    #[test]
+    fn moderation_modals_redact_debug_and_navigate_cleanly() {
+        let mut pinned =
+            PinnedPopup::open("!room123:example.org".into(), "Secret Room".into(), true);
+        pinned.set_items(
+            vec![
+                crate::model::PinnedMessage {
+                    event_id: "$ev1:example.org".into(),
+                    sender: "Alice".into(),
+                    sender_id: Some("@alice:example.org".into()),
+                    day: "Today".into(),
+                    time: "12:00".into(),
+                    snippet: "classified launch codes".into(),
+                    redacted: false,
+                    undecryptable: false,
+                    ignored: false,
+                },
+                crate::model::PinnedMessage {
+                    event_id: "$ev2:example.org".into(),
+                    sender: "Bob".into(),
+                    sender_id: Some("@bob:example.org".into()),
+                    day: "Today".into(),
+                    time: "12:05".into(),
+                    snippet: "secret follow-up".into(),
+                    redacted: true,
+                    undecryptable: false,
+                    ignored: false,
+                },
+            ],
+            None,
+        );
+        assert_eq!(pinned.selected_item().unwrap().event_id, "$ev1:example.org");
+        pinned.select_last();
+        assert_eq!(pinned.selected_item().unwrap().event_id, "$ev2:example.org");
+        pinned.clamp_scroll(1);
+        assert!(pinned.scroll <= 1);
+        pinned.select_first();
+        assert_eq!(pinned.selected, 0);
+        pinned.remove_event("$ev1:example.org");
+        assert_eq!(pinned.items.len(), 1);
+        assert_eq!(pinned.selected_item().unwrap().event_id, "$ev2:example.org");
+
+        let mut redact = ReasonConfirmPopup::redact(
+            "!room123:example.org".into(),
+            crate::model::ItemRef::Event("$ev1:example.org".into()),
+            "Alice".into(),
+            "classified launch codes".into(),
+        );
+        redact.reason.set("top secret reason");
+        assert!(redact.on_reason());
+        redact.step(1);
+        assert!(redact.on_submit());
+        redact.flip_button();
+        assert!(redact.on_cancel());
+        redact.focus_reason();
+        assert!(redact.on_reason());
+
+        let mut ban = ReasonConfirmPopup::ban(
+            "!room123:example.org".into(),
+            "@bob:example.org".into(),
+            "Bob".into(),
+        );
+        ban.reason.set("private ban reason");
+
+        let debug = format!("{pinned:?} {:?} {redact:?} {ban:?}", pinned.items[0]);
+        for secret in [
+            "Secret",
+            "$ev1",
+            "$ev2",
+            "Alice",
+            "alice",
+            "Bob",
+            "bob",
+            "classified",
+            "launch",
+            "follow-up",
+            "top secret",
+            "private ban",
+        ] {
+            assert!(!debug.contains(secret), "{secret} leaked in {debug}");
+        }
     }
 }

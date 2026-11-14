@@ -117,13 +117,13 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
 | `↑` in an empty composer | edit your last message (`Esc` cancels; with the `vim` preset, `Ctrl-C`) |
-| `↑` from the composer | walk into the messages (from the first line of a draft, or when you have no message to edit); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `o` open, `v` view picture, `s` save, `c` copy, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of a draft, or when you have no message to edit); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
 | `Ctrl-N` | join a room, start a chat (search people by name or ID), create a room |
-| `F4` | room details and members (invite, rename, notifications, favourite, low priority, ignore, leave) |
+| `F4` | room details and members (pinned messages, invite, rename, notifications, favourite, low priority, roles, ban/unban, ignore, leave) |
 | `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
@@ -138,7 +138,10 @@ the sent message). `/me`, `/spoiler`, `/plain`, `/shrug` and friends work as com
 Unsent text stays with its room or thread and is still there after a restart (it is kept
 in the encrypted session store). A reply comes back as its text, without what it answered.
 To ignore or report someone, use the message menu (`m` or right-click) or Room info (`F4`, `Alt-I`);
-you can manage ignored users under **Settings → Ignored users** (`F2`).
+you can manage ignored users under **Settings → Ignored users** (`F2`). Where your room
+permissions allow, the message menu and Room info also let you pin or delete other members'
+messages with a reason, ban or unban users (`Alt-B`), and change roles (`Alt-R`); `P` opens
+pinned messages, and `Forward…` copies a message to another room without its reply or thread context.
 
 <div align="center">
 <img src="docs/screenshots/palette.svg" alt="The command palette, filtered by typing" width="860">
@@ -200,7 +203,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_newest`, `jump_to_oldest`.
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `open_pinned`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `edit_last` (in an empty composer: edit your last message; otherwise it selects a message like `select_older`).
 
 **The `vim` preset**

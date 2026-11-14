@@ -8,6 +8,7 @@ pub mod global_search;
 mod keybinds;
 mod media;
 mod menu;
+mod moderation;
 mod palette;
 mod rooms;
 mod safety;
@@ -273,6 +274,7 @@ pub struct App {
     pub hover: Option<HitId>,
     dragging_splitter: bool,
     pub toast: Option<(String, Instant)>,
+    pub toast_room: Option<(String, Instant)>,
     pub screen: Rect,
     pub should_quit: bool,
     pub suspend_requested: bool,
@@ -452,6 +454,7 @@ impl App {
             hover: None,
             dragging_splitter: false,
             toast: None,
+            toast_room: None,
             screen: Rect::default(),
             should_quit: false,
             suspend_requested: false,
@@ -551,6 +554,7 @@ impl App {
         // Toasts often quote what a server or another person said.
         let text = crate::text::sanitize_line(&text.into());
         self.toast = Some((text, Instant::now()));
+        self.toast_room = None;
     }
 
     /// Called when something in the config or themes directory changed (or on
@@ -1122,10 +1126,18 @@ impl App {
         }
         if matches!(
             self.modal,
-            Some(Modal::GlobalSearch(_) | Modal::IgnoredUsers(_) | Modal::Report(_))
+            Some(
+                Modal::GlobalSearch(_)
+                    | Modal::IgnoredUsers(_)
+                    | Modal::Report(_)
+                    | Modal::Pinned(_)
+                    | Modal::ReasonConfirm(_)
+            )
         ) {
             self.modal = None;
         }
+        self.toast = None;
+        self.toast_room = None;
         self.sync = Some(SyncStatus::Stopped);
     }
 
@@ -2060,7 +2072,15 @@ impl App {
         match self.messages().get(index) {
             None => return,
             Some(message) if !message.own => {
-                self.show_toast("You can only delete your own messages");
+                if self.room().is_some_and(|r| r.power.can_redact_other)
+                    && message.state == SendState::Sent
+                    && message.kind != MsgKind::Redacted
+                    && !message.is_system_or_marker()
+                {
+                    self.open_redact_confirm(index);
+                } else {
+                    self.show_toast("You can only delete your own messages");
+                }
                 return;
             }
             Some(_) => {}
@@ -2069,7 +2089,11 @@ impl App {
             // The timeline update that follows shows it as deleted.
             let item = self.messages().get(index).and_then(|m| m.item.clone());
             if let (Some(item), Some(room_id)) = (item, self.room_id()) {
-                self.send_matrix(MatrixCmd::Redact { room_id, item });
+                self.send_matrix(MatrixCmd::Redact {
+                    room_id,
+                    item,
+                    reason: None,
+                });
             }
             return;
         }
@@ -2404,6 +2428,9 @@ impl App {
             Action::JumpToUnread => self.jump_to_unread(),
             Action::ToggleUnread => self.toggle_unread(),
             Action::MarkAllRead => self.mark_all_read(),
+            Action::PinMessage => self.toggle_pin_message(None),
+            Action::OpenPinned => self.open_pinned(),
+            Action::ForwardMessage => self.open_forward_picker(None),
             Action::NewRoom
             | Action::RoomInfo
             | Action::LeaveRoom
@@ -2504,7 +2531,9 @@ impl App {
                 | Modal::Palette(_)
                 | Modal::Keybinds(_)
                 | Modal::IgnoredUsers(_)
-                | Modal::Report(_),
+                | Modal::Report(_)
+                | Modal::Pinned(_)
+                | Modal::ReasonConfirm(_),
             ) => {
                 self.modal = None;
             }
@@ -2637,6 +2666,8 @@ impl App {
             Some(Modal::Keybinds(_)) => self.on_keybinds_key(key, code, mods),
             Some(Modal::IgnoredUsers(_)) => self.on_ignored_users_key(code, mods),
             Some(Modal::Report(_)) => self.on_report_key(code, mods),
+            Some(Modal::Pinned(_)) => self.on_pinned_key(code, mods),
+            Some(Modal::ReasonConfirm(_)) => self.on_reason_confirm_key(code, mods),
             None => {}
         }
     }
@@ -2735,6 +2766,7 @@ impl App {
                     let messages = self.place_unread_line(messages, detached.is_some());
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
+                    self.sync_pinned_flags(&room_id);
                     self.search_sync();
                     if empty_reset {
                         self.timeline.reached_start = false;
@@ -2870,6 +2902,24 @@ impl App {
                 generation,
                 results,
             } => self.on_user_search_results(generation, results),
+            MatrixEvent::RoomPower { room_id, power } => {
+                if let Some(room) = self.rooms.iter_mut().find(|r| r.id == room_id) {
+                    room.power = power;
+                }
+            }
+            MatrixEvent::PinnedEvents { room_id, ids } => self.on_pinned_events(room_id, ids),
+            MatrixEvent::PinnedList {
+                room_id,
+                items,
+                error,
+            } => self.on_pinned_list(room_id, items, error),
+            MatrixEvent::ForwardResult {
+                to_room_id,
+                to_room_name,
+                result,
+            } => {
+                self.on_forward_result(to_room_id, to_room_name, result);
+            }
         }
         // A menu about something that is gone closes.
         self.menu_follow();
@@ -3318,6 +3368,8 @@ impl App {
             Some(Modal::Keybinds(_)) => return,
             Some(Modal::IgnoredUsers(_)) => return self.on_ignored_users_paste(first_line),
             Some(Modal::Report(_)) => return self.on_report_paste(first_line),
+            Some(Modal::ReasonConfirm(_)) => return self.on_reason_confirm_paste(first_line),
+            Some(Modal::Pinned(_)) => return,
             None => {}
         }
         // The picture viewer and the help cover the composer: nothing is pasted
@@ -3374,6 +3426,8 @@ impl App {
                                     | Modal::Keybinds(_)
                                     | Modal::IgnoredUsers(_)
                                     | Modal::Report(_)
+                                    | Modal::Pinned(_)
+                                    | Modal::ReasonConfirm(_)
                             )
                         ) {
                             self.modal = None;
@@ -3394,6 +3448,11 @@ impl App {
                         }
                         Some(Modal::Report(form)) if slot < form.slots() => {
                             form.focus = slot;
+                        }
+                        Some(Modal::ReasonConfirm(popup))
+                            if slot == crate::modal::ReasonConfirmPopup::REASON =>
+                        {
+                            popup.focus_reason();
                         }
                         _ => {}
                     },
@@ -3528,6 +3587,11 @@ impl App {
                     }
                     Some(HitId::ReportSubmit) => self.submit_report(),
                     Some(HitId::UserSearchRow(index)) => self.pick_user_search(index),
+                    Some(HitId::PinnedRow(index)) => self.activate_pinned_at(index),
+                    Some(HitId::PinnedUnpin(index)) => self.unpin_pinned_at(index),
+                    Some(HitId::ReasonConfirmBtn(true)) => self.submit_reason_confirm(),
+                    Some(HitId::ReasonConfirmBtn(false)) => self.modal = None,
+                    Some(HitId::Toast) => self.click_forward_toast(),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -3556,6 +3620,7 @@ impl App {
                             | Modal::RoomInfo(_)
                             | Modal::Keybinds(_)
                             | Modal::IgnoredUsers(_)
+                            | Modal::Pinned(_)
                     )
                 ) =>
             {
@@ -3571,6 +3636,7 @@ impl App {
                     Some(Modal::RoomInfo(_)) => self.manage_scroll(delta),
                     Some(Modal::Keybinds(editor)) => editor.scroll_by(delta),
                     Some(Modal::IgnoredUsers(_)) => self.scroll_ignored_users(delta),
+                    Some(Modal::Pinned(_)) => self.scroll_pinned(delta),
                     _ => {}
                 }
                 self.dirty = true;
@@ -3702,6 +3768,13 @@ impl App {
                     popup.filter.place(rel_col, false);
                 }
             }
+            InputTarget::BanReason => {
+                if let Some(Modal::RoomInfo(popup)) = &mut self.modal
+                    && let Some(prompt) = &mut popup.ban_prompt
+                {
+                    prompt.reason.place(rel_col, false);
+                }
+            }
             InputTarget::VerifyPassword => {
                 if let Some(Modal::Verify(popup)) = &mut self.modal
                     && popup.has_field(&self.verify)
@@ -3723,6 +3796,12 @@ impl App {
                     form.reason.place(rel_col, false);
                 }
             }
+            InputTarget::ReasonConfirm => {
+                if let Some(Modal::ReasonConfirm(popup)) = &mut self.modal {
+                    popup.focus_reason();
+                    popup.reason.place(rel_col, false);
+                }
+            }
         }
     }
 
@@ -3738,6 +3817,7 @@ impl App {
             .is_some_and(|(_, since)| since.elapsed() >= TOAST_TIME)
         {
             self.toast = None;
+            self.toast_room = None;
             self.dirty = true;
         }
         if self.images.tick() {

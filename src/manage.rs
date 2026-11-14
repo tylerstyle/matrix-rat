@@ -390,6 +390,14 @@ pub enum Click {
     MemberChat,
     /// Remove the selected member from the room (asks first).
     MemberRemove,
+    /// Open the ban prompt for the selected member.
+    MemberBan,
+    /// Unban the selected banned member (asks first).
+    MemberUnban,
+    /// Open the role chooser for the selected member.
+    MemberRole,
+    /// Pick an option inside the open role chooser.
+    RoleOption(usize),
     /// Ignore or stop ignoring the selected member (asks first).
     MemberIgnore,
     /// Favourite on or off for the room in question, without a popup.
@@ -557,6 +565,7 @@ impl NewPopup {
 pub enum InfoRow {
     Favourite,
     LowPriority,
+    Pinned,
     Notify,
     Name,
     Topic,
@@ -572,6 +581,8 @@ pub enum Confirm {
     Leave,
     /// Remove the member with this user id.
     Remove(String),
+    /// Unban the member with this user id.
+    Unban(String),
     /// Ignore the member with this user id.
     Ignore(String),
     /// Stop ignoring the member with this user id.
@@ -586,10 +597,113 @@ impl std::fmt::Debug for Confirm {
         f.write_str(match self {
             Self::Leave => "Confirm::Leave",
             Self::Remove(_) => "Confirm::Remove",
+            Self::Unban(_) => "Confirm::Unban",
             Self::Ignore(_) => "Confirm::Ignore",
             Self::Unignore(_) => "Confirm::Unignore",
             Self::NewChat(_) => "Confirm::NewChat",
         })
+    }
+}
+
+/// Inline reason prompt for banning the selected member inside room info.
+#[derive(Clone)]
+pub struct BanPrompt {
+    pub user_id: String,
+    pub name: String,
+    pub reason: LineEdit,
+}
+
+impl BanPrompt {
+    pub fn new(user_id: String, name: String) -> Self {
+        Self {
+            user_id,
+            name,
+            reason: LineEdit::new().with_max_bytes(256),
+        }
+    }
+}
+
+impl std::fmt::Debug for BanPrompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BanPrompt({} reason bytes)", self.reason.as_str().len())
+    }
+}
+
+/// Inline role picker for a member row (`Admin` / `Moderator` / `Default`).
+#[derive(Clone)]
+pub struct RoleChooser {
+    pub user_id: String,
+    pub name: String,
+    pub current_level: i64,
+    pub is_self: bool,
+    pub admin_count: usize,
+    pub options: Vec<(i64, &'static str)>,
+    pub selected: usize,
+    pub confirm_last_admin: bool,
+}
+
+impl std::fmt::Debug for RoleChooser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RoleChooser(current: {}, self: {}, admins: {}, confirm_last: {})",
+            self.current_level, self.is_self, self.admin_count, self.confirm_last_admin
+        )
+    }
+}
+
+impl RoleChooser {
+    pub fn new(
+        member: &RoomMember,
+        own_is_creator: bool,
+        own_level: i64,
+        admin_count: usize,
+    ) -> Self {
+        let options: Vec<(i64, &'static str)> = [(100, "Admin"), (50, "Moderator"), (0, "Default")]
+            .into_iter()
+            .filter(|(lvl, _)| own_is_creator || own_level >= *lvl)
+            .collect();
+        let selected = options
+            .iter()
+            .position(|(lvl, _)| *lvl == member.power_level)
+            .unwrap_or(0);
+        Self {
+            user_id: member.user_id.clone(),
+            name: member.name.clone(),
+            current_level: member.power_level,
+            is_self: member.own,
+            admin_count,
+            options,
+            selected,
+            confirm_last_admin: false,
+        }
+    }
+
+    pub fn step(&mut self, delta: isize) {
+        if self.options.is_empty() {
+            return;
+        }
+        let max = (self.options.len() - 1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+        self.confirm_last_admin = false;
+    }
+
+    pub fn chosen(&self) -> Option<(i64, &'static str)> {
+        self.options.get(self.selected).copied()
+    }
+
+    pub fn select(&mut self, index: usize) -> bool {
+        if index < self.options.len() {
+            self.selected = index;
+            self.confirm_last_admin = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn needs_last_admin_confirm(&self, new_level: i64) -> bool {
+        self.is_self && self.current_level >= 100 && new_level < 100 && self.admin_count <= 1
     }
 }
 
@@ -621,6 +735,10 @@ pub struct InfoPopup {
     pub reveal: bool,
     /// The name or topic while it is being typed.
     pub editing: Option<(InfoRow, LineEdit)>,
+    /// Inline reason prompt for banning a member.
+    pub ban_prompt: Option<BanPrompt>,
+    /// Inline role chooser on a member row.
+    pub role_chooser: Option<RoleChooser>,
     pub confirm: Option<Confirm>,
     /// A change is on its way to the server.
     pub busy: Option<&'static str>,
@@ -654,6 +772,8 @@ impl InfoPopup {
             page: 10,
             reveal: true,
             editing: None,
+            ban_prompt: None,
+            role_chooser: None,
             confirm: None,
             busy: None,
             pending: None,
@@ -694,6 +814,7 @@ impl InfoPopup {
         if !self.invited() {
             rows.push(InfoRow::Favourite);
             rows.push(InfoRow::LowPriority);
+            rows.push(InfoRow::Pinned);
             if let Some(details) = &self.details {
                 if details.notify.is_some() {
                     rows.push(InfoRow::Notify);
@@ -750,6 +871,8 @@ impl InfoPopup {
         if let Some(at) = self.rows().iter().position(|r| *r == row) {
             if at != self.selected {
                 self.confirm = None;
+                self.ban_prompt = None;
+                self.role_chooser = None;
             }
             self.selected = at;
             self.reveal = true;
@@ -760,6 +883,8 @@ impl InfoPopup {
 
     pub fn step(&mut self, delta: isize) {
         self.confirm = None;
+        self.ban_prompt = None;
+        self.role_chooser = None;
         // The user has chosen for themselves.
         self.wanted = None;
         // Up from the first row: what stands above it (name, topic, facts) comes
@@ -786,6 +911,8 @@ impl InfoPopup {
 
     fn after_filter_change(&mut self, before: Option<InfoRow>) {
         self.confirm = None;
+        self.ban_prompt = None;
+        self.role_chooser = None;
         let rows = self.rows();
         let wanted = if self.filter.is_empty() {
             // Emptied: the selection stays where it was.
@@ -829,6 +956,10 @@ impl InfoPopup {
         };
         let keep = match &self.confirm {
             Some(Confirm::Remove(user_id)) => still(user_id, true),
+            Some(Confirm::Unban(user_id)) => details
+                .members
+                .iter()
+                .any(|m| m.user_id == *user_id && m.unbannable),
             Some(
                 Confirm::Ignore(user_id) | Confirm::Unignore(user_id) | Confirm::NewChat(user_id),
             ) => still(user_id, false),
@@ -836,6 +967,27 @@ impl InfoPopup {
         };
         if !keep {
             self.confirm = None;
+        }
+        if let Some(prompt) = &self.ban_prompt
+            && !details
+                .members
+                .iter()
+                .any(|m| m.user_id == prompt.user_id && m.bannable)
+        {
+            self.ban_prompt = None;
+            self.error = Some("You are no longer allowed to ban this member.".to_owned());
+        }
+        if let Some(chooser) = &mut self.role_chooser {
+            if details
+                .members
+                .iter()
+                .any(|m| m.user_id == chooser.user_id && m.role_editable)
+            {
+                chooser.admin_count = details.admin_count;
+            } else {
+                self.role_chooser = None;
+                self.error = Some("You are no longer allowed to change this role.".to_owned());
+            }
         }
         let allowed = match self.editing.as_ref().map(|(row, _)| *row) {
             Some(InfoRow::Name) => details.can_rename,
@@ -894,6 +1046,8 @@ impl InfoPopup {
         if was_invite != self.invited() {
             self.confirm = None;
             self.editing = None;
+            self.ban_prompt = None;
+            self.role_chooser = None;
             self.selected = 0;
             self.reveal = true;
             return true;
@@ -907,12 +1061,16 @@ pub fn confirm_keys(prompt: &str) -> &str {
     prompt.split('·').next().unwrap_or(prompt).trim_end()
 }
 
-pub fn role_label(role: MemberRole) -> &'static str {
+/// Formats a member's power level for display: `owner`/`admin`/`moderator` for standard
+/// levels, empty for `0` (default), and the exact integer string for custom levels.
+pub fn member_role_display(role: MemberRole, power_level: i64) -> std::borrow::Cow<'static, str> {
+    use std::borrow::Cow;
     match role {
-        MemberRole::Owner => "owner",
-        MemberRole::Admin => "admin",
-        MemberRole::Moderator => "moderator",
-        MemberRole::User => "",
+        MemberRole::Owner => Cow::Borrowed("owner"),
+        _ if power_level == 100 => Cow::Borrowed("admin"),
+        _ if power_level == 50 => Cow::Borrowed("moderator"),
+        _ if power_level == 0 => Cow::Borrowed(""),
+        _ => Cow::Owned(power_level.to_string()),
     }
 }
 
@@ -1088,6 +1246,7 @@ mod tests {
                     invited: *invited,
                     own: false,
                     removable: false,
+                    ..RoomMember::default()
                 })
                 .collect(),
             ..RoomDetails::default()
@@ -1099,16 +1258,21 @@ mod tests {
         let mut popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Room);
         assert_eq!(
             popup.rows(),
-            [InfoRow::Favourite, InfoRow::LowPriority, InfoRow::Leave]
+            [
+                InfoRow::Favourite,
+                InfoRow::LowPriority,
+                InfoRow::Pinned,
+                InfoRow::Leave
+            ]
         );
         popup.set_details(details(&[
             ("alice", false),
             ("bob", false),
             ("carol", true),
         ]));
-        assert_eq!(popup.rows().len(), 7 + 3);
+        assert_eq!(popup.rows().len(), 8 + 3);
         popup.set_filter("BO".into());
-        assert_eq!(popup.rows().len(), 7 + 1);
+        assert_eq!(popup.rows().len(), 8 + 1);
         assert_eq!(popup.selected_member().unwrap().name, "bob");
         // Emptying the filter keeps the member selected, wherever it is now.
         popup.set_filter(String::new());
@@ -1131,6 +1295,7 @@ mod tests {
             [
                 InfoRow::Favourite,
                 InfoRow::LowPriority,
+                InfoRow::Pinned,
                 InfoRow::Notify,
                 InfoRow::Leave,
                 InfoRow::Member(0)
@@ -1461,7 +1626,12 @@ mod tests {
         assert_eq!(popup.confirm, None);
         assert_eq!(
             popup.rows(),
-            [InfoRow::Favourite, InfoRow::LowPriority, InfoRow::Leave]
+            [
+                InfoRow::Favourite,
+                InfoRow::LowPriority,
+                InfoRow::Pinned,
+                InfoRow::Leave
+            ]
         );
         assert_eq!(popup.leave_label(), "Leave room");
     }
@@ -1508,5 +1678,67 @@ mod tests {
             "Enter again, Esc to stay"
         );
         assert_eq!(confirm_keys("no more"), "no more");
+    }
+
+    #[test]
+    fn role_display_and_moderation_prompts_cover_custom_levels_guard_and_redacted_debug() {
+        assert_eq!(member_role_display(MemberRole::Owner, i64::MAX), "owner");
+        assert_eq!(member_role_display(MemberRole::Admin, 100), "admin");
+        assert_eq!(member_role_display(MemberRole::Moderator, 50), "moderator");
+        assert_eq!(member_role_display(MemberRole::User, 0), "");
+        assert_eq!(member_role_display(MemberRole::Moderator, 75), "75");
+        assert_eq!(member_role_display(MemberRole::User, -5), "-5");
+
+        let custom_mod = RoomMember {
+            user_id: "@alice:example.org".into(),
+            name: "Alice".into(),
+            role: MemberRole::Moderator,
+            power_level: 75,
+            own: true,
+            role_editable: true,
+            ..RoomMember::default()
+        };
+        let mut chooser = RoleChooser::new(&custom_mod, false, 80, 1);
+        assert_eq!(chooser.options, [(50, "Moderator"), (0, "Default")]);
+        assert!(!chooser.needs_last_admin_confirm(50));
+        assert!(chooser.select(1));
+        assert_eq!(chooser.chosen(), Some((0, "Default")));
+
+        let sole_admin = RoomMember {
+            user_id: "@alice:example.org".into(),
+            name: "Alice".into(),
+            role: MemberRole::Admin,
+            power_level: 100,
+            own: true,
+            role_editable: true,
+            ..RoomMember::default()
+        };
+        let self_admin_chooser = RoleChooser::new(&sole_admin, false, 100, 1);
+        assert!(self_admin_chooser.needs_last_admin_confirm(50));
+        assert!(!self_admin_chooser.needs_last_admin_confirm(100));
+
+        let other = RoomMember {
+            user_id: "@bob:example.org".into(),
+            name: "Bob".into(),
+            role: MemberRole::Admin,
+            power_level: 100,
+            own: false,
+            role_editable: true,
+            ..RoomMember::default()
+        };
+        let chooser_other = RoleChooser::new(&other, true, 100, 1);
+        assert!(!chooser_other.needs_last_admin_confirm(50));
+
+        let mut ban = BanPrompt::new("@bob:example.org".into(), "Bob Secret".into());
+        ban.reason.set("spamming links");
+        let debug = format!(
+            "{:?} {:?} {:?}",
+            ban,
+            chooser_other,
+            Confirm::Unban("@bob:example.org".into())
+        );
+        for secret in ["bob", "Bob", "Secret", "spamming", "alice"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
     }
 }

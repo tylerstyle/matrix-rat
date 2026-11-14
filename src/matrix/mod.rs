@@ -6,6 +6,7 @@ mod drafts;
 mod keyring;
 mod manage;
 mod media;
+mod moderation;
 mod notify;
 mod receipts;
 mod rooms;
@@ -44,7 +45,7 @@ use matrix_sdk_ui::sync_service::{State, SyncService};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::format::Outgoing;
-use crate::model::{ItemRef, Message};
+use crate::model::{ItemRef, Message, PinnedMessage, RoomPower};
 use crate::paths::Paths;
 
 /// Rooms shown before the user scrolls for more. Paging arrives with the timeline work.
@@ -115,6 +116,23 @@ pub enum MatrixCmd {
     Redact {
         room_id: String,
         item: ItemRef,
+        reason: Option<String>,
+    },
+    /// Pin or unpin an event in a room (`m.room.pinned_events`).
+    Pin {
+        room_id: String,
+        event_id: String,
+        pinned: bool,
+    },
+    /// Fetch summaries for all currently pinned events in a room.
+    FetchPinned {
+        room_id: String,
+    },
+    /// Forward a message from one room into another as a standalone copy.
+    Forward {
+        from_room_id: String,
+        event_id: String,
+        to_room_id: String,
     },
     /// Try again to send a message that failed.
     Retry {
@@ -287,6 +305,15 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Edit { room_id, .. } => write!(f, "Edit({room_id})"),
             Self::ToggleReaction { room_id, .. } => write!(f, "ToggleReaction({room_id})"),
             Self::Redact { room_id, .. } => write!(f, "Redact({room_id})"),
+            Self::Pin {
+                room_id, pinned, ..
+            } => write!(f, "Pin({room_id}, {pinned})"),
+            Self::FetchPinned { room_id } => write!(f, "FetchPinned({room_id})"),
+            Self::Forward {
+                from_room_id,
+                to_room_id,
+                ..
+            } => write!(f, "Forward({from_room_id} -> {to_room_id})"),
             Self::Retry { room_id, .. } => write!(f, "Retry({room_id})"),
             Self::Typing { room_id, typing } => write!(f, "Typing({room_id}, {typing})"),
             Self::MarkRead { room_id, .. } => write!(f, "MarkRead({room_id})"),
@@ -571,6 +598,28 @@ pub enum MatrixEvent {
         generation: u64,
         results: Vec<UserMatch>,
     },
+    /// Moderation permissions for a room (sent on open and whenever power levels change).
+    RoomPower {
+        room_id: String,
+        power: RoomPower,
+    },
+    /// Current set of pinned event IDs (`m.room.pinned_events`) in a room.
+    PinnedEvents {
+        room_id: String,
+        ids: Vec<String>,
+    },
+    /// Loaded summaries for [`MatrixCmd::FetchPinned`].
+    PinnedList {
+        room_id: String,
+        items: Vec<PinnedMessage>,
+        error: Option<String>,
+    },
+    /// Outcome of [`MatrixCmd::Forward`].
+    ForwardResult {
+        to_room_id: String,
+        to_room_name: String,
+        result: Result<(), String>,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -693,6 +742,23 @@ impl std::fmt::Debug for MatrixEvent {
                 "UserSearchResults(generation {generation}, {} results)",
                 results.len()
             ),
+            Self::RoomPower { room_id, power } => write!(f, "RoomPower({room_id}, {power:?})"),
+            Self::PinnedEvents { room_id, ids } => {
+                write!(f, "PinnedEvents({room_id}, {} pinned)", ids.len())
+            }
+            Self::PinnedList {
+                room_id,
+                items,
+                error,
+            } => write!(
+                f,
+                "PinnedList({room_id}, {} items, err: {})",
+                items.len(),
+                error.is_some()
+            ),
+            Self::ForwardResult {
+                to_room_id, result, ..
+            } => write!(f, "ForwardResult({to_room_id}, ok: {})", result.is_ok()),
         }
     }
 }
@@ -1145,6 +1211,28 @@ impl Worker {
         let mut notify_changes = client.notification_settings().await.subscribe_to_changes();
         let mut notify_open = true;
         let mut manager = manage::Manager::new(client.clone(), self.events.clone());
+        let power_events = self.events.clone();
+        let manage_refresh = manager.refresh_signal();
+        let power_handler = client.add_event_handler(
+            move |_ev: matrix_sdk::ruma::events::room::power_levels::SyncRoomPowerLevelsEvent,
+                  room: matrix_sdk::Room| {
+                let events = power_events.clone();
+                let refresh = manage_refresh.clone();
+                async move {
+                    manage::emit_room_power(&events, &room).await;
+                    refresh.notify_one();
+                }
+            },
+        );
+        let member_refresh = manager.refresh_signal();
+        let member_handler = client.add_event_handler(
+            move |_ev: matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent| {
+                let refresh = member_refresh.clone();
+                async move {
+                    refresh.notify_one();
+                }
+            },
+        );
         let end = loop {
             tokio::select! {
                 Some(diffs) = space_changes.next() => {
@@ -1268,6 +1356,8 @@ impl Worker {
                 },
             }
         };
+        client.remove_event_handler(power_handler);
+        client.remove_event_handler(member_handler);
         verifier.stop().await;
         manager.stop();
         searcher.stop();

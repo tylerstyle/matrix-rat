@@ -126,4 +126,10 @@ pub enum Action {
     ToggleUnread,
     /// Mark every room as read.
     MarkAllRead,
+    /// Pin or unpin the selected message.
+    PinMessage,
+    /// Open the room's pinned messages popup.
+    OpenPinned,
+    /// Forward the selected message to another room.
+    ForwardMessage,
 }

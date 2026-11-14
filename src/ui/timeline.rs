@@ -60,17 +60,20 @@ const INDENT: &str = "  ";
 /// shield, which is then not said again (in a bridged room every line would say it).
 fn marker(message: &Message, repeated_shield: bool) -> Option<(String, Role)> {
     let shield = message.shield.filter(|_| !repeated_shield);
-    match (message.state, message.edited) {
-        (SendState::Sending, _) => Some((message.sending_label(), Role::Muted)),
-        (SendState::Failed, _) => Some((message.failed_label(), Role::Error)),
-        (SendState::Sent, edited) => {
+    match (message.state, message.edited, message.pinned) {
+        (SendState::Sending, _, _) => Some((message.sending_label(), Role::Muted)),
+        (SendState::Failed, _, _) => Some((message.failed_label(), Role::Error)),
+        (SendState::Sent, edited, pinned) => {
             let role = match shield {
                 Some(shield) if shield.serious() => Role::Error,
-                _ => Role::Muted,
+                Some(_) => Role::Muted,
+                None if pinned => Role::StatusKey,
+                None => Role::Muted,
             };
             let parts: Vec<&str> = shield
                 .map(|shield| shield.label())
                 .into_iter()
+                .chain(pinned.then_some("(pinned)"))
                 .chain(edited.then_some("(edited)"))
                 .collect();
             (!parts.is_empty()).then(|| (parts.join(" "), role))
