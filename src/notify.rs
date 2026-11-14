@@ -476,6 +476,9 @@ struct Live {
     owner: Option<String>,
 }
 
+/// How long the notification service may take to answer a call.
+const CALL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl Clickable {
     fn new(address: Option<String>) -> Self {
         Self {
@@ -486,10 +489,14 @@ impl Clickable {
     }
 
     async fn connect(address: Option<&str>) -> zbus::Result<Link> {
-        let connection = match address {
-            Some(address) => zbus::connection::Builder::address(address).build().await?,
-            None => zbus::Connection::session().await?,
+        // A notification service that does not answer must not hold up everything
+        // after it: a call that takes this long has failed, and the plain way is
+        // taken instead.
+        let builder = match address {
+            Some(address) => zbus::connection::Builder::address(address),
+            None => zbus::connection::Builder::session(),
         };
+        let connection = builder.method_timeout(CALL_PATIENCE).build().await?;
         let capabilities: Vec<String> = connection
             .call_method(
                 Some(SERVICE),
@@ -1285,8 +1292,10 @@ mod tests {
                 .expect("the stand-in service");
             let (shown, asked) = tokio::sync::mpsc::unbounded_channel();
             let connection = service.clone();
+            // Listening from before the first caller can know of the service: a call
+            // that arrived ahead of the task below would never be answered.
+            let mut calls = zbus::MessageStream::from(&service);
             tokio::spawn(async move {
-                let mut calls = zbus::MessageStream::from(&service);
                 let mut next_id = 7u32;
                 while let Some(Ok(call)) = calls.next().await {
                     let header = call.header();

@@ -531,6 +531,7 @@ mod tests {
                         invited: false,
                         own: true,
                         removable: false,
+                        ..RoomMember::default()
                     },
                     RoomMember {
                         user_id: BOB.into(),
@@ -539,6 +540,7 @@ mod tests {
                         invited: false,
                         own: false,
                         removable: true,
+                        ..RoomMember::default()
                     },
                     RoomMember {
                         user_id: CAROL.into(),
@@ -547,11 +549,13 @@ mod tests {
                         invited: false,
                         own: false,
                         removable: false,
+                        ..RoomMember::default()
                     },
                 ],
                 members_error: None,
                 members_loading: false,
                 members_partial: false,
+                ..RoomDetails::default()
             })),
         }));
     }

@@ -574,6 +574,7 @@ impl App {
         timeline.reveal_selected = timeline.selected.is_some();
 
         self.rooms[self.active].messages = messages;
+        self.sync_pinned_flags(&room_id);
         self.timeline = timeline;
         self.timeline_rev += 1;
         self.repaint = true;

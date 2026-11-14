@@ -131,6 +131,12 @@ impl Unread {
     fn settled(&self) -> bool {
         !self.catching_up && self.caught_up_at.is_none_or(|at| at.elapsed() >= CATCH_UP)
     }
+
+    #[cfg(test)]
+    pub(super) fn settle_immediately(&mut self) {
+        self.catching_up = false;
+        self.caught_up_at = None;
+    }
 }
 
 /// The event id of a message the server has.

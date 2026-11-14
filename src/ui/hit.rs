@@ -30,6 +30,10 @@ pub enum InputTarget {
     VerifyPassword,
     IgnoredFilter,
     ReportReason,
+    /// Reason input inside `ReasonConfirmPopup`.
+    ReasonConfirm,
+    /// Inline ban reason input inside `RoomInfo`.
+    BanReason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +94,14 @@ pub enum HitId {
     ReportSubmit,
     /// A match in the user directory dropdown inside the direct-chat / invite popup.
     UserSearchRow(usize),
+    /// Clickable row in the Pinned messages popup (jump to message).
+    PinnedRow(usize),
+    /// Unpin action button on a row in the Pinned messages popup.
+    PinnedUnpin(usize),
+    /// Submit (`true`) or Cancel (`false`) button inside `ReasonConfirmPopup`.
+    ReasonConfirmBtn(bool),
+    /// Clickable "Open ->" affordance on a forward-success toast.
+    Toast,
 }
 
 #[derive(Debug, Default)]

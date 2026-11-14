@@ -97,6 +97,7 @@ pub struct Timelines {
     /// Current ignored users (`m.ignored_user_list`), shared with open timelines.
     ignored: watch::Receiver<IgnoredSet>,
     unread_flags: UnreadFlags,
+    pinned_cache: Arc<std::sync::Mutex<super::moderation::PinnedCache>>,
 }
 
 impl Timelines {
@@ -125,6 +126,7 @@ impl Timelines {
             drafts_told: HashSet::new(),
             ignored,
             unread_flags: UnreadFlags::start(events.clone()),
+            pinned_cache: Arc::default(),
             events,
         }
     }
@@ -722,12 +724,128 @@ impl Timelines {
                 })
                 .await;
             }
-            MatrixCmd::Redact { room_id, item } => {
+            MatrixCmd::Redact {
+                room_id,
+                item,
+                reason,
+            } => {
+                let cache = self.pinned_cache.clone();
+                let rid = room_id.clone();
+                let clean_reason = reason
+                    .as_deref()
+                    .map(crate::text::sanitize)
+                    .filter(|s| !crate::text::is_blank(s));
                 self.with_active_timeline(&room_id, "Could not delete", |timeline| async move {
-                    timeline.redact(&item_id(&item)?, None).await?;
+                    let target = item_id(&item)?;
+                    timeline.redact(&target, clean_reason.as_deref()).await?;
+                    if let ItemRef::Event(id) = item {
+                        cache
+                            .lock()
+                            .expect("pinned cache poisoned")
+                            .invalidate_room_event(&rid, &id);
+                    }
                     Ok(())
                 })
                 .await;
+            }
+            MatrixCmd::Pin {
+                room_id,
+                event_id,
+                pinned,
+            } => {
+                let room = match self.room(&room_id) {
+                    Ok(room) => room,
+                    Err(err) => {
+                        return self.fail("Could not update pinned message", err);
+                    }
+                };
+                let events = self.events.clone();
+                let cache = self.pinned_cache.clone();
+                tokio::spawn(async move {
+                    match super::moderation::pin(&room, &event_id, pinned, &cache).await {
+                        Ok(ids) => {
+                            let _ = events.send(MatrixEvent::PinnedEvents { room_id, ids });
+                        }
+                        Err(err) => {
+                            let _ = events.send(MatrixEvent::ActionFailed(err));
+                        }
+                    }
+                });
+            }
+            MatrixCmd::FetchPinned { room_id } => {
+                let room = match self.room(&room_id) {
+                    Ok(room) => room,
+                    Err(err) => {
+                        let _ = self.events.send(MatrixEvent::PinnedList {
+                            room_id,
+                            items: Vec::new(),
+                            error: Some(err.to_string()),
+                        });
+                        return;
+                    }
+                };
+                let events = self.events.clone();
+                let cache = self.pinned_cache.clone();
+                let ignored = self.ignored.borrow().clone();
+                tokio::spawn(async move {
+                    let (items, error) =
+                        super::moderation::fetch_pinned(&room, &cache, &ignored).await;
+                    let _ = events.send(MatrixEvent::PinnedList {
+                        room_id,
+                        items,
+                        error,
+                    });
+                });
+            }
+            MatrixCmd::Forward {
+                from_room_id,
+                event_id,
+                to_room_id,
+            } => {
+                let from_room = match self.room(&from_room_id) {
+                    Ok(room) => room,
+                    Err(err) => {
+                        let _ = self.events.send(MatrixEvent::ForwardResult {
+                            to_room_id,
+                            to_room_name: String::new(),
+                            result: Err(err.to_string()),
+                        });
+                        return;
+                    }
+                };
+                let to_room = match self.room(&to_room_id) {
+                    Ok(room) => room,
+                    Err(err) => {
+                        let _ = self.events.send(MatrixEvent::ForwardResult {
+                            to_room_id,
+                            to_room_name: String::new(),
+                            result: Err(err.to_string()),
+                        });
+                        return;
+                    }
+                };
+                let client = self.client.clone();
+                let events = self.events.clone();
+                tokio::spawn(async move {
+                    let raw_name = match to_room.cached_display_name() {
+                        Some(name) => name.to_string(),
+                        None => to_room
+                            .display_name()
+                            .await
+                            .map(|name| name.to_string())
+                            .unwrap_or_else(|_| to_room_id.clone()),
+                    };
+                    let to_room_name = crate::text::sanitize_line(&raw_name);
+                    let result = super::moderation::forward_message(
+                        &client, &from_room, &to_room, &event_id,
+                    )
+                    .await;
+                    let _ = events.send(MatrixEvent::ForwardResult {
+                        to_room_id,
+                        to_room_name,
+                        result,
+                    });
+                });
             }
             MatrixCmd::Retry { room_id, item } => {
                 self.with_timeline(&room_id, "Could not retry", |timeline| async move {
@@ -1460,6 +1578,30 @@ async fn forward(
     if events.send(snapshot(&items, marks, messages)).is_err() {
         return;
     }
+    super::manage::emit_room_power(&events, &room).await;
+    let mut last_pinned: Vec<String> = match room.pinned_event_ids() {
+        Some(ids) => ids.into_iter().map(|id| id.to_string()).collect(),
+        None => room
+            .load_pinned_events()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
+    };
+    if events
+        .send(MatrixEvent::PinnedEvents {
+            room_id: room_id.clone(),
+            ids: last_pinned.clone(),
+        })
+        .is_err()
+    {
+        return;
+    }
+    let pin_stream = room.pinned_event_ids_stream();
+    pin_mut!(pin_stream);
     let mut clear_paginators = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
@@ -1552,6 +1694,22 @@ async fn forward(
                 };
                 if events.send(MatrixEvent::Typing { generation, names }).is_err() {
                     return;
+                }
+            }
+            pinned = pin_stream.next() => {
+                let Some(ids) = pinned else { continue };
+                let next: Vec<String> = ids.into_iter().map(|id| id.to_string()).collect();
+                if next != last_pinned {
+                    last_pinned = next.clone();
+                    if events
+                        .send(MatrixEvent::PinnedEvents {
+                            room_id: room_id.clone(),
+                            ids: next,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
         }

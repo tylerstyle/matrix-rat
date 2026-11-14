@@ -19,14 +19,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
     let Some(rect) = centered(area, WIDTH, HEIGHT) else {
         return;
     };
-    let inner = popup(
-        frame,
-        app,
-        area,
-        rect,
-        "Command palette",
-        "↑↓ move · Enter run · Esc close",
-    );
+    let (title, footer, placeholder) = if palette.forward.is_some() {
+        (
+            "Forward to room",
+            "↑↓ move · Enter forward · Esc cancel",
+            "type a room name…",
+        )
+    } else {
+        (
+            "Command palette",
+            "↑↓ move · Enter run · Esc close",
+            "type a command, room, or theme…",
+        )
+    };
+    let inner = popup(frame, app, area, rect, title, footer);
     let theme = &app.theme;
     if inner.width == 0 || inner.height < 2 {
         return;
@@ -40,7 +46,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
         Line::from(vec![
             Span::styled("⌕ ", theme.style(Role::StatusKey)),
             Span::styled(
-                truncate("type a command, room, or theme…", max_query),
+                truncate(placeholder, max_query),
                 theme.style(Role::Placeholder),
             ),
         ])
@@ -65,7 +71,26 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
         let rule_rect = row(inner, 1);
         let count = format!(" {}/{}", palette.filtered.len(), palette.entries.len());
         let count_w = width(&count);
-        if rule_rect.width as usize >= count_w + 6 {
+        if let Some(target) = &palette.forward
+            && rule_rect.width as usize >= count_w + 12
+        {
+            let prefix = "Message: ";
+            let avail = rule_rect.width as usize - count_w - width(prefix) - 1;
+            let preview = truncate(&target.preview, avail);
+            let pad = rule_rect
+                .width
+                .saturating_sub((width(prefix) + width(&preview) + count_w) as u16)
+                as usize;
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(prefix, theme.style(Role::Muted)),
+                    Span::styled(preview, theme.style(Role::Text)),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(count, theme.style(Role::Muted)),
+                ]),
+                rule_rect,
+            );
+        } else if rule_rect.width as usize >= count_w + 6 {
             let line_w = rule_rect.width as usize - count_w;
             frame.render_widget(
                 Line::from(vec![

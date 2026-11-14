@@ -24,11 +24,11 @@ expression: text
 "│                      ││                                                                          │"
 "│                      ││● you  09:20                                                              │"
 "│                      ││  Good to know, thanks. (edited)                                          │"
-"│                      ││                                                                          │"
-"│                      ││● dave  10:02                                        ╭────────────────────╮"
-"│                      ││  Shipping a TUI client on top of it this week 🐀    │ Reply        Enter │" Hidden by multi-width symbols: [(73, " ")]
-"│                      │╰ carol is typing… ───────────────────────────────────│ Reply in thread  t │"
-"│                      │╭ 3 Message ──────────────────────────────────────────│ React…           r │"
-"│                      ││ Click here or press Alt-3 to write                  │ Copy text        c │"
+"│                      ││                                                     ╭────────────────────╮"
+"│                      ││● dave  10:02                                        │ Reply        Enter │"
+"│                      ││  Shipping a TUI client on top of it this week 🐀    │ Reply in thread  t │" Hidden by multi-width symbols: [(73, " ")]
+"│                      │╰ carol is typing… ───────────────────────────────────│ React…           r │"
+"│                      │╭ 3 Message ──────────────────────────────────────────│ Copy text        c │"
+"│                      ││ Click here or press Alt-3 to write                  │ Forward…           │"
 "╰──────────────────────╯╰─────────────────────────────────────────────────────╰────────────────────╯"
 " ● demo data  Enter reply  t thread  e edit  r react  Del delete  F1 help  F2 settings  F3 rat-dark "

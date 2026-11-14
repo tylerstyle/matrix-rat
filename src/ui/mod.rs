@@ -868,6 +868,38 @@ mod tests {
             Some(Modal::RoomInfo(info)),
             menu_modal(false),
             menu_modal(true),
+            {
+                let mut pinned =
+                    crate::modal::PinnedPopup::open("!r:example.org".into(), "rust".into(), true);
+                pinned.set_items(
+                    vec![crate::model::PinnedMessage {
+                        event_id: "$p1:example.org".into(),
+                        sender: "carol".into(),
+                        sender_id: Some("@carol:example.org".into()),
+                        day: "Today".into(),
+                        time: "09:12".into(),
+                        snippet: "Pinned message snippet".into(),
+                        redacted: false,
+                        undecryptable: false,
+                        ignored: false,
+                    }],
+                    None,
+                );
+                Some(Modal::Pinned(pinned))
+            },
+            Some(Modal::ReasonConfirm(
+                crate::modal::ReasonConfirmPopup::redact(
+                    "!r:example.org".into(),
+                    crate::model::ItemRef::Event("$p1:example.org".into()),
+                    "carol".into(),
+                    "Off-topic preview text".into(),
+                ),
+            )),
+            Some(Modal::ReasonConfirm(crate::modal::ReasonConfirmPopup::ban(
+                "!r:example.org".into(),
+                "@bob:example.org".into(),
+                "bob".into(),
+            ))),
         ];
         for modal in modals {
             let mut app = App::demo();
@@ -962,5 +994,125 @@ mod tests {
         app.perform(Action::FilterUnread);
         app.perform(Action::FilterPeople);
         insta::assert_snapshot!(render(&mut app, 80, 24));
+    }
+
+    #[test]
+    fn moderation_modals_and_pinned_toast_snapshots() {
+        use crate::action::Action;
+        use crate::matrix::{MemberRole, RoomDetails, RoomMember};
+        use crate::modal::Modal;
+        use crate::model::PinnedMessage;
+
+        // Pinned messages popup (normal + redacted pin).
+        let mut pinned_app = App::demo();
+        pinned_app.perform(Action::OpenPinned);
+        if let Some(Modal::Pinned(ref mut popup)) = pinned_app.modal {
+            popup.can_pin = true;
+            popup.set_items(
+                vec![
+                    PinnedMessage {
+                        event_id: "$1".into(),
+                        sender: "carol".into(),
+                        sender_id: Some("@carol:example.org".into()),
+                        day: "Today".into(),
+                        time: "09:12".into(),
+                        snippet: "Is the sliding sync proxy still needed?".into(),
+                        redacted: false,
+                        undecryptable: false,
+                        ignored: false,
+                    },
+                    PinnedMessage {
+                        event_id: "$2".into(),
+                        sender: "bob".into(),
+                        sender_id: Some("@bob:example.org".into()),
+                        day: "Yesterday".into(),
+                        time: "18:04".into(),
+                        snippet: String::new(),
+                        redacted: true,
+                        undecryptable: false,
+                        ignored: false,
+                    },
+                ],
+                None,
+            );
+        }
+        insta::assert_snapshot!("pinned_popup", render(&mut pinned_app, 100, 30));
+
+        // ReasonConfirmPopup (redact).
+        let mut redact_app = App::demo();
+        let mut redact_modal = crate::modal::ReasonConfirmPopup::redact(
+            redact_app.rooms[redact_app.active].id.clone(),
+            crate::model::ItemRef::Event("$1".into()),
+            "carol".into(),
+            "Morning! Is the sliding sync proxy still needed?".into(),
+        );
+        redact_modal.reason.set("duplicate question");
+        redact_app.modal = Some(Modal::ReasonConfirm(redact_modal));
+        insta::assert_snapshot!("reason_confirm_redact", render(&mut redact_app, 100, 30));
+
+        // RoomInfo showing Banned section, custom power level, and inline BanPrompt.
+        let mut info_app = App::demo();
+        info_app.perform(Action::RoomInfo);
+        if let Some(Modal::RoomInfo(ref mut info)) = info_app.modal {
+            info.details = Some(RoomDetails {
+                name: "rust".into(),
+                topic: "Matrix TUI dev".into(),
+                joined: 3,
+                own_power_level: 100,
+                admin_count: 1,
+                members: vec![
+                    RoomMember {
+                        user_id: "@alice:example.org".into(),
+                        name: "alice".into(),
+                        role: MemberRole::Admin,
+                        power_level: 100,
+                        own: true,
+                        role_editable: true,
+                        ..RoomMember::default()
+                    },
+                    RoomMember {
+                        user_id: "@carol:example.org".into(),
+                        name: "carol".into(),
+                        role: MemberRole::Moderator,
+                        power_level: 75,
+                        bannable: true,
+                        role_editable: true,
+                        ..RoomMember::default()
+                    },
+                    RoomMember {
+                        user_id: "@eve:example.org".into(),
+                        name: "eve".into(),
+                        role: MemberRole::User,
+                        power_level: 0,
+                        banned: true,
+                        unbannable: true,
+                        ..RoomMember::default()
+                    },
+                ],
+                ..RoomDetails::default()
+            });
+            info.select(crate::manage::InfoRow::Member(1));
+            info.ban_prompt = Some(crate::manage::BanPrompt::new(
+                "@carol:example.org".into(),
+                "carol".into(),
+            ));
+        }
+        insta::assert_snapshot!("room_info_moderation", render(&mut info_app, 100, 30));
+
+        // Timeline "(pinned)" badge + Forwarded toast with "Open ->" button.
+        let mut toast_app = App::demo();
+        if let Some(first) = toast_app.rooms[toast_app.active].messages.get_mut(1) {
+            first.pinned = true;
+        }
+        let target_id = toast_app.rooms[1].id.clone();
+        toast_app.on_matrix(crate::matrix::MatrixEvent::ForwardResult {
+            to_room_id: target_id,
+            to_room_name: "design".into(),
+            result: Ok(()),
+        });
+        insta::assert_snapshot!(
+            "pinned_badge_and_forward_toast",
+            render(&mut toast_app, 100, 30)
+        );
     }
 }

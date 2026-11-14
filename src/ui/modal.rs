@@ -13,8 +13,8 @@ use crate::keymap::Context;
 use crate::lineedit::LineEdit;
 use crate::matrix::ReauthKind;
 use crate::modal::{
-    EmojiPicker, IgnoredUsersPopup, LoginForm, Modal, RecoveryForm, ReportForm, Setting,
-    SettingsMenu,
+    EmojiPicker, IgnoredUsersPopup, LoginForm, Modal, PinnedPopup, ReasonConfirmKind,
+    ReasonConfirmPopup, RecoveryForm, ReportForm, Setting, SettingsMenu,
 };
 use crate::text::{sanitize, sanitize_line, truncate, width};
 use crate::theme::{Role, Theme};
@@ -42,6 +42,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Keybinds(editor) => super::keybinds::draw(frame, app, area, editor),
         Modal::IgnoredUsers(popup) => ignored_users(frame, app, area, popup),
         Modal::Report(form) => report(frame, app, area, form),
+        Modal::Pinned(popup) => pinned(frame, app, area, popup),
+        Modal::ReasonConfirm(confirm) => reason_confirm(frame, app, area, confirm),
     }
     app.modal = Some(modal);
 }
@@ -1000,5 +1002,293 @@ fn report(frame: &mut Frame, app: &mut App, area: Rect, form: &mut ReportForm) {
 
     if let Some(cursor) = cursor {
         frame.set_cursor_position(cursor);
+    }
+}
+
+fn pinned(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut PinnedPopup) {
+    let w = area.width.saturating_sub(4).clamp(24, 72);
+    let h = area.height.saturating_sub(2).clamp(8, 22);
+    let Some(rect) = centered(area, w, h) else {
+        return;
+    };
+    let room = sanitize_line(&popup_state.room_name);
+    let title = format!(
+        " Pinned — {} ",
+        truncate(&room, w.saturating_sub(14) as usize)
+    );
+    let footer = if popup_state.can_pin {
+        "Enter jump · Del/u unpin · Esc close"
+    } else {
+        "Enter jump · Esc close"
+    };
+    let inner = popup(frame, app, area, rect, &title, footer);
+    let theme = &app.theme;
+    if inner.width < 10 || inner.height < 2 {
+        return;
+    }
+
+    if popup_state.loading {
+        frame.render_widget(
+            Line::from(Span::styled(
+                "Loading pinned messages…",
+                theme.style(Role::Muted),
+            )),
+            row(inner, 0),
+        );
+        return;
+    }
+    if let Some(error) = &popup_state.error {
+        frame.render_widget(
+            Paragraph::new(sanitize(error))
+                .style(theme.style(Role::Error))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+    if popup_state.items.is_empty() {
+        frame.render_widget(
+            Line::from(Span::styled("No pinned messages", theme.style(Role::Muted))),
+            row(inner, 0),
+        );
+        return;
+    }
+
+    let rows_per_item = 2usize;
+    let visible = ((inner.height as usize) / rows_per_item).max(1);
+    popup_state.page = visible;
+    popup_state.clamp_scroll(visible);
+    let start = popup_state.scroll;
+    let end = (start + visible).min(popup_state.items.len());
+
+    for (vis, index) in (start..end).enumerate() {
+        let item = &popup_state.items[index];
+        let y = inner.y + (vis * rows_per_item) as u16;
+        let selected = index == popup_state.selected;
+        let hovered_row = app.hover == Some(HitId::PinnedRow(index));
+        let hovered_unpin = app.hover == Some(HitId::PinnedUnpin(index));
+        let row_area = Rect::new(inner.x, y, inner.width, rows_per_item as u16);
+
+        let bg_style = if selected {
+            theme.style(Role::Pill)
+        } else if hovered_row || hovered_unpin {
+            theme.style(Role::Hover)
+        } else {
+            theme.style(Role::Text)
+        };
+        frame.buffer_mut().set_style(row_area, bg_style);
+        app.hits.add(row_area, HitId::PinnedRow(index));
+
+        let sender = sanitize_line(&item.sender);
+        let date = if !item.day.is_empty() && !item.time.is_empty() {
+            format!("{} {}", sanitize_line(&item.day), sanitize_line(&item.time))
+        } else if !item.time.is_empty() {
+            sanitize_line(&item.time)
+        } else {
+            sanitize_line(&item.day)
+        };
+        let unpin_label = " unpin ";
+        let unpin_w = if popup_state.can_pin {
+            width(unpin_label) as u16
+        } else {
+            0
+        };
+        let header_w = inner.width.saturating_sub(unpin_w + 1) as usize;
+        let sender_w = header_w.saturating_sub(width(&date) + 3);
+        let sender_shown = truncate(&sender, sender_w);
+        let mut head_spans = vec![Span::styled(
+            sender_shown,
+            bg_style
+                .patch(theme.style(Role::TitleFocused))
+                .add_modifier(Modifier::BOLD),
+        )];
+        if !date.is_empty() {
+            head_spans.push(Span::styled(
+                format!(" · {date}"),
+                bg_style.patch(theme.style(Role::Muted)),
+            ));
+        }
+        frame.render_widget(
+            Line::from(head_spans),
+            Rect::new(inner.x, y, inner.width.saturating_sub(unpin_w), 1),
+        );
+
+        if popup_state.can_pin && inner.width > unpin_w + 4 {
+            let ux = inner.right() - unpin_w;
+            let urect = Rect::new(ux, y, unpin_w, 1);
+            let ustyle = if hovered_unpin {
+                theme.style(Role::Pill).add_modifier(Modifier::BOLD)
+            } else {
+                theme.style(Role::Error)
+            };
+            frame.render_widget(Line::from(Span::styled(unpin_label, ustyle)), urect);
+            app.hits.add(urect, HitId::PinnedUnpin(index));
+        }
+
+        if y + 1 < inner.bottom() {
+            let snippet_raw = if item.redacted {
+                "[message deleted]".to_owned()
+            } else {
+                sanitize_line(&item.snippet)
+            };
+            let snippet = truncate(&snippet_raw, inner.width.saturating_sub(2) as usize);
+            let sstyle = if item.redacted {
+                bg_style
+                    .patch(theme.style(Role::Muted))
+                    .add_modifier(Modifier::ITALIC)
+            } else {
+                bg_style.patch(theme.style(Role::Text))
+            };
+            frame.render_widget(
+                Line::from(vec![Span::raw("  "), Span::styled(snippet, sstyle)]),
+                Rect::new(inner.x, y + 1, inner.width, 1),
+            );
+        }
+    }
+}
+
+fn reason_confirm(frame: &mut Frame, app: &mut App, area: Rect, form: &mut ReasonConfirmPopup) {
+    let w = area.width.saturating_sub(4).clamp(28, 60);
+    let h = 11u16.min(area.height.saturating_sub(2)).max(7);
+    let Some(rect) = centered(area, w, h) else {
+        return;
+    };
+    let (title, question, detail, action_label): (&str, &str, String, &str) = match &form.kind {
+        ReasonConfirmKind::Redact {
+            sender_name,
+            preview,
+            ..
+        } => {
+            let detail = if preview.is_empty() {
+                sender_name.clone()
+            } else {
+                format!("{sender_name}: {preview}")
+            };
+            (
+                " Delete message ",
+                "Delete this message from the room?",
+                detail,
+                "Delete",
+            )
+        }
+        ReasonConfirmKind::Ban {
+            user_id, user_name, ..
+        } => (
+            " Ban user ",
+            "Ban this user from the room?",
+            if user_name.is_empty() {
+                user_id.clone()
+            } else {
+                user_name.clone()
+            },
+            "Ban",
+        ),
+    };
+    let inner = popup(
+        frame,
+        app,
+        area,
+        rect,
+        title,
+        "Tab move · Enter confirm · Esc cancel",
+    );
+    let theme = &app.theme;
+    if inner.width < 12 || inner.height < 5 {
+        return;
+    }
+
+    frame.render_widget(
+        Line::from(Span::styled(
+            truncate(question, inner.width as usize),
+            theme.style(Role::Text).add_modifier(Modifier::BOLD),
+        )),
+        row(inner, 0),
+    );
+    let detail_line = sanitize_line(&detail);
+    frame.render_widget(
+        Line::from(Span::styled(
+            truncate(&detail_line, inner.width as usize),
+            theme.style(Role::Muted),
+        )),
+        row(inner, 1),
+    );
+
+    let reason_y = if inner.height >= 7 { 3 } else { 2 };
+    let reason_rect = row(inner, reason_y);
+    app.hits
+        .add(reason_rect, HitId::Field(ReasonConfirmPopup::REASON));
+    let on_reason = form.on_reason();
+    let label = "Reason";
+    let input_x = reason_rect.x + FIELD_LABEL as u16;
+    let input_w = reason_rect.width.saturating_sub(FIELD_LABEL as u16) as usize;
+    let label_style = if on_reason {
+        theme.style(Role::TitleFocused).add_modifier(Modifier::BOLD)
+    } else {
+        theme.style(Role::Muted)
+    };
+    let (shown, cursor_col) = if form.reason.is_empty() && !on_reason {
+        ("(optional)".to_owned(), 0)
+    } else if form.reason.is_empty() {
+        (String::new(), 0)
+    } else {
+        let v = form.reason.view(input_w.saturating_sub(1), false);
+        (v.text, v.cursor_col)
+    };
+    let val_style = if form.reason.is_empty() && !on_reason {
+        theme.style(Role::Placeholder)
+    } else {
+        theme.style(Role::Text)
+    };
+    frame.render_widget(
+        Line::from(vec![
+            Span::styled(format!("{label:<FIELD_LABEL$}"), label_style),
+            Span::styled(shown, val_style),
+        ]),
+        reason_rect,
+    );
+    if input_w > 0 {
+        let input_rect = Rect::new(input_x, reason_rect.y, input_w as u16, 1);
+        app.hits
+            .add(input_rect, HitId::Input(InputTarget::ReasonConfirm));
+        if on_reason {
+            frame.set_cursor_position(Position::new(
+                (input_x + cursor_col as u16).min(reason_rect.right().saturating_sub(1)),
+                reason_rect.y,
+            ));
+        }
+    }
+
+    let btn_y = inner.bottom().saturating_sub(1);
+    let submit_text = format!(" [{action_label}] ");
+    let cancel_text = " [Cancel] ";
+    let submit_w = width(&submit_text) as u16;
+    let cancel_w = width(cancel_text) as u16;
+    if inner.width > submit_w + cancel_w {
+        let submit_rect = Rect::new(inner.x, btn_y, submit_w, 1);
+        let cancel_rect = Rect::new(inner.x + submit_w + 1, btn_y, cancel_w, 1);
+        let submit_focused = form.on_submit() || app.hover == Some(HitId::ReasonConfirmBtn(true));
+        let cancel_focused = form.on_cancel() || app.hover == Some(HitId::ReasonConfirmBtn(false));
+        let submit_style = if submit_focused {
+            theme
+                .style(Role::Error)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            theme.style(Role::Error)
+        };
+        let cancel_style = if cancel_focused {
+            theme.style(Role::Pill).add_modifier(Modifier::BOLD)
+        } else {
+            theme.style(Role::Muted)
+        };
+        frame.render_widget(
+            Line::from(Span::styled(submit_text, submit_style)),
+            submit_rect,
+        );
+        frame.render_widget(
+            Line::from(Span::styled(cancel_text, cancel_style)),
+            cancel_rect,
+        );
+        app.hits.add(submit_rect, HitId::ReasonConfirmBtn(true));
+        app.hits.add(cancel_rect, HitId::ReasonConfirmBtn(false));
     }
 }

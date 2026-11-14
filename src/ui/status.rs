@@ -81,6 +81,26 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     if let Some((text, _)) = &app.toast {
         spans.push(Span::styled(format!(" {text} "), theme.style(Role::Toast)));
+        if let Some((room_id, _)) = &app.toast_room
+            && !room_id.is_empty()
+        {
+            let pill_x = area.x + spans.iter().map(|s| width(&s.content) as u16).sum::<u16>() + 1;
+            let pill = " Open → ";
+            let pill_w = width(pill) as u16;
+            if pill_x + pill_w <= right {
+                spans.push(Span::raw(" "));
+                let pill_style = if app.hover == Some(HitId::Toast) {
+                    theme.style(Role::Hover)
+                } else {
+                    theme
+                        .style(Role::Pill)
+                        .add_modifier(ratatui::style::Modifier::BOLD)
+                };
+                spans.push(Span::styled(pill, pill_style));
+                app.hits
+                    .add(Rect::new(pill_x, area.y, pill_w, 1), HitId::Toast);
+            }
+        }
     } else {
         use Action as A;
         let mut hints: Vec<(String, &str, Option<Action>)> = Vec::new();

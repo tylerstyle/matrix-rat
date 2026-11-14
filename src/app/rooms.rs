@@ -9,19 +9,20 @@ use super::App;
 use crate::action::{Action, Pane};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::manage::{
-    Address, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NewPopup, Pending, Stage, clean_input,
-    parse_address, parse_alias_local, parse_user,
+    Address, BanPrompt, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NewPopup, Pending,
+    RoleChooser, Stage, clean_input, parse_address, parse_alias_local, parse_user,
 };
 use crate::matrix::{
     Change, ManageCmd, ManageEvent, MatrixCmd, MemberRole, NotifyLevel, RoomDetails, RoomMember,
 };
 use crate::modal::Modal;
 use crate::model::{MsgKind, RoomKind};
+use crate::text::sanitize_line;
 
 /// A room that was joined or created shows up in the room list a moment later. Longer
 /// than this and opening it by itself would come as a surprise.
 const OPEN_WITHIN: Duration = Duration::from_secs(60);
-const NO_ACCOUNT: &str = "The demo has no account to do this with.";
+pub(super) const NO_ACCOUNT: &str = "The demo has no account to do this with.";
 /// What servers accept for a room name.
 const NAME_MAX: usize = 255;
 
@@ -61,7 +62,7 @@ impl App {
         true
     }
 
-    fn next_request(&mut self) -> u64 {
+    pub(super) fn next_request(&mut self) -> u64 {
         self.manage.requests += 1;
         self.manage.requests
     }
@@ -321,7 +322,7 @@ impl App {
             popup.select(row);
         }
         let room_id = room.id.clone();
-        self.open_modal(Modal::RoomInfo(popup));
+        self.open_modal(Modal::RoomInfo(Box::new(popup)));
         self.manage(ManageCmd::Info { room_id });
     }
 
@@ -355,8 +356,12 @@ impl App {
         match &mut self.modal {
             Some(Modal::New(_)) => self.close_manage(),
             Some(Modal::RoomInfo(info)) => {
-                if info.editing.take().is_some() || info.confirm.take().is_some() {
-                    // Stepped back from typing or from the question.
+                if info.ban_prompt.take().is_some()
+                    || info.role_chooser.take().is_some()
+                    || info.editing.take().is_some()
+                    || info.confirm.take().is_some()
+                {
+                    // Stepped back from typing, choosing a role, or the question.
                 } else if !info.filter.is_empty() {
                     info.set_filter(String::new());
                 } else {
@@ -380,14 +385,15 @@ impl App {
                     }
                 }
             }
-            Some(Modal::RoomInfo(info)) => match &mut info.editing {
-                Some((_, edit)) => {
+            Some(Modal::RoomInfo(info)) => {
+                if let Some(prompt) = &mut info.ban_prompt {
+                    prompt.reason.paste(first_line);
+                } else if let Some((_, edit)) = &mut info.editing {
                     edit.paste(first_line);
-                }
-                None => {
+                } else {
                     info.apply_filter(|f| f.paste(first_line));
                 }
-            },
+            }
             _ => {}
         }
     }
@@ -409,6 +415,25 @@ impl App {
         };
         if code == KeyCode::Esc {
             return self.manage_escape();
+        }
+        if let Some(prompt) = &mut info.ban_prompt {
+            if code == KeyCode::Enter && plain {
+                self.submit_ban_prompt();
+            } else {
+                prompt.reason.handle_key(code, mods, EditKeys::FULL);
+            }
+            return;
+        }
+        if let Some(chooser) = &mut info.role_chooser {
+            match code {
+                KeyCode::Up => chooser.step(-1),
+                KeyCode::Char('k') if plain => chooser.step(-1),
+                KeyCode::Down => chooser.step(1),
+                KeyCode::Char('j') if plain => chooser.step(1),
+                KeyCode::Enter if plain => self.submit_role_chooser(),
+                _ => {}
+            }
+            return;
         }
         if let Some((_, edit)) = &mut info.editing {
             if code == KeyCode::Enter {
@@ -441,11 +466,23 @@ impl App {
                     self.info_activate(row, 0);
                 }
             }
-            KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) => self.remove_member(),
+            KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) => {
+                self.remove_or_unban_member()
+            }
             KeyCode::Char('i')
                 if mods == KeyModifiers::ALT && matches!(row, Some(InfoRow::Member(_))) =>
             {
                 self.toggle_ignore_member();
+            }
+            KeyCode::Char('b')
+                if mods == KeyModifiers::ALT && matches!(row, Some(InfoRow::Member(_))) =>
+            {
+                self.open_ban_prompt();
+            }
+            KeyCode::Char('r')
+                if mods == KeyModifiers::ALT && matches!(row, Some(InfoRow::Member(_))) =>
+            {
+                self.open_role_chooser();
             }
             _ => {
                 let keys = EditKeys {
@@ -483,14 +520,16 @@ impl App {
                     popup.flip(slot);
                 }
             }
-            Click::Submit => {
-                if let Some(Modal::New(popup)) = &mut self.modal
-                    && popup.busy.is_none()
-                {
+            Click::Submit => match &mut self.modal {
+                Some(Modal::RoomInfo(info)) if info.ban_prompt.is_some() => {
+                    self.submit_ban_prompt();
+                }
+                Some(Modal::New(popup)) if popup.busy.is_none() => {
                     popup.focus = popup.slots() - 1;
                     self.submit_new();
                 }
-            }
+                _ => {}
+            },
             Click::Row(index) | Click::Step(index, _) | Click::Select(index) => {
                 let Some(Modal::RoomInfo(info)) = &mut self.modal else {
                     return;
@@ -519,6 +558,10 @@ impl App {
                 }
             }
             Click::MemberRemove => self.remove_member(),
+            Click::MemberBan => self.open_ban_prompt(),
+            Click::MemberUnban => self.unban_member(),
+            Click::MemberRole => self.open_role_chooser(),
+            Click::RoleOption(index) => self.pick_role_option(index),
             Click::MemberIgnore => self.toggle_ignore_member(),
             Click::Favourite => self.toggle_room_tag(false),
             Click::LowPriority => self.toggle_room_tag(true),
@@ -573,7 +616,10 @@ impl App {
         let confirmed = std::mem::take(&mut info.confirm);
         // Nothing is changed, shown as changed or asked about where there is no
         // account to do it with.
-        let sends = !matches!(row, InfoRow::Name | InfoRow::Topic | InfoRow::Invite);
+        let sends = !matches!(
+            row,
+            InfoRow::Name | InfoRow::Topic | InfoRow::Invite | InfoRow::Pinned
+        );
         if sends && !connected {
             info.error = Some(NO_ACCOUNT.to_owned());
             return;
@@ -651,6 +697,7 @@ impl App {
                 info.editing = Some((row, LineEdit::with_text(current).with_max_bytes(FIELD_MAX)));
                 return;
             }
+            InfoRow::Pinned => return self.open_pinned(),
             InfoRow::Invite => return self.open_new(Stage::Invite),
             InfoRow::Leave => {
                 if confirmed != Some(Confirm::Leave) {
@@ -725,6 +772,195 @@ impl App {
         info.wait_for(Pending::Change(Change::Kick), "Removing…");
         let room_id = info.room_id.clone();
         self.manage(ManageCmd::Kick { room_id, user_id });
+    }
+
+    /// Del on a member row unbans a banned user or removes a joined/invited member.
+    fn remove_or_unban_member(&mut self) {
+        let banned = matches!(
+            &self.modal,
+            Some(Modal::RoomInfo(info))
+                if info.selected_member().is_some_and(|m| m.banned)
+        );
+        if banned {
+            self.unban_member();
+        } else {
+            self.remove_member();
+        }
+    }
+
+    fn open_ban_prompt(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || info.editing.is_some() {
+            return;
+        }
+        info.error = None;
+        info.confirm = None;
+        info.role_chooser = None;
+        let Some(member) = info.selected_member().cloned() else {
+            return;
+        };
+        if !member.bannable {
+            info.error = Some(if member.own {
+                "You cannot ban yourself.".to_owned()
+            } else if member.banned {
+                "This user is already banned.".to_owned()
+            } else {
+                "You are not allowed to ban this member.".to_owned()
+            });
+            return;
+        }
+        let name = if member.name.is_empty() {
+            member.user_id.clone()
+        } else {
+            sanitize_line(&member.name)
+        };
+        info.ban_prompt = Some(BanPrompt::new(member.user_id, name));
+    }
+
+    fn submit_ban_prompt(&mut self) {
+        let connected = self.matrix.is_some();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        let Some(prompt) = info.ban_prompt.take() else {
+            return;
+        };
+        if !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        let reason = {
+            let trimmed = sanitize_line(prompt.reason.as_str()).trim().to_owned();
+            (!trimmed.is_empty()).then_some(trimmed)
+        };
+        info.error = None;
+        info.wait_for(Pending::Change(Change::Ban), "Banning…");
+        let room_id = info.room_id.clone();
+        self.manage(ManageCmd::Ban {
+            room_id,
+            user_id: prompt.user_id,
+            reason,
+        });
+    }
+
+    fn unban_member(&mut self) {
+        let connected = self.matrix.is_some();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || info.editing.is_some() {
+            return;
+        }
+        info.error = None;
+        info.ban_prompt = None;
+        info.role_chooser = None;
+        let Some(member) = info.selected_member().cloned() else {
+            return;
+        };
+        if !member.unbannable {
+            info.confirm = None;
+            info.error = Some("You are not allowed to unban this user.".to_owned());
+            return;
+        }
+        let user_id = member.user_id;
+        if info.confirm != Some(Confirm::Unban(user_id.clone())) {
+            info.confirm = Some(Confirm::Unban(user_id));
+            return;
+        }
+        info.confirm = None;
+        if !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        info.wait_for(Pending::Change(Change::Unban), "Unbanning…");
+        let room_id = info.room_id.clone();
+        self.manage(ManageCmd::Unban { room_id, user_id });
+    }
+
+    fn open_role_chooser(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || info.editing.is_some() {
+            return;
+        }
+        info.error = None;
+        info.confirm = None;
+        info.ban_prompt = None;
+        let Some(member) = info.selected_member().cloned() else {
+            return;
+        };
+        if !member.role_editable {
+            info.error = Some("You are not allowed to change this member's role.".to_owned());
+            return;
+        }
+        let Some(details) = info.details.as_ref() else {
+            return;
+        };
+        let chooser = RoleChooser::new(
+            &member,
+            details.own_is_creator,
+            details.own_power_level,
+            details.admin_count,
+        );
+        if chooser.options.is_empty() {
+            info.error = Some("No roles can be assigned with your power level.".to_owned());
+            return;
+        }
+        info.role_chooser = Some(chooser);
+    }
+
+    fn pick_role_option(&mut self, index: usize) {
+        if let Some(Modal::RoomInfo(info)) = &mut self.modal
+            && let Some(chooser) = &mut info.role_chooser
+        {
+            if !chooser.select(index) {
+                return;
+            }
+        } else {
+            return;
+        }
+        self.submit_role_chooser();
+    }
+
+    fn submit_role_chooser(&mut self) {
+        let connected = self.matrix.is_some();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        let Some(_details) = info.details.as_ref() else {
+            return;
+        };
+        let Some(chooser) = info.role_chooser.as_mut() else {
+            return;
+        };
+        let Some((level, _)) = chooser.chosen() else {
+            return;
+        };
+        if level == chooser.current_level {
+            info.role_chooser = None;
+            return;
+        }
+        if chooser.needs_last_admin_confirm(level) && !chooser.confirm_last_admin {
+            chooser.confirm_last_admin = true;
+            return;
+        }
+        let user_id = chooser.user_id.clone();
+        info.role_chooser = None;
+        if !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        info.error = None;
+        info.wait_for(Pending::Change(Change::SetRole), "Updating role…");
+        let room_id = info.room_id.clone();
+        self.manage(ManageCmd::SetRole {
+            room_id,
+            user_id,
+            level,
+        });
     }
 
     fn toggle_ignore_member(&mut self) {
@@ -926,6 +1162,9 @@ impl App {
         let done = match change {
             Change::Invite => "Invitation sent",
             Change::Kick => "Removed from the room",
+            Change::Ban => "Banned from the room",
+            Change::Unban => "Unbanned",
+            Change::SetRole => "Role updated",
             Change::Name => "Room renamed",
             Change::Topic => "Topic changed",
             Change::Favourite(true) => "Added to favourites",
@@ -1057,9 +1296,11 @@ fn demo_details(room: &crate::model::Room) -> RoomDetails {
             } else {
                 MemberRole::User
             },
+            power_level: if members.is_empty() { 100 } else { 0 },
             invited: false,
             own: message.own,
             removable: false,
+            ..RoomMember::default()
         });
     }
     RoomDetails {
@@ -1193,9 +1434,15 @@ mod tests {
             user_id: format!("@{name}:example.org"),
             name: name.to_owned(),
             role,
+            power_level: match role {
+                MemberRole::Admin | MemberRole::Owner => 100,
+                MemberRole::Moderator => 50,
+                MemberRole::User => 0,
+            },
             invited,
             own: name == "me",
             removable: name != "me" && role < MemberRole::Admin,
+            ..RoomMember::default()
         }
     }
 
@@ -1754,7 +2001,8 @@ mod tests {
                 result: Ok(()),
             },
         );
-        // Notifications: arrows step through the three modes.
+        // Notifications (after Pinned messages): arrows step through the three modes.
+        app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Right));
         assert!(matches!(
@@ -2351,7 +2599,12 @@ mod tests {
         assert_eq!(info(&app).confirm, None);
         assert_eq!(
             info(&app).rows(),
-            [InfoRow::Favourite, InfoRow::LowPriority, InfoRow::Leave]
+            [
+                InfoRow::Favourite,
+                InfoRow::LowPriority,
+                InfoRow::Pinned,
+                InfoRow::Leave
+            ]
         );
         let text = screen(&mut app, &mut terminal);
         find(&text, "Leave room");
@@ -2408,6 +2661,7 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected();
         with_info(&mut app, &mut commands);
         // In the middle of renaming, the right to do so is taken away.
+        app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Down));
@@ -2488,8 +2742,10 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         app.perform(Action::RoomInfo);
         let before = info(&app).details.clone().unwrap();
-        // Favourite, then the notifications in both directions, then leaving.
+        // Favourite, Low priority, skip Pinned messages, Notifications in both directions, then leaving.
         app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Right));
         app.on_event(key(KeyCode::Left));
@@ -2644,6 +2900,8 @@ mod tests {
         find(&screen(&mut app, &mut small), "│ Rats ");
         app.on_event(key(KeyCode::Down));
         find(&screen(&mut app, &mut small), "› Low priority");
+        app.on_event(key(KeyCode::Down));
+        find(&screen(&mut app, &mut small), "› Pinned messages");
         app.on_event(key(KeyCode::Down));
         find(&screen(&mut app, &mut small), "› Notifications");
     }
