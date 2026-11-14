@@ -77,6 +77,7 @@ impl App {
             notifications: self.notify_mode != crate::notify::NotifyMode::Off,
             download_dir: crate::files::display(&self.download_dir()),
             verify_status: crate::verify::setting_text(self.verify.security),
+            ignored_users: self.ignored_users.len(),
             wanted_theme: self.wanted_theme.clone(),
             theme_dark: self.theme_dark.clone(),
             theme_light: self.theme_light.clone(),
@@ -175,6 +176,7 @@ impl App {
             }
             Setting::Keys => self.change_setting(Setting::Keys, 0),
             Setting::Encryption => self.start_verification(),
+            Setting::IgnoredUsers => self.change_setting(Setting::IgnoredUsers, 0),
             Setting::Logout => {
                 if self.matrix.is_none() {
                     self.show_toast("The demo has no account to log out of");

@@ -73,6 +73,8 @@ pub struct Message {
     pub kind: MsgKind,
     pub state: SendState,
     pub sender: String,
+    /// Full Matrix user ID (`@user:server`), when known (real events from the SDK).
+    pub sender_id: Option<String>,
     pub time: String,
     pub day: String,
     pub body: String,

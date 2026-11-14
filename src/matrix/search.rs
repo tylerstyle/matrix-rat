@@ -20,9 +20,11 @@ use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, 
 use matrix_sdk::{Client, Room, RoomState};
 use matrix_sdk_base::event_cache::store::EventCacheStoreLockState;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::safety::{IgnoredSet, is_ignored_in};
 use super::{MatrixEvent, convert};
 
 const SEARCH_BATCH_SIZE: usize = 16;
@@ -98,16 +100,22 @@ pub(crate) fn prune_stale_search_indexes(client: &Client, search_dir: &Path) {
 pub(super) struct Searcher {
     client: Client,
     events: UnboundedSender<MatrixEvent>,
+    ignored: watch::Receiver<IgnoredSet>,
     task: Option<JoinHandle<()>>,
     redecrypt_task: Option<JoinHandle<()>>,
 }
 
 impl Searcher {
-    pub(super) fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
+    pub(super) fn new(
+        client: Client,
+        events: UnboundedSender<MatrixEvent>,
+        ignored: watch::Receiver<IgnoredSet>,
+    ) -> Self {
         let redecrypt_task = Some(tokio::spawn(index_redecrypted(client.clone())));
         Self {
             client,
             events,
+            ignored,
             task: None,
             redecrypt_task,
         }
@@ -117,8 +125,9 @@ impl Searcher {
         self.cancel();
         let client = self.client.clone();
         let events = self.events.clone();
+        let ignored = self.ignored.clone();
         self.task = Some(tokio::spawn(async move {
-            run_search(client, events, generation, query).await;
+            run_search(client, events, ignored, generation, query).await;
         }));
     }
 
@@ -274,6 +283,7 @@ async fn try_decrypt_utd(room: &Room, event: &TimelineEvent) -> Option<TimelineE
 async fn run_search(
     client: Client,
     events: UnboundedSender<MatrixEvent>,
+    ignored: watch::Receiver<IgnoredSet>,
     generation: u64,
     query: String,
 ) {
@@ -326,6 +336,7 @@ async fn run_search(
         for (room_id, _score, event_id) in entries {
             let Some(hit) = resolve_hit(
                 &client,
+                &ignored,
                 &room_id,
                 &event_id,
                 &active_query,
@@ -370,8 +381,10 @@ async fn run_search(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_hit(
     client: &Client,
+    ignored: &watch::Receiver<IgnoredSet>,
     room_id: &OwnedRoomId,
     event_id: &EventId,
     query: &str,
@@ -385,6 +398,12 @@ async fn resolve_hit(
     }
 
     let (mut event, mut relations) = load_event_with_replacements(&room, event_id).await?;
+    if event
+        .sender()
+        .is_some_and(|sender| is_ignored_in(ignored, &sender))
+    {
+        return None;
+    }
     let mut resolved_event_id = event_id.to_owned();
     // When a message has been edited, the search index returns the edit event's ID as
     // primary key. Unwrap to the original target event so SearchHit carries its
@@ -399,6 +418,11 @@ async fn resolve_hit(
         resolved_event_id = target_id;
     }
 
+    let sender_id = event.sender()?;
+    if is_ignored_in(ignored, &sender_id) {
+        return None;
+    }
+
     let body = extract_event_text(&event, &relations)?;
     let snippet = window_snippet(&body, query);
     if snippet.is_empty() {
@@ -406,7 +430,6 @@ async fn resolve_hit(
     }
     let thread_root = extract_thread_root(&event);
 
-    let sender_id = event.sender()?;
     let room_name = cached_room_name(&room, room_names).await;
     let sender = cached_sender_name(&room, &sender_id, sender_names).await;
     let date = event

@@ -77,6 +77,12 @@ pub enum Run {
     /// The room's notification setting, in its room info.
     Notifications,
     ClearDraft,
+    /// Ignore the message's sender (`m.ignored_user_list`).
+    IgnoreUser,
+    /// Remove the message's sender from `m.ignored_user_list`.
+    UnignoreUser,
+    /// Report the message to the homeserver.
+    Report,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,8 +92,8 @@ pub struct Item {
     pub hint: String,
     /// `None`: a line that only says something.
     pub run: Option<Run>,
-    /// Asks before it runs: the first Enter or click only arms it.
-    pub confirm: bool,
+    /// Asks before it runs: the first Enter or click turns the label into this prompt.
+    pub confirm: Option<&'static str>,
 }
 
 impl Item {
@@ -96,7 +102,7 @@ impl Item {
             label: label.to_owned(),
             hint: hint.to_owned(),
             run: Some(run),
-            confirm: false,
+            confirm: None,
         }
     }
 
@@ -109,8 +115,12 @@ impl Item {
         )
     }
 
-    fn asking(mut self) -> Self {
-        self.confirm = true;
+    fn asking(self) -> Self {
+        self.asking_label("Again to delete")
+    }
+
+    fn asking_label(mut self, prompt: &'static str) -> Self {
+        self.confirm = Some(prompt);
         self
     }
 }
@@ -130,9 +140,6 @@ pub fn key_hint(keys: &Keymap, context: Context, action: Action, first: bool) ->
         .or_else(|| in_context(Context::Global))
         .unwrap_or("")
 }
-
-/// What an entry that asks first says once it was chosen.
-const ARMED: &str = "Again to delete";
 
 #[derive(Debug, Clone)]
 pub struct Menu {
@@ -200,7 +207,7 @@ impl Menu {
     /// What the entry at `index` shows: its label, or the question once armed.
     pub fn label(&self, index: usize) -> &str {
         match self.items.get(index) {
-            Some(_) if self.armed == Some(index) => ARMED,
+            Some(item) if self.armed == Some(index) => item.confirm.unwrap_or(&item.label),
             Some(item) => &item.label,
             None => "",
         }
@@ -209,7 +216,10 @@ impl Menu {
     /// Choosing the entry at `index`: true if it may run now. An entry that asks
     /// first is armed by the first choice and runs on the second.
     pub fn confirmed(&mut self, index: usize) -> bool {
-        let asks = self.items.get(index).is_some_and(|item| item.confirm);
+        let asks = self
+            .items
+            .get(index)
+            .is_some_and(|item| item.confirm.is_some());
         if asks && self.armed != Some(index) {
             self.selected = index;
             self.armed = Some(index);
@@ -264,8 +274,8 @@ impl Menu {
                     hint => width(&item.label) + 2 + hint,
                 };
                 // The question takes the label's place and must fit as well.
-                if item.confirm {
-                    label.max(width(ARMED))
+                if let Some(prompt) = item.confirm {
+                    label.max(width(prompt))
                 } else {
                     label
                 }
@@ -306,6 +316,8 @@ pub struct MessageFacts {
     pub permalink: bool,
     /// The user wants to see who has read what (the `read_markers` setting).
     pub read_markers: bool,
+    /// Whether the message's sender is currently in `m.ignored_user_list`.
+    pub sender_ignored: bool,
 }
 
 /// The entries for a message. Empty for lines that are not messages.
@@ -408,6 +420,20 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
         // A click lands on the wrong row more easily than a finger on Del.
         items.push(Item::action(keys, "Delete", Timeline, Action::Delete).asking());
     }
+    if facts.connected && !message.own {
+        if message.sender_id.is_some() {
+            let item = if facts.sender_ignored {
+                Item::new("Stop ignoring", "", Run::UnignoreUser)
+                    .asking_label("Again to stop ignoring")
+            } else {
+                Item::new("Ignore user", "", Run::IgnoreUser).asking_label("Again to ignore")
+            };
+            items.push(item);
+        }
+        if on_server && sent {
+            items.push(Item::new("Report…", "", Run::Report));
+        }
+    }
     items
 }
 
@@ -420,7 +446,7 @@ pub fn read_by_items(read_by: &ReadBy) -> Vec<Item> {
             label: truncate(&sanitize_line(&reader.name), 30),
             hint: sanitize_line(&reader.time),
             run: None,
-            confirm: false,
+            confirm: None,
         })
         .collect();
     let more = (read_by.total as usize).saturating_sub(items.len());
@@ -429,7 +455,7 @@ pub fn read_by_items(read_by: &ReadBy) -> Vec<Item> {
             label: format!("and {more} more"),
             hint: String::new(),
             run: None,
-            confirm: false,
+            confirm: None,
         });
     }
     items
@@ -544,6 +570,7 @@ mod tests {
         in_thread: false,
         permalink: true,
         read_markers: true,
+        sender_ignored: false,
     };
 
     fn file() -> Attachment {
@@ -569,7 +596,8 @@ mod tests {
                 "Reply in thread",
                 "React…",
                 "Copy text",
-                "Copy link to message"
+                "Copy link to message",
+                "Report…",
             ]
         );
         // Nothing to edit or delete there, and nothing is listed as unavailable.
@@ -924,13 +952,16 @@ mod tests {
     fn delete_asks_once_before_it_runs() {
         let items = message_items(&text(true), CONNECTED, &keys());
         let delete = items.len() - 1;
-        assert!(items[delete].confirm);
+        assert!(items[delete].confirm.is_some());
         // Nothing else asks; discarding what was never sent does not either.
-        assert_eq!(items.iter().filter(|item| item.confirm).count(), 1);
+        assert_eq!(
+            items.iter().filter(|item| item.confirm.is_some()).count(),
+            1
+        );
         let mut failed = text(true);
         failed.state = SendState::Failed;
         let unsent = message_items(&failed, CONNECTED, &keys());
-        assert!(unsent.iter().all(|item| !item.confirm));
+        assert!(unsent.iter().all(|item| item.confirm.is_none()));
 
         let target = room_target();
         let mut menu = Menu::new(target, "", items, Anchor::at(0, 0)).unwrap();
@@ -1013,5 +1044,42 @@ mod tests {
         // The demo's rooms and messages have no address.
         assert_eq!(permalink("rust", "$event", None), None);
         assert_eq!(permalink("!room:example.org", "", None), None);
+    }
+
+    #[test]
+    fn remote_message_offers_ignore_and_report_with_custom_confirm_labels() {
+        let mut message = text(false);
+        message.sender_id = Some("@bob:example.org".into());
+
+        let items = message_items(&message, CONNECTED, &keys());
+        assert!(
+            items
+                .iter()
+                .any(|i| i.label == "Report…" && i.confirm.is_none())
+        );
+        let ignore_at = items
+            .iter()
+            .position(|i| i.run == Some(Run::IgnoreUser))
+            .unwrap();
+        assert_eq!(items[ignore_at].label, "Ignore user");
+        let mut menu = Menu::new(room_target(), "", items, Anchor::at(0, 0)).unwrap();
+        assert!(!menu.confirmed(ignore_at));
+        assert_eq!(menu.label(ignore_at), "Again to ignore");
+        assert!(menu.confirmed(ignore_at));
+
+        let unignore_facts = MessageFacts {
+            sender_ignored: true,
+            ..CONNECTED
+        };
+        let items = message_items(&message, unignore_facts, &keys());
+        let unignore_at = items
+            .iter()
+            .position(|i| i.run == Some(Run::UnignoreUser))
+            .unwrap();
+        assert_eq!(items[unignore_at].label, "Stop ignoring");
+        let mut menu = Menu::new(room_target(), "", items, Anchor::at(0, 0)).unwrap();
+        assert!(!menu.confirmed(unignore_at));
+        assert_eq!(menu.label(unignore_at), "Again to stop ignoring");
+        assert!(menu.confirmed(unignore_at));
     }
 }

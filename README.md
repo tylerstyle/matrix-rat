@@ -120,8 +120,8 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
-| `Ctrl-N` | join a room, start a chat, create a room |
-| `F4` | room details and members (invite, rename, notifications, favourite, leave) |
+| `Ctrl-N` | join a room, start a chat (search people by name or ID), create a room |
+| `F4` | room details and members (invite, rename, notifications, favourite, ignore, leave) |
 | `Alt-S` | step through your spaces |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
 | `F2` / `F3` | settings / next theme |
@@ -134,6 +134,8 @@ the sent message). `/me`, `/spoiler`, `/plain`, `/shrug` and friends work as com
 
 Unsent text stays with its room or thread and is still there after a restart (it is kept
 in the encrypted session store). A reply comes back as its text, without what it answered.
+To ignore or report someone, use the message menu (`m` or right-click) or Room info (`F4`, `Alt-I`);
+you can manage ignored users under **Settings → Ignored users** (`F2`).
 
 <div align="center">
 <img src="docs/screenshots/palette.svg" alt="The command palette, filtered by typing" width="860">

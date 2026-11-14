@@ -14,15 +14,17 @@ use matrix_sdk::ruma::events::room::message::{
 };
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, RoomId};
 use matrix_sdk::{Client, Room, RoomMemberships};
-use matrix_sdk_ui::eyeball_im::Vector;
+use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     MsgLikeKind, RoomExt, Timeline, TimelineDetails, TimelineEventFocusThreadMode,
     TimelineEventItemId, TimelineFocus, TimelineItem, TimelineReadReceiptTracking,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::convert::convert;
+use super::safety::{IgnoredSet, is_ignored_in};
 use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
 use crate::format::Outgoing;
 use crate::model::ItemRef;
@@ -89,10 +91,16 @@ pub struct Timelines {
     /// Rooms and threads (named as by `threads::key`) whose stored draft the UI was
     /// told.
     drafts_told: HashSet<String>,
+    /// Current ignored users (`m.ignored_user_list`), shared with open timelines.
+    ignored: watch::Receiver<IgnoredSet>,
 }
 
 impl Timelines {
-    pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
+    pub fn new(
+        client: Client,
+        events: UnboundedSender<MatrixEvent>,
+        ignored: watch::Receiver<IgnoredSet>,
+    ) -> Self {
         let (open_tx, open_rx) = unbounded_channel();
         Self {
             media: super::media::Media::new(client.clone(), events.clone()),
@@ -112,7 +120,13 @@ impl Timelines {
             thread: None,
             read_marks: Default::default(),
             drafts_told: HashSet::new(),
+            ignored,
         }
+    }
+
+    /// Drops cached live timelines so the next room open reflects a changed ignore list.
+    pub fn clear_cache(&mut self) {
+        self.cache.clear();
     }
 
     pub(super) async fn next_opened(&mut self) -> Option<OpenedTimeline> {
@@ -350,6 +364,7 @@ impl Timelines {
                     thread_root,
                     self.read_marks.clone(),
                     None,
+                    self.ignored.clone(),
                 )));
                 return;
             }
@@ -490,6 +505,7 @@ impl Timelines {
                         reached_start,
                         reached_end,
                     }),
+                    self.ignored.clone(),
                 )));
             }
         }
@@ -522,6 +538,7 @@ impl Timelines {
                             self.thread.clone(),
                             self.read_marks.clone(),
                             None,
+                            self.ignored.clone(),
                         )));
                     }
                     Err(err) => self.fail("Could not open the room", format!("{err:#}")),
@@ -857,7 +874,12 @@ impl Timelines {
             | MatrixCmd::Verification(_)
             | MatrixCmd::Manage(_)
             | MatrixCmd::SearchMessages { .. }
-            | MatrixCmd::CancelSearch => {}
+            | MatrixCmd::CancelSearch
+            | MatrixCmd::IgnoreUser { .. }
+            | MatrixCmd::UnignoreUser { .. }
+            | MatrixCmd::ReportContent { .. }
+            | MatrixCmd::SearchUsers { .. }
+            | MatrixCmd::CancelUserSearch => {}
         }
     }
 }
@@ -979,6 +1001,7 @@ async fn forward(
     thread: Option<String>,
     read_marks: threads::ReadMarks,
     detached: Option<DetachedForward>,
+    mut ignored: watch::Receiver<IgnoredSet>,
 ) {
     let in_thread = thread.is_some();
     let own = room.own_user_id().to_owned();
@@ -1047,21 +1070,53 @@ async fn forward(
     };
     fetch_replies(&items);
     let marks = unread(&items).await;
-    let mut messages = convert(&items, &own);
+    let mut messages = convert(&items, &own, &ignored.borrow());
     readers.annotate(&room, &mut messages, &items, &own).await;
     if events.send(snapshot(&items, marks, messages)).is_err() {
         return;
     }
+    let mut clear_paginators = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             diffs = changes.next() => {
                 let Some(diffs) = diffs else { return };
+                let saw_clear = diffs.iter().any(|diff| matches!(diff, VectorDiff::Clear));
                 for diff in diffs {
                     diff.apply(&mut items);
                 }
+                while clear_paginators.try_join_next().is_some() {}
+                if saw_clear
+                    && items.is_empty()
+                    && detached.is_none()
+                    && room.state() == matrix_sdk::RoomState::Joined
+                {
+                    // Ignoring or unignoring someone makes the SDK clear the room's event cache;
+                    // load a page immediately so the open chat recovers instead of waiting blank.
+                    let timeline = timeline.clone();
+                    let events = events.clone();
+                    clear_paginators.spawn(async move {
+                        if let Ok(true) = timeline.paginate_backwards(PAGE).await {
+                            let _ = events.send(MatrixEvent::Paginated {
+                                generation,
+                                reached_start: true,
+                            });
+                        }
+                    });
+                }
                 fetch_replies(&items);
                 let marks = unread(&items).await;
-                let mut messages = convert(&items, &own);
+                let mut messages = convert(&items, &own, &ignored.borrow());
+                readers.annotate(&room, &mut messages, &items, &own).await;
+                if events.send(snapshot(&items, marks, messages)).is_err() {
+                    return;
+                }
+            }
+            changed = ignored.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let marks = unread(&items).await;
+                let mut messages = convert(&items, &own, &ignored.borrow());
                 readers.annotate(&room, &mut messages, &items, &own).await;
                 if events.send(snapshot(&items, marks, messages)).is_err() {
                     return;
@@ -1071,6 +1126,7 @@ async fn forward(
                 let names = match users {
                     Ok(users) => users
                         .iter()
+                        .filter(|u| !is_ignored_in(&ignored, u))
                         .map(|u| crate::text::sanitize_line(u.localpart()))
                         .collect(),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

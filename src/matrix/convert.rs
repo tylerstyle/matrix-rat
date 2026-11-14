@@ -1,11 +1,12 @@
 //! Turning SDK timeline items into what the UI shows.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Local, TimeZone};
 use matrix_sdk::ruma::events::room::message::MessageType;
 use matrix_sdk::ruma::events::room::{ImageInfo as RumaImageInfo, MediaSource};
-use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, UserId};
+use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedUserId, UserId};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
     EventSendState, EventTimelineItem, MembershipChange, MsgLikeKind, Profile, TimelineDetails,
@@ -18,16 +19,20 @@ use crate::model::{
 };
 use crate::text::{sanitize, sanitize_line};
 
-pub fn convert(items: &Vector<Arc<TimelineItem>>, own: &UserId) -> Vec<Message> {
+pub fn convert(
+    items: &Vector<Arc<TimelineItem>>,
+    own: &UserId,
+    ignored: &HashSet<OwnedUserId>,
+) -> Vec<Message> {
     let now = Local::now();
     let last = items.len().saturating_sub(1);
-    items
+    let mut messages: Vec<Message> = items
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
             let id = item.unique_id().0.clone();
             if let Some(event) = item.as_event() {
-                return event_message(id, event, own, &now);
+                return event_message(id, event, own, ignored, &now);
             }
             match item.as_virtual()? {
                 // Nothing is new below a marker that sits at the very end.
@@ -40,7 +45,14 @@ pub fn convert(items: &Vector<Arc<TimelineItem>>, own: &UserId) -> Vec<Message> 
                 _ => None,
             }
         })
-        .collect()
+        .collect();
+    while messages
+        .last()
+        .is_some_and(|message| message.kind == MsgKind::ReadMarker)
+    {
+        messages.pop();
+    }
+    messages
 }
 
 /// One line saying what a message is, for the room list.
@@ -101,8 +113,12 @@ fn event_message(
     id: String,
     event: &EventTimelineItem,
     own: &UserId,
+    ignored: &HashSet<OwnedUserId>,
     now: &DateTime<Local>,
 ) -> Option<Message> {
+    if !event.is_own() && ignored.contains(event.sender()) {
+        return None;
+    }
     let sender = display_name(event.sender_profile(), event.sender());
     let when = local_time(event.timestamp());
     let mut message = Message {
@@ -123,6 +139,7 @@ fn event_message(
         day: when.map(|t| day_label(&t, now)).unwrap_or_default(),
         own: event.is_own(),
         sender: sender.clone(),
+        sender_id: Some(event.sender().to_string()),
         ..Message::default()
     };
     match event.send_state() {
@@ -144,16 +161,25 @@ fn event_message(
             message.reactions = content
                 .reactions
                 .iter()
-                .map(|(key, senders)| Reaction {
-                    key: key.clone(),
-                    count: senders.len() as u32,
-                    own: senders.contains_key(own),
+                .filter_map(|(key, senders)| {
+                    let count = senders
+                        .keys()
+                        .filter(|user| !ignored.contains(*user))
+                        .count() as u32;
+                    (count > 0).then(|| Reaction {
+                        key: key.clone(),
+                        count,
+                        own: senders.contains_key(own),
+                    })
                 })
                 .collect();
             message.reply_to = content
                 .in_reply_to
                 .as_ref()
                 .map(|reply| match &reply.event {
+                    TimelineDetails::Ready(original) if ignored.contains(&original.sender) => {
+                        (String::new(), "message from ignored user".to_owned())
+                    }
                     TimelineDetails::Ready(original) => (
                         display_name(&original.sender_profile, &original.sender),
                         original
