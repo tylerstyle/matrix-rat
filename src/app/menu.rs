@@ -243,7 +243,8 @@ impl App {
                 HitId::Message(index)
                 | HitId::Reaction(index, _)
                 | HitId::Image(index)
-                | HitId::Thread(index),
+                | HitId::Thread(index)
+                | HitId::ReplyQuote(index),
             ) => self.open_message_menu(index, at),
             Some(HitId::Room(index)) => self.open_room_menu(index, at),
             Some(HitId::ComposerText | HitId::Attachment(_) | HitId::Pane(Pane::Composer)) => {
@@ -678,6 +679,7 @@ mod tests {
             generation: app.generation,
             messages,
             reached_start: true,
+            detached: None,
         });
     }
 

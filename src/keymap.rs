@@ -188,6 +188,7 @@ action_table! {
     Action::Save => ("save", Context::Timeline, "Save file or picture"),
     Action::Open => ("open", Context::Timeline, "Open link, picture or file"),
     Action::OpenThread => ("open_thread", Context::Timeline, "Open the message's thread"),
+    Action::JumpToReply => ("jump_to_reply", Context::Timeline, "Go to replied message"),
     Action::JumpToNewest => ("jump_to_newest", Context::Timeline, "Jump to newest"),
     Action::JumpToOldest => ("jump_to_oldest", Context::Timeline, "Jump to oldest"),
     Action::Send => ("send", Context::Composer, "Send"),
@@ -585,6 +586,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::OpenThread,
         "t",
         "Open the message's thread",
+    ),
+    bind(
+        Timeline,
+        Char('p'),
+        NONE,
+        Action::JumpToReply,
+        "p",
+        "Go to replied message",
     ),
     bind(
         Timeline,
@@ -1424,6 +1433,12 @@ impl Keymap {
                 .find(|b| b.action == action)
                 .map(|b| b.label.as_ref())
         })
+    }
+
+    /// Key label for returning from a detached view to the live timeline, if bound.
+    pub fn jump_to_newest_label(&self) -> Option<&str> {
+        self.label_in(Context::Timeline, Action::JumpToNewest)
+            .or_else(|| self.label_in(Context::Global, Action::JumpToNewest))
     }
 
     /// All labels for `(context, action)` in declaration order.

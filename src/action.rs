@@ -45,6 +45,8 @@ pub enum Action {
     Delete,
     Copy,
     Open,
+    /// Jump to the message the selected one replies to.
+    JumpToReply,
 
     Send,
     Newline,

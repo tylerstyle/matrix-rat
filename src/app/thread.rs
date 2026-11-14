@@ -50,6 +50,9 @@ pub struct ThreadView {
     /// The thread's own timeline holds the first message (it is loaded last, with the
     /// oldest replies). Until then only the room's timeline can act on it.
     root_loaded: bool,
+    /// False when jumping directly into an older slice of a thread before the room's
+    /// copy of the root message was seen.
+    has_root_message: bool,
 }
 
 impl App {
@@ -75,7 +78,7 @@ impl App {
     /// Shows the thread that starts at the message at `index`. A message without
     /// replies gets an empty thread; the first message sent there starts it.
     pub(super) fn open_thread(&mut self, index: usize) {
-        self.pending_jump = None;
+        self.cancel_pending_jump();
         if self.thread_open() {
             // Threads do not nest.
             self.show_toast("This is already a thread");
@@ -138,10 +141,11 @@ impl App {
             focus: self.focus,
             loaded: false,
             root_loaded: false,
+            has_root_message: true,
         });
         self.timeline_rev += 1;
         // A new generation: late updates for the room are dropped from here on.
-        self.generation += 1;
+        self.generation = self.allocate_gen();
         if let Some(root) = root {
             self.send_matrix(MatrixCmd::OpenThread {
                 room_id,
@@ -150,6 +154,61 @@ impl App {
             });
         }
         self.set_focus(Pane::Composer);
+    }
+
+    /// Opens `ThreadView` for `root` in the active room without sending `OpenThread`
+    /// (the worker has already opened a timeline for this thread via `OpenEvent`).
+    pub(super) fn enter_thread_from_jump(&mut self, root: String) {
+        let Some(room_id) = self.room_id() else {
+            return;
+        };
+        if self.thread_open() {
+            return;
+        }
+        self.save_draft();
+        self.cancel_compose();
+        let room_draft = self.composer.take();
+        self.save_room_marks(&room_id);
+        let draft = self
+            .threads
+            .drafts
+            .remove(&(room_id.clone(), root.clone()))
+            .unwrap_or_default();
+        self.composer.set_text(&draft);
+        self.restore_thread_marks(&room_id, &root);
+
+        let existing_root = self.rooms[self.active]
+            .messages
+            .iter()
+            .position(|m| matches!(&m.item, Some(ItemRef::Event(id)) if id == &root));
+        let (has_root_message, root_index, root_message, shown) = match existing_root {
+            Some(idx) => {
+                let root_msg = self.rooms[self.active].messages[idx].clone();
+                let mut first = root_msg.clone();
+                first.id = ROOT_ID.to_owned();
+                first.read_by = Default::default();
+                (true, idx, root_msg, vec![first])
+            }
+            None => (false, 0, Message::default(), Vec::new()),
+        };
+
+        let room = &mut self.rooms[self.active];
+        self.repaint = true;
+        self.threads.open = Some(ThreadView {
+            root: Some(root.clone()),
+            key: root,
+            root_message,
+            root_index,
+            room_messages: std::mem::replace(&mut room.messages, shown),
+            room_timeline: std::mem::take(&mut self.timeline),
+            room_rows: self.row_cache.take(),
+            room_draft,
+            focus: self.focus,
+            loaded: false,
+            root_loaded: false,
+            has_root_message,
+        });
+        self.timeline_rev += 1;
     }
 
     /// Returns from the thread to the room, exactly where the user was.
@@ -170,7 +229,7 @@ impl App {
         let Some(view) = self.threads.open.take() else {
             return false;
         };
-        self.pending_jump = None;
+        self.cancel_pending_jump();
         self.repaint = true;
         self.cancel_compose();
         let draft = self.composer.take();
@@ -235,6 +294,7 @@ impl App {
         }
         // Answers to what was asked for the room before are dropped as stale.
         self.timeline.loading_older = false;
+        self.timeline.loading_newer = false;
         self.timeline.drawn = false;
         self.row_cache = view.room_rows;
         self.timeline_rev += 1;
@@ -309,6 +369,7 @@ impl App {
                 | MatrixCmd::Redact { .. }
                 | MatrixCmd::Retry { .. }
                 | MatrixCmd::Paginate { .. }
+                | MatrixCmd::PaginateForwards { .. }
                 | MatrixCmd::MarkRead { .. }
                 | MatrixCmd::SendFiles { .. }
                 | MatrixCmd::SaveDraft { .. }),
@@ -337,8 +398,12 @@ impl App {
             .find(|m| matches!(&m.item, Some(ItemRef::Event(id)) if id == root));
         view.root_loaded = own.is_some();
         match own {
-            Some(first) => first.id = ROOT_ID.to_owned(),
-            None => {
+            Some(first) => {
+                view.has_root_message = true;
+                view.root_message = first.clone();
+                first.id = ROOT_ID.to_owned();
+            }
+            None if view.has_root_message => {
                 let mut first = view.root_message.clone();
                 first.id = ROOT_ID.to_owned();
                 first.thread = None;
@@ -346,6 +411,7 @@ impl App {
                 first.read_by = Default::default();
                 messages.insert(0, first);
             }
+            None => {}
         }
         messages
     }
@@ -477,6 +543,7 @@ mod tests {
             generation,
             messages,
             reached_start: true,
+            detached: None,
         }
     }
 

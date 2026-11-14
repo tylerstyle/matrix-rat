@@ -184,13 +184,23 @@ pub fn build_rows(
                 } else {
                     format!("┃ {sender}: {quoted}")
                 };
-                rows.push(Row::plain(
-                    Line::from(vec![
+                let shown = truncate(&quote, body_width);
+                let start = INDENT.len() as u16;
+                let hits = if message.reply_event.is_some() {
+                    vec![(start, start + width(&shown) as u16, HitId::ReplyQuote(i))]
+                } else {
+                    Vec::new()
+                };
+                rows.push(Row {
+                    line: Line::from(vec![
                         Span::raw(INDENT),
-                        Span::styled(truncate(&quote, body_width), theme.style(Role::ReplyQuote)),
+                        Span::styled(shown, theme.style(Role::ReplyQuote)),
                     ]),
-                    Some(i),
-                ));
+                    msg: Some(i),
+                    source: i,
+                    hits,
+                    image: None,
+                });
             }
 
             // A picture: rows are kept free here and painted over when drawn. Its
@@ -520,7 +530,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             app.theme.style(Role::Muted),
         )));
     }
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     frame.render_widget(block, area);
     app.hits.add(area, HitId::Pane(Pane::Timeline));
     super::roominfo::title_hit(&mut app.hits, area, &title);
@@ -565,6 +575,25 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         }
         return;
     }
+    if app.timeline.detached {
+        let banner_rect = Rect::new(inner.x, inner.y, inner.width, 1);
+        let text = match app.keymap.jump_to_newest_label() {
+            Some(key) => format!(" viewing older messages · {key} / click to return to now"),
+            None => " viewing older messages · click to return to now".to_owned(),
+        };
+        let label = truncate(&text, banner_rect.width as usize);
+        frame.render_widget(
+            Line::from(Span::styled(label, theme.style(Role::Banner))),
+            banner_rect,
+        );
+        app.hits
+            .add(banner_rect, HitId::Button(Button::JumpToNewest));
+        inner.y += 1;
+        inner.height = inner.height.saturating_sub(1);
+        if inner.height == 0 {
+            return;
+        }
+    }
     if room.messages.is_empty() {
         let text =
             if app.timeline.loading_older || (app.sync.is_some() && !app.timeline.reached_start) {
@@ -578,6 +607,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         // Ask for history: an empty view may just not have loaded any yet.
         app.timeline.want_older = true;
+        app.timeline.want_newer = false;
         app.timeline.view_full = false;
         return;
     }
@@ -607,12 +637,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             if app.read_markers {
                 rows = receipts::add(rows, room, content.width as usize, theme);
             }
-            // Reading older messages: keep the same ones on screen when new ones
-            // arrive below or something changes its height.
+            // Reading older messages (or paging forwards in a detached view): keep the
+            // same bottom row on screen when messages arrive below or change height.
             if let Some(anchor) = previous
                 .filter(|old| old.key.0 == key.0)
                 .and_then(|old| old.anchor)
-                && app.timeline.scroll > 0
+                && (app.timeline.scroll > 0 || app.timeline.detached)
                 && let Some(at) = room.messages.iter().position(|m| m.id == anchor.id)
                 && let Some(last) = rows.iter().rposition(|row| row.source == at)
                 && let Some(first) = rows.iter().position(|row| row.source == at)
@@ -682,6 +712,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Showing the oldest loaded row: more history is wanted.
     view.want_older = top == 0;
+    // Showing the newest loaded row in a detached slice: more forward history is wanted.
+    view.want_newer = view.detached && !view.reached_end && scroll == 0;
 
     // A short conversation sits at the bottom, next to the composer.
     let pad = height.saturating_sub(rows.len()) as u16;
@@ -692,7 +724,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m)) if m == msg)
+            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m) | HitId::ReplyQuote(m)) if m == msg)
             {
                 frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }
@@ -751,8 +783,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    // Remember what is at the bottom of a scrolled view, to stay there (see `Anchor`).
-    let anchor = (scroll > 0 && last_visible > 0)
+    // Remember what is at the bottom of a scrolled or detached view, to stay there (see `Anchor`).
+    let anchor = ((scroll > 0 || app.timeline.detached) && last_visible > 0)
         .then(|| {
             let bottom = last_visible - 1;
             let source = rows[bottom].source;
@@ -780,6 +812,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.timeline.loading_older && content.width > 24 {
         let label = " loading older messages… ";
         let rect = Rect::new(content.x + 1, content.y, width(label) as u16, 1);
+        frame.render_widget(
+            Line::from(Span::styled(label, theme.style(Role::Pill))),
+            rect,
+        );
+    }
+
+    if app.timeline.loading_newer && content.width > 26 && (scroll == 0 || content.width > 38) {
+        let label = " loading newer messages… ";
+        let rect = Rect::new(content.x + 1, content.bottom() - 1, width(label) as u16, 1);
         frame.render_widget(
             Line::from(Span::styled(label, theme.style(Role::Pill))),
             rect,

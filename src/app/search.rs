@@ -429,6 +429,7 @@ mod tests {
                 generation: app.generation,
                 messages,
                 reached_start: false,
+                detached: None,
             });
             app.on_matrix(MatrixEvent::Paginated {
                 generation: app.generation,
@@ -468,6 +469,7 @@ mod tests {
                 generation: app.generation,
                 messages,
                 reached_start: false,
+                detached: None,
             });
         };
         app.perform(Action::Search);
@@ -587,6 +589,7 @@ mod tests {
             generation: app.generation,
             messages,
             reached_start: false,
+            detached: None,
         });
         app.on_matrix(MatrixEvent::Paginated {
             generation: app.generation,

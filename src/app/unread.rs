@@ -196,8 +196,14 @@ impl App {
 
     /// Puts the "new" line into the messages of an update for the open room, in
     /// place of the SDK's marker; decides where it goes if that is still open.
-    /// A thread gets no line.
-    pub(super) fn place_unread_line(&mut self, mut messages: Vec<Message>) -> Vec<Message> {
+    /// A thread gets no line. `detached`: the messages are a slice from somewhere
+    /// in the room's history (after a jump to a message), which shows a line that
+    /// is placed already but says nothing about where one belongs.
+    pub(super) fn place_unread_line(
+        &mut self,
+        mut messages: Vec<Message>,
+        detached: bool,
+    ) -> Vec<Message> {
         let after_marker = messages
             .iter()
             .position(|message| message.kind == MsgKind::ReadMarker)
@@ -206,6 +212,9 @@ impl App {
         messages.retain(|message| message.kind != MsgKind::ReadMarker);
         if self.thread_open() {
             return messages;
+        }
+        if detached {
+            return self.insert_unread_line(messages);
         }
         // The newest word on where the marker is counts.
         if let Line::Waiting { marker, .. } = &mut self.unread.line {
@@ -216,7 +225,7 @@ impl App {
 
     /// Decides where the line goes, if that is open and can be told from these
     /// messages (which hold no marker), and puts the line among them.
-    fn with_unread_line(&mut self, mut messages: Vec<Message>) -> Vec<Message> {
+    fn with_unread_line(&mut self, messages: Vec<Message>) -> Vec<Message> {
         if let Line::Waiting {
             count,
             marker,
@@ -254,6 +263,11 @@ impl App {
                 None => Line::Off,
             };
         }
+        self.insert_unread_line(messages)
+    }
+
+    /// Puts the line, if it is placed, above its message among `messages`.
+    fn insert_unread_line(&self, mut messages: Vec<Message>) -> Vec<Message> {
         if let Line::At(id) = &self.unread.line
             && let Some(at) = messages.iter().position(|m| event_id(m) == Some(id))
         {
@@ -272,7 +286,12 @@ impl App {
     /// Called now and then: a room that was open before the session had caught up
     /// gets its line once it has, also if no more messages arrive for it.
     pub(super) fn settle_unread_line(&mut self) {
-        if !self.unread_line_pending() || !self.unread.settled() || self.messages().is_empty() {
+        if !self.unread_line_pending()
+            || !self.unread.settled()
+            || self.messages().is_empty()
+            // What is shown is not the room's newest messages, or soon will not be.
+            || self.timeline.detached
+        {
             return;
         }
         let messages = self.with_unread_line(self.messages().to_vec());
@@ -296,10 +315,16 @@ impl App {
             .iter()
             .position(|message| message.kind == MsgKind::ReadMarker);
         let Some(first) = line.and_then(|line| self.find_selectable(line + 1, true)) else {
-            self.show_toast("No unread messages here");
+            // After a jump to a message the view shows some older part of the
+            // room; the line may be elsewhere, or not placed yet.
+            self.show_toast(if self.timeline.detached {
+                "Go back to the newest messages to see what is unread"
+            } else {
+                "No unread messages here"
+            });
             return;
         };
-        self.pending_jump = None;
+        self.cancel_pending_jump();
         self.help_open = false;
         self.set_focus(Pane::Timeline);
         self.timeline.selected = Some(first);
@@ -524,6 +549,7 @@ mod tests {
             generation: app.generation,
             messages,
             reached_start: true,
+            detached: None,
         });
     }
 
@@ -610,7 +636,7 @@ mod tests {
         draw(&mut app, &mut terminal);
         assert_eq!(
             sent(&mut commands),
-            ["OpenRoom(!b)", "FetchMembers(!b)", "Paginate(!b)"]
+            ["FetchMembers(!b)", "OpenRoom(!b)", "Paginate(!b)"]
         );
         assert_eq!(shown(&app), ["m0", "m1"]);
 
@@ -721,6 +747,7 @@ mod tests {
             generation: app.generation - 1,
             messages: with_marker(others(0..3), 1),
             reached_start: true,
+            detached: None,
         });
         assert!(app.messages().is_empty());
         arrive(&mut app, with_marker(others(0..3), 2));
@@ -824,6 +851,165 @@ mod tests {
         draw(&mut app, &mut terminal);
         assert_eq!(shown(&app), ["m0", "m1", "m2"]);
         assert_eq!(reads(&mut commands), 0);
+    }
+
+    /// A slice of the open room's history around `$e{target}`, as it arrives for
+    /// a jump with this generation.
+    fn slice(
+        app: &App,
+        generation: u64,
+        room: &str,
+        messages: Vec<Message>,
+        target: usize,
+    ) -> MatrixEvent {
+        let _ = app;
+        MatrixEvent::Timeline {
+            room_id: room.to_owned(),
+            generation,
+            messages,
+            reached_start: false,
+            detached: Some(crate::matrix::DetachedTimeline {
+                target_event: format!("$e{target}"),
+                thread_root: None,
+                reached_end: false,
+            }),
+        }
+    }
+
+    /// Jumps to `$e{target}` in `room`; the generation the answer has to carry.
+    fn jump(
+        app: &mut App,
+        commands: &mut UnboundedReceiver<MatrixCmd>,
+        room: &str,
+        target: usize,
+    ) -> u64 {
+        while commands.try_recv().is_ok() {}
+        app.jump_to_event(room.to_owned(), format!("$e{target}"), None);
+        match commands.try_recv() {
+            Ok(MatrixCmd::OpenEvent { generation, .. }) => generation,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn reads(commands: &mut UnboundedReceiver<MatrixCmd>) -> usize {
+        sent(commands)
+            .into_iter()
+            .filter(|command| command.starts_with("MarkRead"))
+            .count()
+    }
+
+    #[test]
+    fn a_slice_of_older_messages_neither_places_the_line_nor_reads_anything() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            listed("!a", "Alpha"),
+            unread("!b", "Beta", 2),
+        ]));
+        // A jump into the other room, to a message far back: the room is entered
+        // with a slice of its history. Whatever marker and count say, that is not
+        // where the line is decided, and nothing in it counts as read.
+        let generation = jump(&mut app, &mut commands, "!b", 91);
+        app.on_matrix(slice(
+            &app,
+            generation,
+            "!b",
+            with_marker(others(90..94), 1),
+            91,
+        ));
+        assert_eq!(app.active, 1);
+        assert!(app.timeline.detached);
+        assert_eq!(shown(&app), ["m90", "m91", "m92", "m93"]);
+        assert_eq!(app.messages()[app.timeline.selected.unwrap()].id, "m91");
+        draw(&mut app, &mut terminal);
+        app.on_tick();
+        // More of the slice arrives.
+        app.on_matrix(slice(
+            &app,
+            generation,
+            "!b",
+            with_marker(others(90..96), 3),
+            91,
+        ));
+        draw(&mut app, &mut terminal);
+        assert!(!shown(&app).contains(&"--"));
+        assert!(app.unread_line_pending());
+        assert_eq!(reads(&mut commands), 0);
+        // In there, there is no unread line to go to; that is said.
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::ALT);
+        assert_eq!(
+            app.toast.as_ref().unwrap().0,
+            "Go back to the newest messages to see what is unread"
+        );
+        assert!(app.timeline.detached);
+
+        // Back at the newest messages the line is placed by them, as when the room
+        // is opened, and from there on the room is read.
+        app.perform(Action::JumpToNewest);
+        assert!(!app.timeline.detached);
+        assert_eq!(reads(&mut commands), 0);
+        arrive(&mut app, with_marker(others(0..4), 2));
+        assert_eq!(shown(&app)[2], "--");
+        // The selection the user came back with is not moved to the line.
+        assert!(!app.timeline.reveal_unread);
+        draw(&mut app, &mut terminal);
+        assert_eq!(reads(&mut commands), 1);
+
+        // A jump within the room leaves the line where it is: it shows in the
+        // slice if its message is there, and is back with the newest messages.
+        let generation = jump(&mut app, &mut commands, "!b", 91);
+        app.on_matrix(slice(&app, generation, "!b", others(90..94), 91));
+        assert!(app.timeline.detached);
+        assert!(!shown(&app).contains(&"--") && !app.unread_line_pending());
+        let generation = jump(&mut app, &mut commands, "!b", 80);
+        let mut around = others(80..82);
+        around.extend(others(1..4));
+        app.on_matrix(slice(&app, generation, "!b", around, 80));
+        assert_eq!(shown(&app), ["m80", "m81", "m1", "--", "m2", "m3"]);
+        // There the unread line can be gone to.
+        app.toast = None;
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::ALT);
+        assert!(app.toast.is_none());
+        assert_eq!(app.messages()[app.timeline.selected.unwrap()].id, "m2");
+        app.perform(Action::JumpToNewest);
+        arrive(&mut app, others(0..5));
+        assert_eq!(shown(&app), ["m0", "m1", "--", "m2", "m3", "m4"]);
+    }
+
+    #[test]
+    fn a_jump_into_another_rooms_newest_messages_places_the_line_and_keeps_its_target() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            listed("!a", "Alpha"),
+            unread("!b", "Beta", 40),
+        ]));
+        // The message jumped to is among the room's newest: the worker answers
+        // with those, marker and all. Entering the room this way is opening it.
+        let generation = jump(&mut app, &mut commands, "!b", 55);
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!b".to_owned(),
+            generation,
+            messages: with_marker(others(0..60), 10),
+            reached_start: true,
+            detached: None,
+        });
+        assert_eq!(app.active, 1);
+        assert_eq!(app.generation, generation);
+        assert_eq!(shown(&app)[10], "--");
+        // The view is at the message jumped to, not at the line.
+        assert!(!app.timeline.reveal_unread);
+        assert_eq!(app.messages()[app.timeline.selected.unwrap()].id, "m55");
+        let text = draw(&mut app, &mut terminal);
+        assert!(
+            text.contains("text 55") && !text.contains("─ new ─"),
+            "{text}"
+        );
+        // Later updates keep the line, and Alt-U goes to it.
+        arrive(&mut app, others(0..61));
+        assert_eq!(shown(&app)[10], "--");
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::ALT);
+        assert_eq!(app.messages()[app.timeline.selected.unwrap()].id, "m10");
+        let text = draw(&mut app, &mut terminal);
+        assert!(text.contains("─ new ─"), "{text}");
     }
 
     #[test]
@@ -963,7 +1149,7 @@ mod tests {
         app.perform(Action::OpenRoom(1));
         assert_eq!(
             sent(&mut commands),
-            ["SetUnread(!b, false)", "OpenRoom(!b)", "FetchMembers(!b)"]
+            ["SetUnread(!b, false)", "FetchMembers(!b)", "OpenRoom(!b)"]
         );
         app.on_matrix(MatrixEvent::Rooms(after.clone()));
         assert!(!app.rooms[1].shows_unread());

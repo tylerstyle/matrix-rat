@@ -296,10 +296,13 @@ mod tests {
                 match events.recv().await.expect("worker stopped") {
                     MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
                     // The list arrives in batches; wait for a room we have joined.
+                    // (The test server collects private rooms of other tests, which
+                    // Bob cannot join: wait for the room both are in.)
                     MatrixEvent::Rooms(rooms)
-                        if rooms
-                            .iter()
-                            .any(|room| room.category != crate::matrix::RoomCategory::Invite) =>
+                        if rooms.iter().any(|room| {
+                            room.category != crate::matrix::RoomCategory::Invite
+                                && room.name == "Test Lounge"
+                        }) =>
                     {
                         return rooms;
                     }
@@ -318,6 +321,7 @@ mod tests {
         let shared: Vec<String> = listed
             .into_iter()
             .filter(|room| room.category != crate::matrix::RoomCategory::Invite)
+            .filter(|room| room.name == "Test Lounge")
             .map(|room| room.id)
             .collect();
 

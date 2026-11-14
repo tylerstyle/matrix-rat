@@ -74,6 +74,7 @@ pub struct MessageCaps {
     pub can_save: bool,
     pub can_open: bool,
     pub can_open_thread: bool,
+    pub can_jump_to_reply: bool,
     pub failed_retry: bool,
 }
 
@@ -392,6 +393,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             Action::FocusRoomFilter => (binding.description, &["filter rooms", "alt-r"]),
             Action::Open => (binding.description, &["view picture"]),
             Action::OpenThread => (binding.description, &["thread", "replies"]),
+            Action::JumpToReply => (binding.description, &["parent", "original", "reply"]),
             Action::Attach => (binding.description, &["upload", "send file", "attach"]),
             Action::ToggleHelp => (binding.description, &["key bindings", "shortcuts", "help"]),
             Action::JumpToUnread => (
@@ -523,6 +525,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Save => sel.can_save,
         Action::Open => sel.can_open,
         Action::OpenThread => sel.can_open_thread,
+        Action::JumpToReply => sel.can_jump_to_reply,
         Action::CloseThread => ctx.thread_open,
         Action::Attach => {
             ctx.has_room && !ctx.in_invite && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
@@ -549,6 +552,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::Save
                 | Action::Open
                 | Action::OpenThread
+                | Action::JumpToReply
                 | Action::JumpToNewest
                 | Action::JumpToOldest
         ),
@@ -995,6 +999,7 @@ mod tests {
             can_save: false,
             can_open: false,
             can_open_thread: true,
+            can_jump_to_reply: false,
             failed_retry: false,
         };
         let p = Palette::open(ctx);

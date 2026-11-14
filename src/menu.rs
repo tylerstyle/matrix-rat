@@ -343,6 +343,14 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
         };
         items.push(Item::action(keys, label, Timeline, Action::OpenThread));
     }
+    if message.reply_event.is_some() {
+        items.push(Item::action(
+            keys,
+            "Go to replied message",
+            Timeline,
+            Action::JumpToReply,
+        ));
+    }
     if sent && addressable && readable {
         items.push(Item::action(keys, "React…", Timeline, Action::React));
     }

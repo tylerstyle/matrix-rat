@@ -47,24 +47,21 @@ pub struct Rich {
 }
 
 impl Rich {
-    /// Plain text: one line per line, no styling, but web addresses become links.
+    /// Plain text: one line per line, no styling, but web and `matrix:` addresses
+    /// become links.
     pub fn plain(text: &str) -> Rich {
         let text = sanitize(text);
         let mut rich = Rich::default();
         for line in text.split('\n') {
             let mut segments = Vec::new();
             let mut rest = line;
-            while let Some(start) = ["https://", "http://"]
-                .iter()
-                .filter_map(|scheme| rest.find(scheme))
-                .min()
-            {
+            while let Some((start, scheme_len)) = find_plain_link(rest) {
                 let tail = &rest[start..];
                 let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
                 // Punctuation that ends the sentence is not part of the address.
                 let url =
                     tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'', '"']);
-                if url.len() <= "https://".len() {
+                if url.len() <= scheme_len {
                     // Just the scheme: not a link.
                     let cut = start + end.max(1);
                     segments.push(Segment {
@@ -110,6 +107,25 @@ impl Rich {
             Some(html) => from_html(html),
             None => Rich::plain(body),
         }
+    }
+}
+
+fn find_plain_link(rest: &str) -> Option<(usize, usize)> {
+    let web = ["https://", "http://"]
+        .into_iter()
+        .filter_map(|scheme| rest.find(scheme).map(|pos| (pos, scheme.len())))
+        .min_by_key(|&(pos, _)| pos);
+    let matrix = rest
+        .match_indices("matrix:")
+        .find(|&(pos, _)| {
+            pos == 0
+                || !rest[..pos]
+                    .ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        })
+        .map(|(pos, s)| (pos, s.len()));
+    match (web, matrix) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (a, b) => a.or(b),
     }
 }
 
@@ -885,6 +901,17 @@ mod tests {
             .map(|s| s.text.as_str())
             .collect();
         assert_eq!(linked, ["https://example.org/a?b=1", "http://x.test"]);
+
+        let matrix = Rich::plain(
+            "foo_matrix:skip (matrix:u/bob:example.org?action=chat). matrix: alone\nsee matrix:r/rust:matrix.org!",
+        );
+        assert_eq!(
+            matrix.links,
+            [
+                "matrix:u/bob:example.org?action=chat",
+                "matrix:r/rust:matrix.org"
+            ]
+        );
     }
 
     #[test]

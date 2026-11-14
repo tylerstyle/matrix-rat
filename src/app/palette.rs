@@ -53,6 +53,7 @@ impl App {
                         && !matches!(m.kind, MsgKind::System | MsgKind::ReadMarker)
                         && (self.matrix.is_none()
                             || matches!(m.item, Some(crate::model::ItemRef::Event(_)))),
+                    can_jump_to_reply: m.reply_event.is_some(),
                     failed_retry: self.matrix.is_some() && m.state == SendState::Failed,
                 }
             }
