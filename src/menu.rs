@@ -437,6 +437,9 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
         let label = if message.pinned { "Unpin" } else { "Pin" };
         items.push(Item::action(keys, label, Timeline, Action::PinMessage));
     }
+    if message.sender_id.is_some() {
+        items.push(Item::action(keys, "User info", Timeline, Action::UserInfo));
+    }
     if message.own && !sent {
         // Deleting what has not been sent takes it out of the queue.
         items.push(Item::action(keys, "Discard", Timeline, Action::Delete));

@@ -570,6 +570,7 @@ pub enum InfoRow {
     Name,
     Topic,
     Invite,
+    OwnName,
     Leave,
     /// Index into the details' member list.
     Member(usize),
@@ -828,6 +829,7 @@ impl InfoPopup {
                 if details.can_invite {
                     rows.push(InfoRow::Invite);
                 }
+                rows.push(InfoRow::OwnName);
             }
         }
         rows.push(InfoRow::Leave);
@@ -1270,9 +1272,9 @@ mod tests {
             ("bob", false),
             ("carol", true),
         ]));
-        assert_eq!(popup.rows().len(), 8 + 3);
+        assert_eq!(popup.rows().len(), 9 + 3);
         popup.set_filter("BO".into());
-        assert_eq!(popup.rows().len(), 8 + 1);
+        assert_eq!(popup.rows().len(), 9 + 1);
         assert_eq!(popup.selected_member().unwrap().name, "bob");
         // Emptying the filter keeps the member selected, wherever it is now.
         popup.set_filter(String::new());
@@ -1297,6 +1299,7 @@ mod tests {
                 InfoRow::LowPriority,
                 InfoRow::Pinned,
                 InfoRow::Notify,
+                InfoRow::OwnName,
                 InfoRow::Leave,
                 InfoRow::Member(0)
             ]

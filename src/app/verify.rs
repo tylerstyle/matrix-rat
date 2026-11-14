@@ -23,6 +23,7 @@ impl App {
         match &self.modal {
             None | Some(Modal::Emoji(_)) | Some(Modal::Verify(_)) => true,
             Some(Modal::Recovery(form)) => !form.busy,
+            Some(Modal::UserInfo(popup)) => popup.busy.is_none(),
             _ => false,
         }
     }

@@ -91,6 +91,22 @@ pub fn draw_avatar(
     }
 }
 
+/// Colored 2-cell avatar tile style shared across sidebar, profile popups, and composer.
+pub fn avatar_tile_style(theme: &Theme, color_key: &str) -> Style {
+    Style::new()
+        .fg(theme.style(Role::UnreadBadge).fg.unwrap_or_default())
+        .bg(theme.user_color(color_key))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Renders a 2-cell colored avatar tile span with the user's or room's initial.
+pub fn avatar_tile(theme: &Theme, color_key: &str, name: &str) -> Span<'static> {
+    Span::styled(
+        super::sidebar::initial(name),
+        avatar_tile_style(theme, color_key),
+    )
+}
+
 /// Puts an encoded picture into the frame, leaving out the first `skip` rows and
 /// whatever does not fit into `area`.
 fn render(frame: &mut Frame, theme: &Theme, encoded: &Encoded, area: Rect, skip: u16) {

@@ -10,6 +10,7 @@ mod media;
 mod menu;
 mod moderation;
 mod palette;
+mod people;
 mod rooms;
 mod safety;
 pub mod search;
@@ -182,6 +183,8 @@ pub struct App {
     matrix: Option<MatrixHandle>,
     pub sync: Option<SyncStatus>,
     pub user_id: Option<String>,
+    pub own_profile: Option<crate::matrix::OwnProfile>,
+    user_info_requests: u64,
     recovery_prompted: bool,
     /// Counts timeline requests; see `request_timeline`.
     generation: u64,
@@ -409,6 +412,8 @@ impl App {
             matrix: None,
             sync: None,
             user_id: None,
+            own_profile: None,
+            user_info_requests: 0,
             recovery_prompted: false,
             generation: 0,
             next_gen: 0,
@@ -803,6 +808,7 @@ impl App {
             Setting::Notifications => switch(self.notify_mode != crate::notify::NotifyMode::Off),
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::Keys => self.keymap.preset_summary(),
+            Setting::Profile => self.own_profile_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
             Setting::IgnoredUsers => match self.ignored_users.len() {
                 0 => "None".to_owned(),
@@ -881,6 +887,12 @@ impl App {
             Setting::Keys => {
                 if delta == 0 {
                     self.open_keybinds_editor();
+                }
+            }
+            Setting::Profile => {
+                if delta == 0 {
+                    self.modal = None;
+                    self.open_own_profile();
                 }
             }
             Setting::Encryption => {
@@ -1129,6 +1141,7 @@ impl App {
         self.unread = Default::default();
         self.complete.reset_session();
         self.manage = Default::default();
+        self.own_profile = None;
         self.pending_jump = None;
         self.rooms_received = false;
         self.search_gen += 1;
@@ -1146,6 +1159,8 @@ impl App {
                     | Modal::Report(_)
                     | Modal::Pinned(_)
                     | Modal::ReasonConfirm(_)
+                    | Modal::UserInfo(_)
+                    | Modal::OwnProfile(_)
             )
         ) {
             self.modal = None;
@@ -1652,7 +1667,10 @@ impl App {
                     self.open_new_join(&addr);
                 }
             }
-            Ok(crate::manage::Address::User(user_id)) => self.open_new_user(&user_id),
+            Ok(crate::manage::Address::User(user_id)) => {
+                let room_id = self.room_id();
+                self.open_user_info(user_id, room_id, None);
+            }
             Err(reason) => self.show_toast(reason),
         }
         true
@@ -1765,7 +1783,7 @@ impl App {
             }
             Ok(crate::manage::Address::User(user_id)) => {
                 self.startup_target = None;
-                self.open_new_user(&user_id);
+                self.open_user_info(user_id, None, None);
             }
         }
     }
@@ -1796,7 +1814,7 @@ impl App {
         }
     }
 
-    fn room_id(&self) -> Option<String> {
+    pub(crate) fn room_id(&self) -> Option<String> {
         self.room().map(|room| room.id.clone())
     }
 
@@ -2458,6 +2476,7 @@ impl App {
             Action::PinMessage => self.toggle_pin_message(None),
             Action::OpenPinned => self.open_pinned(),
             Action::ForwardMessage => self.open_forward_picker(None),
+            Action::UserInfo => self.open_user_info_from_selection(),
             Action::NewRoom
             | Action::RoomInfo
             | Action::LeaveRoom
@@ -2568,6 +2587,8 @@ impl App {
             Some(Modal::GlobalSearch(_)) => self.close_global_search(),
             Some(Modal::Verify(_)) => self.verify_escape(),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_escape(),
+            Some(Modal::UserInfo(_)) => self.escape_user_info(),
+            Some(Modal::OwnProfile(_)) => self.escape_own_profile(),
             Some(Modal::Menu(_)) => self.modal = None,
             None => {}
         }
@@ -2695,6 +2716,8 @@ impl App {
             Some(Modal::Report(_)) => self.on_report_key(code, mods),
             Some(Modal::Pinned(_)) => self.on_pinned_key(code, mods),
             Some(Modal::ReasonConfirm(_)) => self.on_reason_confirm_key(code, mods),
+            Some(Modal::UserInfo(_)) => self.on_user_info_key(code, mods),
+            Some(Modal::OwnProfile(_)) => self.on_own_profile_key(code, mods),
             None => {}
         }
     }
@@ -2946,6 +2969,13 @@ impl App {
                 result,
             } => {
                 self.on_forward_result(to_room_id, to_room_name, result);
+            }
+            MatrixEvent::OwnProfile(profile) => self.on_own_profile(profile),
+            MatrixEvent::OwnProfileResult { what, result } => {
+                self.on_own_profile_result(what, result);
+            }
+            MatrixEvent::UserProfile { request, result } => {
+                self.on_user_profile(request, result.map(|p| *p));
             }
         }
         // A menu about something that is gone closes.
@@ -3397,6 +3427,8 @@ impl App {
             Some(Modal::Report(_)) => return self.on_report_paste(first_line),
             Some(Modal::ReasonConfirm(_)) => return self.on_reason_confirm_paste(first_line),
             Some(Modal::Pinned(_)) => return,
+            Some(Modal::UserInfo(_)) => return self.on_user_info_paste(first_line),
+            Some(Modal::OwnProfile(_)) => return self.on_own_profile_paste(&text, first_line),
             None => {}
         }
         // The picture viewer and the help cover the composer: nothing is pasted
@@ -3445,7 +3477,7 @@ impl App {
                         self.images.close_viewer();
                         self.help_open = false;
                         if matches!(
-                            self.modal,
+                            &self.modal,
                             Some(
                                 Modal::Emoji(_)
                                     | Modal::Settings(_)
@@ -3456,6 +3488,12 @@ impl App {
                                     | Modal::Pinned(_)
                                     | Modal::ReasonConfirm(_)
                             )
+                        ) || matches!(
+                            &self.modal,
+                            Some(Modal::UserInfo(p)) if p.busy.is_none()
+                        ) || matches!(
+                            &self.modal,
+                            Some(Modal::OwnProfile(p)) if p.busy.is_none()
                         ) {
                             self.modal = None;
                         }
@@ -3558,6 +3596,7 @@ impl App {
                         self.composer.place(view.width, row, col);
                         self.sync_completion();
                     }
+                    Some(HitId::Button(Button::OwnProfile)) => self.open_own_profile(),
                     Some(HitId::Button(button)) => self.perform(match button {
                         Button::Help => Action::ToggleHelp,
                         Button::Settings => Action::OpenSettings,
@@ -3565,6 +3604,7 @@ impl App {
                         Button::CancelCompose => Action::CancelCompose,
                         Button::JumpToNewest => Action::JumpToNewest,
                         Button::Palette => Action::OpenPalette,
+                        Button::OwnProfile => unreachable!(),
                     }),
                     Some(HitId::Do(action)) => self.perform(action),
                     Some(HitId::Pane(pane)) => {
@@ -3614,6 +3654,15 @@ impl App {
                     }
                     Some(HitId::ReportSubmit) => self.submit_report(),
                     Some(HitId::UserSearchRow(index)) => self.pick_user_search(index),
+                    Some(HitId::UserSearchInfo(index)) => self.open_user_info_from_search(index),
+                    Some(HitId::Sender(index)) => self.open_user_info_from_sender(index),
+                    Some(HitId::UserInfoRow(index)) => self.click_user_info_row(index),
+                    Some(HitId::UserInfoCopy) => self.copy_user_info_id(),
+                    Some(HitId::UserInfoBanSubmit) => self.submit_user_info_ban(),
+                    Some(HitId::UserInfoRoleOption(index)) => {
+                        self.pick_user_info_role_option(index)
+                    }
+                    Some(HitId::OwnProfileSlot(slot)) => self.click_own_profile_slot(slot),
                     Some(HitId::PinnedRow(index)) => self.activate_pinned_at(index),
                     Some(HitId::PinnedUnpin(index)) => self.unpin_pinned_at(index),
                     Some(HitId::ReasonConfirmBtn(true)) => self.submit_reason_confirm(),
@@ -3648,6 +3697,7 @@ impl App {
                             | Modal::Keybinds(_)
                             | Modal::IgnoredUsers(_)
                             | Modal::Pinned(_)
+                            | Modal::UserInfo(_)
                     )
                 ) =>
             {
@@ -3664,6 +3714,7 @@ impl App {
                     Some(Modal::Keybinds(editor)) => editor.scroll_by(delta),
                     Some(Modal::IgnoredUsers(_)) => self.scroll_ignored_users(delta),
                     Some(Modal::Pinned(_)) => self.scroll_pinned(delta),
+                    Some(Modal::UserInfo(_)) => self.scroll_user_info(delta),
                     _ => {}
                 }
                 self.dirty = true;
@@ -3795,13 +3846,19 @@ impl App {
                     popup.filter.place(rel_col, false);
                 }
             }
-            InputTarget::BanReason => {
-                if let Some(Modal::RoomInfo(popup)) = &mut self.modal
-                    && let Some(prompt) = &mut popup.ban_prompt
-                {
-                    prompt.reason.place(rel_col, false);
+            InputTarget::BanReason => match &mut self.modal {
+                Some(Modal::RoomInfo(popup)) => {
+                    if let Some(prompt) = &mut popup.ban_prompt {
+                        prompt.reason.place(rel_col, false);
+                    }
                 }
-            }
+                Some(Modal::UserInfo(popup)) => {
+                    if let Some(prompt) = &mut popup.ban_prompt {
+                        prompt.reason.place(rel_col, false);
+                    }
+                }
+                _ => {}
+            },
             InputTarget::VerifyPassword => {
                 if let Some(Modal::Verify(popup)) = &mut self.modal
                     && popup.has_field(&self.verify)
@@ -3827,6 +3884,22 @@ impl App {
                 if let Some(Modal::ReasonConfirm(popup)) = &mut self.modal {
                     popup.focus_reason();
                     popup.reason.place(rel_col, false);
+                }
+            }
+            InputTarget::OwnProfileName => {
+                if let Some(Modal::OwnProfile(popup)) = &mut self.modal
+                    && popup.busy.is_none()
+                {
+                    popup.set_focus(crate::people::OwnProfilePopup::NAME_INPUT);
+                    popup.display_name.place(rel_col, false);
+                }
+            }
+            InputTarget::OwnProfileAvatar => {
+                if let Some(Modal::OwnProfile(popup)) = &mut self.modal
+                    && popup.busy.is_none()
+                {
+                    popup.set_focus(crate::people::OwnProfilePopup::AVATAR_PATH);
+                    popup.avatar_path.place(rel_col, false);
                 }
             }
         }
@@ -5794,6 +5867,7 @@ mod tests {
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::Keybinds(_))) && !app.help_open);
         app.on_event(key(KeyCode::Esc));
@@ -7126,14 +7200,13 @@ mod tests {
         }
         app.modal = None;
 
-        // 6. User link -> Stage::Direct prefilled.
+        // 6. User link -> UserInfo modal for that user.
         assert!(app.try_open_matrix_link("matrix:u/carol:example.org"));
         match &app.modal {
-            Some(Modal::New(popup)) => {
-                assert_eq!(popup.stage, crate::manage::Stage::Direct);
-                assert_eq!(popup.user.as_str(), "@carol:example.org");
+            Some(Modal::UserInfo(popup)) => {
+                assert_eq!(popup.user_id, "@carol:example.org");
             }
-            other => panic!("expected Direct modal, got {other:?}"),
+            other => panic!("expected UserInfo modal, got {other:?}"),
         }
         app.modal = None;
 
@@ -7270,8 +7343,7 @@ mod tests {
         assert!(demo.startup_target.is_none());
         assert!(matches!(
             &demo.modal,
-            Some(Modal::New(popup)) if popup.stage == crate::manage::Stage::Direct
-                && popup.user.as_str() == "@alice:example.org"
+            Some(Modal::UserInfo(popup)) if popup.user_id == "@alice:example.org"
         ));
     }
 

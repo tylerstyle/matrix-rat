@@ -38,6 +38,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::GlobalSearch(search) => super::global_search::draw(frame, app, area, search),
         Modal::New(form) => super::roominfo::draw_new(frame, app, area, form),
         Modal::RoomInfo(info) => super::roominfo::draw_info(frame, app, area, info),
+        Modal::UserInfo(popup) => super::people::draw_user_info(frame, app, area, popup),
+        Modal::OwnProfile(popup) => super::people::draw_own_profile(frame, app, area, popup),
         Modal::Menu(menu) => super::menu::draw(frame, app, area, menu),
         Modal::Keybinds(editor) => super::keybinds::draw(frame, app, area, editor),
         Modal::IgnoredUsers(popup) => ignored_users(frame, app, area, popup),
@@ -295,6 +297,14 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
                 truncate(&value, room),
                 theme.style(Role::StatusKey),
             )),
+            Setting::Profile => {
+                let role = if value.starts_with("not") || value.starts_with("signed out") {
+                    Role::Muted
+                } else {
+                    Role::Text
+                };
+                spans.push(Span::styled(truncate(&value, room), theme.style(role)));
+            }
             Setting::Encryption => {
                 let role = if value.starts_with("not") {
                     Role::Error
