@@ -116,8 +116,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` in an empty composer | edit your last message (`Esc` cancels; with the `vim` preset, `Ctrl-C`) |
-| `↑` from the composer | walk into the messages (from the first line of a draft, or when you have no message to edit); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
@@ -204,7 +203,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `open_pinned`, `jump_to_newest`, `jump_to_oldest`.
-- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `edit_last` (in an empty composer: edit your last message; otherwise it selects a message like `select_older`).
+- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**
 
@@ -228,6 +227,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `mouse` | turn off to use the terminal's own text selection |
 | `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
 | `notification_preview` (file only) | `false` hides message text, names and pictures in notifications |
+| `notification_click_command` (file only) | a shell command run when a notification is clicked, to bring the terminal window to the front (see Good to know) |
 | `secret_store` (file only) | `"file"` (default), `"keyring"` to keep the store's key in the system keyring, or `"auto"` |
 
 `--profile <name>` keeps several accounts apart.
@@ -239,8 +239,11 @@ Setting `preset = "vim"` keeps the default keys and adds:
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
   once at start.
 - **Clicking a desktop notification** opens its room in the matrix-rat that showed it
-  (where the notification service supports actions). Bringing the terminal window to
-  the front is left to your desktop.
+  (where the notification service supports actions). The terminal window is brought to
+  the front on [niri](https://github.com/YaLTeR/niri) by itself; elsewhere, set
+  `notification_click_command` in the config file to the command your desktop offers
+  for that, for example `hyprctl dispatch focuswindow class:kitty` on Hyprland or
+  `swaymsg '[app_id="kitty"] focus'` on sway.
 - **Logs** are in `~/.local/state/matrix-rat/<profile>/`. At the default level the app
   keeps message text, passwords and keys out of them.
 - **Something stuck?** `Ctrl-Q` quits and `Ctrl-Z` suspends to the shell, also from

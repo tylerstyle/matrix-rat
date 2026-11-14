@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn up_in_the_empty_composer_edits_the_own_latest_reply_of_the_thread() {
+    fn edit_last_edits_the_own_latest_reply_of_the_thread() {
         let (mut app, _terminal, mut commands) = connected();
         app.open_thread(5);
         let mut loaded = thread_messages();
@@ -1017,7 +1017,7 @@ mod tests {
         app.on_matrix(update(&app, 2, loaded));
         drain(&mut commands);
 
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, crate::app::ComposeMode::Edit(1));
         assert_eq!(app.composer.text(), "first reply");
         type_text(&mut app, "!");

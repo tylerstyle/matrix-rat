@@ -235,6 +235,10 @@ pub struct App {
     notify_icons: Option<Arc<crate::notify::IconCache>>,
     /// The `download_dir` setting; empty means the desktop's download folder.
     download_dir: String,
+    /// The `notification_click_command` setting (see `focus`). `None` where no
+    /// window is to be raised at all: the demo, and tests, which may well run
+    /// inside a desktop that would obey.
+    notification_click_command: Option<String>,
     /// Attachments being downloaded, and where finished ones went (by `mxc://` address).
     saving: std::collections::HashSet<String>,
     saved: std::collections::HashMap<String, PathBuf>,
@@ -315,7 +319,10 @@ impl App {
     /// With `matrix` the app shows the account's rooms; without, built-in demo data.
     #[cfg(test)]
     pub fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
-        Self::new_in_scheme(config, themes_dir, matrix, ColorScheme::Dark)
+        let mut app = Self::new_in_scheme(config, themes_dir, matrix, ColorScheme::Dark);
+        // Tests may well run inside a desktop that would obey: no window is raised.
+        app.notification_click_command = None;
+        app
     }
 
     pub(crate) fn new_in_scheme(
@@ -340,6 +347,7 @@ impl App {
         app.read_markers = config.read_markers;
         app.mouse = config.mouse;
         app.download_dir = config.download_dir.clone();
+        app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
         app.notify_mode = config.notifications;
         if config.notifications != crate::notify::NotifyMode::Off {
@@ -430,6 +438,7 @@ impl App {
             pending_notices: Vec::new(),
             notify_icons: None,
             download_dir: String::new(),
+            notification_click_command: None,
             saving: Default::default(),
             saved: Default::default(),
             confirm_large: None,
@@ -958,6 +967,11 @@ impl App {
         let Some(index) = self.rooms.iter().position(|room| room.id == room_id) else {
             return;
         };
+        // The click was on the desktop, maybe with another window in front: ask for
+        // ours to be shown.
+        if let Some(command) = &self.notification_click_command {
+            crate::focus::raise_window(command);
+        }
         // A jump to a message that is still on its way would take the view
         // somewhere else afterwards.
         self.cancel_pending_jump();
@@ -1967,7 +1981,7 @@ impl App {
 
     /// The user's own latest message that can be edited, if the composer is free for
     /// it: empty, and neither answering nor editing. This is what `Action::EditLast`
-    /// (↑ in the composer) edits.
+    /// edits; it has no key unless the user gave it one.
     pub fn last_editable(&self) -> Option<usize> {
         if !self.composer.is_empty() || self.compose_mode != ComposeMode::Normal {
             return None;
@@ -2307,7 +2321,20 @@ impl App {
             }
             Action::EditLast => match self.last_editable() {
                 Some(i) => self.edit_message(i),
-                None => self.perform(Action::SelectOlder),
+                None if !self.composer.is_empty() || self.compose_mode != ComposeMode::Normal => {
+                    self.show_toast("Finish what you are writing first")
+                }
+                // The last one could not be sent: there it is, to be sent again or
+                // discarded, which is offered on the message itself.
+                None if self
+                    .messages()
+                    .iter()
+                    .rfind(|message| message.editable())
+                    .is_some_and(|message| message.state == SendState::Failed) =>
+                {
+                    self.perform(Action::SelectOlder)
+                }
+                None => self.show_toast("There is no message of yours to edit here"),
             },
             Action::React => {
                 if let Some(i) = self.timeline.selected
@@ -4135,7 +4162,17 @@ mod tests {
     }
 
     #[test]
-    fn up_in_an_empty_composer_edits_the_own_latest_message() {
+    fn up_in_an_empty_composer_walks_into_the_messages() {
+        let mut app = with_messages(&[(false, "hello"), (true, "mine"), (false, "bye")]);
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(app.composer.is_empty());
+        assert_eq!(app.focus, Pane::Timeline);
+        assert_eq!(app.timeline.selected, Some(2));
+    }
+
+    #[test]
+    fn edit_last_edits_the_own_latest_message() {
         let mut app = with_messages(&[
             (false, "hello"),
             (true, "first"),
@@ -4154,7 +4191,7 @@ mod tests {
             )),
         });
         app.rooms[0].messages[4].kind = MsgKind::Redacted;
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(2));
         assert_eq!(app.composer.text(), "second");
         assert_eq!(app.focus, Pane::Composer);
@@ -4170,24 +4207,24 @@ mod tests {
         assert!(app.composer.is_empty());
 
         // Esc gives it up and leaves the composer empty again.
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(2));
         app.on_event(key(KeyCode::Esc));
         assert_eq!(app.compose_mode, ComposeMode::Normal);
         assert!(app.composer.is_empty());
 
-        // While editing, Up is not "edit the last one" again: it goes to the messages.
-        app.on_event(key(KeyCode::Up));
+        // While editing, Up goes to the messages and leaves the edit as it is.
+        app.perform(Action::EditLast);
         app.on_event(key(KeyCode::Up));
         assert_eq!(app.compose_mode, ComposeMode::Edit(2));
         assert_eq!(app.focus, Pane::Timeline);
     }
 
     #[test]
-    fn up_edits_an_action_as_an_action() {
+    fn edit_last_edits_an_action_as_an_action() {
         let mut app = with_messages(&[(true, "waves")]);
         app.rooms[0].messages[0].kind = MsgKind::Emote;
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(0));
         assert_eq!(app.composer.text(), "/me waves");
     }
@@ -4212,10 +4249,10 @@ mod tests {
     }
 
     #[test]
-    fn up_leaves_a_message_that_was_not_sent_to_the_messages_pane() {
+    fn edit_last_leaves_a_message_that_was_not_sent_to_the_messages_pane() {
         let mut app = with_messages(&[(true, "sent"), (true, "not sent")]);
         app.rooms[0].messages[1].state = SendState::Failed;
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Normal);
         assert_eq!(app.focus, Pane::Timeline);
         assert_eq!(app.timeline.selected, Some(1));
@@ -4223,7 +4260,7 @@ mod tests {
         // One that is still on its way can be corrected.
         app.rooms[0].messages[1].state = SendState::Sending;
         app.perform(Action::Focus(Pane::Composer));
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(1));
     }
 
@@ -4246,20 +4283,67 @@ mod tests {
             KeyCode::F(8),
             KeyModifiers::NONE,
         );
-        // Up has no meaning of its own in the composer now.
-        app.on_event(key(KeyCode::Up));
-        assert_eq!(app.compose_mode, ComposeMode::Normal);
-        assert_eq!(app.focus, Pane::Composer);
         app.on_event(key(KeyCode::F(8)));
         assert_eq!(app.compose_mode, ComposeMode::Edit(0));
         assert_eq!(app.composer.text(), "mine");
     }
 
     #[test]
-    fn up_edits_in_the_vim_preset_too() {
+    fn edit_last_is_in_the_palette_once_with_or_without_a_key() {
+        let listed = |app: &mut App| {
+            app.perform(Action::OpenPalette);
+            let count = match &app.modal {
+                Some(Modal::Palette(palette)) => (0..)
+                    .map_while(|at| palette.entry_at(at))
+                    .filter(|entry| entry.title == "Edit your last message")
+                    .count(),
+                _ => panic!("no palette"),
+            };
+            app.modal = None;
+            count
+        };
+        let mut app = with_messages(&[(true, "mine"), (false, "theirs")]);
+        assert_eq!(listed(&mut app), 1);
+        app.keymap.apply_rebind(
+            Context::Composer,
+            Action::EditLast,
+            KeyCode::F(8),
+            KeyModifiers::NONE,
+        );
+        assert_eq!(listed(&mut app), 1);
+    }
+
+    #[test]
+    fn edit_last_says_why_when_there_is_nothing_to_edit() {
+        let toast = |app: &App| app.toast.as_ref().map(|(text, _)| text.clone());
+        // Nothing of ours in the room.
+        let mut app = with_messages(&[(false, "theirs")]);
+        app.perform(Action::EditLast);
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("There is no message of yours to edit here")
+        );
+        assert_eq!(app.focus, Pane::Composer);
+        assert_eq!(app.timeline.selected, None);
+        // Something is being written.
+        let mut app = with_messages(&[(true, "mine")]);
+        for c in "draft".chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        app.perform(Action::EditLast);
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("Finish what you are writing first")
+        );
+        assert_eq!(app.composer.text(), "draft");
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+    }
+
+    #[test]
+    fn edit_last_works_in_the_vim_preset_too() {
         let mut app = with_messages(&[(true, "mine"), (false, "theirs")]);
         app.keymap = Keymap::from_preset(keymap::Preset::Vim);
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(0));
         // Esc is "to the messages" there and leaves the edit as it is, like one begun
         // with `e`; Ctrl-C gives it up.
@@ -4277,7 +4361,7 @@ mod tests {
     fn ctrl_c_gives_up_an_edit_or_a_reply_even_with_nothing_typed() {
         // An edit whose text was erased by hand.
         let mut app = with_messages(&[(true, "ab"), (false, "theirs")]);
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         app.on_event(key(KeyCode::Backspace));
         app.on_event(key(KeyCode::Backspace));
         assert!(app.composer.is_empty());
@@ -4312,7 +4396,7 @@ mod tests {
     fn the_edit_banner_names_the_key_that_cancels() {
         let mut app = with_messages(&[(true, "mine")]);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         redraw(&mut app, &mut terminal);
         find(&terminal, "✎ Editing your message · Esc cancel");
 
@@ -4940,9 +5024,8 @@ mod tests {
         assert!(app.composer.is_empty());
         assert_eq!(app.compose_mode, ComposeMode::Normal);
 
-        // If the message being edited disappears, its text is not left as a draft.
-        // (Up in the empty composer edits our latest message.)
-        app.on_event(key(KeyCode::Up));
+        // (EditLast edits our latest message.)
+        app.perform(Action::EditLast);
         assert_eq!(app.composer.text(), "second");
         app.on_matrix(timeline(&app, vec![remote("0", "ann", "older")]));
         assert_eq!(app.compose_mode, ComposeMode::Normal);

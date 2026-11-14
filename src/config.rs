@@ -31,6 +31,9 @@ pub struct Config {
     pub notifications: crate::notify::NotifyMode,
     /// Show the text of the message in notifications.
     pub notification_preview: bool,
+    /// A shell command run when a desktop notification is clicked, to bring the
+    /// terminal window to the front. Empty: the built-in ways (see `focus`).
+    pub notification_click_command: String,
     /// Show the latest message under each room in the room list (two lines a room).
     pub room_previews: bool,
     /// Where saved attachments go. Empty: the desktop's download folder.
@@ -100,6 +103,7 @@ impl Default for Config {
             read_markers: true,
             notifications: crate::notify::NotifyMode::Auto,
             notification_preview: true,
+            notification_click_command: String::new(),
             room_previews: true,
             download_dir: String::new(),
             images: ImageMode::Auto,

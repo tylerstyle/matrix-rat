@@ -349,9 +349,9 @@ mod tests {
 
     #[test]
     fn a_stored_draft_that_arrives_during_an_edit_waits_behind_it() {
-        // The edit was begun (here by Up) before the worker said what is stored.
+        // The edit was begun (here by the edit-last action) before the worker said what is stored.
         let (mut app, mut commands) = connected();
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(1));
         app.on_matrix(stored("!a", "old"));
         assert_eq!(app.composer.text(), "line 1");
@@ -375,7 +375,7 @@ mod tests {
 
         // And so does quitting.
         let (mut app, mut commands) = connected();
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         app.on_matrix(stored("!a", "old"));
         app.shut_down_worker();
         assert_eq!(saves(&mut commands), Vec::<String>::new());
