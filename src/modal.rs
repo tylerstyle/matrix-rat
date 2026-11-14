@@ -473,6 +473,8 @@ pub enum Modal {
     Verify(crate::verify::VerifyPopup),
     Search(crate::app::search::SearchBar),
     Palette(crate::palette::Palette),
+    /// Global full-text search across loaded rooms.
+    GlobalSearch(crate::app::global_search::GlobalSearch),
     /// Join a room, start a direct chat, create a room, or invite someone.
     New(crate::manage::NewPopup),
     RoomInfo(crate::manage::InfoPopup),

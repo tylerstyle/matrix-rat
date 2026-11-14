@@ -9,7 +9,7 @@ repository = "https://github.com/tylerstyle/matrix-rat"
 
 [dependencies]
 # Matrix. Pinned exactly: every minor release has breaking changes.
-matrix-sdk = { version = "=0.19.1", features = ["bundled-sqlite", "sso-login", "socks", "qrcode"] }
+matrix-sdk = { version = "=0.19.1", features = ["bundled-sqlite", "sso-login", "socks", "qrcode", "experimental-search"] }
 matrix-sdk-ui = "=0.19.1"
 # For decrypting attachments we download ourselves; same version as the SDK.
 matrix-sdk-base = { version = "=0.19.1", features = ["e2e-encryption"] }

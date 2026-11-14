@@ -154,6 +154,7 @@ action_table! {
     Action::OpenEmoji => ("emoji", Context::Global, "Emoji picker"),
     Action::Attach => ("attach", Context::Global, "Attach a file"),
     Action::Search => ("search", Context::Global, "Find in this room"),
+    Action::SearchEverywhere => ("search_all", Context::Global, "Search all rooms"),
     Action::SpaceNext => ("space_next", Context::Global, "Next space (then all rooms)"),
     Action::SpacePrev => ("space_prev", Context::Global, "Previous space"),
     Action::RoomPrev => ("room_prev", Context::Global, "Previous room"),
@@ -385,6 +386,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::Search,
         "Ctrl-F",
         "Find in this room",
+    ),
+    bind(
+        Global,
+        Char('g'),
+        CTRL,
+        Action::SearchEverywhere,
+        "Ctrl-G",
+        "Search all rooms",
     ),
     bind(
         Global,

@@ -230,6 +230,12 @@ async fn offline_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Re
     Client::builder()
         .homeserver_url(homeserver)
         .sqlite_store(paths.store_dir(), Some(passphrase))
+        .search_index_store(
+            matrix_sdk::search_index::SearchIndexStoreKind::EncryptedDirectory(
+                paths.search_dir(),
+                passphrase.to_owned(),
+            ),
+        )
         .with_encryption_settings(encryption_settings())
         .with_threading_support(super::threads::SUPPORT)
         .handle_refresh_tokens()
@@ -255,6 +261,7 @@ fn move_aside_store(paths: &Paths) -> Result<()> {
         let _ = std::fs::remove_dir_all(&backup);
         std::fs::rename(&store, &backup).context("could not set the old stores aside")?;
     }
+    let _ = std::fs::remove_dir_all(paths.search_dir());
     let _ = std::fs::remove_file(paths.session_file());
     Ok(())
 }
@@ -281,6 +288,7 @@ pub async fn forget_with<K: KeyringBackend>(
         .map(|t| t.keyring_key(&paths.profile))
         .or_else(|| read_saved_key(paths));
     let _ = std::fs::remove_file(paths.session_file());
+    let _ = std::fs::remove_dir_all(paths.search_dir());
     if let Some(key) = key
         && let Err(err) = keyring.delete(&key).await
     {
@@ -301,6 +309,7 @@ pub async fn clear_with<K: KeyringBackend>(
     forget_with(paths, target, keyring).await;
     let _ = std::fs::remove_dir_all(paths.store_dir());
     let _ = std::fs::remove_dir_all(paths.data_dir.join("store.previous"));
+    let _ = std::fs::remove_dir_all(paths.search_dir());
 }
 
 fn write_saved(path: &Path, saved: &Saved) -> Result<()> {
@@ -457,6 +466,7 @@ pub async fn restore_with<K: KeyringBackend>(
             "Could not restore your session: {err:#}. Your local store was kept intact."
         ));
     }
+    super::search::prune_stale_search_indexes(&client, &paths.search_dir());
 
     RestoreOutcome::Restored(ActiveSession {
         client,
@@ -545,6 +555,7 @@ async fn commit_preserved_reauth<K: KeyringBackend>(
 
     let client = offline_client(paths, &homeserver, existing_passphrase).await?;
     client.restore_session(auth_session).await?;
+    super::search::prune_stale_search_indexes(&client, &paths.search_dir());
     let saved = Saved {
         homeserver,
         passphrase: file_passphrase,
@@ -917,6 +928,9 @@ mod tests {
         std::fs::create_dir_all(paths.store_dir()).unwrap();
         let store_marker = paths.store_dir().join("marker");
         std::fs::write(&store_marker, b"keep-me").unwrap();
+        std::fs::create_dir_all(paths.search_dir()).unwrap();
+        let search_marker = paths.search_dir().join("marker");
+        std::fs::write(&search_marker, b"keep-search").unwrap();
 
         let target = ReauthTarget {
             homeserver: "http://127.0.0.1:6167".into(),
@@ -968,11 +982,13 @@ mod tests {
         }
         assert!(paths.session_file().exists());
         assert_eq!(std::fs::read(&store_marker).unwrap(), b"keep-me");
+        assert_eq!(std::fs::read(&search_marker).unwrap(), b"keep-search");
 
-        // 3. Explicit forget deletes session.json and keyring entry cleanly after unlocking.
+        // 3. Explicit forget deletes session.json, search index, and keyring entry cleanly after unlocking.
         keyring.locked = false;
         forget_with(&paths, Some(&target), &keyring).await;
         assert!(!paths.session_file().exists());
+        assert!(!paths.search_dir().exists());
         assert!(
             !keyring
                 .entries
@@ -980,6 +996,30 @@ mod tests {
                 .unwrap()
                 .contains_key(&target.keyring_key(&paths.profile))
         );
+
+        let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn clear_and_move_aside_remove_search_dir() {
+        let paths = temp_paths("clear-search-dir");
+        std::fs::create_dir_all(paths.store_dir()).unwrap();
+        std::fs::write(paths.store_dir().join("db"), b"store").unwrap();
+        std::fs::create_dir_all(paths.search_dir()).unwrap();
+        std::fs::write(paths.search_dir().join("idx"), b"index").unwrap();
+
+        move_aside_store(&paths).unwrap();
+        assert!(!paths.store_dir().exists());
+        assert!(paths.data_dir.join("store.previous").join("db").exists());
+        assert!(!paths.search_dir().exists());
+
+        std::fs::create_dir_all(paths.store_dir()).unwrap();
+        std::fs::create_dir_all(paths.search_dir()).unwrap();
+        let keyring = TestKeyring::default();
+        clear_with(&paths, None, &keyring).await;
+        assert!(!paths.store_dir().exists());
+        assert!(!paths.data_dir.join("store.previous").exists());
+        assert!(!paths.search_dir().exists());
 
         let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
     }

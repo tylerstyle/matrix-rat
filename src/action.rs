@@ -67,6 +67,8 @@ pub enum Action {
     RoomNext,
     /// Find text in the open room.
     Search,
+    /// Search messages across all joined rooms (local index).
+    SearchEverywhere,
     /// Narrow the room list to the next or previous space ("all rooms" in between).
     SpaceNext,
     SpacePrev,

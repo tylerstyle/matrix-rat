@@ -75,6 +75,7 @@ impl App {
     /// Shows the thread that starts at the message at `index`. A message without
     /// replies gets an empty thread; the first message sent there starts it.
     pub(super) fn open_thread(&mut self, index: usize) {
+        self.pending_jump = None;
         if self.thread_open() {
             // Threads do not nest.
             self.show_toast("This is already a thread");
@@ -163,6 +164,7 @@ impl App {
         let Some(view) = self.threads.open.take() else {
             return false;
         };
+        self.pending_jump = None;
         self.repaint = true;
         self.cancel_compose();
         let draft = self.composer.take();

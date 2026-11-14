@@ -23,6 +23,7 @@ pub enum InputTarget {
     EmojiQuery,
     PaletteQuery,
     SearchQuery,
+    GlobalSearchQuery,
     NewField(usize),
     InfoEdit(crate::manage::InfoRow),
     InfoFilter,
@@ -65,6 +66,8 @@ pub enum HitId {
     Attachment(usize),
     /// A row in the command palette (index into its filtered entries).
     Palette(usize),
+    /// A result row in the global search popup.
+    GlobalSearch(usize),
     /// A row in the composer completion popup (index into `completion.items`).
     Complete(usize),
     /// A row of the context menu.
