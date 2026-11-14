@@ -399,6 +399,15 @@ impl App {
         }
     }
 
+    /// The user said that the room at `index` is read. If it is the open one and its
+    /// "new" line is still to be decided, there will be none: the read marker that
+    /// arrives with its messages may be the old one, from before the server heard.
+    pub(super) fn no_unread_line_after_marking_read(&mut self, index: usize) {
+        if index == self.active && matches!(self.unread.line, Line::Waiting { .. }) {
+            self.unread.line = Line::Off;
+        }
+    }
+
     /// Marks every room that shows as unread as read.
     pub(super) fn mark_all_read(&mut self) {
         let unread: Vec<usize> = (0..self.rooms.len())
@@ -407,6 +416,9 @@ impl App {
                 room.kind != RoomKind::Invite && room.shows_unread()
             })
             .collect();
+        // The open room counts as read since it was opened, so it is not in that
+        // list; its line, if still to be decided, is called off all the same.
+        self.no_unread_line_after_marking_read(self.active);
         if unread.is_empty() {
             return self.show_toast("Nothing is unread");
         }
@@ -752,6 +764,31 @@ mod tests {
         assert!(app.messages().is_empty());
         arrive(&mut app, with_marker(others(0..3), 2));
         assert_eq!(shown(&app), ["m0", "m1", "--", "m2"]);
+    }
+
+    #[test]
+    fn marking_the_open_room_read_before_its_messages_arrive_leaves_no_line() {
+        let (mut app, _terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            listed("!a", "Alpha"),
+            unread("!b", "Beta", 2),
+        ]));
+        app.perform(Action::OpenRoom(1));
+        sent(&mut commands);
+        // Said to be read while nothing is loaded; the messages then come with the
+        // read marker of before.
+        app.mark_room_read(1);
+        arrive(&mut app, with_marker(others(0..3), 1));
+        assert_eq!(shown(&app), ["m0", "m1", "m2"]);
+        // The same through "mark all".
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            unread("!a", "Alpha", 1),
+            listed("!b", "Beta"),
+        ]));
+        app.perform(Action::OpenRoom(0));
+        app.mark_all_read();
+        arrive(&mut app, with_marker(others(0..3), 1));
+        assert_eq!(shown(&app), ["m0", "m1", "m2"]);
     }
 
     #[test]

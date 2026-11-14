@@ -474,6 +474,7 @@ impl App {
         let public = self.read_receipts;
         // The worker takes the mark back along with the receipt.
         self.unmark_unread(index);
+        self.no_unread_line_after_marking_read(index);
         let Some(room) = self.rooms.get_mut(index) else {
             return;
         };

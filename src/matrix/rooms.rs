@@ -1028,6 +1028,19 @@ async fn mark_room_read(
 ) -> Result<()> {
     // In line behind a mark that is still on its way to the server.
     flags.set(timeline.room().clone(), false);
+    // A timeline opened just for this (see `MarkRoomsRead`) may hold nothing yet:
+    // the room list keeps a single event per room, and that one may not be a
+    // message. Without a newest event the SDK sends no receipt and says nothing, so
+    // fetch a page first; and if there still is none, say so rather than report a
+    // room as read that the server goes on counting as unread.
+    if timeline.latest_event_id().await.is_none() {
+        if let Err(err) = timeline.paginate_backwards(PAGE).await {
+            tracing::debug!(?err, "could not load messages to mark as read");
+        }
+        if timeline.latest_event_id().await.is_none() {
+            bail!("no message to mark as read");
+        }
+    }
     let receipt = timeline.mark_as_read(receipt).await;
     let marker = timeline.mark_as_read(ReceiptType::FullyRead).await;
     receipt?;
@@ -1040,15 +1053,14 @@ async fn mark_room_read(
 /// room and opening it right away must not reach the server the other way round.
 ///
 /// What the SDK knows of the flag is what the last sync said, which lags behind
-/// what was sent from here a moment ago. So what was last sent counts until a sync
-/// has confirmed it (or for a while at most), and a request is only skipped when
-/// the room is known to be that way already.
+/// what was sent from here a moment ago. So what was last sent is remembered for a
+/// while as a second witness, and a request is only skipped when nothing speaks
+/// against the room being that way already.
 #[derive(Clone)]
 struct UnreadFlags(UnboundedSender<(Room, bool)>);
 
 impl UnreadFlags {
-    /// For this long at most what we sent is taken to be the state, whatever the
-    /// last sync said.
+    /// For this long what we sent is remembered next to what the last sync said.
     const TRUST_SENT: std::time::Duration = std::time::Duration::from_secs(30);
 
     /// Ends when the last copy of the handle is dropped.
@@ -1063,19 +1075,15 @@ impl UnreadFlags {
             while let Some((room, unread)) = wanted.recv().await {
                 sent.retain(|_, (_, at)| at.elapsed() < Self::TRUST_SENT);
                 let synced = room.is_marked_unread();
-                // The sync has caught up with what we sent: from here on it is
-                // the one that knows (another client may change the flag too).
-                if sent
-                    .get(room.room_id())
-                    .is_some_and(|(ours, _)| *ours == synced)
-                {
-                    sent.remove(room.room_id());
-                }
-                let now = match sent.get(room.room_id()) {
-                    Some((ours, _)) => *ours,
-                    None => synced,
-                };
-                if now == unread {
+                // Skipping is only to spare the server a request that changes
+                // nothing, so it needs both witnesses to agree: the last sync, and
+                // what was last sent from here if the sync may not have caught up
+                // with it. When they differ (our own request still on its way back,
+                // or another client changed the flag meanwhile) the request goes
+                // out: once too often does no harm, once too rarely leaves the room
+                // marked the wrong way.
+                let ours = sent.get(room.room_id()).map(|(ours, _)| *ours);
+                if !Self::needs_request(synced, ours, unread) {
                     continue;
                 }
                 match room
@@ -1104,6 +1112,12 @@ impl UnreadFlags {
 
     fn set(&self, room: Room, unread: bool) {
         let _ = self.0.send((room, unread));
+    }
+
+    /// Whether asking for `wanted` changes anything, given what the last sync said
+    /// and what was last sent from here (if that is recent).
+    fn needs_request(synced: bool, ours: Option<bool>, wanted: bool) -> bool {
+        synced != wanted || ours.is_some_and(|ours| ours != wanted)
     }
 }
 
@@ -1238,6 +1252,23 @@ async fn forward(
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    #[test]
+    fn an_unread_mark_is_only_skipped_when_nothing_speaks_against_it() {
+        let needs = super::UnreadFlags::needs_request;
+        // Known to be that way: nothing to do.
+        assert!(!needs(false, None, false));
+        assert!(!needs(true, Some(true), true));
+        // Marked here a moment ago, the sync still says otherwise, and now the room
+        // is opened: the mark must be taken back.
+        assert!(needs(false, Some(true), false));
+        // We took the mark back, the sync confirmed it, then another client marked
+        // the room: reading it here must take that mark back too.
+        assert!(needs(true, Some(false), false));
+        // And the other way round.
+        assert!(needs(false, Some(true), true));
+        assert!(needs(false, None, true));
+    }
 
     use matrix_sdk::config::SyncSettings;
 
