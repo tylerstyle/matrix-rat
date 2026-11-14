@@ -184,6 +184,13 @@ pub enum MatrixCmd {
         room_id: String,
         text: String,
     },
+    /// The room is gone from the room list: remove its stored draft and those of
+    /// these threads (by the event they start at), unless the account is still in
+    /// the room after all.
+    ForgetDrafts {
+        room_id: String,
+        threads: Vec<String>,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -232,6 +239,9 @@ impl std::fmt::Debug for MatrixCmd {
             // A draft is message text.
             Self::SaveDraft { room_id, text } => {
                 write!(f, "SaveDraft({room_id}, {} bytes)", text.len())
+            }
+            Self::ForgetDrafts { room_id, threads } => {
+                write!(f, "ForgetDrafts({room_id}, {} threads)", threads.len())
             }
         }
     }

@@ -1365,6 +1365,28 @@ impl Keymap {
             .map(|b| b.label.as_ref())
     }
 
+    /// The key that gives up a reply or an edit from the composer, to name it there:
+    /// the one bound to `CancelCompose`; else the `Back` key, unless the composer has
+    /// another use for it (the vim preset's Esc goes to the messages); else Ctrl-C,
+    /// which is not a binding and always does.
+    pub fn cancel_compose_label(&self) -> &str {
+        let composer = |action| {
+            self.bindings
+                .iter()
+                .filter(|b| matches!(b.context, Context::Composer | Context::Global))
+                .filter(|b| b.action == action)
+                // A global key counts only where the composer does not take it.
+                .find(|b| {
+                    self.lookup_in(Context::Composer, b.code, b.mods)
+                        .is_none_or(|a| a == action)
+                })
+                .map(|b| b.label.as_ref())
+        };
+        composer(Action::CancelCompose)
+            .or_else(|| composer(Action::Back))
+            .unwrap_or("Ctrl-C")
+    }
+
     /// Last key label for `(context, action)` (useful where `DEFAULT` lists a secondary key first,
     /// e.g. `Open` has `v` before `o` in `Timeline`).
     pub fn last_label_in(&self, context: Context, action: Action) -> Option<&str> {

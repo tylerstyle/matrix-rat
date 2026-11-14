@@ -269,6 +269,20 @@ impl App {
         }
     }
 
+    /// Drops the unsent text kept for the threads of a room that is gone, and says
+    /// which threads those were.
+    pub(super) fn forget_thread_drafts(&mut self, room_id: &str) -> Vec<String> {
+        let mut roots = Vec::new();
+        self.threads.drafts.retain(|(room, root), _| {
+            let gone = room == room_id;
+            if gone {
+                roots.push(root.clone());
+            }
+            !gone
+        });
+        roots
+    }
+
     /// Addresses a command about messages to the open thread, if there is one.
     pub(super) fn in_thread(&self, command: MatrixCmd) -> MatrixCmd {
         let view = self.threads.open.as_ref();

@@ -2352,6 +2352,11 @@ impl App {
             })
             .collect();
 
+        // What is left over is gone from the list, and its drafts with it.
+        for room_id in old.keys() {
+            self.forget_room_drafts(room_id);
+        }
+
         // Held back for a moment: if the full notification (with sender and text)
         // arrives for the same room, it is shown instead.
         let now = Instant::now();
@@ -2570,7 +2575,10 @@ impl App {
     fn clear_draft(&mut self) -> bool {
         // What is attached goes with the draft.
         let had_files = self.clear_attachments();
-        if !self.composer.is_empty() {
+        // Also with nothing typed: a reply or an edit that was begun is given up (an
+        // edit emptied by hand would otherwise have no way out by this key).
+        let composing = self.compose_mode != ComposeMode::Normal;
+        if !self.composer.is_empty() || composing {
             self.composer.take();
             self.clear_completion_marks();
             self.cancel_compose();
@@ -3443,6 +3451,67 @@ mod tests {
         app.on_event(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert_eq!(app.compose_mode, ComposeMode::Normal);
         assert!(app.composer.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_gives_up_an_edit_or_a_reply_even_with_nothing_typed() {
+        // An edit whose text was erased by hand.
+        let mut app = with_messages(&[(true, "ab"), (false, "theirs")]);
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Backspace));
+        app.on_event(key(KeyCode::Backspace));
+        assert!(app.composer.is_empty());
+        assert_eq!(app.compose_mode, ComposeMode::Edit(0));
+        app.on_event(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(!app.should_quit);
+        assert_eq!(app.rooms[0].messages[0].body, "ab");
+
+        // The draft that waited behind the edit is back, not cleared with it.
+        let mut app = with_messages(&[(true, "ab")]);
+        type_text(&mut app, "draft");
+        app.timeline.selected = Some(0);
+        app.perform(Action::Edit);
+        app.on_event(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.composer.text(), "draft");
+
+        // A reply that was begun and not written.
+        let mut app = with_messages(&[(false, "theirs")]);
+        app.timeline.selected = Some(0);
+        app.perform(Action::Reply);
+        app.on_event(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        // With nothing to give up it still only says how to quit.
+        app.on_event(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.toast.is_some());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn the_edit_banner_names_the_key_that_cancels() {
+        let mut app = with_messages(&[(true, "mine")]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        app.on_event(key(KeyCode::Up));
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "✎ Editing your message · Esc cancel");
+
+        // In the vim preset Esc goes to the messages; Ctrl-C is what cancels.
+        app.keymap = Keymap::from_preset(keymap::Preset::Vim);
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "✎ Editing your message · Ctrl-C cancel");
+
+        // A key of its own for it is named first.
+        app.keymap.apply_rebind(
+            Context::Composer,
+            Action::CancelCompose,
+            KeyCode::F(9),
+            KeyModifiers::NONE,
+        );
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "✎ Editing your message · F9 cancel");
+        app.on_event(key(KeyCode::F(9)));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
     }
 
     #[test]

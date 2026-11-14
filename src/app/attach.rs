@@ -54,6 +54,18 @@ impl AttachState {
         self.stash.get(scope).map_or("", String::as_str)
     }
 
+    /// Puts `draft` aside in `scope` as if an `/upload` command had been begun over
+    /// it, unless one is there already.
+    pub fn stash_draft(&mut self, scope: Scope, draft: String) {
+        self.stash.entry(scope).or_insert(draft);
+    }
+
+    /// Drops what waits in a room and its threads: the room is gone.
+    pub fn forget_room(&mut self, room_id: &str) {
+        self.pending.retain(|(room, _), _| room != room_id);
+        self.stash.retain(|(room, _), _| room != room_id);
+    }
+
     pub fn clear(&mut self) {
         *self = Self::default();
     }

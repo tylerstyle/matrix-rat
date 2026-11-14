@@ -644,6 +644,14 @@ async fn leave(client: &Client, room_id: &str) -> Result<(), String> {
     ) {
         room.leave().await.map_err(|err| failed("leave", &err))?;
     }
+    // Forgetting does not remove the room's unsent text from the store. The UI asks
+    // for that (with the threads it knows) when the room leaves its list; the room's
+    // own draft goes here already, while there still is a room to ask.
+    if matches!(room.state(), RoomState::Left | RoomState::Banned)
+        && let Err(err) = room.clear_composer_draft(None).await
+    {
+        tracing::warn!(?err, "could not remove the draft of a room after leaving");
+    }
     // So it does not linger on the account as a room once left. Leaving worked, which
     // is what was asked for; a server that cannot forget is not worth an alarm.
     if matches!(room.state(), RoomState::Left | RoomState::Banned)

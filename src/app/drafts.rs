@@ -99,8 +99,11 @@ impl App {
     }
 
     /// `unknown_differs`: what to assume while the worker has not said what is stored.
-    /// Normally that it is nothing, so an empty composer needs no command.
+    /// Normally that it is nothing, so an empty composer the user did not touch needs
+    /// no command (and a draft they have not seen yet is not removed). An emptied one
+    /// does: whatever is stored is older than what the user did.
     fn write_draft(&mut self, unknown_differs: bool) {
+        self.note_draft();
         let Some(scope) = self.draft_scope() else {
             return;
         };
@@ -108,7 +111,7 @@ impl App {
         self.drafts.changed = None;
         let same = match self.drafts.stored.get(&scope) {
             Some(stored) => *stored == text,
-            None => text.is_empty() && !unknown_differs,
+            None => text.is_empty() && !unknown_differs && !self.drafts.touched,
         };
         if same {
             return;
@@ -137,9 +140,11 @@ impl App {
     }
 
     /// The worker reports the draft the store holds for a room or thread that was
-    /// opened for the first time. It never replaces something the user typed: it goes
-    /// into the composer only if that conversation is still open and nothing was
-    /// written or begun there; for one that was left meanwhile it waits with it.
+    /// opened for the first time. It never replaces something the user typed, and it
+    /// is never dropped unseen: if nothing was written in that conversation since it
+    /// was opened, it goes where its draft is (the composer, or behind an edit or an
+    /// `/upload` command begun meanwhile); for a conversation that was left it waits
+    /// with it. Only what the user wrote instead takes its place in the store.
     pub(super) fn on_stored_draft(
         &mut self,
         room_id: String,
@@ -160,21 +165,62 @@ impl App {
             let (room_id, thread) = scope;
             return self.keep_stored_draft(room_id, thread, text);
         }
-        let free = self.composer.is_empty()
-            && self.compose_mode == ComposeMode::Normal
-            && !self.drafts.touched;
-        if free {
+        if self.drafts.touched || !self.draft_text(&scope).is_empty() {
+            // What the user wrote instead takes its place in the store at the next
+            // pause.
+            self.drafts.changed = Some(Instant::now());
+            return;
+        }
+        // Untouched and empty: the stored draft goes where `draft_text` looks.
+        let editing = matches!(self.compose_mode, ComposeMode::Edit(_));
+        let front = match editing {
+            true => self.edit_stash.as_deref().unwrap_or_default(),
+            false => self.composer.text(),
+        };
+        if crate::upload::command_argument(front).is_some() {
+            // It comes back as the caption when the file is chosen or the command
+            // given up.
+            self.attach.stash_draft(scope.clone(), text.clone());
+        } else if editing {
+            // It comes back when the edit ends.
+            self.edit_stash = Some(text.clone());
+        } else {
+            // Also into a reply that was begun but not written yet, as when a reply
+            // is begun over a draft.
             self.composer.set_text(&text);
             // Mention marks are not stored with a draft: after a restart a restored
             // `@name` is plain text, and is sent as such unless it is completed again.
             self.clear_completion_marks();
             self.sync_completion();
-            self.drafts.seen = Some((scope, text));
-        } else {
-            // What the user is writing instead takes its place in the store at the
-            // next pause.
-            self.drafts.changed = Some(Instant::now());
         }
+        self.drafts.seen = Some((scope, text));
+    }
+
+    /// A room is gone from the list (left, declined, or removed from it): nothing
+    /// kept for its drafts stays, here or in the store. Should the room come back,
+    /// it starts empty.
+    pub(super) fn forget_room_drafts(&mut self, room_id: &str) {
+        let mut threads = self.forget_thread_drafts(room_id);
+        // Threads whose drafts are only in the store, as far as known.
+        threads.extend(
+            self.drafts
+                .stored
+                .keys()
+                .filter(|(room, _)| room == room_id)
+                .filter_map(|(_, thread)| thread.clone()),
+        );
+        threads.sort();
+        threads.dedup();
+        self.drafts.stored.retain(|(room, _), _| room != room_id);
+        if matches!(&self.drafts.seen, Some(((room, _), _)) if room == room_id) {
+            self.drafts.seen = None;
+        }
+        self.attach.forget_room(room_id);
+        self.forget_room_marks(room_id);
+        self.send_matrix(MatrixCmd::ForgetDrafts {
+            room_id: room_id.to_owned(),
+            threads,
+        });
     }
 }
 
@@ -290,24 +336,201 @@ mod tests {
         assert_eq!(saves(&mut commands), ["!a="]);
     }
 
-    #[test]
-    fn a_stored_draft_stays_out_of_a_reply_and_of_an_edit() {
-        let (mut app, _commands) = connected();
-        app.timeline.selected = Some(0);
-        app.perform(Action::Reply);
-        assert_eq!(app.compose_mode, ComposeMode::Reply(0));
-        app.on_matrix(stored("!a", "old"));
-        assert_eq!(app.composer.text(), "");
-        assert_eq!(app.compose_mode, ComposeMode::Reply(0));
+    /// Nothing was saved, by a pause in typing, by leaving the room or by quitting.
+    fn nothing_is_written(app: &mut App, commands: &mut UnboundedReceiver<MatrixCmd>) {
+        app.save_idle_draft(Duration::ZERO);
+        assert_eq!(saves(commands), Vec::<String>::new(), "after a pause");
+        app.perform(Action::OpenRoom(1));
+        assert_eq!(saves(commands), Vec::<String>::new(), "on leaving");
+        app.perform(Action::OpenRoom(0));
+        app.shut_down_worker();
+        assert_eq!(saves(commands), Vec::<String>::new(), "at quit");
+    }
 
-        let (mut app, _commands) = connected();
-        app.timeline.selected = Some(1);
-        app.perform(Action::Edit);
+    #[test]
+    fn a_stored_draft_that_arrives_during_an_edit_waits_behind_it() {
+        // The edit was begun (here by Up) before the worker said what is stored.
+        let (mut app, mut commands) = connected();
+        app.on_event(key(KeyCode::Up));
         assert_eq!(app.compose_mode, ComposeMode::Edit(1));
         app.on_matrix(stored("!a", "old"));
         assert_eq!(app.composer.text(), "line 1");
+        // It is not removed from the store after a pause.
+        app.save_idle_draft(Duration::ZERO);
+        assert_eq!(saves(&mut commands), Vec::<String>::new());
+        // It is the draft the edit gives back.
         app.perform(Action::CancelCompose);
+        assert_eq!(app.composer.text(), "old");
+        nothing_is_written(&mut app, &mut commands);
+        assert_eq!(app.composer.text(), "old");
+
+        // Leaving the room in the middle of the edit keeps it as well.
+        let (mut app, mut commands) = connected();
+        app.timeline.selected = Some(1);
+        app.perform(Action::Edit);
+        app.on_matrix(stored("!a", "old"));
+        app.perform(Action::OpenRoom(1));
+        assert_eq!(saves(&mut commands), Vec::<String>::new());
+        assert_eq!(app.rooms[0].draft, "old");
+
+        // And so does quitting.
+        let (mut app, mut commands) = connected();
+        app.on_event(key(KeyCode::Up));
+        app.on_matrix(stored("!a", "old"));
+        app.shut_down_worker();
+        assert_eq!(saves(&mut commands), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_stored_draft_that_arrives_in_an_unwritten_reply_becomes_its_text() {
+        let (mut app, mut commands) = connected();
+        app.timeline.selected = Some(0);
+        app.perform(Action::Reply);
+        app.on_matrix(stored("!a", "old"));
+        assert_eq!(app.composer.text(), "old");
+        assert_eq!(app.compose_mode, ComposeMode::Reply(0));
+        nothing_is_written(&mut app, &mut commands);
+        assert_eq!(app.composer.text(), "old");
+    }
+
+    #[test]
+    fn a_stored_draft_that_arrives_during_an_upload_command_waits_behind_it() {
+        let (mut app, mut commands) = connected();
+        app.perform(Action::Attach);
+        type_text(&mut app, "x");
+        assert_eq!(app.composer.text(), "/upload x");
+        app.on_matrix(stored("!a", "old"));
+        assert_eq!(app.composer.text(), "/upload x");
+        app.save_idle_draft(Duration::ZERO);
+        assert_eq!(saves(&mut commands), Vec::<String>::new());
+        // Esc gives the command up and the draft is there.
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "old");
+        nothing_is_written(&mut app, &mut commands);
+
+        // Quitting with the command still typed keeps it too.
+        let (mut app, mut commands) = connected();
+        app.perform(Action::Attach);
+        app.on_matrix(stored("!a", "old"));
+        app.shut_down_worker();
+        assert_eq!(saves(&mut commands), Vec::<String>::new());
+    }
+
+    #[test]
+    fn only_what_the_user_wrote_takes_a_late_stored_drafts_place() {
+        // Written into a reply.
+        let (mut app, mut commands) = connected();
+        app.timeline.selected = Some(0);
+        app.perform(Action::Reply);
+        type_text(&mut app, "yes");
+        app.on_matrix(stored("!a", "old"));
+        assert_eq!(app.composer.text(), "yes");
+        app.save_idle_draft(Duration::ZERO);
+        assert_eq!(saves(&mut commands), ["!a=yes"]);
+
+        // Written before an edit was begun over it.
+        let (mut app, mut commands) = connected();
+        type_text(&mut app, "mine");
+        app.timeline.selected = Some(1);
+        app.perform(Action::Edit);
+        app.on_matrix(stored("!a", "old"));
+        app.perform(Action::CancelCompose);
+        assert_eq!(app.composer.text(), "mine");
+        app.save_idle_draft(Duration::ZERO);
+        assert_eq!(saves(&mut commands), ["!a=mine"]);
+    }
+
+    #[test]
+    fn a_draft_emptied_before_the_store_answered_stays_empty() {
+        // Typed, erased and left: the user emptied the field, so what the store
+        // holds is removed and its late answer does not come back.
+        let (mut app, mut commands) = connected();
+        type_text(&mut app, "x");
+        app.on_event(key(KeyCode::Backspace));
+        app.perform(Action::OpenRoom(1));
+        assert_eq!(saves(&mut commands), ["!a="]);
+        app.on_matrix(stored("!a", "old"));
+        assert_eq!(app.rooms[0].draft, "");
+
+        // Merely passing through a room removes nothing.
+        let (mut app, mut commands) = connected();
+        app.perform(Action::OpenRoom(1));
+        assert_eq!(saves(&mut commands), Vec::<String>::new());
+    }
+
+    fn listed(id: &str) -> crate::matrix::RoomSummary {
+        crate::matrix::RoomSummary {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            category: crate::matrix::RoomCategory::Room,
+            notifications: 0,
+            preview: None,
+            server_notifications: 0,
+            mention: false,
+            unread: false,
+            avatar: None,
+            alias: None,
+        }
+    }
+
+    /// The `ForgetDrafts` commands sent so far: `!room[$thread,…]`.
+    fn forgotten(commands: &mut UnboundedReceiver<MatrixCmd>) -> Vec<String> {
+        let mut seen = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let MatrixCmd::ForgetDrafts { room_id, threads } = command {
+                seen.push(format!("{room_id}[{}]", threads.join(",")));
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn a_room_that_leaves_the_list_takes_its_drafts_along() {
+        let (mut app, mut commands) = connected();
+        // A draft in a thread of the first room, one in the room, and a second thread
+        // whose draft is only known from the store.
+        app.open_thread(0);
+        type_text(&mut app, "thread words");
+        app.close_thread();
+        type_text(&mut app, "room words");
+        app.on_matrix(MatrixEvent::Draft {
+            room_id: "!a".to_owned(),
+            thread: Some("$e2".to_owned()),
+            text: "other thread".to_owned(),
+        });
+        app.perform(Action::OpenRoom(1));
+        assert_eq!(app.rooms[0].draft, "room words");
+        assert_eq!(forgotten(&mut commands), Vec::<String>::new());
+
+        // The room is left (here or elsewhere): the list comes without it.
+        app.on_matrix(MatrixEvent::Rooms(vec![listed("!b")]));
+        assert_eq!(forgotten(&mut commands), ["!a[$e0,$e2]"]);
+        assert!(app.drafts.stored.keys().all(|(room, _)| room != "!a"));
+
+        // Rejoined later, it starts empty, and what the store says then counts.
+        app.on_matrix(MatrixEvent::Rooms(vec![listed("!a"), listed("!b")]));
+        assert_eq!(app.rooms[0].draft, "");
+        app.perform(Action::OpenRoom(0));
         assert_eq!(app.composer.text(), "");
+        app.on_matrix(stored("!a", "fresh"));
+        assert_eq!(app.composer.text(), "fresh");
+        // Nothing is asked to be forgotten for rooms that stay.
+        assert_eq!(forgotten(&mut commands), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_open_room_leaving_the_list_takes_its_drafts_along_too() {
+        let (mut app, mut commands) = connected();
+        type_text(&mut app, "abc");
+        app.save_idle_draft(Duration::ZERO);
+        app.on_matrix(MatrixEvent::Rooms(vec![listed("!b")]));
+        assert_eq!(forgotten(&mut commands), ["!a[]"]);
+        assert!(app.drafts.stored.is_empty());
+        assert_eq!(app.room().map(|room| room.id.as_str()), Some("!b"));
+        assert_eq!(app.composer.text(), "");
+        // The room that is open now is not written to on account of the other.
+        app.shut_down_worker();
+        assert_eq!(saves(&mut commands), Vec::<String>::new());
     }
 
     #[test]
@@ -544,5 +767,10 @@ mod tests {
             text: "secret".to_owned(),
         };
         assert_eq!(format!("{event:?}"), "Draft(!a, $e0, 6 bytes)");
+        let command = MatrixCmd::ForgetDrafts {
+            room_id: "!a".to_owned(),
+            threads: vec!["$e0".to_owned()],
+        };
+        assert_eq!(format!("{command:?}"), "ForgetDrafts(!a, 1 threads)");
     }
 }

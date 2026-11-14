@@ -2,8 +2,10 @@
 //! encrypted like the rest of the session), one draft per room and one per thread.
 
 use anyhow::{Result, anyhow};
+use matrix_sdk::ruma::RoomId;
 use matrix_sdk::ruma::{EventId, OwnedEventId};
-use matrix_sdk::{ComposerDraft, ComposerDraftType, Room};
+use matrix_sdk::{Client, ComposerDraft, ComposerDraftType, Room};
+use matrix_sdk_base::StateStoreDataKey;
 
 fn thread_root(thread: Option<&str>) -> Result<Option<OwnedEventId>> {
     thread
@@ -40,6 +42,26 @@ pub async fn load(room: &Room, thread: Option<&str>) -> Result<String> {
         .filter(|draft| !matches!(draft.draft_type, ComposerDraftType::Edit { .. }))
         .map(|draft| draft.plain_text)
         .unwrap_or_default())
+}
+
+/// Removes the stored drafts of a room and of these threads. Forgetting a room does
+/// not remove them, and afterwards the client has no room to ask; so this goes to
+/// the store itself, and works before and after.
+pub async fn forget(client: &Client, room_id: &str, threads: &[String]) -> Result<()> {
+    let room_id = RoomId::parse(room_id).map_err(|_| anyhow!("invalid room id"))?;
+    let store = client.state_store();
+    store
+        .remove_kv_data(StateStoreDataKey::ComposerDraft(&room_id, None))
+        .await?;
+    for thread in threads {
+        // One that is no event id was never stored.
+        if let Some(root) = thread_root(Some(thread)).ok().flatten() {
+            store
+                .remove_kv_data(StateStoreDataKey::ComposerDraft(&room_id, Some(&root)))
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

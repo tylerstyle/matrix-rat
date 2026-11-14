@@ -465,6 +465,24 @@ impl Timelines {
                     tracing::warn!(?err, "could not save the draft");
                 }
             }
+            MatrixCmd::ForgetDrafts { room_id, threads } => {
+                // Told again, should the room come back.
+                let in_room = threads::key(&room_id, Some(""));
+                self.drafts_told
+                    .retain(|key| *key != room_id && !key.starts_with(&in_room));
+                // The list can lose a room for a moment; its drafts stay then.
+                let still_in = self.room(&room_id).is_ok_and(|room| {
+                    matches!(
+                        room.state(),
+                        matrix_sdk::RoomState::Joined | matrix_sdk::RoomState::Invited
+                    )
+                });
+                if !still_in
+                    && let Err(err) = drafts::forget(&self.client, &room_id, &threads).await
+                {
+                    tracing::warn!(?err, "could not remove the drafts of a room");
+                }
+            }
             // Handled by the session loop.
             MatrixCmd::LoginPassword { .. }
             | MatrixCmd::LoginBrowser { .. }
