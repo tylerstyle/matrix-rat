@@ -595,12 +595,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     if room.messages.is_empty() {
-        let text =
-            if app.timeline.loading_older || (app.sync.is_some() && !app.timeline.reached_start) {
-                " Loading messages…"
-            } else {
-                " No messages yet."
-            };
+        let ready =
+            !app.timeline.loading_older && (app.sync.is_none() || app.timeline.reached_start);
+        let text = if ready {
+            " No messages yet."
+        } else {
+            " Loading messages…"
+        };
         frame.render_widget(
             Line::from(Span::styled(text, theme.style(Role::Muted))),
             inner,
@@ -609,6 +610,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         app.timeline.want_older = true;
         app.timeline.want_newer = false;
         app.timeline.view_full = false;
+        if ready {
+            // Nothing visible exists (e.g. an empty room or all messages ignored),
+            // so treat the frame as drawn to let unread/read-marker settling finish.
+            app.timeline.drawn = true;
+        }
         return;
     }
 
@@ -671,6 +677,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     view.page = height;
     view.scroll = view.scroll.min(max_scroll);
     let mut top = max_scroll - view.scroll;
+    if view.reveal_unread {
+        view.reveal_unread = false;
+        // The "new" line goes to the top of the view when what is below it does not
+        // fit; when it does, the newest message stays at the bottom.
+        if let Some(at) = room
+            .messages
+            .iter()
+            .position(|m| m.kind == MsgKind::ReadMarker)
+            && let Some(line) = rows.iter().position(|row| row.source == at)
+        {
+            top = line.min(max_scroll);
+            view.scroll = max_scroll - top;
+        }
+    }
     if view.reveal_selected {
         view.reveal_selected = false;
         if let Some(selected) = view.selected {

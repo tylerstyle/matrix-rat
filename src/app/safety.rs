@@ -211,6 +211,7 @@ impl super::App {
         self.ignored_users = users.into_iter().collect();
         self.sync_ignored_modal();
         self.prune_ignored_from_user_search();
+        self.refresh_unread_line_for_ignored();
     }
 
     pub(super) fn on_ignore_result(
@@ -230,6 +231,7 @@ impl super::App {
                 }
                 self.sync_ignored_modal();
                 self.prune_ignored_from_user_search();
+                self.refresh_unread_line_for_ignored();
             }
             Err(err) => {
                 let verb = if ignored { "ignore" } else { "unignore" };
@@ -464,6 +466,7 @@ mod tests {
             server_notifications: 0,
             mention: false,
             unread: false,
+            marked_unread: false,
             preview: None,
             avatar: None,
             alias: None,
@@ -1026,5 +1029,121 @@ mod tests {
             assert!(popup.user_results.is_empty());
             assert!(!popup.user_searching);
         }
+    }
+
+    #[test]
+    fn suppressed_notice_prevents_count_fallback_notification_while_click_still_opens_room() {
+        let (mut app, _terminal, mut commands) = connected();
+        app.notify_mode = crate::notify::NotifyMode::Terminal;
+        app.window_focused = false;
+        app.session_started = Some(Instant::now() - Duration::from_secs(25));
+
+        let base_room = |id: &str, name: &str, count: u64| RoomSummary {
+            id: id.into(),
+            name: name.into(),
+            category: RoomCategory::Room,
+            notifications: count,
+            server_notifications: count,
+            mention: false,
+            unread: count > 0,
+            marked_unread: false,
+            preview: None,
+            avatar: None,
+            alias: None,
+        };
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            base_room(ROOM, "Rats", 0),
+            base_room("!other:example.org", "Other", 0),
+        ]));
+
+        // Server bumps notification count for `!other`, queueing a fallback
+        // count-based notice, while the worker reports that the detailed notice
+        // was suppressed because its sender is ignored.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            base_room(ROOM, "Rats", 0),
+            base_room("!other:example.org", "Other", 1),
+        ]));
+        assert_eq!(app.count_notices.len(), 1);
+        app.on_matrix(MatrixEvent::SuppressedNotice {
+            room_id: "!other:example.org".into(),
+        });
+        assert!(app.count_notices.is_empty());
+        app.release_count_notices(Duration::ZERO);
+        assert!(
+            app.pending_notices.is_empty(),
+            "count fallback must not fire desktop notice for suppressed ignored sender"
+        );
+
+        // If a normal non-ignored notification is clicked, NoticeClicked still opens
+        // its target room cleanly.
+        drain_cmds(&mut commands);
+        app.on_matrix(MatrixEvent::NoticeClicked {
+            room_id: "!other:example.org".into(),
+        });
+        assert_eq!(app.active, 1);
+        assert_eq!(app.room_id().as_deref(), Some("!other:example.org"));
+        assert!(drain_cmds(&mut commands).iter().any(
+            |c| matches!(c, MatrixCmd::OpenRoom { room_id, .. } if room_id == "!other:example.org")
+        ));
+    }
+
+    #[test]
+    fn jump_to_ignored_message_shows_clear_toast_and_keeps_current_view() {
+        let (mut app, _terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::IgnoredUsers(vec![BOB.into()]));
+        // Add a non-ignored message replying to an ignored message (`$ev_ignored`),
+        // mirroring `convert.rs` (`reply_event` still points to the ignored id).
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: ROOM.into(),
+            generation: app.generation,
+            messages: vec![Message {
+                id: "reply1".into(),
+                item: Some(ItemRef::Event("$ev_reply:example.org".into())),
+                sender: "carol".into(),
+                sender_id: Some("@carol:example.org".into()),
+                body: "see above".into(),
+                day: "Today".into(),
+                time: "12:01".into(),
+                kind: MsgKind::Text,
+                reply_to: Some((String::new(), "message from ignored user".into())),
+                reply_event: Some("$ev_ignored:example.org".into()),
+                ..Message::default()
+            }],
+            reached_start: true,
+            detached: None,
+        });
+        app.timeline.selected = Some(0);
+        drain_cmds(&mut commands);
+
+        app.jump_to_reply(0);
+        let cmd = drain_cmds(&mut commands)
+            .into_iter()
+            .find_map(|c| match c {
+                MatrixCmd::OpenEvent {
+                    room_id,
+                    event_id,
+                    generation,
+                    ..
+                } => Some((room_id, event_id, generation)),
+                _ => None,
+            })
+            .expect("expected OpenEvent command for ignored parent");
+        assert_eq!(cmd.0, ROOM);
+        assert_eq!(cmd.1, "$ev_ignored:example.org");
+        assert!(app.pending_jump.is_some());
+
+        // Worker rejects opening an event from an ignored sender with a clear reason.
+        app.on_matrix(MatrixEvent::JumpFailed {
+            generation: cmd.2,
+            reason: "That message is from an ignored user.".into(),
+        });
+        assert!(app.pending_jump.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|t| t.0.as_str()),
+            Some("That message is from an ignored user.")
+        );
+        // Active room and selection stay intact.
+        assert_eq!(app.room_id().as_deref(), Some(ROOM));
+        assert_eq!(app.timeline.selected, Some(0));
     }
 }

@@ -26,7 +26,7 @@ pub fn convert(
 ) -> Vec<Message> {
     let now = Local::now();
     let last = items.len().saturating_sub(1);
-    let mut messages: Vec<Message> = items
+    items
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
@@ -35,7 +35,8 @@ pub fn convert(
                 return event_message(id, event, own, ignored, &now);
             }
             match item.as_virtual()? {
-                // Nothing is new below a marker that sits at the very end.
+                // Keep a trailing `ReadMarker` too when every item after it was
+                // hidden/ignored so the UI knows no visible unread messages follow it.
                 VirtualTimelineItem::ReadMarker if index < last => Some(Message {
                     id,
                     kind: MsgKind::ReadMarker,
@@ -45,14 +46,7 @@ pub fn convert(
                 _ => None,
             }
         })
-        .collect();
-    while messages
-        .last()
-        .is_some_and(|message| message.kind == MsgKind::ReadMarker)
-    {
-        messages.pop();
-    }
-    messages
+        .collect()
 }
 
 /// One line saying what a message is, for the room list.

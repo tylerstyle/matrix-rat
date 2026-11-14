@@ -125,9 +125,24 @@ pub enum MatrixCmd {
         room_id: String,
         typing: bool,
     },
+    /// Everything in the room (or, inside [`MatrixCmd::InThread`], the thread) has been
+    /// read: sends the receipt and, for a room, moves the read marker (`m.fully_read`)
+    /// and takes back a "marked as unread".
     MarkRead {
         room_id: String,
         /// Whether other people may see the receipt.
+        public: bool,
+    },
+    /// Sets or takes back the "marked as unread" flag of a room (`m.marked_unread`
+    /// in its account data, shared with the user's other clients).
+    SetUnread {
+        room_id: String,
+        unread: bool,
+    },
+    /// [`MatrixCmd::MarkRead`] for many rooms, one after the other in the background,
+    /// without keeping their timelines open.
+    MarkRoomsRead {
+        room_ids: Vec<String>,
         public: bool,
     },
     Join {
@@ -274,6 +289,10 @@ impl std::fmt::Debug for MatrixCmd {
             Self::Retry { room_id, .. } => write!(f, "Retry({room_id})"),
             Self::Typing { room_id, typing } => write!(f, "Typing({room_id}, {typing})"),
             Self::MarkRead { room_id, .. } => write!(f, "MarkRead({room_id})"),
+            Self::SetUnread { room_id, unread } => write!(f, "SetUnread({room_id}, {unread})"),
+            Self::MarkRoomsRead { room_ids, .. } => {
+                write!(f, "MarkRoomsRead({} rooms)", room_ids.len())
+            }
             Self::Join { room_id } => write!(f, "Join({room_id})"),
             Self::Leave { room_id } => write!(f, "Leave({room_id})"),
             Self::Logout => f.write_str("Logout"),
@@ -361,6 +380,8 @@ pub struct RoomSummary {
     pub mention: bool,
     /// Has unread messages, even if they do not notify.
     pub unread: bool,
+    /// The user marked the room as unread by hand, here or in another client.
+    pub marked_unread: bool,
     /// `mxc://` address of the room's picture (for a chat with one person without
     /// a picture of its own: that person's).
     pub avatar: Option<String>,
@@ -410,6 +431,10 @@ pub enum MatrixEvent {
         user_id: String,
     },
     Sync(SyncStatus),
+    /// The first sync of the session is through: what was missed while the app was
+    /// not running has arrived (or is arriving in the open room right now). Sent
+    /// once per session.
+    CaughtUp,
     Rooms(Vec<RoomSummary>),
     Recovery(RecoveryStatus),
     /// Outcome of [`MatrixCmd::Recover`]: `Err` carries a message for the user.
@@ -463,6 +488,17 @@ pub enum MatrixEvent {
     Spaces(Vec<SpaceSummary>),
     /// A message the account's notification rules consider worth a notification.
     Notice(Notice),
+    /// A notifying message or invite arrived for this room, but was suppressed because
+    /// its sender or inviter is on the ignored list. Keeps count-based notification
+    /// fallbacks from firing a generic "New message" toast for it.
+    SuppressedNotice {
+        room_id: String,
+    },
+    /// The user clicked the desktop notification shown for this room. Comes from the
+    /// notification service, not from the worker.
+    NoticeClicked {
+        room_id: String,
+    },
     /// Outcome of [`MatrixCmd::SaveFile`]: where the file is now, or what went wrong.
     FileSaved {
         key: String,
@@ -534,6 +570,7 @@ impl std::fmt::Debug for MatrixEvent {
             Self::BrowserLoginUrl(_) => f.write_str("BrowserLoginUrl"),
             Self::LoggedIn { user_id } => write!(f, "LoggedIn({user_id})"),
             Self::Sync(status) => write!(f, "Sync({status:?})"),
+            Self::CaughtUp => f.write_str("CaughtUp"),
             Self::Rooms(rooms) => write!(f, "Rooms({})", rooms.len()),
             Self::Recovery(status) => write!(f, "Recovery({status:?})"),
             Self::RecoverResult(result) => write!(f, "RecoverResult(ok: {})", result.is_ok()),
@@ -584,6 +621,8 @@ impl std::fmt::Debug for MatrixEvent {
             }
             Self::Spaces(spaces) => write!(f, "Spaces({})", spaces.len()),
             Self::Notice(notice) => write!(f, "{notice:?}"),
+            Self::SuppressedNotice { room_id } => write!(f, "SuppressedNotice({room_id})"),
+            Self::NoticeClicked { room_id } => write!(f, "NoticeClicked({room_id})"),
             Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
             Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
             // The reason names a file.
@@ -1063,6 +1102,14 @@ impl Worker {
         let mut sync_state = sync.state();
         // The subscriber only reports changes; the service may already be running.
         self.emit(MatrixEvent::Sync(sync_status(&sync_state.get())));
+        // The room list leaves its first state when the first answer of the server
+        // has been worked in.
+        let mut list_state = sync.room_list_service().state();
+        let mut caught_up = false;
+        if caught_up_in(&list_state.get()) {
+            caught_up = true;
+            self.emit(MatrixEvent::CaughtUp);
+        }
         let recovery = client.encryption().recovery();
         let recovery_states = recovery.state_stream();
         pin_mut!(recovery_states);
@@ -1114,6 +1161,12 @@ impl Worker {
                 Some(opened) = timelines.next_opened() => timelines.on_opened(opened).await,
                 Some(state) = sync_state.next() => {
                     self.emit(MatrixEvent::Sync(sync_status(&state)));
+                }
+                Some(state) = list_state.next(), if !caught_up => {
+                    if caught_up_in(&state) {
+                        caught_up = true;
+                        self.emit(MatrixEvent::CaughtUp);
+                    }
                 }
                 Some(state) = recovery_states.next() => {
                     self.emit(MatrixEvent::Recovery(recovery_status(state)));
@@ -1243,6 +1296,12 @@ async fn latest_message(
     } else {
         format!("{}: {text}", convert::display_name(&profile, &sender))
     })
+}
+
+/// Whether the room list has had an answer from the server in this state.
+fn caught_up_in(state: &matrix_sdk_ui::room_list_service::State) -> bool {
+    use matrix_sdk_ui::room_list_service::State;
+    matches!(state, State::SettingUp | State::Recovering | State::Running)
 }
 
 fn sync_status(state: &State) -> SyncStatus {
@@ -1389,6 +1448,10 @@ async fn summarize(
         } else {
             None
         };
+        // Server push-rule counts intentionally remain faithful to `/sync` (so ignored
+        // senders still count until marked read): subtracting them reliably would require
+        // fetching unread history for every room and would otherwise mask real unread
+        // messages sitting before an ignored latest message.
         let notifications = room.num_unread_notifications();
         summaries.push(RoomSummary {
             id: room.room_id().to_string(),
@@ -1398,7 +1461,8 @@ async fn summarize(
             preview: previews.line(room, direct, ignored).await,
             server_notifications: room.unread_notification_counts().notification_count,
             mention: room.num_unread_mentions() > 0,
-            unread: notifications > 0 || room.num_unread_messages() > 0 || room.is_marked_unread(),
+            unread: notifications > 0 || room.num_unread_messages() > 0,
+            marked_unread: room.is_marked_unread(),
             avatar: avatar.as_deref().and_then(safety::safe_mxc),
             alias: room
                 .canonical_alias()

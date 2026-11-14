@@ -327,6 +327,9 @@ pub struct Room {
     pub unread: u32,
     /// Has unread messages, even without a notification count.
     pub bold: bool,
+    /// Marked as unread by hand (here or in another client), until it is opened,
+    /// marked as read or written in. Looks like a room with unread messages.
+    pub marked_unread: bool,
     pub mention: bool,
     pub online: bool,
     pub typing: Option<String>,
@@ -359,6 +362,11 @@ fn msg(sender: &str, day: &str, time: &str, body: &str) -> Message {
 }
 
 impl Room {
+    /// Whether the room list shows the room as unread, for whatever reason.
+    pub fn shows_unread(&self) -> bool {
+        self.bold || self.unread > 0 || self.mention || self.marked_unread
+    }
+
     pub fn new(id: &str, name: &str, kind: RoomKind) -> Room {
         Room {
             id: id.into(),
@@ -375,6 +383,7 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         kind,
         unread,
         bold: unread > 0,
+        marked_unread: false,
         mention: false,
         online: false,
         typing: None,

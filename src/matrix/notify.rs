@@ -108,8 +108,14 @@ pub async fn watch(
                 let Some(events) = events else {
                     return;
                 };
-                if let Some(notice) = notice(notification, &room, &client, &ignored).await {
-                    let _ = events.send(MatrixEvent::Notice(notice));
+                match notice(notification, &room, &client, &ignored).await {
+                    NoticeOutcome::Show(notice) => {
+                        let _ = events.send(MatrixEvent::Notice(notice));
+                    }
+                    NoticeOutcome::Suppressed(room_id) => {
+                        let _ = events.send(MatrixEvent::SuppressedNotice { room_id });
+                    }
+                    NoticeOutcome::Ignore => {}
                 }
             }
         })
@@ -117,18 +123,24 @@ pub async fn watch(
     watch
 }
 
+enum NoticeOutcome {
+    Show(Notice),
+    Suppressed(String),
+    Ignore,
+}
+
 async fn notice(
     notification: Notification,
     room: &Room,
     client: &Client,
     ignored: &watch::Receiver<IgnoredSet>,
-) -> Option<Notice> {
+) -> NoticeOutcome {
     if !notification
         .actions
         .iter()
         .any(|action| action.should_notify())
     {
-        return None;
+        return NoticeOutcome::Ignore;
     }
     let highlight = notification
         .actions
@@ -142,14 +154,19 @@ async fn notice(
     let (sender, body) = match &notification.event {
         RawAnySyncOrStrippedTimelineEvent::Sync(raw) => {
             thread = thread_of(raw.json().get());
-            let event = raw.deserialize().ok()?;
-            if Some(event.sender()) == client.user_id() || is_ignored_in(ignored, event.sender()) {
-                return None;
+            let Ok(event) = raw.deserialize() else {
+                return NoticeOutcome::Ignore;
+            };
+            if Some(event.sender()) == client.user_id() {
+                return NoticeOutcome::Ignore;
             }
             let sent = UNIX_EPOCH + Duration::from_millis(event.origin_server_ts().0.into());
             let age = SystemTime::now().duration_since(sent).unwrap_or_default();
             if age > FRESH {
-                return None;
+                return NoticeOutcome::Ignore;
+            }
+            if is_ignored_in(ignored, event.sender()) {
+                return NoticeOutcome::Suppressed(room.room_id().to_string());
             }
             let sender = match room.get_member_no_sync(event.sender()).await {
                 Ok(Some(member)) => member.name().to_owned(),
@@ -169,12 +186,12 @@ async fn notice(
                 .as_ref()
                 .is_some_and(|user| is_ignored_in(ignored, user))
             {
-                return None;
+                return NoticeOutcome::Suppressed(room.room_id().to_string());
             }
             (String::new(), "You are invited to this room".to_owned())
         }
     };
-    Some(Notice {
+    NoticeOutcome::Show(Notice {
         room_id: room.room_id().to_string(),
         room: sanitize_line(&room_name),
         sender: sanitize_line(&sender),

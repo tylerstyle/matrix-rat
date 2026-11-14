@@ -360,6 +360,7 @@ impl App {
         }
 
         if self.matrix.is_some() {
+            self.clear_marked_unread(self.active);
             self.send_matrix(MatrixCmd::SendFiles {
                 room_id: room_id.clone(),
                 files: files.iter().map(|file| file.path.clone()).collect(),

@@ -74,6 +74,7 @@ pub enum Run {
     CopyLink,
     OpenRoom,
     MarkRead,
+    MarkUnread,
     /// The room's notification setting, in its room info.
     Notifications,
     ClearDraft,
@@ -490,8 +491,10 @@ pub fn room_items(room: &Room, keys: &Keymap) -> Vec<Item> {
         ));
         return items;
     }
-    if room.bold || room.unread > 0 || room.mention {
+    if room.shows_unread() {
         items.push(Item::new("Mark as read", "", Run::MarkRead));
+    } else {
+        items.push(Item::new("Mark as unread", "", Run::MarkUnread));
     }
     let favourite = if room.kind == RoomKind::Favourite {
         "Remove from favourites"
@@ -815,6 +818,7 @@ mod tests {
             [
                 "Open",
                 "Room info",
+                "Mark as unread",
                 "Add to favourites",
                 "Notification mode…",
                 "Leave…"

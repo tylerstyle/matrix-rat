@@ -652,15 +652,18 @@ async fn leave(client: &Client, room_id: &str) -> Result<(), String> {
     {
         tracing::warn!(?err, "could not remove the draft of a room after leaving");
     }
-    // So it does not linger on the account as a room once left. Leaving worked, which
-    // is what was asked for; a server that cannot forget is not worth an alarm.
-    if matches!(room.state(), RoomState::Left | RoomState::Banned)
-        && let Err(err) = room.forget().await
-    {
-        tracing::warn!(
-            kind = ?err.client_api_error_kind(),
-            "could not forget the room after leaving"
-        );
+    // Clear the room's event cache while it still exists in `base_client`: calling
+    // `room.forget()` first drops it from `base_client`, causing `event_cache().forget_room()`
+    // inside `room.forget()` to fail with `ClientDropped` and leave a stale cache entry
+    // that breaks later `clear_all_rooms()` calls on ignore/unignore.
+    if matches!(room.state(), RoomState::Left | RoomState::Banned) {
+        let _ = client.event_cache().forget_room(room.room_id()).await;
+        if let Err(err) = room.forget().await {
+            tracing::warn!(
+                kind = ?err.client_api_error_kind(),
+                "could not forget the room after leaving"
+            );
+        }
     }
     Ok(())
 }

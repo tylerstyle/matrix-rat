@@ -530,7 +530,7 @@ impl App {
                     room_index == self.active && self.threads.open_root() == Some(root.as_str());
                 if !same_thread {
                     self.leave_thread();
-                    self.switch_room_state(room_index);
+                    self.switch_room_state(room_index, false);
                     if let Some(at) = self.visible_rooms().iter().position(|i| *i == room_index) {
                         self.sidebar.cursor = at;
                         self.sidebar.reveal_cursor = true;
@@ -540,7 +540,7 @@ impl App {
             }
             None => {
                 self.leave_thread();
-                self.switch_room_state(room_index);
+                self.switch_room_state(room_index, false);
                 if let Some(at) = self.visible_rooms().iter().position(|i| *i == room_index) {
                     self.sidebar.cursor = at;
                     self.sidebar.reveal_cursor = true;
@@ -553,6 +553,11 @@ impl App {
             .map(|d| d.target_event.as_str())
             .unwrap_or(&pending.event_id);
 
+        // The "new" line of the room: placed by these messages if they are the
+        // room's newest and the room was not open before; never by a slice from
+        // somewhere in its history. The message jumped to is what the view shows,
+        // not the line (the view's state is made anew below).
+        let messages = self.place_unread_line(messages, detached.is_some());
         let messages = if self.thread_open() {
             self.thread_snapshot(messages)
         } else {

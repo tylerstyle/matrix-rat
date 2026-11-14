@@ -511,6 +511,10 @@ mod tests {
         wait_for_ignored(&mut ev1, &bob_id, false).await;
         wait_for_ignored(&mut ev2, &bob_id, false).await;
 
+        // Clear any leftover ignore state cleanly even if the test panics mid-run.
+        let h1_guard = h1.clone();
+        let bob_guard = bob_id.clone();
+        let outcome = tokio::spawn(async move {
         // Create a public room (so continuwuity indexes members in `/user_directory/search`)
         // and invite bob.
         let tag = std::time::SystemTime::now()
@@ -567,6 +571,56 @@ mod tests {
 
         let parsed_room = RoomId::parse(&room_id).unwrap();
         let bob_room = bob.join_room_by_id(&parsed_room).await.unwrap();
+
+        // Second room never opened on h1: set up before ignoring bob so the invite/join
+        // succeeds on homeservers with MSC4406 ignore rules; used later for `/context`
+        // OpenEvent rejection, SuppressedNotice, and MarkRoomsRead.
+        h1.send(MatrixCmd::Manage(ManageCmd::Create {
+            request: 43,
+            name: format!("Safety Unread {tag}"),
+            topic: None,
+            encrypted: false,
+            alias: None,
+        }));
+        let room2_id = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match ev1.recv().await.expect("worker stopped") {
+                    MatrixEvent::Manage(ManageEvent::Opened {
+                        request: 43,
+                        result,
+                    }) => break result.expect("create room2"),
+                    MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out creating room2");
+        wait_for_room_joined(&mut ev1, &room2_id).await;
+        h1.send(MatrixCmd::Manage(ManageCmd::Invite {
+            room_id: room2_id.clone(),
+            user_id: bob_id.clone(),
+        }));
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match ev1.recv().await.expect("worker stopped") {
+                    MatrixEvent::Manage(ManageEvent::Done {
+                        change: crate::matrix::Change::Invite,
+                        result,
+                        ..
+                    }) => {
+                        result.expect("invite bob to room2");
+                        break;
+                    }
+                    MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out inviting bob to room2");
+        let parsed_room2 = RoomId::parse(&room2_id).unwrap();
+        let bob_room2 = bob.join_room_by_id(&parsed_room2).await.unwrap();
         bob.sync_once(SyncSettings::default()).await.unwrap();
 
         // Verify UserDirectory search finds bob once both users share a room.
@@ -613,7 +667,7 @@ mod tests {
         // Report bob's message to the homeserver.
         h1.send(MatrixCmd::ReportContent {
             room_id: room_id.clone(),
-            event_id,
+            event_id: event_id.clone(),
             reason: Some("safety integration test".into()),
         });
         let report_res = tokio::time::timeout(Duration::from_secs(30), async {
@@ -680,6 +734,141 @@ mod tests {
             "ignored user should be omitted from directory search"
         );
 
+        // Jumping to an ignored user's message rejects cleanly via JumpFailed (warm cache).
+        h1.send(MatrixCmd::OpenEvent {
+            room_id: room_id.clone(),
+            event_id: event_id.clone(),
+            thread_root: None,
+            generation: 99,
+        });
+        let jump_reason = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match ev1.recv().await.expect("worker stopped") {
+                    MatrixEvent::JumpFailed {
+                        generation: 99,
+                        reason,
+                    } => break reason,
+                    MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for warm-cache JumpFailed");
+        assert!(jump_reason.contains("ignored"), "{jump_reason}");
+
+        // Ignored bob speaks in unopened room2: Continuwuity's MSC4406 may withhold the
+        // event or notification from sync altogether, or emit `SuppressedNotice` — in
+        // either case no `MatrixEvent::Notice` may be emitted for room2.
+        let bob_sent = bob_room2
+            .send(RoomMessageEventContent::text_plain("unread while ignored"))
+            .await
+            .unwrap();
+        let bob_ev2 = bob_sent.response.event_id.to_string();
+
+        let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(ev) = ev1.recv().await {
+                match ev {
+                    MatrixEvent::Notice(n) if n.room_id == room2_id => {
+                        panic!("must not emit Notice for ignored sender: {n:?}");
+                    }
+                    MatrixEvent::SuppressedNotice { room_id: rid } if rid == room2_id => {
+                        break;
+                    }
+                    MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        // `/context` OpenEvent on unopened room2 rejects with "ignored" without opening.
+        h1.send(MatrixCmd::OpenEvent {
+            room_id: room2_id.clone(),
+            event_id: bob_ev2,
+            thread_root: None,
+            generation: 100,
+        });
+        let ctx_reason = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match ev1.recv().await.expect("worker stopped") {
+                    MatrixEvent::Notice(n) if n.room_id == room2_id => {
+                        panic!("must not emit Notice for ignored sender: {n:?}");
+                    }
+                    MatrixEvent::JumpFailed {
+                        generation: 100,
+                        reason,
+                    } => break reason,
+                    MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for /context JumpFailed");
+        assert!(ctx_reason.contains("ignored"), "{ctx_reason}");
+
+        // Mark room2 unread then run MarkRoomsRead: exercises fallback read marking even
+        // when room2 holds no visible non-ignored messages in its timeline.
+        h1.send(MatrixCmd::SetUnread {
+            room_id: room2_id.clone(),
+            unread: true,
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match ev1.recv().await.expect("worker stopped") {
+                    MatrixEvent::Rooms(list)
+                        if list
+                            .iter()
+                            .find(|r| r.id == room2_id)
+                            .is_some_and(|r| r.marked_unread) =>
+                    {
+                        break;
+                    }
+                    MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for room2 marked_unread");
+        h1.send(MatrixCmd::MarkRoomsRead {
+            room_ids: vec![room2_id.clone()],
+            public: false,
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match ev1.recv().await.expect("worker stopped") {
+                    MatrixEvent::ActionFailed(err) => panic!("MarkRoomsRead failed: {err}"),
+                    MatrixEvent::Rooms(list)
+                        if list
+                            .iter()
+                            .find(|r| r.id == room2_id)
+                            .is_some_and(|r| !r.marked_unread && !r.unread && r.notifications == 0) =>
+                    {
+                        break;
+                    }
+                    MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for room2 unread count to clear");
+
+        let _ = bob_room2.leave().await;
+        h1.send(MatrixCmd::Manage(ManageCmd::Leave {
+            room_id: room2_id.clone(),
+        }));
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(ev) = ev1.recv().await {
+                if matches!(ev, MatrixEvent::Manage(ManageEvent::Left { room_id: rid, .. }) if rid == room2_id) {
+                    break;
+                }
+            }
+        })
+        .await;
+
         // Unignoring bob syncs and restores bob's message in the live timeline.
         h1.send(MatrixCmd::UnignoreUser {
             user_id: bob_id.clone(),
@@ -718,5 +907,13 @@ mod tests {
         .expect("timed out shutting down worker 2");
         let _ = std::fs::remove_dir_all(_root1);
         let _ = std::fs::remove_dir_all(_root2);
+        })
+        .await;
+        if let Err(err) = outcome {
+            h1_guard.send(MatrixCmd::UnignoreUser { user_id: bob_guard });
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            h1_guard.send(MatrixCmd::Shutdown);
+            std::panic::resume_unwind(err.into_panic());
+        }
     }
 }
