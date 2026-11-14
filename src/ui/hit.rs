@@ -62,6 +62,8 @@ pub enum HitId {
     Image(usize),
     /// The thread line under the message at this index.
     Thread(usize),
+    /// The quoted-reply row above the message at this index.
+    ReplyQuote(usize),
     /// The ✕ of the waiting file at this index in the composer.
     Attachment(usize),
     /// A row in the command palette (index into its filtered entries).

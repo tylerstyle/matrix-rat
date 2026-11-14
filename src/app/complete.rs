@@ -666,6 +666,7 @@ mod tests {
             generation: 1,
             messages: vec![msg],
             reached_start: true,
+            detached: None,
         });
         app.on_matrix(MatrixEvent::RoomMembers {
             room_id: "!a".into(),

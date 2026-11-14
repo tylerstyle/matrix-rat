@@ -5,19 +5,17 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::App;
+use super::{App, TimelineState};
 use crate::action::{Action, Pane};
 use crate::keymap::Context;
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::search::{query_terms, window_snippet};
-use crate::matrix::{MatrixCmd, SearchHit};
+use crate::matrix::{DetachedTimeline, MatrixCmd, SearchHit};
 use crate::modal::Modal;
 use crate::model::{ItemRef, Message, MsgKind, RoomKind};
 
 /// Pause after typing before sending a search query to the index worker.
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
-/// Maximum backward-pagination rounds when jumping to an older hit on a room switch.
-const MAX_JUMP_DIG: u8 = 15;
 const DEMO_MAX_HITS: usize = 200;
 
 #[derive(Clone)]
@@ -93,15 +91,22 @@ impl GlobalSearch {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct PendingJump {
+    pub generation: u64,
     pub room_id: String,
     pub event_id: String,
     pub thread_root: Option<String>,
-    pub paginate_rounds: u8,
-    /// Wait for the fresh `MatrixEvent::Timeline` from `OpenRoom` / `OpenThread` before
-    /// digging or giving up.
-    pub awaiting_timeline: bool,
+}
+
+/// Redacts room, event, and thread identifiers from logs and panic output.
+impl fmt::Debug for PendingJump {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingJump")
+            .field("generation", &self.generation)
+            .field("has_thread", &self.thread_root.is_some())
+            .finish()
+    }
 }
 
 impl App {
@@ -360,144 +365,229 @@ impl App {
             return;
         };
         self.close_global_search();
+        self.jump_to_event(hit.room_id, hit.event_id, hit.thread_root);
+    }
 
-        let Some(room_index) = self.rooms.iter().position(|r| r.id == hit.room_id) else {
+    /// Aborts any in-flight event jump without disturbing the currently visible view.
+    pub(super) fn cancel_pending_jump(&mut self) {
+        if let Some(pending) = self.pending_jump.take() {
+            self.send_matrix(MatrixCmd::CancelOpenEvent {
+                generation: pending.generation,
+            });
+        }
+    }
+
+    /// Jumps to `event_id` in `room_id` (optionally inside `thread_root`). Selects
+    /// immediately if already in the active view; otherwise asks the worker to open
+    /// the cached live timeline or an event-focused `/context` slice while keeping the
+    /// active view intact until it arrives.
+    pub(super) fn jump_to_event(
+        &mut self,
+        room_id: String,
+        event_id: String,
+        thread_root: Option<String>,
+    ) {
+        let Some(room_index) = self.rooms.iter().position(|r| r.id == room_id) else {
             self.show_toast("That room is no longer available");
             return;
         };
+        if self.rooms[room_index].kind == RoomKind::Invite {
+            self.show_toast("Join this room before jumping to a message in it");
+            return;
+        }
 
-        let in_target_thread = hit.thread_root.is_some()
+        let in_target_thread = thread_root.is_some()
             && room_index == self.active
-            && self.thread_key() == hit.thread_root.as_deref();
-        let in_target_room = room_index == self.active && !self.thread_open();
+            && self.thread_key() == thread_root.as_deref();
+        let in_target_room =
+            thread_root.is_none() && room_index == self.active && !self.thread_open();
+        if (in_target_thread || in_target_room)
+            && let Some(pos) = find_target_message(
+                self.messages(),
+                &event_id,
+                self.matrix.is_none(),
+                in_target_thread,
+            )
+        {
+            self.cancel_pending_jump();
+            self.set_focus(Pane::Timeline);
+            self.timeline.selected = Some(pos);
+            self.timeline.reveal_selected = true;
+            return;
+        }
+
+        // An event link without a thread root can still point to a message (or the root)
+        // in the currently open thread; select it right here if loaded.
+        if thread_root.is_none()
+            && room_index == self.active
+            && self.thread_open()
+            && let Some(pos) = find_target_message(self.messages(), &event_id, false, true)
+        {
+            self.cancel_pending_jump();
+            self.set_focus(Pane::Timeline);
+            self.timeline.selected = Some(pos);
+            self.timeline.reveal_selected = true;
+            return;
+        }
+
+        if self.matrix.is_none() {
+            self.jump_in_demo(room_index, &room_id, &event_id, thread_root.as_deref());
+            return;
+        }
+
+        self.cancel_pending_jump();
+        let generation = self.allocate_gen();
+        self.pending_jump = Some(PendingJump {
+            generation,
+            room_id: room_id.clone(),
+            event_id: event_id.clone(),
+            thread_root: thread_root.clone(),
+        });
+        self.send_matrix(MatrixCmd::OpenEvent {
+            room_id,
+            event_id,
+            thread_root,
+            generation,
+        });
+    }
+
+    fn jump_in_demo(
+        &mut self,
+        room_index: usize,
+        room_id: &str,
+        event_id: &str,
+        thread_root: Option<&str>,
+    ) {
+        if self.space.is_some() && !self.space_rooms.contains(room_id) {
+            self.select_space(None);
+        }
+        let in_target_thread =
+            thread_root.is_some() && room_index == self.active && self.thread_key() == thread_root;
+        let in_target_room =
+            thread_root.is_none() && room_index == self.active && !self.thread_open();
         if !in_target_thread && !in_target_room {
-            // If the hit belongs to a room outside the active space filter, show all rooms
-            // so the jumped-to conversation stays visible in the sidebar.
-            if self.space.is_some() && !self.space_rooms.contains(&hit.room_id) {
-                self.select_space(None);
-            }
             self.open_room(room_index);
             if let Some(at) = self.visible_rooms().iter().position(|i| *i == room_index) {
                 self.sidebar.cursor = at;
                 self.sidebar.reveal_cursor = true;
             }
         }
-
-        let awaiting_timeline = !in_target_thread && !in_target_room && self.matrix.is_some();
-        self.pending_jump = Some(PendingJump {
-            room_id: hit.room_id,
-            event_id: hit.event_id,
-            thread_root: hit.thread_root,
-            paginate_rounds: MAX_JUMP_DIG,
-            awaiting_timeline,
-        });
-        self.try_apply_pending_jump();
-    }
-
-    pub(super) fn on_jump_timeline(&mut self) {
-        if let Some(jump) = &mut self.pending_jump {
-            jump.awaiting_timeline = false;
-        }
-        self.try_apply_pending_jump();
-    }
-
-    pub(super) fn try_apply_pending_jump(&mut self) {
-        let Some(jump) = self.pending_jump.clone() else {
-            return;
-        };
-        if self.room_id().as_deref() != Some(jump.room_id.as_str()) {
-            self.pending_jump = None;
-            return;
-        }
-
-        let demo_mode = self.matrix.is_none();
-        if let Some(root) = jump.thread_root.clone() {
-            match self.thread_key() {
-                Some(open_key) if open_key == root => {
-                    self.try_select_or_paginate(jump, demo_mode, true);
-                }
-                Some(_) => {
-                    self.pending_jump = None;
-                }
-                None => {
-                    if jump.awaiting_timeline {
-                        return;
-                    }
-                    if let Some(root_pos) =
-                        find_target_message(self.messages(), &root, demo_mode, false)
-                    {
-                        self.open_thread(root_pos);
-                        if self.thread_key() == Some(root.as_str()) {
-                            self.pending_jump = Some(PendingJump {
-                                room_id: jump.room_id,
-                                event_id: jump.event_id,
-                                thread_root: Some(root),
-                                paginate_rounds: MAX_JUMP_DIG,
-                                awaiting_timeline: self.matrix.is_some(),
-                            });
-                            if demo_mode {
-                                self.try_apply_pending_jump();
-                            }
-                        } else {
-                            self.pending_jump = None;
-                        }
-                        return;
-                    }
-                    self.paginate_for_jump(jump);
-                }
+        if let Some(root) = thread_root
+            && self.thread_key() != Some(root)
+        {
+            if let Some(root_pos) = find_target_message(self.messages(), root, true, false) {
+                self.open_thread(root_pos);
+            } else {
+                self.show_toast("That message is not in this conversation");
+                return;
             }
-            return;
         }
-
-        if self.thread_open() {
-            self.pending_jump = None;
-            return;
-        }
-        self.try_select_or_paginate(jump, demo_mode, false);
-    }
-
-    fn try_select_or_paginate(&mut self, jump: PendingJump, demo_mode: bool, thread_open: bool) {
-        if let Some(pos) =
-            find_target_message(self.messages(), &jump.event_id, demo_mode, thread_open)
+        if let Some(pos) = find_target_message(self.messages(), event_id, true, self.thread_open())
         {
             self.set_focus(Pane::Timeline);
             self.timeline.selected = Some(pos);
             self.timeline.reveal_selected = true;
-            if !jump.awaiting_timeline {
-                self.pending_jump = None;
-            }
-            return;
+        } else {
+            self.show_toast("That message is not in this conversation");
         }
-
-        if jump.awaiting_timeline {
-            return;
-        }
-        self.paginate_for_jump(jump);
     }
 
-    fn paginate_for_jump(&mut self, jump: PendingJump) {
-        if self.timeline.loading_older {
+    pub(super) fn on_jump_arrived(
+        &mut self,
+        generation: u64,
+        room_id: String,
+        messages: Vec<Message>,
+        reached_start: bool,
+        detached: Option<DetachedTimeline>,
+    ) {
+        let Some(pending) = self.pending_jump.take() else {
+            return;
+        };
+        if pending.generation != generation {
             return;
         }
-        if self.timeline.reached_start || jump.paginate_rounds == 0 {
-            self.pending_jump = None;
-            self.show_toast("Message is not in the loaded timeline");
+        let Some(room_index) = self.rooms.iter().position(|r| r.id == room_id) else {
+            self.show_toast("That room is no longer available");
             return;
+        };
+
+        self.generation = generation;
+        self.auto_opened = false;
+        self.row_cache = None;
+
+        if self.space.is_some() && !self.space_rooms.contains(&room_id) {
+            self.select_space(None);
         }
 
-        if let Some(pending) = &mut self.pending_jump {
-            pending.paginate_rounds -= 1;
+        let want_thread = detached
+            .as_ref()
+            .and_then(|d| d.thread_root.clone())
+            .or(pending.thread_root);
+
+        match want_thread {
+            Some(root) => {
+                let same_thread =
+                    room_index == self.active && self.threads.open_root() == Some(root.as_str());
+                if !same_thread {
+                    self.leave_thread();
+                    self.switch_room_state(room_index);
+                    if let Some(at) = self.visible_rooms().iter().position(|i| *i == room_index) {
+                        self.sidebar.cursor = at;
+                        self.sidebar.reveal_cursor = true;
+                    }
+                    self.enter_thread_from_jump(root);
+                }
+            }
+            None => {
+                self.leave_thread();
+                self.switch_room_state(room_index);
+                if let Some(at) = self.visible_rooms().iter().position(|i| *i == room_index) {
+                    self.sidebar.cursor = at;
+                    self.sidebar.reveal_cursor = true;
+                }
+            }
         }
-        self.timeline.loading_older = true;
-        self.timeline.count_at_request = self.messages().len();
-        self.send_matrix(MatrixCmd::Paginate {
-            room_id: jump.room_id,
-            generation: self.generation,
-        });
+
+        let target_id = detached
+            .as_ref()
+            .map(|d| d.target_event.as_str())
+            .unwrap_or(&pending.event_id);
+
+        let messages = if self.thread_open() {
+            self.thread_snapshot(messages)
+        } else {
+            messages
+        };
+
+        let mut timeline = TimelineState {
+            reached_start,
+            detached: detached.is_some(),
+            reached_end: detached.as_ref().is_some_and(|d| d.reached_end),
+            ..TimelineState::default()
+        };
+        timeline.selected = find_target_message(&messages, target_id, false, self.thread_open());
+        timeline.reveal_selected = timeline.selected.is_some();
+
+        self.rooms[self.active].messages = messages;
+        self.timeline = timeline;
+        self.timeline_rev += 1;
+        self.repaint = true;
+        self.set_focus(Pane::Timeline);
+    }
+
+    pub(super) fn on_jump_failed(&mut self, generation: u64, reason: String) {
+        if self
+            .pending_jump
+            .as_ref()
+            .is_some_and(|pending| pending.generation == generation)
+        {
+            self.pending_jump = None;
+            self.show_toast(&reason);
+        }
     }
 }
 
-fn find_target_message(
+pub(super) fn find_target_message(
     messages: &[Message],
     target: &str,
     demo_mode: bool,
@@ -651,25 +741,57 @@ mod tests {
         assert_eq!(s.hits.len(), 1);
         assert!(!s.searching);
 
-        // Selecting and hitting Enter closes modal, cancels, opens room beta, selects $ev_b1.
+        // Selecting and hitting Enter closes modal, cancels search, and dispatches OpenEvent
+        // while keeping the current room intact until the target timeline arrives.
         app.on_event(key_event(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.modal.is_none());
-        assert_eq!(app.active, 1);
-        assert_eq!(app.focus, Pane::Timeline);
-        assert_eq!(app.timeline.selected, Some(0));
+        assert_eq!(app.active, 0);
+        assert!(app.pending_jump.is_some());
         let mut cmds = Vec::new();
         while let Ok(c) = rx.try_recv() {
             cmds.push(c);
         }
         assert!(cmds.iter().any(|c| matches!(c, MatrixCmd::CancelSearch)));
-        assert!(cmds.iter().any(|c| matches!(
-            c,
-            MatrixCmd::OpenRoom { room_id, .. } if room_id == "!b:example.org"
-        )));
+        let jump_gen = cmds
+            .iter()
+            .find_map(|c| match c {
+                MatrixCmd::OpenEvent {
+                    room_id,
+                    event_id,
+                    thread_root,
+                    generation,
+                } if room_id == "!b:example.org"
+                    && event_id == "$ev_b1"
+                    && thread_root.is_none() =>
+                {
+                    Some(*generation)
+                }
+                _ => None,
+            })
+            .expect("expected OpenEvent(!b, $ev_b1)");
+
+        app.on_matrix(crate::matrix::MatrixEvent::Timeline {
+            room_id: "!b:example.org".into(),
+            generation: jump_gen,
+            messages: vec![Message {
+                id: "$ev_b1".into(),
+                item: Some(ItemRef::Event("$ev_b1".into())),
+                sender: "bob".into(),
+                body: "second room target needle".into(),
+                ..Message::default()
+            }],
+            reached_start: true,
+            detached: None,
+        });
+        assert_eq!(app.active, 1);
+        assert_eq!(app.focus, Pane::Timeline);
+        assert_eq!(app.timeline.selected, Some(0));
+        assert!(!app.timeline.detached);
+        assert!(app.pending_jump.is_none());
     }
 
     #[test]
-    fn jump_waits_for_async_timeline_and_paginates_if_older() {
+    fn jump_opens_detached_event_timeline_and_preserves_view_until_arrival() {
         let (mut app, mut rx, _handle) = test_app_with_matrix();
         app.rooms[1].messages.clear();
 
@@ -693,37 +815,26 @@ mod tests {
             note: None,
         });
         app.on_event(key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active, 1);
+        assert_eq!(app.active, 0, "view stays put while OpenEvent is in flight");
         assert!(app.pending_jump.is_some());
 
-        // Drain initial CancelSearch + OpenRoom.
         let mut open_gen = 0;
         while let Ok(cmd) = rx.try_recv() {
-            if let MatrixCmd::OpenRoom { generation, .. } = cmd {
+            if let MatrixCmd::OpenEvent {
+                room_id,
+                event_id,
+                generation,
+                ..
+            } = cmd
+            {
+                assert_eq!(room_id, "!b:example.org");
+                assert_eq!(event_id, "$older_b");
                 open_gen = generation;
             }
         }
         assert!(open_gen > 0);
 
-        // Initial timeline arrives WITHOUT $older_b yet -> triggers Paginate.
-        app.on_matrix(crate::matrix::MatrixEvent::Timeline {
-            room_id: "!b:example.org".into(),
-            generation: open_gen,
-            messages: vec![Message {
-                id: "$newer_b".into(),
-                item: Some(ItemRef::Event("$newer_b".into())),
-                sender: "bob".into(),
-                body: "newest".into(),
-                ..Message::default()
-            }],
-            reached_start: false,
-        });
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            MatrixCmd::Paginate { generation, .. } if generation == open_gen
-        ));
-
-        // Back-paginated page delivers $older_b -> selected and focused!
+        // Worker opens the /context slice around $older_b.
         app.on_matrix(crate::matrix::MatrixEvent::Timeline {
             room_id: "!b:example.org".into(),
             generation: open_gen,
@@ -744,13 +855,18 @@ mod tests {
                 },
             ],
             reached_start: false,
+            detached: Some(DetachedTimeline {
+                target_event: "$older_b".into(),
+                thread_root: None,
+                reached_end: false,
+            }),
         });
-        app.on_matrix(crate::matrix::MatrixEvent::Paginated {
-            generation: open_gen,
-            reached_start: false,
-        });
+        assert_eq!(app.active, 1);
+        assert_eq!(app.generation, open_gen);
         assert_eq!(app.focus, Pane::Timeline);
         assert_eq!(app.timeline.selected, Some(0));
+        assert!(app.timeline.detached);
+        assert!(!app.timeline.reached_end);
         assert!(app.pending_jump.is_none());
     }
 
@@ -903,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_reply_hit_opens_room_digs_for_root_opens_thread_and_selects_reply() {
+    fn thread_reply_hit_opens_detached_thread_and_reuses_already_open_thread() {
         let (mut app, mut rx, _handle) = test_app_with_matrix();
         app.rooms[1].messages.clear();
 
@@ -947,100 +1063,50 @@ mod tests {
             note: None,
         });
         app.on_event(key_event(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.active, 1);
+        assert_eq!(app.active, 0);
         assert!(!app.thread_open());
         assert!(app.pending_jump.is_some());
 
-        let mut open_room_gen = 0;
+        let mut open_event_gen = 0;
         while let Ok(cmd) = rx.try_recv() {
-            if let MatrixCmd::OpenRoom { generation, .. } = cmd {
-                open_room_gen = generation;
-            }
-        }
-        assert!(open_room_gen > 0);
-
-        // Initial room timeline does not yet contain $thread_root_b -> triggers room Paginate.
-        app.on_matrix(crate::matrix::MatrixEvent::Timeline {
-            room_id: "!b:example.org".into(),
-            generation: open_room_gen,
-            messages: vec![make_msg("$latest_b", "latest room msg")],
-            reached_start: false,
-        });
-        assert!(!app.thread_open());
-        let mut cmds = Vec::new();
-        while let Ok(cmd) = rx.try_recv() {
-            cmds.push(cmd);
-        }
-        assert!(cmds.iter().any(|c| matches!(
-            c,
-            MatrixCmd::Paginate { room_id, generation }
-                if room_id == "!b:example.org" && *generation == open_room_gen
-        )));
-
-        // Room pagination brings $thread_root_b -> opens thread and sends OpenThread.
-        app.on_matrix(crate::matrix::MatrixEvent::Timeline {
-            room_id: "!b:example.org".into(),
-            generation: open_room_gen,
-            messages: vec![
-                make_msg("$thread_root_b", "thread starter"),
-                make_msg("$latest_b", "latest room msg"),
-            ],
-            reached_start: false,
-        });
-        app.on_matrix(crate::matrix::MatrixEvent::Paginated {
-            generation: open_room_gen,
-            reached_start: false,
-        });
-        assert!(app.thread_open());
-        assert_eq!(app.thread_key(), Some("$thread_root_b"));
-
-        let mut thread_gen = 0;
-        while let Ok(cmd) = rx.try_recv() {
-            if let MatrixCmd::OpenThread {
+            if let MatrixCmd::OpenEvent {
                 room_id,
-                root,
+                event_id,
+                thread_root,
                 generation,
             } = cmd
             {
                 assert_eq!(room_id, "!b:example.org");
-                assert_eq!(root, "$thread_root_b");
-                thread_gen = generation;
+                assert_eq!(event_id, "$reply_old");
+                assert_eq!(thread_root.as_deref(), Some("$thread_root_b"));
+                open_event_gen = generation;
             }
         }
-        assert!(thread_gen > open_room_gen);
+        assert!(open_event_gen > 0);
 
-        // Initial thread timeline arrives without $reply_old yet -> paginates INSIDE the thread!
+        // Detached thread slice arrives without the root yet: must open the thread cleanly
+        // without inserting a blank root placeholder.
         app.on_matrix(crate::matrix::MatrixEvent::Timeline {
             room_id: "!b:example.org".into(),
-            generation: thread_gen,
-            messages: vec![make_msg("$reply_newer", "newer thread reply")],
-            reached_start: false,
-        });
-        assert!(app.pending_jump.is_some());
-        let mut cmds = Vec::new();
-        while let Ok(cmd) = rx.try_recv() {
-            cmds.push(cmd);
-        }
-        assert!(cmds.iter().any(|c| matches!(
-            c,
-            MatrixCmd::InThread { root, command }
-                if root == "$thread_root_b"
-                    && matches!(**command, MatrixCmd::Paginate { ref room_id, generation } if room_id == "!b:example.org" && generation == thread_gen)
-        )), "expected InThread Paginate, got {cmds:?}");
-
-        // Thread pagination brings $reply_old -> selects it inside the open thread!
-        app.on_matrix(crate::matrix::MatrixEvent::Timeline {
-            room_id: "!b:example.org".into(),
-            generation: thread_gen,
+            generation: open_event_gen,
             messages: vec![
-                make_msg("$thread_root_b", "thread starter"),
                 make_msg("$reply_old", "old thread reply"),
                 make_msg("$reply_newer", "newer thread reply"),
             ],
-            reached_start: true,
+            reached_start: false,
+            detached: Some(DetachedTimeline {
+                target_event: "$reply_old".into(),
+                thread_root: Some("$thread_root_b".into()),
+                reached_end: true,
+            }),
         });
+        assert_eq!(app.active, 1);
         assert_eq!(app.focus, Pane::Timeline);
         assert!(app.thread_open());
+        assert_eq!(app.thread_key(), Some("$thread_root_b"));
+        assert!(app.timeline.detached);
+        assert!(app.timeline.reached_end);
+        assert_eq!(app.messages().len(), 2);
         assert_eq!(
             app.timeline
                 .selected
@@ -1076,9 +1142,12 @@ mod tests {
             cmds.push(cmd);
         }
         assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, MatrixCmd::OpenRoom { .. } | MatrixCmd::OpenThread { .. })),
+            !cmds.iter().any(|c| matches!(
+                c,
+                MatrixCmd::OpenRoom { .. }
+                    | MatrixCmd::OpenThread { .. }
+                    | MatrixCmd::OpenEvent { .. }
+            )),
             "already-open target thread should not reopen: {cmds:?}"
         );
         assert_eq!(
@@ -1090,23 +1159,23 @@ mod tests {
     }
 
     #[test]
-    fn pending_jump_dropped_on_selection_typing_scroll_and_popup_while_digging() {
+    fn pending_jump_cancelled_on_selection_typing_scroll_and_popup_while_opening() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
-        let start_digging =
+        let start_opening =
             |app: &mut App, rx: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>| {
-                app.rooms[1].messages = vec![
+                app.rooms[0].messages = vec![
                     Message {
                         id: "$visible_0".into(),
                         item: Some(ItemRef::Event("$visible_0".into())),
-                        sender: "bob".into(),
+                        sender: "alice".into(),
                         body: "zero".into(),
                         ..Message::default()
                     },
                     Message {
                         id: "$visible_1".into(),
                         item: Some(ItemRef::Event("$visible_1".into())),
-                        sender: "bob".into(),
+                        sender: "alice".into(),
                         body: "one".into(),
                         ..Message::default()
                     },
@@ -1133,59 +1202,50 @@ mod tests {
                 app.on_event(key_event(KeyCode::Enter, KeyModifiers::NONE));
                 let mut open_gen = 0;
                 while let Ok(cmd) = rx.try_recv() {
-                    if let MatrixCmd::OpenRoom { generation, .. } = cmd {
+                    if let MatrixCmd::OpenEvent { generation, .. } = cmd {
                         open_gen = generation;
                     }
                 }
-                app.on_matrix(crate::matrix::MatrixEvent::Timeline {
-                    room_id: "!b:example.org".into(),
-                    generation: open_gen,
-                    messages: app.rooms[1].messages.clone(),
-                    reached_start: false,
-                });
                 assert!(app.pending_jump.is_some());
                 open_gen
             };
 
-        let deliver_late_page = |app: &mut App, open_gen: u64| {
+        let deliver_late_open = |app: &mut App, open_gen: u64| {
             app.on_matrix(crate::matrix::MatrixEvent::Timeline {
                 room_id: "!b:example.org".into(),
                 generation: open_gen,
-                messages: vec![
-                    Message {
-                        id: "$late_target".into(),
-                        item: Some(ItemRef::Event("$late_target".into())),
-                        sender: "bob".into(),
-                        body: "late target".into(),
-                        ..Message::default()
-                    },
-                    Message {
-                        id: "$visible_0".into(),
-                        item: Some(ItemRef::Event("$visible_0".into())),
-                        sender: "bob".into(),
-                        body: "zero".into(),
-                        ..Message::default()
-                    },
-                    Message {
-                        id: "$visible_1".into(),
-                        item: Some(ItemRef::Event("$visible_1".into())),
-                        sender: "bob".into(),
-                        body: "one".into(),
-                        ..Message::default()
-                    },
-                ],
+                messages: vec![Message {
+                    id: "$late_target".into(),
+                    item: Some(ItemRef::Event("$late_target".into())),
+                    sender: "bob".into(),
+                    body: "late target".into(),
+                    ..Message::default()
+                }],
                 reached_start: true,
-            });
-            app.on_matrix(crate::matrix::MatrixEvent::Paginated {
-                generation: open_gen,
-                reached_start: true,
+                detached: Some(DetachedTimeline {
+                    target_event: "$late_target".into(),
+                    thread_root: None,
+                    reached_end: true,
+                }),
             });
         };
 
-        // 1. User moves selection via mouse click on a message while digging.
+        let has_cancel = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>,
+                          expected_gen: u64| {
+            let mut found = false;
+            while let Ok(cmd) = rx.try_recv() {
+                if matches!(cmd, MatrixCmd::CancelOpenEvent { generation } if generation == expected_gen)
+                {
+                    found = true;
+                }
+            }
+            found
+        };
+
+        // 1. User moves selection via mouse click on a message while opening.
         {
             let (mut app, mut rx, _h) = test_app_with_matrix();
-            let open_gen = start_digging(&mut app, &mut rx);
+            let open_gen = start_opening(&mut app, &mut rx);
             app.hits.clear();
             app.hits.add(
                 ratatui::layout::Rect::new(25, 5, 40, 1),
@@ -1198,26 +1258,30 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             }));
             assert!(app.pending_jump.is_none());
-            deliver_late_page(&mut app, open_gen);
-            assert_eq!(app.timeline.selected, Some(1));
+            assert!(has_cancel(&mut rx, open_gen));
+            deliver_late_open(&mut app, open_gen);
+            assert_eq!(app.active, 0);
+            assert_eq!(app.timeline.selected, Some(0));
         }
 
-        // 2. User types in the composer while digging.
+        // 2. User types in the composer while opening.
         {
             let (mut app, mut rx, _h) = test_app_with_matrix();
-            let open_gen = start_digging(&mut app, &mut rx);
+            let open_gen = start_opening(&mut app, &mut rx);
             app.set_focus(Pane::Composer);
             app.on_event(key_event(KeyCode::Char('h'), KeyModifiers::NONE));
             assert!(app.pending_jump.is_none());
-            deliver_late_page(&mut app, open_gen);
+            assert!(has_cancel(&mut rx, open_gen));
+            deliver_late_open(&mut app, open_gen);
+            assert_eq!(app.active, 0);
             assert_eq!(app.focus, Pane::Composer);
             assert!(app.timeline.selected.is_none());
         }
 
-        // 3. User scrolls the timeline with the mouse wheel while digging.
+        // 3. User scrolls the timeline with the mouse wheel while opening.
         {
             let (mut app, mut rx, _h) = test_app_with_matrix();
-            let open_gen = start_digging(&mut app, &mut rx);
+            let open_gen = start_opening(&mut app, &mut rx);
             app.hits.add(
                 ratatui::layout::Rect::new(20, 0, 60, 20),
                 crate::ui::hit::HitId::Pane(Pane::Timeline),
@@ -1229,30 +1293,36 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             }));
             assert!(app.pending_jump.is_none());
-            deliver_late_page(&mut app, open_gen);
+            assert!(has_cancel(&mut rx, open_gen));
+            deliver_late_open(&mut app, open_gen);
+            assert_eq!(app.active, 0);
             assert!(app.timeline.selected.is_none());
         }
 
-        // 4. User opens another popup while digging.
+        // 4. User opens another popup while opening.
         {
             let (mut app, mut rx, _h) = test_app_with_matrix();
-            let open_gen = start_digging(&mut app, &mut rx);
+            let open_gen = start_opening(&mut app, &mut rx);
             app.perform(Action::OpenSettings);
             assert!(app.pending_jump.is_none());
+            assert!(has_cancel(&mut rx, open_gen));
             assert!(matches!(app.modal, Some(Modal::Settings(_))));
-            deliver_late_page(&mut app, open_gen);
+            deliver_late_open(&mut app, open_gen);
+            assert_eq!(app.active, 0);
             assert!(app.timeline.selected.is_none());
         }
 
-        // 5. User moves selection via key action (SelectOlder) while digging.
+        // 5. User moves selection via key action (SelectOlder) while opening.
         {
             let (mut app, mut rx, _h) = test_app_with_matrix();
-            let open_gen = start_digging(&mut app, &mut rx);
+            let open_gen = start_opening(&mut app, &mut rx);
             app.perform(Action::SelectOlder);
             assert!(app.pending_jump.is_none());
+            assert!(has_cancel(&mut rx, open_gen));
             assert_eq!(app.timeline.selected, Some(1));
-            deliver_late_page(&mut app, open_gen);
-            assert_eq!(app.timeline.selected, Some(2));
+            deliver_late_open(&mut app, open_gen);
+            assert_eq!(app.active, 0);
+            assert_eq!(app.timeline.selected, Some(1));
         }
 
         // 6. Demo mode finds a thread reply and jumps into that demo thread.

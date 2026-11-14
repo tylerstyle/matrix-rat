@@ -33,10 +33,12 @@ mod upload;
 mod verify;
 mod watch;
 
+use std::fmt;
+
 use anyhow::Result;
 use clap::Parser;
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(version, about)]
 struct Args {
     /// Profile to use; each profile has its own account, message store and log. The
@@ -57,6 +59,24 @@ struct Args {
     /// and exit.
     #[arg(long, value_name = "GENERATOR")]
     print_template: Option<String>,
+
+    /// Matrix link or address to open after connecting (matrix.to, matrix:, room,
+    /// alias, or user).
+    #[arg(value_name = "LINK")]
+    target: Option<String>,
+}
+
+/// Redacts the target link/address from Debug output.
+impl fmt::Debug for Args {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Args")
+            .field("profile", &self.profile)
+            .field("demo", &self.demo)
+            .field("reload_theme", &self.reload_theme)
+            .field("print_template", &self.print_template)
+            .field("has_target", &self.target.is_some())
+            .finish()
+    }
 }
 
 fn main() -> Result<()> {
@@ -90,7 +110,7 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(app::run(&paths, &config, args.demo));
+    let result = runtime.block_on(app::run(&paths, &config, args.demo, args.target));
     if let Err(err) = &result {
         tracing::error!(?err, "exited with error");
     }

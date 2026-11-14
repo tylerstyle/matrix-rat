@@ -70,8 +70,27 @@ pub enum MatrixCmd {
         room_id: String,
         generation: u64,
     },
+    /// Open a room (or thread) focused around a specific event id via `/context` when
+    /// it is not already in a live timeline. Answered with [`MatrixEvent::Timeline`] for
+    /// `generation`, or [`MatrixEvent::JumpFailed`] if unavailable.
+    OpenEvent {
+        room_id: String,
+        event_id: String,
+        thread_root: Option<String>,
+        generation: u64,
+    },
+    /// Abort an in-flight [`MatrixCmd::OpenEvent`] if its `generation` is still pending,
+    /// leaving whatever timeline is currently active untouched.
+    CancelOpenEvent {
+        generation: u64,
+    },
     /// Load older messages.
     Paginate {
+        room_id: String,
+        generation: u64,
+    },
+    /// Load newer messages on an event-focused detached timeline.
+    PaginateForwards {
         room_id: String,
         generation: u64,
     },
@@ -215,7 +234,16 @@ impl std::fmt::Debug for MatrixCmd {
             Self::CancelLogin => f.write_str("CancelLogin"),
             Self::Recover { .. } => f.write_str("Recover"),
             Self::OpenRoom { room_id, .. } => write!(f, "OpenRoom({room_id})"),
+            Self::OpenEvent {
+                room_id,
+                generation,
+                ..
+            } => write!(f, "OpenEvent({room_id}, generation {generation})"),
+            Self::CancelOpenEvent { generation } => {
+                write!(f, "CancelOpenEvent(generation {generation})")
+            }
             Self::Paginate { room_id, .. } => write!(f, "Paginate({room_id})"),
+            Self::PaginateForwards { room_id, .. } => write!(f, "PaginateForwards({room_id})"),
             // Message text is private too.
             Self::Send { room_id, .. } => write!(f, "Send({room_id})"),
             Self::Edit { room_id, .. } => write!(f, "Edit({room_id})"),
@@ -311,6 +339,18 @@ pub struct RoomSummary {
     pub alias: Option<String>,
 }
 
+/// Metadata attached to [`MatrixEvent::Timeline`] when it shows a detached
+/// slice centered around an older event rather than the live tip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedTimeline {
+    /// Event id the detached slice was centered on.
+    pub target_event: String,
+    /// Thread root event id when `/context` resolved to a thread timeline.
+    pub thread_root: Option<String>,
+    /// Whether forward pagination has already reached the live end.
+    pub reached_end: bool,
+}
+
 pub enum MatrixEvent {
     /// No usable session; show the login form. `reason` explains a failed restore.
     NeedLogin {
@@ -334,11 +374,23 @@ pub enum MatrixEvent {
         messages: Vec<Message>,
         /// The oldest message of the room is loaded; there is no more history.
         reached_start: bool,
+        /// `Some` when this timeline is a detached `/context` view rather than live.
+        detached: Option<DetachedTimeline>,
     },
     /// A request for older messages finished.
     Paginated {
         generation: u64,
         reached_start: bool,
+    },
+    /// A request for newer messages on a detached timeline finished.
+    PaginatedForwards {
+        generation: u64,
+        reached_end: bool,
+    },
+    /// Opening an event-focused timeline failed; the previous view was kept.
+    JumpFailed {
+        generation: u64,
+        reason: String,
     },
     /// Who else is typing in the open room.
     Typing {
@@ -428,10 +480,12 @@ impl std::fmt::Debug for MatrixEvent {
                 generation,
                 messages,
                 reached_start,
+                detached,
             } => write!(
                 f,
-                "Timeline({room_id}, generation {generation}, {} messages, start: {reached_start})",
-                messages.len()
+                "Timeline({room_id}, generation {generation}, {} messages, start: {reached_start}, detached: {})",
+                messages.len(),
+                detached.is_some()
             ),
             Self::Paginated {
                 generation,
@@ -440,6 +494,16 @@ impl std::fmt::Debug for MatrixEvent {
                 f,
                 "Paginated(generation {generation}, start: {reached_start})"
             ),
+            Self::PaginatedForwards {
+                generation,
+                reached_end,
+            } => write!(
+                f,
+                "PaginatedForwards(generation {generation}, end: {reached_end})"
+            ),
+            Self::JumpFailed { generation, reason } => {
+                write!(f, "JumpFailed(generation {generation}, {reason})")
+            }
             Self::Typing { generation, names } => {
                 write!(f, "Typing(generation {generation}, {})", names.len())
             }
@@ -952,6 +1016,7 @@ impl Worker {
                     self.emit(MatrixEvent::Rooms(summarize(&rooms, &mut previews).await));
                 }
                 () = own_members.finished() => own_members.ensure(&rooms).await,
+                Some(opened) = timelines.next_opened() => timelines.on_opened(opened).await,
                 Some(state) = sync_state.next() => {
                     self.emit(MatrixEvent::Sync(sync_status(&state)));
                 }
@@ -1407,6 +1472,7 @@ mod tests {
                                 generation: 1,
                                 messages: messages.clone(),
                                 reached_start: false,
+                                detached: None,
                             }
                         );
                         assert!(!debug.contains(&body));

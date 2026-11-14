@@ -484,6 +484,17 @@ mod tests {
     }
 
     #[test]
+    fn detached_banner() {
+        let mut app = App::demo();
+        render(&mut app, 100, 30);
+        app.timeline.detached = true;
+        app.timeline.reached_end = false;
+        app.perform(Action::SelectOlder);
+        app.perform(Action::SelectOlder);
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+    }
+
+    #[test]
     fn find_bar() {
         let mut app = App::demo();
         render(&mut app, 100, 30);
