@@ -577,12 +577,16 @@ impl Verifier {
         });
     }
 
-    /// Ends the session's verification work. A running verification is cancelled
-    /// (briefly waiting for the other side to be told); everything else stops.
-    pub async fn stop(mut self) {
+    fn remove_handlers(&mut self) {
         for handler in self.handlers.drain(..) {
             self.client.remove_event_handler(handler);
         }
+    }
+
+    /// Ends the session's verification work. A running verification is cancelled
+    /// (briefly waiting for the other side to be told); everything else stops.
+    pub async fn stop(mut self) {
+        self.remove_handlers();
         if let Some(running) = self.running.take() {
             if !running.finished.load(Ordering::SeqCst) {
                 let _ = running.answers.send(Answer::Cancel);
@@ -598,6 +602,15 @@ impl Verifier {
             }
         }
         self.tasks.shutdown().await;
+    }
+}
+
+impl Drop for Verifier {
+    fn drop(&mut self) {
+        self.remove_handlers();
+        if let Some(running) = self.running.take() {
+            running.task.abort();
+        }
     }
 }
 
@@ -1384,6 +1397,33 @@ mod tests {
             password: Some("hunter2".into()),
         });
         assert!(!format!("{command:?}").contains("hunter2"));
+    }
+
+    #[tokio::test]
+    async fn dropping_verifier_removes_handlers_and_stops_tasks() {
+        let client = Client::builder()
+            .homeserver_url("http://127.0.0.1:1")
+            .build()
+            .await
+            .expect("client");
+        let (tx, mut rx) = unbounded_channel();
+        let verifier = Verifier::start(&client, tx);
+        let refresh = Arc::downgrade(&verifier.refresh);
+
+        drop(verifier);
+
+        // Handlers stored on `client` and background tasks on `verifier` hold
+        // strong refs to `refresh` and clones of `tx`; removing and aborting
+        // them on drop must release every reference while `client` still lives.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while rx.recv().await.is_some() {}
+            while refresh.strong_count() > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("verifier handlers and tasks should tear down on drop");
+        drop(client);
     }
 
     /// Creates a new account, so the test never touches the cross-signing keys of an
