@@ -234,6 +234,10 @@ pub struct App {
     notify_icons: Option<Arc<crate::notify::IconCache>>,
     /// The `download_dir` setting; empty means the desktop's download folder.
     download_dir: String,
+    /// The `notification_click_command` setting (see `focus`). `None` where no
+    /// window is to be raised at all: the demo, and tests, which may well run
+    /// inside a desktop that would obey.
+    notification_click_command: Option<String>,
     /// Attachments being downloaded, and where finished ones went (by `mxc://` address).
     saving: std::collections::HashSet<String>,
     saved: std::collections::HashMap<String, PathBuf>,
@@ -338,6 +342,7 @@ impl App {
         app.read_markers = config.read_markers;
         app.mouse = config.mouse;
         app.download_dir = config.download_dir.clone();
+        app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
         app.notify_mode = config.notifications;
         if config.notifications != crate::notify::NotifyMode::Off {
@@ -428,6 +433,7 @@ impl App {
             pending_notices: Vec::new(),
             notify_icons: None,
             download_dir: String::new(),
+            notification_click_command: None,
             saving: Default::default(),
             saved: Default::default(),
             confirm_large: None,
@@ -954,6 +960,11 @@ impl App {
         let Some(index) = self.rooms.iter().position(|room| room.id == room_id) else {
             return;
         };
+        // The click was on the desktop, maybe with another window in front: ask for
+        // ours to be shown.
+        if let Some(command) = &self.notification_click_command {
+            crate::focus::raise_window(command);
+        }
         // A jump to a message that is still on its way would take the view
         // somewhere else afterwards.
         self.cancel_pending_jump();

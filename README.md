@@ -225,6 +225,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `mouse` | turn off to use the terminal's own text selection |
 | `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
 | `notification_preview` (file only) | `false` hides message text, names and pictures in notifications |
+| `notification_click_command` (file only) | a shell command run when a notification is clicked, to bring the terminal window to the front (see Good to know) |
 | `secret_store` (file only) | `"file"` (default), `"keyring"` to keep the store's key in the system keyring, or `"auto"` |
 
 `--profile <name>` keeps several accounts apart.
@@ -236,8 +237,11 @@ Setting `preset = "vim"` keeps the default keys and adds:
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
   once at start.
 - **Clicking a desktop notification** opens its room in the matrix-rat that showed it
-  (where the notification service supports actions). Bringing the terminal window to
-  the front is left to your desktop.
+  (where the notification service supports actions). The terminal window is brought to
+  the front on [niri](https://github.com/YaLTeR/niri) by itself; elsewhere, set
+  `notification_click_command` in the config file to the command your desktop offers
+  for that, for example `hyprctl dispatch focuswindow class:kitty` on Hyprland or
+  `swaymsg '[app_id="kitty"] focus'` on sway.
 - **Logs** are in `~/.local/state/matrix-rat/<profile>/`. At the default level the app
   keeps message text, passwords and keys out of them.
 - **Something stuck?** `Ctrl-Q` quits and `Ctrl-Z` suspends to the shell, also from
