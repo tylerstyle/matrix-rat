@@ -22,7 +22,7 @@ expression: "render(&mut app, 100, 24)"
 "│                      ││● dave  10:02                                                            ┃│"
 "│                      ││  Shipping a TUI client on top of it this week 🐀                        ┃│" Hidden by multi-width symbols: [(73, " ")]
 "│                      │╰ carol is typing… ────────────────────────────────────────────────────────╯"
-"│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
+"│                      │╭ 3 Message ─────────────────────────────────────────────────────── M  me ─╮"
 "│                      ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ● demo data  ⚠ unverified device — verify  Enter send            F1 help  F2 settings  F3 rat-dark "

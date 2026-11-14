@@ -169,6 +169,7 @@ pub fn build_rows(
                 let mut spans = vec![Span::styled("● ", color)];
                 let with_time = 2 + width(&message.sender) + 2 + width(&message.time) <= max_width;
                 let name = truncate(&message.sender, max_width.saturating_sub(2));
+                let hit_w = (2 + width(&name)).min(max_width) as u16;
                 spans.push(Span::styled(name, color.add_modifier(Modifier::BOLD)));
                 if with_time {
                     spans.push(Span::raw("  "));
@@ -177,7 +178,11 @@ pub fn build_rows(
                         theme.style(Role::Timestamp),
                     ));
                 }
-                rows.push(Row::plain(Line::from(spans), Some(i)));
+                let mut row = Row::plain(Line::from(spans), Some(i));
+                if message.sender_id.is_some() && hit_w > 0 {
+                    row.hits.push((0, hit_w, HitId::Sender(i)));
+                }
+                rows.push(row);
             }
 
             if let Some((sender, quoted)) = &message.reply_to {
@@ -736,7 +741,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m) | HitId::ReplyQuote(m)) if m == msg)
+            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m) | HitId::ReplyQuote(m) | HitId::Sender(m)) if m == msg)
             {
                 frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }

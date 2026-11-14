@@ -132,4 +132,6 @@ pub enum Action {
     OpenPinned,
     /// Forward the selected message to another room.
     ForwardMessage,
+    /// Open profile details for the selected sender or target user.
+    UserInfo,
 }

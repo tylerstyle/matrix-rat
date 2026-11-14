@@ -177,6 +177,10 @@ pub enum Answer {
 pub enum VerifyCmd {
     /// Ask the user's other devices to verify this one.
     Request,
+    /// Ask another Matrix user to verify identities in a direct chat.
+    RequestUser {
+        user_id: String,
+    },
     Answer {
         flow: u64,
         answer: Answer,
@@ -188,11 +192,12 @@ pub enum VerifyCmd {
     },
 }
 
-/// Never prints the password.
+/// Never prints the password or target user id.
 impl std::fmt::Debug for VerifyCmd {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request => f.write_str("Request"),
+            Self::RequestUser { .. } => f.write_str("RequestUser"),
             Self::Answer { flow, answer } => write!(f, "Answer({flow}, {answer:?})"),
             Self::SetUp { password } => write!(f, "SetUp(password: {})", password.is_some()),
         }
@@ -510,7 +515,7 @@ impl Verifier {
             });
             return;
         }
-        self.launch(Some(request));
+        self.launch(Some(request), None);
     }
 
     pub async fn handle(&mut self, command: VerifyCmd) {
@@ -521,8 +526,29 @@ impl Verifier {
                         "A verification is already running".to_owned(),
                     ));
                 } else {
-                    self.launch(None);
+                    self.launch(None, None);
                 }
+            }
+            VerifyCmd::RequestUser { user_id } => {
+                if self.busy() {
+                    let _ = self.events.send(MatrixEvent::ActionFailed(
+                        "A verification is already running".to_owned(),
+                    ));
+                    return;
+                }
+                let Ok(parsed) = matrix_sdk::ruma::UserId::parse(&user_id) else {
+                    let _ = self.events.send(MatrixEvent::ActionFailed(
+                        "That is not a valid Matrix user ID.".to_owned(),
+                    ));
+                    return;
+                };
+                if self.client.user_id() == Some(&*parsed) {
+                    let _ = self.events.send(MatrixEvent::ActionFailed(
+                        "Use Settings → Encryption to verify your own device.".to_owned(),
+                    ));
+                    return;
+                }
+                self.launch(None, Some(parsed));
             }
             VerifyCmd::Answer { flow, answer } => match &self.running {
                 Some(running) if running.flow == flow => {
@@ -547,9 +573,10 @@ impl Verifier {
         }
     }
 
-    /// Runs a verification: an incoming `request`, or (with `None`) a new request to
-    /// the user's other devices. Only called when no other one runs.
-    fn launch(&mut self, request: Option<VerificationRequest>) {
+    /// Runs a verification: an incoming `request`, a new request to another user when
+    /// `target` is `Some`, or a new request to the user's other devices otherwise. Only
+    /// called when no other one runs.
+    fn launch(&mut self, request: Option<VerificationRequest>, target: Option<OwnedUserId>) {
         if let Some(old) = self.running.take() {
             // Over already; at most still waiting for its signature to show up.
             old.task.abort();
@@ -557,14 +584,19 @@ impl Verifier {
         self.next_flow += 1;
         let (answers, answer_rx) = unbounded_channel();
         let finished = Arc::new(AtomicBool::new(false));
+        let (peer, own, this_device) = match &target {
+            Some(user_id) => (sanitize_line(user_id.as_str()), false, false),
+            None => ("your other devices".to_owned(), true, true),
+        };
         let flow = Flow {
             id: self.next_flow,
             events: self.events.clone(),
             refresh: self.refresh.clone(),
             finished: finished.clone(),
-            peer: "your other devices".to_owned(),
-            own: true,
-            this_device: true,
+            peer,
+            target,
+            own,
+            this_device,
             last: None,
         };
         let client = self.client.clone();
@@ -696,6 +728,7 @@ struct Flow {
     refresh: Arc<Notify>,
     finished: Arc<AtomicBool>,
     peer: String,
+    target: Option<OwnedUserId>,
     own: bool,
     this_device: bool,
     /// The stage last sent to the UI.
@@ -766,7 +799,11 @@ impl Flow {
             Some(request) => request,
             None => {
                 self.show(VerifyStage::Waiting);
-                match request_own(&client).await {
+                let result = match &self.target {
+                    Some(user_id) => request_user(&client, user_id).await,
+                    None => request_own(&client).await,
+                };
+                match result {
                     Ok(request) => request,
                     Err(reason) => return self.show(VerifyStage::Cancelled { reason }),
                 }
@@ -854,7 +891,11 @@ impl Flow {
             tracing::warn!(%err, "could not withdraw a verification request");
         }
         debug_assert!(request.is_cancelled());
-        match request_own(client).await {
+        let result = match &self.target {
+            Some(user_id) => request_user(client, user_id).await,
+            None => request_own(client).await,
+        };
+        match result {
             Ok(new) => Some(new),
             Err(reason) => {
                 self.show(VerifyStage::Cancelled { reason });
@@ -1040,6 +1081,32 @@ async fn request_own(client: &Client) -> Result<VerificationRequest, String> {
         .request_verification_with_methods(vec![VerificationMethod::SasV1])
         .await
         .map_err(|err| format!("Could not send the request: {err}"))
+}
+
+/// Sends a verification request to another Matrix user in a direct chat.
+async fn request_user(client: &Client, user_id: &UserId) -> Result<VerificationRequest, String> {
+    let encryption = client.encryption();
+    let identity = match encryption
+        .get_user_identity(user_id)
+        .await
+        .map_err(|err| format!("Could not read the encryption store: {err}"))?
+    {
+        Some(identity) => identity,
+        None => tokio::time::timeout(
+            Duration::from_secs(15),
+            encryption.request_user_identity(user_id),
+        )
+        .await
+        .map_err(|_| "Looking up that user's encryption keys timed out.".to_owned())?
+        .map_err(|err| format!("Could not fetch that user's encryption keys: {err}"))?
+        .ok_or_else(|| {
+            "That user has no encryption keys yet, so there is nothing to verify.".to_owned()
+        })?,
+    };
+    identity
+        .request_verification_with_methods(vec![VerificationMethod::SasV1])
+        .await
+        .map_err(|err| format!("Could not send the verification request: {err}"))
 }
 
 /// How many devices this account has, and whether another one is cross-signed, so it

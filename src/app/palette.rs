@@ -58,6 +58,7 @@ impl App {
                     can_redact: room.is_some_and(|r| Self::can_redact_message(r, m)),
                     can_pin: room.is_some_and(|r| Self::can_pin_message(r, m)),
                     can_forward: Self::can_forward_message(m),
+                    can_user_info: m.sender_id.is_some(),
                 }
             }
             None => MessageCaps::default(),
@@ -77,6 +78,7 @@ impl App {
                 .map(|room| room.shows_unread()),
             connected: self.matrix.is_some(),
             user_id: self.user_id.clone(),
+            own_display_name: self.own_profile_hint(),
             mouse: self.mouse,
             typing_notices: self.typing_notices,
             read_receipts: self.read_receipts,
@@ -232,6 +234,7 @@ impl App {
                 self.open_modal(Modal::Settings(menu));
             }
             Setting::Keys => self.change_setting(Setting::Keys, 0),
+            Setting::Profile => self.open_own_profile(),
             Setting::Encryption => self.start_verification(),
             Setting::IgnoredUsers => self.change_setting(Setting::IgnoredUsers, 0),
             Setting::Logout => {

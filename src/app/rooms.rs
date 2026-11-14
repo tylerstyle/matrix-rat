@@ -34,6 +34,12 @@ pub struct ManageState {
     requests: u64,
 }
 
+impl ManageState {
+    pub(super) fn record_pending_open(&mut self, room_id: String) {
+        self.pending_open = Some((room_id, Instant::now()));
+    }
+}
+
 impl App {
     /// The room that room-level commands are about: the one under the cursor while
     /// the room list has the focus, otherwise the open one. The command palette
@@ -54,7 +60,7 @@ impl App {
     }
 
     /// Sends a command to the worker; false in the demo, which has none.
-    fn manage(&mut self, command: ManageCmd) -> bool {
+    pub(super) fn manage(&mut self, command: ManageCmd) -> bool {
         if self.matrix.is_none() {
             return false;
         }
@@ -82,12 +88,6 @@ impl App {
 
     fn open_new(&mut self, stage: Stage) {
         self.open_new_with(stage, |_| {});
-    }
-
-    pub(super) fn open_new_user(&mut self, user_id: &str) {
-        self.open_new_with(Stage::Direct, |popup| {
-            popup.user.set(user_id);
-        });
     }
 
     pub(super) fn open_new_join(&mut self, address: &str) {
@@ -554,7 +554,7 @@ impl App {
                 if let Some(Modal::RoomInfo(info)) = &self.modal
                     && let Some(row @ InfoRow::Member(_)) = info.current()
                 {
-                    self.info_activate(row, 0);
+                    self.open_member_direct_chat(row);
                 }
             }
             Click::MemberRemove => self.remove_member(),
@@ -602,9 +602,7 @@ impl App {
     /// Does what the row is for. `step` is the direction for rows with a value to
     /// change; 0 for Enter or a click.
     fn info_activate(&mut self, row: InfoRow, step: i8) {
-        let own = self.user_id.clone();
         let connected = self.matrix.is_some();
-        let request = self.next_request();
         let Some(Modal::RoomInfo(info)) = &mut self.modal else {
             return;
         };
@@ -618,7 +616,12 @@ impl App {
         // account to do it with.
         let sends = !matches!(
             row,
-            InfoRow::Name | InfoRow::Topic | InfoRow::Invite | InfoRow::Pinned
+            InfoRow::Name
+                | InfoRow::OwnName
+                | InfoRow::Topic
+                | InfoRow::Invite
+                | InfoRow::Pinned
+                | InfoRow::Member(_)
         );
         if sends && !connected {
             info.error = Some(NO_ACCOUNT.to_owned());
@@ -686,14 +689,15 @@ impl App {
                     "Saving…",
                 )
             }
-            InfoRow::Name | InfoRow::Topic => {
-                let current = info.details.as_ref().map_or(String::new(), |details| {
-                    if row == InfoRow::Name {
-                        details.name.clone()
-                    } else {
-                        crate::text::sanitize_line(&details.topic)
-                    }
-                });
+            InfoRow::Name | InfoRow::OwnName | InfoRow::Topic => {
+                let current = info
+                    .details
+                    .as_ref()
+                    .map_or(String::new(), |details| match row {
+                        InfoRow::Name => details.name.clone(),
+                        InfoRow::OwnName => details.own_display_name.clone().unwrap_or_default(),
+                        _ => crate::text::sanitize_line(&details.topic),
+                    });
                 info.editing = Some((row, LineEdit::with_text(current).with_max_bytes(FIELD_MAX)));
                 return;
             }
@@ -707,34 +711,52 @@ impl App {
                 (ManageCmd::Leave { room_id }, Pending::Leave, "Leaving…")
             }
             InfoRow::Member(_) => {
-                let Some(member) = info.member(row) else {
-                    return;
-                };
-                if member.own || own.as_deref() == Some(&member.user_id) {
-                    info.error = Some("That is you.".to_owned());
-                    return;
-                }
-                let user_id = member.user_id.clone();
-                // The first Enter only opens a chat that exists. Making one (a room,
-                // and an invitation to that person) takes a second, after the question.
-                let create = confirmed == Some(Confirm::NewChat(user_id.clone()));
-                (
-                    ManageCmd::DirectChat {
-                        request,
-                        user_id,
-                        create,
-                    },
-                    Pending::Chat(request),
-                    if create {
-                        "Starting the chat…"
-                    } else {
-                        "Opening the chat…"
-                    },
-                )
+                return self.open_user_info_from_room_member(row);
             }
         };
         info.wait_for(pending, busy);
         self.manage(command);
+    }
+
+    /// Fast direct-chat shortcut from Room Info's `" chat "` pill.
+    fn open_member_direct_chat(&mut self, row: InfoRow) {
+        let own = self.user_id.clone();
+        let connected = self.matrix.is_some();
+        let request = self.next_request();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() {
+            return;
+        }
+        info.error = None;
+        if !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        let Some(member) = info.member(row) else {
+            return;
+        };
+        if member.own || own.as_deref() == Some(&member.user_id) {
+            info.error = Some("That is you.".to_owned());
+            return;
+        }
+        let user_id = member.user_id.clone();
+        let confirmed = std::mem::take(&mut info.confirm);
+        let create = confirmed == Some(Confirm::NewChat(user_id.clone()));
+        info.wait_for(
+            Pending::Chat(request),
+            if create {
+                "Starting the chat…"
+            } else {
+                "Opening the chat…"
+            },
+        );
+        self.manage(ManageCmd::DirectChat {
+            request,
+            user_id,
+            create,
+        });
     }
 
     /// Del on a member: asks first, removes on the second press.
@@ -1019,6 +1041,10 @@ impl App {
         let room_id = info.room_id.clone();
         let unchanged = info.details.as_ref().is_some_and(|details| match row {
             InfoRow::Name => details.name == text,
+            InfoRow::OwnName => {
+                crate::text::sanitize_line(details.own_display_name.as_deref().unwrap_or(""))
+                    == text
+            }
             _ => crate::text::sanitize_line(&details.topic) == text,
         });
         if unchanged {
@@ -1030,7 +1056,7 @@ impl App {
                 info.error = Some("A room needs a name.".to_owned());
                 return;
             }
-            InfoRow::Name if text.len() > NAME_MAX => {
+            InfoRow::Name | InfoRow::OwnName if text.len() > NAME_MAX => {
                 info.error = Some("That name is too long.".to_owned());
                 return;
             }
@@ -1040,6 +1066,13 @@ impl App {
                     name: text,
                 },
                 Change::Name,
+            ),
+            InfoRow::OwnName => (
+                ManageCmd::SetOwnName {
+                    room_id,
+                    name: (!text.is_empty()).then_some(text),
+                },
+                Change::OwnName,
             ),
             _ => (
                 ManageCmd::SetTopic {
@@ -1064,6 +1097,9 @@ impl App {
     pub(super) fn on_manage(&mut self, event: ManageEvent) {
         match event {
             ManageEvent::Opened { request, result } => {
+                if self.on_user_info_manage_opened(request, &result) {
+                    return;
+                }
                 // Only the popup that asked for exactly this is touched by the answer.
                 let asked = match &mut self.modal {
                     Some(Modal::New(popup)) if popup.request == Some(request) => {
@@ -1092,6 +1128,9 @@ impl App {
                 }
             }
             ManageEvent::NoDirectChat { request, user_id } => {
+                if self.on_user_info_no_direct_chat(request, &user_id) {
+                    return;
+                }
                 if let Some(Modal::RoomInfo(info)) = &mut self.modal
                     && info.answered(Pending::Chat(request))
                 {
@@ -1158,7 +1197,12 @@ impl App {
         }
     }
 
-    fn on_change_done(&mut self, room_id: &str, change: Change, result: Result<(), String>) {
+    pub(super) fn on_change_done(
+        &mut self,
+        room_id: &str,
+        change: Change,
+        result: Result<(), String>,
+    ) {
         let done = match change {
             Change::Invite => "Invitation sent",
             Change::Kick => "Removed from the room",
@@ -1166,6 +1210,7 @@ impl App {
             Change::Unban => "Unbanned",
             Change::SetRole => "Role updated",
             Change::Name => "Room renamed",
+            Change::OwnName => "Name in room updated",
             Change::Topic => "Topic changed",
             Change::Favourite(true) => "Added to favourites",
             Change::Favourite(false) => "Removed from favourites",
@@ -1173,6 +1218,9 @@ impl App {
             Change::LowPriority(false) => "Removed from low priority",
             Change::Notify => "",
         };
+        if self.on_user_info_manage_done(room_id, change, done, &result) {
+            return;
+        }
         match &mut self.modal {
             Some(Modal::New(popup))
                 if change == Change::Invite
@@ -1907,12 +1955,12 @@ mod tests {
         app.on_event(key(KeyCode::Delete));
         assert!(info(&app).error.is_some());
         assert!(sent(&mut commands).is_empty());
-        // Enter on a member starts a direct chat; with oneself there is none.
-        app.on_event(key(KeyCode::Enter));
-        assert!(sent(&mut commands).is_empty());
+        // Self has no direct-chat button; Enter on another member opens User Info
+        // while " chat " starts a direct chat immediately.
+        assert!(!screen(&mut app, &mut terminal).contains(" chat "));
         app.on_event(ctrl('u'));
         type_text(&mut app, "carol");
-        app.on_event(key(KeyCode::Enter));
+        click_on(&mut app, &mut terminal, " chat ");
         assert!(matches!(
             sent(&mut commands).as_slice(),
             [ManageCmd::DirectChat { user_id, .. }] if user_id == "@carol:example.org"
@@ -2302,9 +2350,16 @@ mod tests {
         type_text(&mut app, "carol");
         // What Enter does is on the border and on the bottom line.
         let text = screen(&mut app, &mut terminal);
-        find(&text, "Enter chat");
-        find(&text, "Enter: chat");
-        // The first Enter only looks for a chat that exists.
+        find(&text, "Enter info");
+        find(&text, "Enter: user info");
+        // Enter on a member opens User Info; inside it, Direct chat asks first.
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::UserInfo(popup)) if popup.user_id == "@carol:example.org"
+        ));
+        assert!(sent(&mut commands).is_empty());
+        // The first Enter on Direct chat only looks for a chat that exists.
         app.on_event(key(KeyCode::Enter));
         let asked = sent(&mut commands);
         let (request, user, create) = chat_request(&asked[0]);
@@ -2317,8 +2372,11 @@ mod tests {
                 user_id: user.clone(),
             },
         );
-        assert_eq!(info(&app).confirm, Some(Confirm::NewChat(user.clone())));
-        assert!(info(&app).busy.is_none());
+        let Modal::UserInfo(popup) = app.modal.as_ref().unwrap() else {
+            panic!("user info closed");
+        };
+        assert_eq!(popup.confirm, Some(Confirm::NewChat(user.clone())));
+        assert!(popup.busy.is_none());
         find(
             &screen(&mut app, &mut terminal),
             "Enter again to start one, Esc to stay",
@@ -2326,7 +2384,10 @@ mod tests {
         assert!(sent(&mut commands).is_empty());
         // Esc, or walking away, withdraws it: the next Enter asks afresh.
         app.on_event(key(KeyCode::Esc));
-        assert_eq!(info(&app).confirm, None);
+        let Modal::UserInfo(popup) = app.modal.as_ref().unwrap() else {
+            panic!("user info closed on confirm cancel");
+        };
+        assert_eq!(popup.confirm, None);
         app.on_event(key(KeyCode::Enter));
         let (request, _, create) = chat_request(&sent(&mut commands)[0]);
         assert!(!create);
@@ -2372,7 +2433,7 @@ mod tests {
             &mut app,
             Err("Could not start the chat: not allowed".into()),
         );
-        app.on_event(key(KeyCode::Enter));
+        click_on(&mut app, &mut terminal, " chat ");
         let (request, _, _) = chat_request(&sent(&mut commands)[0]);
         answer(
             &mut app,
@@ -2750,6 +2811,7 @@ mod tests {
         app.on_event(key(KeyCode::Right));
         app.on_event(key(KeyCode::Left));
         app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Enter));
         app.on_event(key(KeyCode::Enter));

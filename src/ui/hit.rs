@@ -13,6 +13,7 @@ pub enum Button {
     CancelCompose,
     JumpToNewest,
     Palette,
+    OwnProfile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,10 @@ pub enum InputTarget {
     ReasonConfirm,
     /// Inline ban reason input inside `RoomInfo`.
     BanReason,
+    /// Display name input inside `OwnProfilePopup`.
+    OwnProfileName,
+    /// Avatar file path input inside `OwnProfilePopup`.
+    OwnProfileAvatar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +99,20 @@ pub enum HitId {
     ReportSubmit,
     /// A match in the user directory dropdown inside the direct-chat / invite popup.
     UserSearchRow(usize),
+    /// Info action button on a highlighted user directory search row.
+    UserSearchInfo(usize),
+    /// Clicking a message sender header in the timeline opens User Info.
+    Sender(usize),
+    /// Selectable row inside `UserInfoPopup`.
+    UserInfoRow(usize),
+    /// Copy user ID button inside `UserInfoPopup`.
+    UserInfoCopy,
+    /// Confirm button (`true`) or Cancel (`false`) inside `UserInfoPopup` inline confirm? Or inline Ban submit.
+    UserInfoBanSubmit,
+    /// Inline role option inside `UserInfoPopup`.
+    UserInfoRoleOption(usize),
+    /// Focusable slot/button inside `OwnProfilePopup`.
+    OwnProfileSlot(usize),
     /// Clickable row in the Pinned messages popup (jump to message).
     PinnedRow(usize),
     /// Unpin action button on a row in the Pinned messages popup.

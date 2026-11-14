@@ -49,6 +49,22 @@ pub fn convert(
         .collect()
 }
 
+/// Applies the room's current synced own display name to already-loaded own messages so
+/// non-ambiguous display name changes do not wait for old SDK timeline items to refresh.
+pub(super) fn apply_own_display_name(messages: &mut [Message], own_name: Option<&str>) {
+    let Some(name) = own_name else {
+        return;
+    };
+    if crate::text::is_blank(name) {
+        return;
+    }
+    for msg in messages {
+        if msg.own && !matches!(msg.kind, MsgKind::System | MsgKind::ReadMarker) {
+            msg.sender = name.to_owned();
+        }
+    }
+}
+
 /// One line saying what a message is, for the room list.
 pub(super) fn preview(content: &TimelineItemContent) -> String {
     let text = match content {

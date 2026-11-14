@@ -90,6 +90,7 @@ pub struct MessageCaps {
     pub can_redact: bool,
     pub can_pin: bool,
     pub can_forward: bool,
+    pub can_user_info: bool,
     pub can_copy: bool,
     pub can_save: bool,
     pub can_open: bool,
@@ -133,6 +134,7 @@ pub struct PaletteContext {
     pub open_unread: Option<bool>,
     pub connected: bool,
     pub user_id: Option<String>,
+    pub own_display_name: Option<String>,
     pub mouse: bool,
     pub typing_notices: bool,
     pub read_receipts: bool,
@@ -453,6 +455,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         Action::MarkAllRead,
         Action::PinMessage,
         Action::ForwardMessage,
+        Action::UserInfo,
     ];
     for binding in active_bindings {
         if include_keymap_action(binding.action) == ActionInclusion::Skip {
@@ -596,6 +599,17 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         action_enabled(Action::ForwardMessage, ctx),
         0,
     );
+    push_entry(
+        out,
+        Target::Action(Action::UserInfo),
+        Category::Action,
+        "User info",
+        key_of(Action::UserInfo),
+        "User info",
+        &["profile", "sender", "member", "author", "identity"],
+        action_enabled(Action::UserInfo, ctx),
+        0,
+    );
 }
 
 #[derive(PartialEq, Eq)]
@@ -639,6 +653,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Delete => sel.has_selection && sel.can_redact,
         Action::PinMessage => sel.can_pin,
         Action::ForwardMessage => sel.can_forward,
+        Action::UserInfo => sel.can_user_info,
         Action::OpenPinned => ctx.has_room && !ctx.in_invite,
         Action::Copy => sel.can_copy,
         Action::Save => sel.can_save,
@@ -744,6 +759,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::JumpToReply
                 | Action::PinMessage
                 | Action::ForwardMessage
+                | Action::UserInfo
                 | Action::OpenPinned
                 | Action::JumpToNewest
                 | Action::JumpToOldest
@@ -989,6 +1005,20 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::Profile)),
+            title: Setting::Profile.label(),
+            hint: ctx.own_display_name.clone(),
+            aliases: &[
+                "own profile",
+                "display name",
+                "avatar",
+                "picture",
+                "account",
+                "setting",
+            ],
+            enabled: true,
+        },
+        SettingItem {
             target: Target::Action(Action::StartVerification),
             title: "Encryption / Verify device",
             hint: Some(ctx.verify_status.to_owned()),
@@ -1139,6 +1169,7 @@ mod tests {
             open_unread: Some(false),
             connected: false,
             user_id: None,
+            own_display_name: None,
             mouse: true,
             typing_notices: true,
             read_receipts: true,
