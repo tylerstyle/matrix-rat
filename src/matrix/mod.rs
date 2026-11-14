@@ -1220,16 +1220,17 @@ impl Worker {
                 let refresh = manage_refresh.clone();
                 async move {
                     manage::emit_room_power(&events, &room).await;
-                    manage::bump_refresh(&refresh);
+                    manage::bump_refresh(&refresh, room.room_id().as_str());
                 }
             },
         );
         let member_refresh = manager.refresh_signal();
         let member_handler = client.add_event_handler(
-            move |_ev: matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent| {
+            move |_ev: matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent,
+                  room: matrix_sdk::Room| {
                 let refresh = member_refresh.clone();
                 async move {
-                    manage::bump_refresh(&refresh);
+                    manage::bump_refresh(&refresh, room.room_id().as_str());
                 }
             },
         );
