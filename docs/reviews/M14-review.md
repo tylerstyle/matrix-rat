@@ -89,3 +89,40 @@ Draft persistence across clean quit (`Ctrl-Q`, `SIGINT`, `SIGTERM`, `SIGHUP`), `
 - `cargo clippy --all-targets -- -D warnings` — pass
 - `cargo test` — first parallel run had 1 transient keyring timeout (`matrix::keyring::tests::dbus_secret_service_roundtrip_over_private_bus`: `Unavailable("timed out waiting for system keyring")`); standalone rerun passed in `0.09s`, and full rerun passed cleanly: **`467 passed; 0 failed; 19 ignored`**
 - `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test -- --ignored --test-threads=1 draft_survives_a_restart_and_can_be_cleared --nocapture` (against local continuwuity on `127.0.0.1:6167`) — **`1 passed; 0 failed`** (`4.93s`)
+
+---
+
+## Re-check (`635ed60`)
+
+**Diff inspected:** `git diff ca3b85f..635ed60` on `drafts-edit` (11 files, `+439` / `-24`, checked cleanly in `/home/tylerstyle/git/matrix-rat/.claude/worktrees/agent-a43c2f5fda87dc4be`).
+
+### Verdict: **M14 ok — Approved for merge.**
+
+All four findings from the `ca3b85f` review are properly addressed without new draft-loss races or `Debug`/log exposure, and both stated residual gaps on room-forget cleanup are reasonable given `matrix-sdk-base`'s `StateStore` interface.
+
+### Per-finding verification
+
+1. **Finding #1 (`[HIGH]` Late `MatrixEvent::Draft` during `Edit`, `Reply`, or `/upload`) — Fixed:**
+   - `on_stored_draft` (`src/app/drafts.rs:148-197`) only arms `self.drafts.changed` when `self.drafts.touched || !self.draft_text(&scope).is_empty()` (`lines 168-173`).
+   - Otherwise (`!touched` and `draft_text` empty), it routes the restored draft directly where `draft_text` expects it (`lines 174-196`): into `self.attach.stash_draft(scope, text)` (`src/app/attach.rs:59-61`) when `/upload` is active (including `Edit` begun over `/upload`), into `self.edit_stash` when in `ComposeMode::Edit(_)`, or into `self.composer` when in `Normal` / unwritten `ComposeMode::Reply(_)`, and updates `self.drafts.seen = Some((scope, text))` (`line 196`).
+   - Verified end-to-end across pause (`save_idle_draft(Duration::ZERO)`), room switch (`OpenRoom(1)`), and quit (`shut_down_worker`) in `a_stored_draft_that_arrives_during_an_edit_waits_behind_it`, `a_stored_draft_that_arrives_in_an_unwritten_reply_becomes_its_text`, `a_stored_draft_that_arrives_during_an_upload_command_waits_behind_it`, and `only_what_the_user_wrote_takes_a_late_stored_drafts_place` (`src/app/drafts.rs:351-441`).
+
+2. **Finding #2 (`[MEDIUM]` Leaving/forgetting a room leaves `ComposerDraft` & caches behind) — Fixed:**
+   - `apply_rooms` (`src/app.rs:2355-2358`) calls `self.forget_room_drafts(room_id)` (`src/app/drafts.rs:202-224`), which drops `threads.drafts`, `drafts.stored`, `drafts.seen`, `attach.pending`/`stash` (`src/app/attach.rs:64-67`), and mention marks (`src/app/complete.rs:94-99`), and sends `MatrixCmd::ForgetDrafts { room_id, threads }` (`src/matrix/mod.rs:190-193`, redacted `Debug` at `lines 243-245`, not wrapped by `in_thread`).
+   - On the worker (`src/matrix/rooms.rs:468-485`), `Timelines::handle` prunes `self.drafts_told` for the room and its `room_id\n` thread keys (`threads::key(&room_id, Some(""))`) and calls `drafts::forget(&self.client, &room_id, &threads)` (`src/matrix/drafts.rs:50-65`) unless the account is still `Joined` or `Invited`. `manage::leave` (`src/matrix/manage.rs:650-654`) also clears `room.clear_composer_draft(None)` after `room.leave()` before `room.forget()`.
+   - Covered at the app/command level by `a_room_that_leaves_the_list_takes_its_drafts_along`, `the_open_room_leaving_the_list_takes_its_drafts_along_too`, and `drafts_are_not_printed` (`src/app/drafts.rs:488-534, 754-775`).
+   - **Assessment of the two stated gaps:**
+     1. *No worker/server test assertion on `ForgetDrafts` / `drafts::forget`:* Acceptable non-blocking gap. `drafts::forget` (`src/matrix/drafts.rs:50-65`) only calls `client.state_store().remove_kv_data(StateStoreDataKey::ComposerDraft(&room_id, root))` (matching `SqliteStateStore::encode_state_store_data_key` at `matrix-sdk-sqlite-0.19.1/src/state_store.rs:534-543`), and `Timelines::handle` accurately guards on `!still_in` and `threads::key` prefix `room_id\n`. Extending `draft_survives_a_restart_and_can_be_cleared` or adding an offline store unit test is a good small follow-up, not a blocker.
+     2. *Earlier-session thread drafts for threads never opened in this session stay in SQLite:* Acceptable `StateStore` API boundary. `matrix-sdk-base`'s `StateStore` trait (`matrix-sdk-base-0.19.1/src/store/traits.rs:95-107, 2483`) provides only exact-key `set_kv_data`/`remove_kv_data(StateStoreDataKey)` with no prefix scan or prefix delete on `kv_blob`. Only main room drafts and threads seen/opened in the current session have known keys; avoiding raw out-of-band SQLite access is the right trade-off for this rare rejoin edge case.
+
+3. **Finding #3 (`[LOW]` Fast type-erase-switch race before initial `MatrixEvent::Draft`) — Fixed:**
+   - `write_draft` (`src/app/drafts.rs:105-125`) includes `!self.drafts.touched` in the `None` arm (`line 114`), so an explicitly typed-and-erased draft sends `SaveDraft(..., "")` and records `""` in `drafts.stored` (causing a late `MatrixEvent::Draft` to be ignored), while untouched room pass-through still writes nothing. Verified by `a_draft_emptied_before_the_store_answered_stays_empty` (`src/app/drafts.rs:444-459`).
+
+4. **Finding #4 (`[LOW]` `vim` edit cancel hint & emptied-edit `Ctrl-C` trap) — Fixed:**
+   - `Keymap::cancel_compose_label` (`src/keymap.rs:1372-1388`) resolves `Action::CancelCompose`, falling back to `Action::Back` if `Context::Composer` does not shadow it (so `VIM_EXTRA`'s `Esc` -> `Focus(Pane::Timeline)` at `src/keymap.rs:751-758` falls through cleanly to `"Ctrl-C"`), and `ui::composer::draw` (`src/ui/composer.rs:50-54`) displays it in the editing banner (`"✎ Editing your message · <key> cancel"`).
+   - `clear_draft` (`src/app.rs:2575-2588`) cancels compose whenever `self.compose_mode != ComposeMode::Normal`, even when `composer.is_empty()` (`Ctrl-C` on an emptied edit or unwritten reply). Covered by `ctrl_c_gives_up_an_edit_or_a_reply_even_with_nothing_typed` and `the_edit_banner_names_the_key_that_cancels` (`src/app.rs:3457-3516`).
+
+### Checks run on `drafts-edit` (`635ed60`)
+
+- `./scripts/check.sh` — **passed** (exit `0`): `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (**475 passed; 0 failed; 19 ignored**), `cargo build`
+- `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test -- --ignored --test-threads=1 draft_survives_a_restart_and_can_be_cleared` (local continuwuity on `http://127.0.0.1:6167`) — **`1 passed; 0 failed`** (`3.18s`)

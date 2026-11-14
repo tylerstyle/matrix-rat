@@ -29,7 +29,7 @@ notifications and themes that follow your desktop are all there.
 | 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list (kitty graphics only; coloured initials otherwise). |
 | 💬 **Everything a chat needs** | Replies, edits, reactions, threads, mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
-| 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
+| 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
 | 🎨 **Yours to shape** | Eleven built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
 | 🔔 **Notifications** | Desktop notifications with the chat's picture, or plain ones through the terminal; none for what you are reading right now. |
@@ -40,7 +40,34 @@ matrix-rat is developed and tested on Linux. The desktop features (notifications
 pictures, following dark/light, the keyring) use D-Bus and are Linux-only; the rest should
 build wherever Rust and a terminal are, but that is untested.
 
-**With Nix** (the repository is the package; no flake needed):
+**With Nix, from the NUR** (prebuilt, nothing is compiled): matrix-rat is in the
+[Nix User Repository](https://nur.nix-community.org) as `nur.repos.tylerstyle.matrix-rat`,
+and a binary cache serves it for the `nixos-unstable` and `nixpkgs-unstable` channels.
+
+```nix
+# configuration.nix
+{ pkgs, ... }:
+let
+  nur-tylerstyle = import (builtins.fetchTarball
+    "https://github.com/tylerstyle/nur-packages/archive/main.tar.gz") { inherit pkgs; };
+in {
+  nix.settings = {
+    extra-substituters = [ "https://tylerstyle.cachix.org" ];
+    extra-trusted-public-keys =
+      [ "tylerstyle.cachix.org-1:LPNllLpkzqd8U9T9LE7zj7CjXShPpapyTruShQ3V8hw=" ];
+  };
+  environment.systemPackages = [ nur-tylerstyle.matrix-rat ];
+}
+```
+
+If you already use the NUR, `pkgs.nur.repos.tylerstyle.matrix-rat` is the same package; pin
+the tarball as you pin your other sources. Two things to know: the cache settings must be
+active before the package is installed, so on a first setup rebuild once with only the
+`nix.settings` lines; and matrix-rat needs Rust 1.96 or newer, so it is not offered for
+`nixos-26.05`. If your nixpkgs is older than the cache's, Nix builds it locally instead
+(about 20 minutes).
+
+**With Nix, from the source** (the repository is the package; no flake needed):
 
 ```sh
 git clone https://github.com/tylerstyle/matrix-rat && cd matrix-rat
