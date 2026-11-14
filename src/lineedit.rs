@@ -167,7 +167,10 @@ impl LineEdit {
 
     /// Replaces the text (preserving limit and secret settings) and places the cursor at the end.
     pub fn set(&mut self, text: impl Into<String>) {
-        self.text = text.into();
+        let mut old = std::mem::replace(&mut self.text, text.into());
+        if self.secret {
+            zeroize::Zeroize::zeroize(&mut old);
+        }
         self.clip_to_limit();
         self.cursor = self.text.len();
         self.scroll_col = 0;
@@ -177,7 +180,12 @@ impl LineEdit {
     pub fn take_string(&mut self) -> String {
         self.cursor = 0;
         self.scroll_col = 0;
-        std::mem::take(&mut self.text)
+        let taken = std::mem::take(&mut self.text);
+        if self.secret {
+            // For what is typed next (a second try at a password).
+            self.text.reserve(SECRET_ROOM);
+        }
+        taken
     }
 
     #[cfg(test)]
@@ -523,6 +531,25 @@ impl LineEdit {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secret_fields_have_room_from_the_start_and_after_being_emptied() {
+        let mut field = super::LineEdit::secret();
+        assert!(field.text.capacity() >= super::SECRET_ROOM);
+        field.insert("hunter2");
+        let at = field.text.as_ptr();
+        field.insert(" and a good deal more than that");
+        // Typing on did not move the text (and leave a copy behind).
+        assert_eq!(field.text.as_ptr(), at);
+        assert_eq!(
+            field.take_string(),
+            "hunter2 and a good deal more than that"
+        );
+        assert!(field.is_empty() && field.text.capacity() >= super::SECRET_ROOM);
+        assert!(!format!("{field:?}").contains("hunter2"));
+        // An ordinary field is left alone.
+        assert_eq!(super::LineEdit::new().text.capacity(), 0);
+    }
+
     use super::*;
 
     fn key(code: KeyCode) -> (KeyCode, KeyModifiers) {
