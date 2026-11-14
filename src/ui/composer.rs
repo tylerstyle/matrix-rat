@@ -47,7 +47,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             .room()
             .and_then(|r| r.messages.get(i))
             .map(|m| format!("↩ Replying to {}: {}", m.sender, m.body.replace('\n', " "))),
-        ComposeMode::Edit(_) => Some("✎ Editing your message".to_owned()),
+        // With the key that gives it up: not in every preset is that Esc.
+        ComposeMode::Edit(_) => Some(format!(
+            "✎ Editing your message · {} cancel",
+            app.keymap.cancel_compose_label()
+        )),
     };
     if let Some(banner) = banner {
         let rect = Rect::new(text_area.x, text_area.y, text_area.width, 1);

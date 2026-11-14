@@ -190,6 +190,7 @@ action_table! {
     Action::Send => ("send", Context::Composer, "Send"),
     Action::Newline => ("newline", Context::Composer, "Line break"),
     Action::CancelCompose => ("cancel_compose", Context::Composer, "Cancel reply or edit"),
+    Action::EditLast => ("edit_last", Context::Composer, "Edit last message, or select"),
 }
 
 pub fn action_by_name(name: &str) -> Option<ActionSpec> {
@@ -622,13 +623,15 @@ pub const DEFAULT: &[Binding] = &[
         "Alt-Enter",
         "Line break (fallback)",
     ),
+    // The keymap cannot say "only when empty": the action itself goes on to select a
+    // message when there is text (the cursor being on the first line) or nothing to edit.
     bind(
         Composer,
         KeyCode::Up,
         NONE,
-        Action::SelectOlder,
+        Action::EditLast,
         "↑",
-        "First line: select a message",
+        "Edit last message, or select",
     ),
 ];
 
@@ -1369,6 +1372,28 @@ impl Keymap {
             .iter()
             .find(|b| b.context == context && b.action == action)
             .map(|b| b.label.as_ref())
+    }
+
+    /// The key that gives up a reply or an edit from the composer, to name it there:
+    /// the one bound to `CancelCompose`; else the `Back` key, unless the composer has
+    /// another use for it (the vim preset's Esc goes to the messages); else Ctrl-C,
+    /// which is not a binding and always does.
+    pub fn cancel_compose_label(&self) -> &str {
+        let composer = |action| {
+            self.bindings
+                .iter()
+                .filter(|b| matches!(b.context, Context::Composer | Context::Global))
+                .filter(|b| b.action == action)
+                // A global key counts only where the composer does not take it.
+                .find(|b| {
+                    self.lookup_in(Context::Composer, b.code, b.mods)
+                        .is_none_or(|a| a == action)
+                })
+                .map(|b| b.label.as_ref())
+        };
+        composer(Action::CancelCompose)
+            .or_else(|| composer(Action::Back))
+            .unwrap_or("Ctrl-C")
     }
 
     /// Last key label for `(context, action)` (useful where `DEFAULT` lists a secondary key first,
