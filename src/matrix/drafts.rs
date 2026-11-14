@@ -73,8 +73,8 @@ mod tests {
     use crate::matrix::{MatrixCmd, MatrixEvent, MatrixHandle, RoomCategory, spawn};
     use crate::paths::Paths;
 
-    /// Waits for the room list, logging in if the worker asks for it; opens the first
-    /// joined room and returns its id with the draft the worker reports for it.
+    /// Waits for the room list, logging in if the worker asks for it; opens the shared
+    /// test room and returns its id with the draft the worker reports for it.
     async fn open_first_room(
         handle: &MatrixHandle,
         events: &mut UnboundedReceiver<MatrixEvent>,
@@ -95,7 +95,11 @@ mod tests {
                     MatrixEvent::Rooms(rooms) if opened.is_none() => {
                         let joined = rooms
                             .into_iter()
-                            .find(|room| room.category != RoomCategory::Invite);
+                            // Always the same room: the order of the list differs
+                            // between a first and a later start.
+                            .find(|room| {
+                                room.category != RoomCategory::Invite && room.name == "Test Lounge"
+                            });
                         if let Some(room) = joined {
                             handle.send(MatrixCmd::OpenRoom {
                                 room_id: room.id.clone(),
