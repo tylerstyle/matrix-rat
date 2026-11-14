@@ -4,6 +4,7 @@
 //! the status changes, and a [`VerifyUpdate`] whenever a running verification moves on.
 //! One verification runs at a time; each gets a number (`flow`) that the UI quotes back.
 
+use std::collections::BTreeMap;
 use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt, pin_mut};
 use matrix_sdk::Client;
+use matrix_sdk::config::RequestConfig;
 use matrix_sdk::encryption::VerificationState;
 use matrix_sdk::encryption::backups::BackupState;
 use matrix_sdk::encryption::verification::{
@@ -19,6 +21,7 @@ use matrix_sdk::encryption::verification::{
     VerificationRequestState,
 };
 use matrix_sdk::event_handler::EventHandlerHandle;
+use matrix_sdk::ruma::api::client::to_device::send_event_to_device::v3::Request as SendToDevice;
 use matrix_sdk::ruma::api::client::uiaa::{
     AuthData, MatrixUserIdentifier, Password, UserIdentifier,
 };
@@ -27,7 +30,12 @@ use matrix_sdk::ruma::events::key::verification::cancel::CancelCode;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
 use matrix_sdk::ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent};
 use matrix_sdk::ruma::events::secret::send::ToDeviceSecretSendEvent;
-use matrix_sdk::ruma::{DeviceId, MilliSecondsSinceUnixEpoch, OwnedUserId, UserId};
+use matrix_sdk::ruma::events::{
+    AnySyncMessageLikeEvent, AnyToDeviceEventContent, MessageLikeEventType, ToDeviceEventType,
+};
+use matrix_sdk::ruma::serde::Raw;
+use matrix_sdk::ruma::to_device::DeviceIdOrAllDevices;
+use matrix_sdk::ruma::{DeviceId, MilliSecondsSinceUnixEpoch, OwnedUserId, TransactionId, UserId};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::{JoinHandle, JoinSet};
@@ -251,6 +259,103 @@ fn addressed_to(msgtype: &MessageType, own: Option<&UserId>) -> bool {
     }
 }
 
+/// Whether this room event is a step of a verification taken by someone else just now
+/// (anything after the request itself: ready, start, accept, key, mac, done, cancel).
+/// The SDK may answer such a step by itself; see [`send_queued`].
+fn in_room_step(event: &AnySyncMessageLikeEvent, own: Option<&UserId>) -> bool {
+    use MessageLikeEventType as T;
+    matches!(
+        event.event_type(),
+        T::KeyVerificationReady
+            | T::KeyVerificationStart
+            | T::KeyVerificationAccept
+            | T::KeyVerificationKey
+            | T::KeyVerificationMac
+            | T::KeyVerificationDone
+            | T::KeyVerificationCancel
+    ) && Some(event.sender()) != own
+        // Not history that comes in when a room is first loaded.
+        && age_ms(event.origin_server_ts()) < FRESH_MS
+}
+
+/// Makes the SDK send what its verification code has queued, each time `wake` is
+/// notified.
+///
+/// Some steps of a verification are answered by the SDK itself: our key after the other
+/// side's key, our "done" (and the upload of our signature) after their confirmation,
+/// a cancellation after a step that does not fit. It does not send these answers; it
+/// queues them (`VerificationMachine::queue_up_content` in matrix-sdk-crypto 0.19.1),
+/// and the queue is only emptied by `Client::send_outgoing_requests`, which is private
+/// and which, under the `SyncService`, runs only when the encryption sync starts a new
+/// request (`SlidingSync::send_sync_request`, guarded by `is_e2ee_enabled`). The room
+/// list sync, which is the one that delivers verification steps taken in a room, does
+/// not run it. So the answer to a step taken in a direct chat stays queued until the
+/// encryption sync's long poll returns for some other reason: up to 30 seconds, twice
+/// per verification (the emoji show late, and the other side waits for our "done").
+/// Verifications between one's own devices are not affected: their steps arrive by the
+/// encryption sync itself, which sends the queue with its next request.
+///
+/// Seen with the server test `other_people_verify_in_a_direct_chat`, which failed about
+/// every other run. The local homeserver answers both polls when a room event arrives,
+/// so it was a race there (a server that leaves the encryption poll alone would give
+/// the full wait every time). From a failing run, SDK logs of the device under test:
+///
+/// ```text
+/// 18:45:44.933435 sync_once{conn_id="encryption" pos="429863"}: Received response
+/// 18:45:44.942276 sync_once{conn_id="room-list" pos="429863"}: Received response
+/// 18:45:44.943630 sync_once{conn_id="encryption" pos="429868"}: Sending request
+/// 18:45:44.943957 sync_once{conn_id="encryption" ..}:send_outgoing_requests: ..
+/// 18:45:44.944305 sync_once{conn_id="room-list" ..}:handle_response:receive_any_event:
+///                 SAS received an event and changed its state .. new_state=KeyReceived
+/// 18:45:44.944348 .. Storing the request info, waiting for the request to be marked
+///                 as sent
+/// 18:46:14.9      (the test gives up; the encryption sync sent no request in between)
+/// ```
+///
+/// The queue was read 0.4 ms before our key was put in it.
+///
+/// The SDK has no public call that empties the queue or ends that poll (short of
+/// `SyncService::expire_sessions`, which starts both syncs over), so we end the poll
+/// from outside: an empty `m.dummy` message to this very device ("should be ignored"
+/// says the spec, and the SDK does: `OlmMachine::handle_to_device_event`) makes the
+/// server answer the poll, and the SDK sends the queue with the request that follows.
+/// The message carries nothing and goes to nobody else.
+///
+/// We never send the queue ourselves, so nothing can go out twice, and the order of
+/// things does not matter: whether the message reaches the server before or after the
+/// encryption sync's current request, that request is answered because of it and the
+/// next one is made after the answer was queued (the handler that wakes us runs after
+/// the SDK has worked the step in). If the message cannot be sent, or a server does
+/// not answer the poll for it, the answer goes out as late as before. One small
+/// request per wake at most; wakes that come while it is under way count as one.
+///
+/// Not covered: room-key requests to our other devices, which the SDK queues the same
+/// way when a message that came by the room list sync cannot be decrypted. They still
+/// wait for the encryption sync's next request (up to 30 seconds).
+async fn send_queued(client: Client, wake: Arc<Notify>) {
+    loop {
+        wake.notified().await;
+        let (Some(user), Some(device)) = (client.user_id(), client.device_id()) else {
+            continue;
+        };
+        let Ok(content) = Raw::<AnyToDeviceEventContent>::from_json_string("{}".to_owned()) else {
+            continue;
+        };
+        let to = DeviceIdOrAllDevices::DeviceId(device.to_owned());
+        let messages = BTreeMap::from([(user.to_owned(), BTreeMap::from([(to, content)]))]);
+        let request =
+            SendToDevice::new_raw(ToDeviceEventType::Dummy, TransactionId::new(), messages);
+        // Once only, and not for long: a late nudge is worth nothing.
+        let config = RequestConfig::new()
+            .disable_retry()
+            .timeout(Duration::from_secs(10));
+        if let Err(err) = client.send(request).with_request_config(config).await {
+            // The queue is sent with the encryption sync's next request all the same.
+            tracing::warn!(%err, "could not hurry the answer to a verification step");
+        }
+    }
+}
+
 impl Verifier {
     pub fn start(client: &Client, events: UnboundedSender<MatrixEvent>) -> Self {
         let (tx, incoming) = unbounded_channel();
@@ -281,6 +386,20 @@ impl Verifier {
                 }
             }
         });
+        // Steps of a verification in a room: the SDK has worked them in by the time
+        // handlers run, and queued its answer, which `send_queued` gets on its way.
+        let wake = Arc::new(Notify::new());
+        let own = client.user_id().map(ToOwned::to_owned);
+        let poke = wake.clone();
+        let steps = client.add_event_handler(move |ev: AnySyncMessageLikeEvent| {
+            let poke = poke.clone();
+            let step = in_room_step(&ev, own.as_deref());
+            async move {
+                if step {
+                    poke.notify_one();
+                }
+            }
+        });
         let refresh = Arc::new(Notify::new());
         // After a verification, the other device sends the keys this one lacks. The SDK
         // has stored them by the time handlers run.
@@ -295,11 +414,12 @@ impl Verifier {
             events.clone(),
             refresh.clone(),
         ));
+        tasks.spawn(send_queued(client.clone(), wake));
         Self {
             client: client.clone(),
             events,
             incoming,
-            handlers: vec![from_device, in_room, secrets],
+            handlers: vec![from_device, in_room, steps, secrets],
             next_flow: 0,
             running: None,
             tasks,
@@ -1129,6 +1249,107 @@ mod tests {
     }
 
     #[test]
+    fn steps_other_people_take_in_a_room_hurry_the_answer() {
+        use matrix_sdk::ruma::user_id;
+        let me = user_id!("@me:example.org");
+        let now = u64::from(MilliSecondsSinceUnixEpoch::now().get());
+        let event = |kind: &str, sender: &str, sent: u64| -> AnySyncMessageLikeEvent {
+            // The check looks at type, sender and time only; the SDK has judged the
+            // rest by then.
+            let relates = serde_json::json!({ "rel_type": "m.reference", "event_id": "$request" });
+            let content = match kind {
+                "m.key.verification.ready" => serde_json::json!({
+                    "from_device": "DEVICE", "methods": ["m.sas.v1"], "m.relates_to": relates,
+                }),
+                "m.key.verification.start" => serde_json::json!({
+                    "from_device": "DEVICE",
+                    "method": "m.sas.v1",
+                    "key_agreement_protocols": ["curve25519-hkdf-sha256"],
+                    "hashes": ["sha256"],
+                    "message_authentication_codes": ["hkdf-hmac-sha256.v2"],
+                    "short_authentication_string": ["emoji"],
+                    "m.relates_to": relates,
+                }),
+                "m.key.verification.accept" => serde_json::json!({
+                    "method": "m.sas.v1",
+                    "key_agreement_protocol": "curve25519-hkdf-sha256",
+                    "hash": "sha256",
+                    "message_authentication_code": "hkdf-hmac-sha256.v2",
+                    "short_authentication_string": ["emoji"],
+                    "commitment": "a2V5",
+                    "m.relates_to": relates,
+                }),
+                "m.key.verification.key" => serde_json::json!({
+                    "key": "a2V5", "m.relates_to": relates,
+                }),
+                "m.key.verification.mac" => serde_json::json!({
+                    "mac": {}, "keys": "a2V5", "m.relates_to": relates,
+                }),
+                "m.key.verification.done" => serde_json::json!({ "m.relates_to": relates }),
+                "m.key.verification.cancel" => serde_json::json!({
+                    "code": "m.user", "reason": "no", "m.relates_to": relates,
+                }),
+                // A message of ours that this device cannot read (yet).
+                "m.room.encrypted" => serde_json::json!({
+                    "algorithm": "m.megolm.v1.aes-sha2",
+                    "ciphertext": "a2V5",
+                    "sender_key": "a2V5",
+                    "device_id": "DEVICE",
+                    "session_id": "session",
+                }),
+                // The request itself: nothing is answered before the user accepts.
+                "m.room.message" => serde_json::json!({
+                    "msgtype": "m.key.verification.request",
+                    "body": "verify",
+                    "from_device": "DEVICE",
+                    "methods": ["m.sas.v1"],
+                    "to": me,
+                }),
+                _ => panic!("no content for {kind}"),
+            };
+            serde_json::from_value(serde_json::json!({
+                "type": kind,
+                "event_id": "$step",
+                "sender": sender,
+                "origin_server_ts": sent,
+                "content": content,
+            }))
+            .unwrap()
+        };
+        let them = "@them:example.org";
+        for kind in [
+            "m.key.verification.ready",
+            "m.key.verification.start",
+            "m.key.verification.accept",
+            "m.key.verification.key",
+            "m.key.verification.mac",
+            "m.key.verification.done",
+            "m.key.verification.cancel",
+        ] {
+            let live = event(kind, them, now);
+            assert_eq!(live.event_type().to_string(), kind);
+            assert!(in_room_step(&live, Some(me)), "{kind}");
+            // Just loaded, but sent a while ago.
+            assert!(in_room_step(
+                &event(kind, them, now - FRESH_MS / 2),
+                Some(me)
+            ));
+            // Our own steps (this device's, or another one's) need no answer from here.
+            assert!(!in_room_step(&event(kind, me.as_str(), now), Some(me)));
+            // History.
+            assert!(!in_room_step(
+                &event(kind, them, now - 2 * FRESH_MS),
+                Some(me)
+            ));
+        }
+        for kind in ["m.room.message", "m.room.encrypted"] {
+            let other = event(kind, them, now);
+            assert_eq!(other.event_type().to_string(), kind);
+            assert!(!in_room_step(&other, Some(me)), "{kind}");
+        }
+    }
+
+    #[test]
     fn debug_output_hides_the_password() {
         let command = MatrixCmd::Verification(VerifyCmd::SetUp {
             password: Some("hunter2".into()),
@@ -1887,6 +2108,7 @@ mod tests {
             answer: Answer::Accept,
         }));
         let requester = tokio::spawn(run_requester(v_request));
+        let began = std::time::Instant::now();
         let run = async {
             loop {
                 let update = next_update(&mut u_events, "U").await;
@@ -1905,13 +2127,17 @@ mod tests {
                 }
             }
         };
-        tokio::time::timeout(Duration::from_secs(60), run)
+        // Each step is answered at once (it takes two or three seconds here). An answer
+        // that waits for the encryption sync's poll takes 30 seconds: see `send_queued`.
+        tokio::time::timeout(Duration::from_secs(15), run)
             .await
-            .expect("timed out during the verification");
+            .expect("the verification took too long: are queued answers sent at once?");
+        eprintln!("U done after {:?}", began.elapsed());
         tokio::time::timeout(Duration::from_secs(10), requester)
             .await
             .expect("V did not finish")
             .expect("V failed");
+        eprintln!("V done after {:?}", began.elapsed());
         // V signed U's identity; it shows once V fetches it back from the server.
         let trusted = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
