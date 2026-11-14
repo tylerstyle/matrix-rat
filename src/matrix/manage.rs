@@ -308,29 +308,67 @@ pub struct Manager {
     /// Keeps the open room info view current.
     watcher: Option<JoinHandle<()>>,
     /// Wakes the open room info watcher after local moderation or membership changes.
-    refresh: Arc<watch::Sender<u64>>,
+    refresh: Arc<Refresh>,
 }
 
-pub(super) fn bump_refresh(refresh: &watch::Sender<u64>) {
-    refresh.send_modify(|n| *n = n.wrapping_add(1));
+/// Wakes the open room info watcher when the watched room changes.
+pub struct Refresh {
+    tx: watch::Sender<u64>,
+    watched: std::sync::Mutex<Option<String>>,
+}
+
+impl Refresh {
+    fn new() -> Self {
+        let (tx, _) = watch::channel(0u64);
+        Self {
+            tx,
+            watched: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn watch(&self, room_id: &str) -> watch::Receiver<u64> {
+        let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
+        *watched = Some(room_id.to_owned());
+        self.tx.subscribe()
+    }
+
+    fn clear(&self) {
+        *self.watched.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    fn bump(&self, room_id: &str) {
+        let is_watched = self
+            .watched
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+            == Some(room_id);
+        if is_watched {
+            self.tx.send_modify(|n| *n = n.wrapping_add(1));
+        }
+    }
+}
+
+pub(super) fn bump_refresh(refresh: &Refresh, room_id: &str) {
+    refresh.bump(room_id);
 }
 
 impl Manager {
     pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
-        let (refresh, _) = watch::channel(0u64);
         Self {
             client,
             events,
             watcher: None,
-            refresh: Arc::new(refresh),
+            refresh: Arc::new(Refresh::new()),
         }
     }
 
-    pub fn refresh_signal(&self) -> Arc<watch::Sender<u64>> {
+    pub fn refresh_signal(&self) -> Arc<Refresh> {
         self.refresh.clone()
     }
 
     pub fn stop(&mut self) {
+        self.refresh.clear();
         if let Some(watcher) = self.watcher.take() {
             watcher.abort();
         }
@@ -396,7 +434,7 @@ impl Manager {
                 self.stop();
                 // Subscribe before spawning so changes arriving during the initial
                 // store read still mark this watcher's receiver dirty.
-                let refresh = self.refresh.subscribe();
+                let refresh = self.refresh.watch(&room_id);
                 self.watcher = Some(tokio::spawn(watch(
                     client,
                     room_id,
@@ -428,7 +466,7 @@ impl Manager {
                         })
                         .await;
                     if result.is_ok() {
-                        bump_refresh(&refresh);
+                        bump_refresh(&refresh, &room_id);
                     }
                     emit(ManageEvent::Done {
                         room_id,
@@ -454,7 +492,7 @@ impl Manager {
                         })
                         .await;
                     if result.is_ok() {
-                        bump_refresh(&refresh);
+                        bump_refresh(&refresh, &room_id);
                     }
                     emit(ManageEvent::Done {
                         room_id,
@@ -472,7 +510,7 @@ impl Manager {
                         })
                         .await;
                     if result.is_ok() {
-                        bump_refresh(&refresh);
+                        bump_refresh(&refresh, &room_id);
                     }
                     emit(ManageEvent::Done {
                         room_id,
@@ -509,7 +547,7 @@ impl Manager {
                                 && let Ok(r) = ok_room
                             {
                                 emit_room_power(&events_tx, &r).await;
-                                bump_refresh(&refresh);
+                                bump_refresh(&refresh, &room_id);
                             }
                             res
                         }
@@ -602,6 +640,12 @@ impl Manager {
                 result,
             }));
         });
+    }
+}
+
+impl Drop for Manager {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -1929,6 +1973,24 @@ mod tests {
         assert!(!entries_agree(&entries, (3, 0)));
         assert!(!entries_agree(&entries, (2, 0)));
         assert!(entries_agree(&[], (0, 0)));
+    }
+
+    #[test]
+    fn refresh_signal_only_wakes_the_watched_room() {
+        let refresh = Refresh::new();
+        let mut rx = refresh.watch("!watched:example.org");
+        assert!(!rx.has_changed().unwrap());
+
+        bump_refresh(&refresh, "!other:example.org");
+        assert!(!rx.has_changed().unwrap());
+
+        bump_refresh(&refresh, "!watched:example.org");
+        assert!(rx.has_changed().unwrap());
+        let _ = rx.borrow_and_update();
+
+        refresh.clear();
+        bump_refresh(&refresh, "!watched:example.org");
+        assert!(!rx.has_changed().unwrap());
     }
 
     #[test]
