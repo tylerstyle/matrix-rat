@@ -456,6 +456,7 @@ mod tests {
             server_notifications: 0,
             mention: false,
             unread: false,
+            marked_unread: false,
             avatar: None,
             preview: None,
             alias: alias.map(str::to_owned),

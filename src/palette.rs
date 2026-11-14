@@ -87,6 +87,9 @@ pub struct PaletteContext {
     pub thread_open: bool,
     pub has_room: bool,
     pub has_messages: bool,
+    /// Whether the open room shows as unread; `None` if there is no room to mark
+    /// (none open, or an invitation).
+    pub open_unread: Option<bool>,
     pub connected: bool,
     pub user_id: Option<String>,
     pub mouse: bool,
@@ -360,7 +363,8 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         .count()
         > 1;
 
-    let mut seen: Vec<Action> = Vec::new();
+    // Listed above already, whether a key is bound to them or not.
+    let mut seen: Vec<Action> = vec![Action::ToggleUnread, Action::MarkAllRead];
     for binding in active_bindings {
         if include_keymap_action(binding.action) == ActionInclusion::Skip {
             continue;
@@ -392,6 +396,10 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             Action::JumpToReply => (binding.description, &["parent", "original", "reply"]),
             Action::Attach => (binding.description, &["upload", "send file", "attach"]),
             Action::ToggleHelp => (binding.description, &["key bindings", "shortcuts", "help"]),
+            Action::JumpToUnread => (
+                binding.description,
+                &["new messages", "unread line", "first new message"],
+            ),
             _ => (binding.description, &[]),
         };
 
@@ -441,6 +449,35 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             group,
         );
     }
+
+    // Marking rooms has no key by default; named for what it would do right now.
+    let key_of = |action| ctx.keymap.label_for(action).map(str::to_owned);
+    let toggle_title = match ctx.open_unread {
+        Some(true) => "Mark this room as read",
+        _ => "Mark this room as unread",
+    };
+    push_entry(
+        out,
+        Target::Action(Action::ToggleUnread),
+        Category::Action,
+        toggle_title,
+        key_of(Action::ToggleUnread),
+        toggle_title,
+        &["mark as read", "mark as unread", "mark read", "mark unread"],
+        ctx.open_unread.is_some(),
+        1,
+    );
+    push_entry(
+        out,
+        Target::Action(Action::MarkAllRead),
+        Category::Action,
+        "Mark all rooms as read",
+        key_of(Action::MarkAllRead),
+        "Mark all rooms as read",
+        &["mark all as read", "mark everything read", "catch up"],
+        true,
+        1,
+    );
 }
 
 #[derive(PartialEq, Eq)]
@@ -493,7 +530,9 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Attach => {
             ctx.has_room && !ctx.in_invite && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
-        Action::JumpToNewest | Action::JumpToOldest => ctx.has_room && ctx.has_messages,
+        Action::JumpToNewest | Action::JumpToOldest | Action::JumpToUnread => {
+            ctx.has_room && ctx.has_messages
+        }
         Action::AcceptInvite | Action::DeclineInvite => ctx.in_invite,
         Action::RoomInfo => ctx.target.is_some(),
         Action::Search => ctx.has_room && !ctx.in_invite,
@@ -834,6 +873,7 @@ mod tests {
             thread_open: false,
             has_room: true,
             has_messages: true,
+            open_unread: Some(false),
             connected: false,
             user_id: None,
             mouse: true,

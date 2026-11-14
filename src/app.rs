@@ -12,6 +12,7 @@ mod palette;
 mod rooms;
 pub mod search;
 mod thread;
+mod unread;
 mod verify;
 
 use std::path::PathBuf;
@@ -96,6 +97,9 @@ pub struct TimelineState {
     pub scroll: usize,
     /// Ask the next draw to bring the selected message into view.
     pub reveal_selected: bool,
+    /// Ask the next draw to put the "new" line at the top of the view, if what is
+    /// below it does not fit (else the newest message stays at the bottom).
+    pub reveal_unread: bool,
     /// Visible rows, as of the last draw.
     pub page: usize,
     /// Set by the draw when the oldest loaded message is on screen.
@@ -269,6 +273,8 @@ pub struct App {
     pub attach: attach::AttachState,
     /// What of the unsent text is in the store, to have it back after a restart.
     drafts: drafts::Drafts,
+    /// The "new" line of the open room, and rooms marked as unread by hand.
+    unread: unread::Unread,
     /// Composer completions and tracked mentions/room links.
     pub complete: complete::CompleteState,
     /// Joining, creating and leaving rooms.
@@ -436,6 +442,7 @@ impl App {
             threads: Default::default(),
             attach: Default::default(),
             drafts: Default::default(),
+            unread: Default::default(),
             complete: Default::default(),
             manage: Default::default(),
             keymap: Keymap::default(),
@@ -893,6 +900,54 @@ impl App {
         self.pending_notices.push(notice);
     }
 
+    /// The user clicked the desktop notification of a room: that room is opened, as
+    /// if picked in the room list. Not while a question is open that has to be
+    /// answered first (logging in, the recovery key, a device verification), and not
+    /// for a room that is gone; what was merely being looked at (a menu, the command
+    /// palette, the settings, a picture) makes way.
+    fn on_notice_click(&mut self, room_id: &str) {
+        if self.logged_out
+            || matches!(
+                self.modal,
+                Some(Modal::Login(_) | Modal::Recovery(_) | Modal::Verify(_))
+            )
+        {
+            return;
+        }
+        let Some(index) = self.rooms.iter().position(|room| room.id == room_id) else {
+            return;
+        };
+        // A jump to a message that is still on its way would take the view
+        // somewhere else afterwards.
+        self.cancel_pending_jump();
+        match self.modal {
+            Some(Modal::Search(_)) => self.close_search(),
+            Some(Modal::GlobalSearch(_)) => self.close_global_search(),
+            Some(Modal::New(_) | Modal::RoomInfo(_)) => self.close_manage(),
+            _ => self.modal = None,
+        }
+        self.help_open = false;
+        self.images.close_viewer();
+        // Already there: nothing moves, a thread stays open, the place in the
+        // messages is kept. Only a view of some older part of the room (after a
+        // jump to a message) goes back to the newest messages, where the news is.
+        if index == self.active && self.room().is_some() {
+            if self.timeline.detached {
+                self.return_to_live();
+            }
+            return;
+        }
+        // The room list shows where we went, also when a space hid that room.
+        if self.space.is_some() && !self.space_rooms.contains(room_id) {
+            self.select_space(None);
+        }
+        self.open_room(index);
+        if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
+            self.sidebar.cursor = at;
+            self.sidebar.reveal_cursor = true;
+        }
+    }
+
     /// Shows the count-based notifications that have waited long enough, unless a
     /// detailed one covered the room in the meantime.
     fn release_count_notices(&mut self, wait: Duration) {
@@ -1014,6 +1069,7 @@ impl App {
         self.images.clear();
         self.attach.clear();
         self.drafts = Default::default();
+        self.unread = Default::default();
         self.complete.reset_session();
         self.manage = Default::default();
         self.pending_jump = None;
@@ -1050,11 +1106,15 @@ impl App {
         self.sync_completion();
     }
 
-    pub(super) fn switch_room_state(&mut self, index: usize) {
+    /// Makes the room at `index` the open one. `opened`: the user opens the room,
+    /// which starts its "new" line afresh also if it is the open one already; a
+    /// jump to a message leaves the line of the room it stays in alone.
+    pub(super) fn switch_room_state(&mut self, index: usize, opened: bool) {
         if index >= self.rooms.len() {
             return;
         }
         self.auto_opened = false;
+        let fresh = opened || index != self.active;
         if index != self.active {
             if self.typing_sent.take().is_some()
                 && let Some(room_id) = self.room_id()
@@ -1080,9 +1140,15 @@ impl App {
             self.restore_room_marks(&new_id);
         }
         self.active = index;
+        // Before the count is cleared: it helps to place the "new" line.
+        if fresh {
+            self.begin_unread_line();
+        }
         self.rooms[index].unread = 0;
         self.rooms[index].bold = false;
         self.rooms[index].mention = false;
+        // Opening a room that was marked as unread by hand is reading it.
+        self.clear_marked_unread(index);
         self.sidebar.filter.clear();
         self.request_members_for_open_room();
     }
@@ -1094,7 +1160,7 @@ impl App {
         self.cancel_pending_jump();
         // A thread belongs to its room; picking a room (even the same one) leaves it.
         self.leave_thread();
-        self.switch_room_state(index);
+        self.switch_room_state(index, true);
         self.timeline = TimelineState::default();
         self.row_cache = None;
         self.timeline_rev += 1;
@@ -1264,6 +1330,8 @@ impl App {
                 },
             };
             self.send_matrix(command);
+            // Whoever writes in a room has read it.
+            self.clear_marked_unread(self.active);
             self.composer.take();
             self.clear_completion_marks();
             if matches!(self.compose_mode, ComposeMode::Edit(_)) {
@@ -1617,6 +1685,11 @@ impl App {
         if !seen || self.matrix.is_none() || self.thread_loading() {
             return;
         }
+        // Where the "new" line goes is read from the room's first messages after
+        // opening it; a receipt sent before that would move what it is read from.
+        if self.unread_line_pending() {
+            return;
+        }
         let newest = self.messages().iter().rev().find_map(|m| match &m.item {
             Some(ItemRef::Event(id)) => Some(id.clone()),
             _ => None,
@@ -1624,6 +1697,7 @@ impl App {
         if newest.is_none() || newest == self.timeline.marked_read {
             return;
         }
+        self.note_read(newest.as_deref());
         self.timeline.marked_read = newest;
         if let Some(room_id) = self.room_id() {
             self.send_matrix(MatrixCmd::MarkRead {
@@ -2177,6 +2251,9 @@ impl App {
             }
             Action::Setting(setting) => self.perform_setting(setting),
             Action::ContextMenu => self.open_menu_by_key(),
+            Action::JumpToUnread => self.jump_to_unread(),
+            Action::ToggleUnread => self.toggle_unread(),
+            Action::MarkAllRead => self.mark_all_read(),
             Action::NewRoom
             | Action::RoomInfo
             | Action::LeaveRoom
@@ -2439,8 +2516,10 @@ impl App {
                 self.send_matrix(MatrixCmd::Previews(self.room_previews));
                 self.logged_out = false;
                 self.session_started = Some(Instant::now());
+                self.unread.session_begins();
                 self.maybe_open_startup_target();
             }
+            MatrixEvent::CaughtUp => self.unread.caught_up(),
             MatrixEvent::Sync(status) => {
                 self.sync = Some(status);
                 if self.sync == Some(SyncStatus::Synced) {
@@ -2493,6 +2572,7 @@ impl App {
                 } else if generation == self.generation
                     && self.room_id().as_deref() == Some(&room_id)
                 {
+                    let messages = self.place_unread_line(messages, detached.is_some());
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
                     self.search_sync();
@@ -2572,6 +2652,7 @@ impl App {
                     .retain(|(_, waiting)| waiting.room_id != notice.room_id);
                 self.on_notice(notice);
             }
+            MatrixEvent::NoticeClicked { room_id } => self.on_notice_click(&room_id),
             MatrixEvent::FileSaved { key, open, result } => self.on_file_saved(key, open, result),
             MatrixEvent::Security(security) => self.on_security(security),
             MatrixEvent::Verification(update) => self.on_verification(update),
@@ -2674,6 +2755,7 @@ impl App {
                 room.name = summary.name;
                 room.kind = kind;
                 room.unread = summary.notifications.min(u32::MAX as u64) as u32;
+                room.marked_unread = self.unread.settle(&summary.id, summary.marked_unread);
                 room.bold = summary.unread;
                 room.mention = summary.mention;
                 room.avatar = summary.avatar;
@@ -2686,6 +2768,7 @@ impl App {
         // What is left over is gone from the list, and its drafts with it.
         for room_id in old.keys() {
             self.forget_room_drafts(room_id);
+            self.unread.forget(room_id);
         }
 
         // Held back for a moment: if the full notification (with sender and text)
@@ -2708,6 +2791,7 @@ impl App {
                 // An accepted invitation becomes a room with messages to load.
                 if was_invite && self.rooms[index].kind != RoomKind::Invite {
                     self.timeline = TimelineState::default();
+                    self.begin_unread_line();
                     self.request_timeline();
                     self.request_members_for_open_room();
                 }
@@ -2742,6 +2826,7 @@ impl App {
                         self.clear_completion_marks();
                     }
                 }
+                self.begin_unread_line();
                 self.request_timeline();
                 self.request_members_for_open_room();
             }
@@ -3404,6 +3489,7 @@ impl App {
         self.tick_global_search();
         self.release_count_notices(COUNT_NOTICE_WAIT);
         self.save_idle_draft(drafts::IDLE);
+        self.settle_unread_line();
         if self
             .toast
             .as_ref()
@@ -3485,6 +3571,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     app.set_notify_icons(notify_icons);
     let mut encoded_images = app.start_images(graphics);
     let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
+    // Clicks on desktop notifications come back here, as the room to open.
+    let (notice_clicks, mut clicked) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     while !app.should_quit {
         if app.suspend_requested {
@@ -3513,6 +3601,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 ready.preview,
                 icon,
                 ready.icon_cache.clone(),
+                Some(&notice_clicks),
             );
         }
         if app.dirty {
@@ -3533,6 +3622,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                     None => std::future::pending().await,
                 }
             } => app.on_matrix(event),
+            Some(room_id) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked { room_id }),
             _ = theme_watch.changed() => app.reload_theme(),
             scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),
@@ -4157,6 +4247,7 @@ mod tests {
             server_notifications: notifications,
             mention: false,
             unread: notifications > 0,
+            marked_unread: false,
             avatar: None,
             alias: None,
         }
@@ -4478,7 +4569,9 @@ mod tests {
         app.on_event(key(KeyCode::Up));
         assert_eq!(app.timeline.selected, Some(1));
 
-        // Older history arrives in front, with a system line and a marker mixed in.
+        // Older history arrives in front, with a system line mixed in, and the SDK's
+        // read marker, which is not shown: nothing was unread when the room was
+        // opened (see `unread` for the line that is shown when something was).
         let system = Message {
             id: "s".into(),
             kind: MsgKind::System,
@@ -4500,9 +4593,9 @@ mod tests {
                 remote("2", "me", "second"),
             ],
         ));
-        assert_eq!(app.timeline.selected, Some(4));
+        assert_eq!(app.timeline.selected, Some(3));
         assert_eq!(app.compose_mode, ComposeMode::Reply(2));
-        // Moving up skips the marker and the system line.
+        // Moving up skips the system line.
         app.on_event(key(KeyCode::Up));
         assert_eq!(app.timeline.selected, Some(2));
         app.on_event(key(KeyCode::Up));
@@ -5967,6 +6060,261 @@ mod tests {
         app.on_event(click(col + 3 + 2, row));
         app.on_event(key(KeyCode::Char('X')));
         assert_eq!(app.sidebar.filter, "CaXfe\u{0301} ");
+    }
+
+    /// Connected to a fake worker: `!a` Alpha (open, with two messages), `!b` Beta
+    /// and an invitation.
+    fn with_worker() -> (App, tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>) {
+        let (handle, mut commands) = MatrixHandle::for_test();
+        let config = crate::config::Config::default();
+        let mut app = App::new(&config, std::path::PathBuf::new(), Some(handle));
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@me:example.org".into(),
+        });
+        app.on_matrix(MatrixEvent::CaughtUp);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            summary("!b", "Beta", RoomCategory::Room, 0),
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+        ]));
+        let message = |n: usize| Message {
+            id: n.to_string(),
+            item: Some(ItemRef::Event(format!("$e{n}"))),
+            sender: "ann".into(),
+            body: format!("line {n}"),
+            ..Message::default()
+        };
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: app.generation,
+            messages: vec![message(0), message(1)],
+            reached_start: true,
+            detached: None,
+        });
+        while commands.try_recv().is_ok() {}
+        (app, commands)
+    }
+
+    fn commands_sent(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>,
+    ) -> Vec<String> {
+        let mut seen = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            seen.push(format!("{command:?}"));
+        }
+        seen
+    }
+
+    fn clicked(room_id: &str) -> MatrixEvent {
+        MatrixEvent::NoticeClicked {
+            room_id: room_id.into(),
+        }
+    }
+
+    #[test]
+    fn a_clicked_notification_opens_its_room_like_the_room_list_does() {
+        let (mut app, mut commands) = with_worker();
+        assert_eq!(format!("{:?}", clicked("!b")), "NoticeClicked(!b)");
+        // Something half written, and a message selected, in the open room.
+        type_text(&mut app, "half a thought");
+        app.on_matrix(clicked("!b"));
+        assert_eq!(app.active, 1);
+        assert_eq!(app.focus, Pane::Composer);
+        // The draft stays with its room, in the store as well.
+        assert_eq!(app.composer.text(), "");
+        assert_eq!(app.rooms[0].draft, "half a thought");
+        assert_eq!(
+            commands_sent(&mut commands),
+            [
+                "Typing(!a, true)",
+                "Typing(!a, false)",
+                "SaveDraft(!a, 14 bytes)",
+                "FetchMembers(!b)",
+                "OpenRoom(!b)"
+            ]
+        );
+
+        // What was only being looked at makes way: the palette, a menu, the help.
+        app.perform(Action::OpenPalette);
+        assert!(app.modal.is_some());
+        app.on_matrix(clicked("!a"));
+        assert!(app.modal.is_none());
+        assert_eq!(app.active, 0);
+        assert_eq!(app.composer.text(), "half a thought");
+        commands_sent(&mut commands);
+        app.perform(Action::ToggleHelp);
+        app.on_matrix(clicked("!b"));
+        assert!(!app.help_open);
+        assert_eq!(app.active, 1);
+        // A search across rooms is ended properly.
+        app.perform(Action::SearchEverywhere);
+        commands_sent(&mut commands);
+        app.on_matrix(clicked("!a"));
+        assert!(app.modal.is_none());
+        assert!(commands_sent(&mut commands).contains(&"CancelSearch".to_owned()));
+
+        // A room that a space hides is shown in the list as well.
+        app.on_matrix(MatrixEvent::Spaces(vec![crate::matrix::SpaceSummary {
+            id: "!s".into(),
+            name: "Space".into(),
+            level: 0,
+            rooms: vec!["!a".into()],
+        }]));
+        app.select_space(Some(0));
+        assert!(app.space.is_some());
+        app.on_matrix(clicked("!b"));
+        assert_eq!(app.active, 1);
+        assert!(app.space.is_none());
+        assert_eq!(app.cursor_room(), Some(1));
+    }
+
+    #[test]
+    fn a_click_for_the_open_room_or_a_room_that_is_gone_changes_nothing() {
+        let (mut app, mut commands) = with_worker();
+        // The open room: the place in the messages, a selection and a thread stay.
+        app.perform(Action::Focus(Pane::Timeline));
+        app.timeline.scroll = 3;
+        let selected = app.timeline.selected;
+        assert!(selected.is_some());
+        let generation = app.generation;
+        app.on_matrix(clicked("!a"));
+        assert_eq!(
+            (app.active, app.focus, app.timeline.scroll),
+            (0, Pane::Timeline, 3)
+        );
+        assert_eq!(app.timeline.selected, selected);
+        assert_eq!(app.generation, generation);
+        app.perform(Action::OpenThread);
+        assert!(app.thread_open());
+        commands_sent(&mut commands);
+        app.on_matrix(clicked("!a"));
+        assert!(app.thread_open());
+        assert_eq!(commands_sent(&mut commands), Vec::<String>::new());
+
+        // A room that has left the list since (or never was in it): nothing, and a
+        // popup that is open stays.
+        app.perform(Action::OpenPalette);
+        app.on_matrix(clicked("!gone"));
+        assert!(matches!(app.modal, Some(Modal::Palette(_))));
+        assert_eq!(app.active, 0);
+        assert!(app.thread_open());
+        assert_eq!(commands_sent(&mut commands), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_click_ends_a_jump_that_is_under_way_and_a_view_of_older_messages() {
+        let slice = |generation: u64, room: &str| MatrixEvent::Timeline {
+            room_id: room.into(),
+            generation,
+            messages: vec![Message {
+                id: "old".into(),
+                item: Some(ItemRef::Event("$old".into())),
+                sender: "ann".into(),
+                body: "long ago".into(),
+                ..Message::default()
+            }],
+            reached_start: false,
+            detached: Some(crate::matrix::DetachedTimeline {
+                target_event: "$old".into(),
+                thread_root: None,
+                reached_end: false,
+            }),
+        };
+        // The generation of the jump that was asked for last.
+        let asked = |commands: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>| {
+            let mut found = None;
+            while let Ok(command) = commands.try_recv() {
+                if let MatrixCmd::OpenEvent { generation, .. } = command {
+                    found = Some(generation);
+                }
+            }
+            found.expect("no jump was asked for")
+        };
+
+        // A jump into the other room is on its way; the notification of the open
+        // room is clicked. The jump is called off, and its late answer changes
+        // nothing.
+        let (mut app, mut commands) = with_worker();
+        app.jump_to_event("!b".into(), "$old".into(), None);
+        let jump = asked(&mut commands);
+        app.on_matrix(clicked("!a"));
+        assert_eq!(
+            commands_sent(&mut commands),
+            [format!("CancelOpenEvent(generation {jump})")]
+        );
+        app.on_matrix(slice(jump, "!b"));
+        assert_eq!(app.active, 0);
+        assert!(!app.timeline.detached);
+
+        // The same with a click for another room: that room is opened, as from the
+        // room list, and shows its newest messages.
+        app.jump_to_event("!b".into(), "$old".into(), None);
+        let jump = asked(&mut commands);
+        app.on_matrix(clicked("!b"));
+        assert_eq!(
+            commands_sent(&mut commands),
+            [
+                format!("CancelOpenEvent(generation {jump})"),
+                "FetchMembers(!b)".to_owned(),
+                "OpenRoom(!b)".to_owned()
+            ]
+        );
+        app.on_matrix(slice(jump, "!b"));
+        assert!(!app.timeline.detached);
+        assert!(app.messages().is_empty());
+
+        // The view shows an older part of a room (a jump arrived). A click for
+        // another room opens that one as usual.
+        app.jump_to_event("!a".into(), "$old".into(), None);
+        let jump = asked(&mut commands);
+        app.on_matrix(slice(jump, "!a"));
+        assert!(app.timeline.detached);
+        assert_eq!(app.active, 0);
+        commands_sent(&mut commands);
+        app.on_matrix(clicked("!b"));
+        assert_eq!(app.active, 1);
+        assert!(!app.timeline.detached);
+        assert_eq!(
+            commands_sent(&mut commands),
+            ["FetchMembers(!b)", "OpenRoom(!b)"]
+        );
+        // A click for the room itself goes back to its newest messages.
+        app.jump_to_event("!b".into(), "$old".into(), None);
+        let jump = asked(&mut commands);
+        app.on_matrix(slice(jump, "!b"));
+        assert!(app.timeline.detached);
+        commands_sent(&mut commands);
+        app.on_matrix(clicked("!b"));
+        assert!(!app.timeline.detached);
+        assert_eq!(commands_sent(&mut commands), ["OpenRoom(!b)"]);
+    }
+
+    #[test]
+    fn a_click_is_ignored_while_a_question_has_to_be_answered() {
+        // The recovery key is asked for.
+        let (mut app, mut commands) = with_worker();
+        app.on_matrix(MatrixEvent::Recovery(RecoveryStatus::NeedsKey));
+        assert!(matches!(app.modal, Some(Modal::Recovery(_))));
+        app.on_matrix(clicked("!b"));
+        assert!(matches!(app.modal, Some(Modal::Recovery(_))));
+        assert_eq!(app.active, 0);
+        // A device verification is under way.
+        app.modal = Some(Modal::Verify(crate::verify::VerifyPopup::flow()));
+        app.on_matrix(clicked("!b"));
+        assert!(matches!(app.modal, Some(Modal::Verify(_))));
+        assert_eq!(app.active, 0);
+        assert_eq!(commands_sent(&mut commands), Vec::<String>::new());
+
+        // The session ended and the login form is up; the rooms of the old session
+        // are not gone into, and neither are those of the next one before it is in.
+        let (mut app, mut commands) = with_worker();
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert!(matches!(app.modal, Some(Modal::Login(_))));
+        app.on_matrix(clicked("!b"));
+        assert!(matches!(app.modal, Some(Modal::Login(_))));
+        app.modal = None;
+        app.on_matrix(clicked("!b"));
+        assert_eq!(commands_sent(&mut commands), Vec::<String>::new());
     }
 
     fn take_opened_urls() -> Vec<String> {

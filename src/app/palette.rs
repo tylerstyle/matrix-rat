@@ -67,6 +67,10 @@ impl App {
             thread_open,
             has_room: self.room().is_some(),
             has_messages: !self.messages().is_empty(),
+            open_unread: self
+                .room()
+                .filter(|room| room.kind != RoomKind::Invite)
+                .map(|room| room.shows_unread()),
             connected: self.matrix.is_some(),
             user_id: self.user_id.clone(),
             mouse: self.mouse,
