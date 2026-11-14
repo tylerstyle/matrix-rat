@@ -196,7 +196,7 @@ action_table! {
     Action::Send => ("send", Context::Composer, "Send"),
     Action::Newline => ("newline", Context::Composer, "Line break"),
     Action::CancelCompose => ("cancel_compose", Context::Composer, "Cancel reply or edit"),
-    Action::EditLast => ("edit_last", Context::Composer, "Edit last message, or select"),
+    Action::EditLast => ("edit_last", Context::Composer, "Edit your last message"),
 }
 
 pub fn action_by_name(name: &str) -> Option<ActionSpec> {
@@ -661,15 +661,17 @@ pub const DEFAULT: &[Binding] = &[
         "Alt-Enter",
         "Line break (fallback)",
     ),
-    // The keymap cannot say "only when empty": the action itself goes on to select a
-    // message when there is text (the cursor being on the first line) or nothing to edit.
+    // From the first line of the composer, up is into the messages: to look at a
+    // picture, open a spoiler, answer. (Editing one's last message from here, as
+    // other clients do on this key, got in the way of that; `edit_last` has no key
+    // unless it is given one.)
     bind(
         Composer,
         KeyCode::Up,
         NONE,
-        Action::EditLast,
+        Action::SelectOlder,
         "↑",
-        "Edit last message, or select",
+        "Select message",
     ),
 ];
 
