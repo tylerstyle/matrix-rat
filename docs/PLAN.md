@@ -463,6 +463,15 @@ differentiators and can be reviewed with fake data in days.
 
 ### Open requests
 
+- **0.2.0 scope (agreed 2026-11-14):** after 0.1.1, five features, each written by one agent
+  and reviewed by the other until both agree; no further sign-off from the user needed:
+  1. jump to a message that is not loaded (event-focused timeline), so that Matrix links,
+     replied-to messages and search results open properly;
+  2. clicking a desktop notification opens its room;
+  3. unread handling: mark read/unread, jump to first unread, an unread line in the timeline;
+  4. drafts per room, kept across room switches and restarts;
+  5. Up in an empty composer edits your last message.
+
 - **For the 0.1.1 release (requested 2026-11-14):** add installing from the NUR to the
   README's install section: the package `nur.repos.tylerstyle.matrix-rat`, the `tylerstyle`
   Cachix cache with its public key so nothing is compiled, and that it needs Rust 1.96 or
