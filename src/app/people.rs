@@ -185,9 +185,16 @@ impl App {
                 {
                     popup.notice = Some(note.clone());
                 }
+                let prev_row = popup.current(&ctx);
                 popup.profile = Some(profile);
-                let count = popup.rows(&ctx).len();
-                popup.selected = popup.selected.min(count.saturating_sub(1));
+                let rows = popup.rows(&ctx);
+                if let Some(prev) = prev_row
+                    && let Some(idx) = rows.iter().position(|r| *r == prev)
+                {
+                    popup.selected = idx;
+                } else {
+                    popup.selected = popup.selected.min(rows.len().saturating_sub(1));
+                }
             }
             Err(err) => {
                 popup.error = Some(err);
@@ -1739,6 +1746,32 @@ mod tests {
             stage: VerifyStage::Waiting,
         }));
         assert!(matches!(app.modal, Some(Modal::Verify(_))));
+        app.on_event(key(KeyCode::Esc));
+
+        // Opening a Verified user hides "Verify user" and preserves non-Verify selection.
+        app.open_user_info(BOB.into(), Some(ROOM.into()), Some("Bob".into()));
+        // Navigate down to Ignore user while loading (Direct chat=0, Mention=1, Verify=2, Ignore=3).
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        let ver_req = match drain_cmds(&mut commands).pop() {
+            Some(MatrixCmd::FetchUserProfile { request, .. }) => request,
+            other => panic!("expected FetchUserProfile, got {other:?}"),
+        };
+        app.on_matrix(MatrixEvent::UserProfile {
+            request: ver_req,
+            result: Ok(Box::new(UserProfile {
+                user_id: BOB.into(),
+                display_name: Some("Bob".into()),
+                verify: UserVerifyStatus::Verified,
+                ..UserProfile::default()
+            })),
+        });
+        assert!(!screen(&mut app, &mut terminal).contains("Verify user"));
+        assert_eq!(
+            user_info(&app).current(&app.user_info_ctx(BOB)),
+            Some(UserInfoRow::Action(UserAction::IgnoreToggle))
+        );
         app.on_event(key(KeyCode::Esc));
 
         // Mention inserts display name mark into composer and focuses composer.
