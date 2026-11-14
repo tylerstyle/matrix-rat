@@ -125,6 +125,7 @@ macro_rules! action_table {
                 | Action::CloseModal
                 | Action::Verify(_)
                 | Action::Manage(_)
+                | Action::Devices(_)
                 | Action::OpenRoom(_)
                 | Action::SelectTheme(_)
                 | Action::Setting(_) => None,
@@ -194,6 +195,7 @@ action_table! {
     Action::PinMessage => ("pin_message", Context::Timeline, "Pin or unpin message"),
     Action::ForwardMessage => ("forward_message", Context::Timeline, "Forward message"),
     Action::OpenPinned => ("open_pinned", Context::Timeline, "Pinned messages"),
+    Action::RetryDecryption => ("retry_decryption", Context::Timeline, "Try decrypting again"),
     Action::JumpToNewest => ("jump_to_newest", Context::Timeline, "Jump to newest"),
     Action::JumpToOldest => ("jump_to_oldest", Context::Timeline, "Jump to oldest"),
     Action::Send => ("send", Context::Composer, "Send"),
@@ -623,6 +625,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::OpenPinned,
         "P",
         "Pinned messages",
+    ),
+    bind(
+        Timeline,
+        Char('d'),
+        NONE,
+        Action::RetryDecryption,
+        "d",
+        "Try decrypting again",
     ),
     bind(
         Timeline,

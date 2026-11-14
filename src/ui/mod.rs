@@ -3,6 +3,7 @@
 mod attach;
 mod complete;
 mod composer;
+mod devices;
 mod global_search;
 mod help;
 pub mod hit;

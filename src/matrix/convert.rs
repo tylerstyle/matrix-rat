@@ -7,15 +7,16 @@ use chrono::{DateTime, Local, TimeZone};
 use matrix_sdk::ruma::events::room::message::MessageType;
 use matrix_sdk::ruma::events::room::{ImageInfo as RumaImageInfo, MediaSource};
 use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedUserId, UserId};
+use matrix_sdk_base::crypto::types::events::UtdCause;
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
-    EventSendState, EventTimelineItem, MembershipChange, MsgLikeKind, Profile, TimelineDetails,
-    TimelineEventItemId, TimelineItem, TimelineItemContent, VirtualTimelineItem,
+    EncryptedMessage, EventSendState, EventTimelineItem, MembershipChange, MsgLikeKind, Profile,
+    TimelineDetails, TimelineEventItemId, TimelineItem, TimelineItemContent, VirtualTimelineItem,
 };
 
 use crate::model::{
     Attachment, ImageInfo, ImageSource, ItemRef, MediaRef, Message, MsgKind, Reaction, SendState,
-    Shield,
+    Shield, UtdWhy,
 };
 use crate::text::{sanitize, sanitize_line};
 
@@ -47,6 +48,24 @@ pub fn convert(
             }
         })
         .collect()
+}
+
+/// Why a message could not be decrypted, from what the SDK worked out.
+pub(super) fn utd_why(encrypted: &EncryptedMessage) -> UtdWhy {
+    let EncryptedMessage::MegolmV1AesSha2 { cause, .. } = encrypted else {
+        return UtdWhy::Unsupported;
+    };
+    match cause {
+        UtdCause::Unknown => UtdWhy::NoKey,
+        UtdCause::SentBeforeWeJoined => UtdWhy::SentBeforeJoin,
+        UtdCause::VerificationViolation => UtdWhy::SenderIdentityChanged,
+        UtdCause::UnsignedDevice => UtdWhy::SenderDeviceUnsigned,
+        UtdCause::UnknownDevice => UtdWhy::SenderDeviceUnknown,
+        UtdCause::HistoricalMessageAndBackupIsDisabled => UtdWhy::HistoryNoBackup,
+        UtdCause::HistoricalMessageAndDeviceIsUnverified => UtdWhy::HistoryNeedsVerification,
+        UtdCause::WithheldForUnverifiedOrInsecureDevice => UtdWhy::WithheldUnverified,
+        UtdCause::WithheldBySender => UtdWhy::Withheld,
+    }
 }
 
 /// One line saying what a message is, for the room list.
@@ -260,9 +279,11 @@ fn event_message(
                     message.kind = MsgKind::Redacted;
                     message.body = "Message deleted".to_owned();
                 }
-                MsgLikeKind::UnableToDecrypt(_) => {
+                MsgLikeKind::UnableToDecrypt(encrypted) => {
+                    let why = utd_why(encrypted);
                     message.kind = MsgKind::Undecryptable;
-                    message.body = "Unable to decrypt (waiting for keys)".to_owned();
+                    message.body = why.text().to_owned();
+                    message.utd = Some(why);
                 }
                 MsgLikeKind::Sticker(sticker) => {
                     let content = sticker.content();
@@ -464,6 +485,57 @@ fn system_owned(mut message: Message, text: String) -> Message {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn every_cause_the_sdk_knows_gets_its_own_words() {
+        #[allow(deprecated)]
+        let megolm = |cause| EncryptedMessage::MegolmV1AesSha2 {
+            sender_key: None,
+            device_id: None,
+            session_id: "session".to_owned(),
+            cause,
+        };
+        let causes = [
+            (UtdCause::Unknown, UtdWhy::NoKey),
+            (UtdCause::SentBeforeWeJoined, UtdWhy::SentBeforeJoin),
+            (
+                UtdCause::VerificationViolation,
+                UtdWhy::SenderIdentityChanged,
+            ),
+            (UtdCause::UnsignedDevice, UtdWhy::SenderDeviceUnsigned),
+            (UtdCause::UnknownDevice, UtdWhy::SenderDeviceUnknown),
+            (
+                UtdCause::HistoricalMessageAndBackupIsDisabled,
+                UtdWhy::HistoryNoBackup,
+            ),
+            (
+                UtdCause::HistoricalMessageAndDeviceIsUnverified,
+                UtdWhy::HistoryNeedsVerification,
+            ),
+            (
+                UtdCause::WithheldForUnverifiedOrInsecureDevice,
+                UtdWhy::WithheldUnverified,
+            ),
+            (UtdCause::WithheldBySender, UtdWhy::Withheld),
+        ];
+        let mut texts = HashSet::new();
+        for (cause, why) in causes {
+            assert_eq!(utd_why(&megolm(cause)), why);
+            // One line each, different from all others, and none names an id.
+            let text = why.text();
+            assert!(texts.insert(text), "{text}");
+            assert!(!text.contains('\n') && !text.contains("session"), "{text}");
+            assert!(!why.advice().is_empty());
+        }
+        assert_eq!(utd_why(&EncryptedMessage::Unknown), UtdWhy::Unsupported);
+        assert_eq!(
+            utd_why(&EncryptedMessage::OlmV1Curve25519AesSha2 {
+                sender_key: "key".to_owned()
+            }),
+            UtdWhy::Unsupported
+        );
+        assert!(texts.insert(UtdWhy::Unsupported.text()));
+    }
 
     #[test]
     fn image_info_is_taken_from_the_event_and_made_safe() {

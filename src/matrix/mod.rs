@@ -2,6 +2,7 @@
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
 mod convert;
+mod devices;
 mod drafts;
 mod keyring;
 mod manage;
@@ -18,6 +19,9 @@ mod threads;
 mod upload;
 mod verify;
 
+pub use devices::{
+    DevicesCmd, DevicesEvent, ServerBackup, Session, SessionList, SessionTrust, SignOutOutcome,
+};
 pub use keyring::SecretStoreMode;
 pub use manage::{
     Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomMember,
@@ -275,6 +279,15 @@ pub enum MatrixCmd {
     },
     /// Cancels any running user directory search.
     CancelUserSearch,
+    /// The account's sessions, the key backup, and message keys to and from a file.
+    Devices(DevicesCmd),
+    /// Try once more to read a message that could not be decrypted: look for its key
+    /// in the key backup and decrypt again. Answered with
+    /// [`MatrixEvent::DecryptionRetried`].
+    RetryDecryption {
+        room_id: String,
+        item: ItemRef,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -361,6 +374,8 @@ impl std::fmt::Debug for MatrixCmd {
                 write!(f, "SearchUsers(generation {generation})")
             }
             Self::CancelUserSearch => f.write_str("CancelUserSearch"),
+            Self::Devices(command) => write!(f, "Devices({command:?})"),
+            Self::RetryDecryption { room_id, .. } => write!(f, "RetryDecryption({room_id})"),
         }
     }
 }
@@ -620,6 +635,14 @@ pub enum MatrixEvent {
         to_room_name: String,
         result: Result<(), String>,
     },
+    /// An answer to a [`MatrixCmd::Devices`], or news for the sessions popup.
+    Devices(DevicesEvent),
+    /// Outcome of [`MatrixCmd::RetryDecryption`]: whether the message can be read
+    /// now, or what went wrong.
+    DecryptionRetried {
+        room_id: String,
+        result: Result<bool, String>,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -759,6 +782,14 @@ impl std::fmt::Debug for MatrixEvent {
             Self::ForwardResult {
                 to_room_id, result, ..
             } => write!(f, "ForwardResult({to_room_id}, ok: {})", result.is_ok()),
+            Self::Devices(event) => write!(f, "Devices({event:?})"),
+            Self::DecryptionRetried { room_id, result } => {
+                write!(
+                    f,
+                    "DecryptionRetried({room_id}, {:?})",
+                    result.as_ref().ok()
+                )
+            }
         }
     }
 }
@@ -1187,7 +1218,8 @@ impl Worker {
         // has been worked in.
         let mut list_state = sync.room_list_service().state();
         let mut caught_up = false;
-        if caught_up_in(&list_state.get()) {
+        let caught_up_at_start = caught_up_in(&list_state.get());
+        if caught_up_at_start {
             caught_up = true;
             self.emit(MatrixEvent::CaughtUp);
         }
@@ -1202,6 +1234,9 @@ impl Worker {
         let mut own_members = notify::OwnMembers::default();
         let mut previews = Previews::default();
         let mut verifier = verify::Verifier::start(client, self.events.clone());
+        if caught_up_at_start {
+            verifier.caught_up();
+        }
         // Kept alive for the session: it follows the space hierarchy by itself.
         let space_service = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
         let (mut space_filters, space_changes) = space_service.subscribe_to_space_filters().await;
@@ -1211,6 +1246,7 @@ impl Worker {
         let mut notify_changes = client.notification_settings().await.subscribe_to_changes();
         let mut notify_open = true;
         let mut manager = manage::Manager::new(client.clone(), self.events.clone());
+        let mut devices = devices::Devices::new(client.clone(), self.events.clone());
         let power_events = self.events.clone();
         let manage_refresh = manager.refresh_signal();
         let power_handler = client.add_event_handler(
@@ -1255,6 +1291,8 @@ impl Worker {
                     }
                 }
                 incoming = verifier.next_incoming() => verifier.on_incoming(incoming).await,
+                // Keys came in from a file: what is on screen may be readable now.
+                () = devices.next_imported() => timelines.retry_decryption().await,
                 Some(diffs) = entries.next() => {
                     for diff in diffs {
                         diff.apply(&mut rooms);
@@ -1283,6 +1321,7 @@ impl Worker {
                 Some(state) = list_state.next(), if !caught_up => {
                     if caught_up_in(&state) {
                         caught_up = true;
+                        verifier.caught_up();
                         self.emit(MatrixEvent::CaughtUp);
                     }
                 }
@@ -1329,6 +1368,7 @@ impl Worker {
                     }
                     Some(MatrixCmd::Verification(command)) => verifier.handle(command).await,
                     Some(MatrixCmd::Manage(command)) => manager.handle(command),
+                    Some(MatrixCmd::Devices(command)) => devices.handle(command),
                     Some(MatrixCmd::SearchMessages { generation, query }) => {
                         searcher.start(generation, query);
                     }
@@ -1361,6 +1401,7 @@ impl Worker {
         client.remove_event_handler(member_handler);
         verifier.stop().await;
         manager.stop();
+        devices.stop();
         searcher.stop();
         user_searcher.stop();
         ignore_tracker.stop();

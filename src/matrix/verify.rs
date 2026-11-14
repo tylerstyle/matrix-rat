@@ -4,12 +4,12 @@
 //! the status changes, and a [`VerifyUpdate`] whenever a running verification moves on.
 //! One verification runs at a time; each gets a number (`flow`) that the UI quotes back.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::{Future, pending};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::{Stream, StreamExt, pin_mut};
 use matrix_sdk::Client;
@@ -28,6 +28,9 @@ use matrix_sdk::ruma::api::client::uiaa::{
 use matrix_sdk::ruma::events::key::verification::VerificationMethod;
 use matrix_sdk::ruma::events::key::verification::cancel::CancelCode;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
+use matrix_sdk::ruma::events::room::encrypted::{
+    EncryptedEventScheme, OriginalSyncRoomEncryptedEvent, RoomEncryptedEventContent,
+};
 use matrix_sdk::ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent};
 use matrix_sdk::ruma::events::secret::send::ToDeviceSecretSendEvent;
 use matrix_sdk::ruma::events::{
@@ -35,7 +38,9 @@ use matrix_sdk::ruma::events::{
 };
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::to_device::DeviceIdOrAllDevices;
-use matrix_sdk::ruma::{DeviceId, MilliSecondsSinceUnixEpoch, OwnedUserId, TransactionId, UserId};
+use matrix_sdk::ruma::{
+    DeviceId, MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedUserId, TransactionId, UserId,
+};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::{JoinHandle, JoinSet};
@@ -177,6 +182,11 @@ pub enum Answer {
 pub enum VerifyCmd {
     /// Ask the user's other devices to verify this one.
     Request,
+    /// Ask one particular device of the user for a verification: to verify it, if
+    /// this device is verified, or else to get this one verified by it.
+    RequestDevice {
+        device_id: String,
+    },
     Answer {
         flow: u64,
         answer: Answer,
@@ -193,6 +203,7 @@ impl std::fmt::Debug for VerifyCmd {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request => f.write_str("Request"),
+            Self::RequestDevice { .. } => f.write_str("RequestDevice"),
             Self::Answer { flow, answer } => write!(f, "Answer({flow}, {answer:?})"),
             Self::SetUp { password } => write!(f, "SetUp(password: {})", password.is_some()),
         }
@@ -226,7 +237,113 @@ pub struct Incoming {
 const FRESH_MS: u64 = 5 * 60 * 1000;
 
 fn is_fresh_at(now: MilliSecondsSinceUnixEpoch, sent: MilliSecondsSinceUnixEpoch) -> bool {
-    u64::from(now.get()).abs_diff(sent.get().into()) < FRESH_MS
+    within(now, sent, FRESH_MS)
+}
+
+fn within(now: MilliSecondsSinceUnixEpoch, sent: MilliSecondsSinceUnixEpoch, ms: u64) -> bool {
+    u64::from(now.get()).abs_diff(sent.get().into()) < ms
+}
+
+// ----- hurrying key requests ----------------------------------------------------------
+
+/// A message that cannot be decrypted counts as new if it was sent this recently.
+/// Anything older is history (a room being loaded, a backlog after a pause): its key
+/// request may wait the 30 seconds.
+const UTD_FRESH_MS: u64 = 2 * 60 * 1000;
+/// Nothing is hurried until the first sync of the session has been through for this
+/// long: what arrives until then is the backlog.
+const WAKE_SETTLE: Duration = Duration::from_secs(20);
+/// At most this many wakes at once, and one more every [`WAKE_EVERY`] after that.
+const WAKE_BURST: u32 = 2;
+const WAKE_EVERY: Duration = Duration::from_secs(10);
+/// How many megolm sessions are remembered as "seen undecryptable".
+const WAKE_SESSIONS: usize = 512;
+
+/// Decides which undecryptable messages are worth a wake of [`send_queued`], so that a
+/// key request for a message that just arrived leaves at once, and nothing else costs
+/// a request. Every limit holds whatever arrives:
+///
+/// - a megolm session gets one wake at most (the SDK asks for a session's key once,
+///   so a second message of the same session has nothing new to send), whether its
+///   first message was live or history;
+/// - only messages sent in the last two minutes count, and none before the session's
+///   first sync has been through for a while;
+/// - at most [`WAKE_BURST`] wakes in a row and one per [`WAKE_EVERY`] in the long run
+///   (never more than eight in any minute), however many rooms and sessions there
+///   are. A session that came while the ration was used up gets no
+///   wake later: its request goes out with the next wake or the next sync request.
+///
+/// Only session ids are kept, in memory, and nothing here is logged.
+struct KeyRequestWakes {
+    /// When the first sync of this session was through.
+    live_since: Option<Instant>,
+    /// Sessions a message of which could not be decrypted, oldest first.
+    seen: VecDeque<String>,
+    /// Wakes that may be made right now.
+    ration: u32,
+    /// When the ration was last counted up.
+    counted: Instant,
+}
+
+impl KeyRequestWakes {
+    fn new(now: Instant) -> Self {
+        Self {
+            live_since: None,
+            seen: VecDeque::new(),
+            ration: WAKE_BURST,
+            counted: now,
+        }
+    }
+
+    fn caught_up(&mut self, now: Instant) {
+        self.live_since.get_or_insert(now);
+    }
+
+    /// A message of megolm session `session` could not be decrypted; `fresh` if it
+    /// was sent just now. Whether to wake for it.
+    fn allow(&mut self, now: Instant, session: &str, fresh: bool) -> bool {
+        // History counts as seen too: its key was asked for when it was loaded.
+        if self.seen.iter().any(|seen| seen == session) {
+            return false;
+        }
+        self.seen.push_back(session.to_owned());
+        if self.seen.len() > WAKE_SESSIONS {
+            self.seen.pop_front();
+        }
+        let settled = self
+            .live_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= WAKE_SETTLE);
+        if !fresh || !settled {
+            return false;
+        }
+        let earned = now.saturating_duration_since(self.counted).as_secs() / WAKE_EVERY.as_secs();
+        if earned > 0 {
+            let earned = u32::try_from(earned).unwrap_or(u32::MAX);
+            self.ration = self.ration.saturating_add(earned).min(WAKE_BURST);
+            self.counted = if self.ration == WAKE_BURST {
+                now
+            } else {
+                self.counted + WAKE_EVERY * earned
+            };
+        }
+        if self.ration == 0 {
+            return false;
+        }
+        if self.ration == WAKE_BURST {
+            // The wait for the next one starts when the full ration is first used.
+            self.counted = now;
+        }
+        self.ration -= 1;
+        true
+    }
+}
+
+/// The megolm session of an encrypted event, if it has one.
+fn megolm_session(content: &RoomEncryptedEventContent) -> Option<&str> {
+    match &content.scheme {
+        EncryptedEventScheme::MegolmV1AesSha2(megolm) => Some(&megolm.session_id),
+        _ => None,
+    }
 }
 
 fn is_fresh(sent: MilliSecondsSinceUnixEpoch) -> bool {
@@ -253,6 +370,8 @@ pub struct Verifier {
     tasks: JoinSet<()>,
     /// Asks the status watcher to look again.
     refresh: Arc<Notify>,
+    /// Rations the wakes made for messages that cannot be decrypted.
+    key_wakes: Arc<Mutex<KeyRequestWakes>>,
 }
 
 /// An in-room verification request is for us only if it names us: in a room with
@@ -334,9 +453,12 @@ fn in_room_step(event: &AnySyncMessageLikeEvent, own: Option<&UserId>) -> bool {
 /// not answer the poll for it, the answer goes out as late as before. One small
 /// request per wake at most; wakes that come while it is under way count as one.
 ///
-/// Not covered: room-key requests to our other devices, which the SDK queues the same
-/// way when a message that came by the room list sync cannot be decrypted. They still
-/// wait for the encryption sync's next request (up to 30 seconds).
+/// The same nudge gets room-key requests on their way: the SDK queues one for our other
+/// devices when a message that came by the room list sync cannot be decrypted
+/// (`OlmMachine::decrypt_room_event_inner` calls `create_outgoing_key_request`, once per
+/// megolm session and only while one of our devices is verified), and it would wait
+/// for the encryption sync's next request like the answers above. Those wakes are
+/// rationed by [`KeyRequestWakes`].
 async fn send_queued(client: Client, wake: Arc<Notify>) {
     loop {
         wake.notified().await;
@@ -405,6 +527,28 @@ impl Verifier {
                 }
             }
         });
+        // A message that is still encrypted when handlers run could not be decrypted
+        // (handlers get the decrypted event otherwise), and the SDK has queued its
+        // request for the key. Only events from sync come here, never loaded history.
+        let key_wakes = Arc::new(Mutex::new(KeyRequestWakes::new(Instant::now())));
+        let ration = key_wakes.clone();
+        let poke = wake.clone();
+        let undecrypted = client.add_event_handler(move |ev: OriginalSyncRoomEncryptedEvent| {
+            let fresh = within(
+                MilliSecondsSinceUnixEpoch::now(),
+                ev.origin_server_ts,
+                UTD_FRESH_MS,
+            );
+            let hurry = megolm_session(&ev.content).is_some_and(|session| {
+                ration
+                    .lock()
+                    .is_ok_and(|mut ration| ration.allow(Instant::now(), session, fresh))
+            });
+            if hurry {
+                poke.notify_one();
+            }
+            async {}
+        });
         let refresh = Arc::new(Notify::new());
         // After a verification, the other device sends the keys this one lacks. The SDK
         // has stored them by the time handlers run.
@@ -424,11 +568,20 @@ impl Verifier {
             client: client.clone(),
             events,
             incoming,
-            handlers: vec![from_device, in_room, steps, secrets],
+            handlers: vec![from_device, in_room, steps, secrets, undecrypted],
             next_flow: 0,
             running: None,
             tasks,
             refresh,
+            key_wakes,
+        }
+    }
+
+    /// The first sync of the session is through: from a little later on, new messages
+    /// that cannot be decrypted get their key request sent at once.
+    pub fn caught_up(&self) {
+        if let Ok(mut wakes) = self.key_wakes.lock() {
+            wakes.caught_up(Instant::now());
         }
     }
 
@@ -510,7 +663,7 @@ impl Verifier {
             });
             return;
         }
-        self.launch(Some(request));
+        self.launch(Start::Incoming(request));
     }
 
     pub async fn handle(&mut self, command: VerifyCmd) {
@@ -521,7 +674,16 @@ impl Verifier {
                         "A verification is already running".to_owned(),
                     ));
                 } else {
-                    self.launch(None);
+                    self.launch(Start::Own);
+                }
+            }
+            VerifyCmd::RequestDevice { device_id } => {
+                if self.busy() {
+                    let _ = self.events.send(MatrixEvent::ActionFailed(
+                        "A verification is already running".to_owned(),
+                    ));
+                } else {
+                    self.launch(Start::Device(device_id.into()));
                 }
             }
             VerifyCmd::Answer { flow, answer } => match &self.running {
@@ -547,9 +709,14 @@ impl Verifier {
         }
     }
 
-    /// Runs a verification: an incoming `request`, or (with `None`) a new request to
-    /// the user's other devices. Only called when no other one runs.
-    fn launch(&mut self, request: Option<VerificationRequest>) {
+    /// Runs a verification: an incoming request, or a new one to the user's other
+    /// devices (or one of them). Only called when no other one runs.
+    fn launch(&mut self, start: Start) {
+        let (request, target) = match start {
+            Start::Incoming(request) => (Some(request), None),
+            Start::Own => (None, None),
+            Start::Device(device) => (None, Some(device)),
+        };
         if let Some(old) = self.running.take() {
             // Over already; at most still waiting for its signature to show up.
             old.task.abort();
@@ -562,9 +729,14 @@ impl Verifier {
             events: self.events.clone(),
             refresh: self.refresh.clone(),
             finished: finished.clone(),
-            peer: "your other devices".to_owned(),
+            // Until the request is made and the device's name is known.
+            peer: match &target {
+                Some(device) => sanitize_line(device.as_str()),
+                None => "your other devices".to_owned(),
+            },
             own: true,
             this_device: true,
+            target,
             last: None,
         };
         let client = self.client.clone();
@@ -616,7 +788,10 @@ impl Drop for Verifier {
 
 /// Creates the account's cross-signing identity unless it has one. Servers that follow
 /// MSC3967 allow the first upload without a password; others ask for it.
-async fn set_up_cross_signing(client: &Client, password: Option<String>) -> SetUpOutcome {
+pub(super) async fn set_up_cross_signing(
+    client: &Client,
+    password: Option<String>,
+) -> SetUpOutcome {
     let encryption = client.encryption();
     let failed = |err: matrix_sdk::Error| {
         SetUpOutcome::Failed(format!("Could not set up encryption: {err}"))
@@ -698,8 +873,19 @@ struct Flow {
     peer: String,
     own: bool,
     this_device: bool,
+    /// The one device a request of ours goes to; `None` for all of the user's.
+    target: Option<OwnedDeviceId>,
     /// The stage last sent to the UI.
     last: Option<VerifyStage>,
+}
+
+/// How a verification begins.
+enum Start {
+    Incoming(VerificationRequest),
+    /// We ask all of the user's other devices.
+    Own,
+    /// We ask one of them.
+    Device(OwnedDeviceId),
 }
 
 /// What became of a verification request.
@@ -756,6 +942,19 @@ impl Flow {
         };
     }
 
+    /// Sends our request: to the one device this verification is meant for, or to all
+    /// of the user's other devices.
+    async fn request(&mut self, client: &Client) -> Result<VerificationRequest, String> {
+        match self.target.clone() {
+            Some(device) => {
+                let (request, label) = request_device(client, &device).await?;
+                self.peer = label;
+                Ok(request)
+            }
+            None => request_own(client).await,
+        }
+    }
+
     async fn run(
         mut self,
         client: Client,
@@ -766,7 +965,7 @@ impl Flow {
             Some(request) => request,
             None => {
                 self.show(VerifyStage::Waiting);
-                match request_own(&client).await {
+                match self.request(&client).await {
                     Ok(request) => request,
                     Err(reason) => return self.show(VerifyStage::Cancelled { reason }),
                 }
@@ -854,7 +1053,7 @@ impl Flow {
             tracing::warn!(%err, "could not withdraw a verification request");
         }
         debug_assert!(request.is_cancelled());
-        match request_own(client).await {
+        match self.request(client).await {
             Ok(new) => Some(new),
             Err(reason) => {
                 self.show(VerifyStage::Cancelled { reason });
@@ -1040,6 +1239,37 @@ async fn request_own(client: &Client) -> Result<VerificationRequest, String> {
         .request_verification_with_methods(vec![VerificationMethod::SasV1])
         .await
         .map_err(|err| format!("Could not send the request: {err}"))
+}
+
+/// Sends a verification request to one of the user's devices. Returns it with a name
+/// for that device.
+async fn request_device(
+    client: &Client,
+    device_id: &DeviceId,
+) -> Result<(VerificationRequest, String), String> {
+    let user_id = client
+        .user_id()
+        .ok_or_else(|| "Not logged in".to_owned())?
+        .to_owned();
+    if client.device_id() == Some(device_id) {
+        return Err("That is this device".to_owned());
+    }
+    let device = client
+        .encryption()
+        .get_device(&user_id, device_id)
+        .await
+        .map_err(|err| format!("Could not read the encryption store: {err}"))?
+        .ok_or_else(|| {
+            "That session has no encryption keys (or they are not known here yet), so it \
+             cannot be verified"
+                .to_owned()
+        })?;
+    let label = device_label(device.display_name(), device_id);
+    let request = device
+        .request_verification_with_methods(vec![VerificationMethod::SasV1])
+        .await
+        .map_err(|err| format!("Could not send the request: {err}"))?;
+    Ok((request, label))
 }
 
 /// How many devices this account has, and whether another one is cross-signed, so it
@@ -1234,7 +1464,7 @@ async fn security(client: &Client, user_id: &UserId, checks: &mut IdentityChecks
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::time::Duration;
 
     use matrix_sdk::ruma::api::client::account::register::v3::Request as RegisterRequest;
@@ -1392,6 +1622,101 @@ mod tests {
     }
 
     #[test]
+    fn key_request_wakes_are_rationed() {
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut wakes = KeyRequestWakes::new(start);
+        // Before the first sync is through, and for a while after: nothing, and what
+        // was seen then is not woken for later either.
+        assert!(!wakes.allow(at(0), "backlog", true));
+        wakes.caught_up(at(5));
+        assert!(!wakes.allow(at(6), "early", true));
+        let live = 5 + WAKE_SETTLE.as_secs();
+        assert!(!wakes.allow(at(live + 1), "backlog", true));
+        assert!(!wakes.allow(at(live + 1), "early", true));
+        // History (a room being loaded) never wakes, and marks its session as seen.
+        assert!(!wakes.allow(at(live + 1), "history", false));
+        assert!(!wakes.allow(at(live + 2), "history", true));
+        // A new message of a new session: one wake, and none for the next of it.
+        assert!(wakes.allow(at(live + 2), "a", true));
+        assert!(!wakes.allow(at(live + 2), "a", true));
+        assert!(!wakes.allow(at(live + 600), "a", true));
+
+        // A flood of new sessions: the burst, then one per interval, whatever comes.
+        let mut wakes = KeyRequestWakes::new(start);
+        wakes.caught_up(start);
+        let base = WAKE_SETTLE.as_secs();
+        let mut allowed = 0;
+        for n in 0..10_000u64 {
+            // Ten new sessions a second, for 1000 seconds.
+            if wakes.allow(at(base + n / 10), &format!("s{n}"), true) {
+                allowed += 1;
+            }
+        }
+        let most = u64::from(WAKE_BURST) + 1000 / WAKE_EVERY.as_secs();
+        assert!(allowed <= most, "{allowed} wakes, at most {most} expected");
+        assert!(allowed >= most - 1, "{allowed} wakes");
+        // Never more than the burst within one interval.
+        let mut wakes = KeyRequestWakes::new(start);
+        wakes.caught_up(start);
+        let mut times = Vec::new();
+        for n in 0..3_000u64 {
+            let now = start + WAKE_SETTLE + Duration::from_millis(n * 100);
+            if wakes.allow(now, &format!("t{n}"), true) {
+                times.push(now);
+            }
+        }
+        for window in times.windows(WAKE_BURST as usize + 1) {
+            assert!(
+                window[WAKE_BURST as usize].duration_since(window[0]) >= WAKE_EVERY,
+                "{times:?}"
+            );
+        }
+        // After a quiet time the full burst is back, and no more than that.
+        let later = base + 400 + 3600;
+        let again = (0..10)
+            .filter(|n| wakes.allow(at(later), &format!("u{n}"), true))
+            .count();
+        assert_eq!(again, WAKE_BURST as usize);
+        // The memory of sessions is bounded.
+        assert!(wakes.seen.len() <= WAKE_SESSIONS);
+        // The time of the first sync is set once.
+        let mut wakes = KeyRequestWakes::new(start);
+        wakes.caught_up(at(0));
+        wakes.caught_up(at(1000));
+        assert!(wakes.allow(at(WAKE_SETTLE.as_secs()), "x", true));
+    }
+
+    #[test]
+    fn only_megolm_messages_have_a_session_to_ask_for() {
+        let megolm: RoomEncryptedEventContent = serde_json::from_value(serde_json::json!({
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "ciphertext": "a2V5",
+            "sender_key": "a2V5",
+            "device_id": "DEVICE",
+            "session_id": "the-session",
+        }))
+        .unwrap();
+        assert_eq!(megolm_session(&megolm), Some("the-session"));
+        let olm: RoomEncryptedEventContent = serde_json::from_value(serde_json::json!({
+            "algorithm": "m.olm.v1.curve25519-aes-sha2",
+            "ciphertext": {},
+            "sender_key": "a2V5",
+        }))
+        .unwrap();
+        assert_eq!(megolm_session(&olm), None);
+        // Sent two minutes ago or more is history.
+        let now = MilliSecondsSinceUnixEpoch::now();
+        let ago = |ms: u64| {
+            MilliSecondsSinceUnixEpoch(matrix_sdk::ruma::UInt::new_saturating(
+                u64::from(now.get()) - ms,
+            ))
+        };
+        assert!(within(now, ago(1_000), UTD_FRESH_MS));
+        assert!(!within(now, ago(UTD_FRESH_MS), UTD_FRESH_MS));
+    }
+
+    #[test]
     fn debug_output_hides_the_password() {
         let command = MatrixCmd::Verification(VerifyCmd::SetUp {
             password: Some("hunter2".into()),
@@ -1458,7 +1783,7 @@ mod tests {
     }
 
     /// Waits for an event the check accepts, failing on errors.
-    async fn wait_for(
+    pub(in crate::matrix) async fn wait_for(
         events: &mut UnboundedReceiver<MatrixEvent>,
         what: &str,
         mut check: impl FnMut(&MatrixEvent) -> bool,
@@ -1516,20 +1841,20 @@ mod tests {
         }
     }
 
-    fn trace() {
+    pub(in crate::matrix) fn trace() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into()))
             .with_test_writer()
             .try_init();
     }
 
-    fn homeserver() -> String {
+    pub(in crate::matrix) fn homeserver() -> String {
         std::env::var("MATRIX_RAT_TEST_HOMESERVER")
             .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned())
     }
 
     /// A new account, named after `prefix` and the time. Returns name and password.
-    async fn new_account(prefix: &str) -> (String, String) {
+    pub(in crate::matrix) async fn new_account(prefix: &str) -> (String, String) {
         let token = std::env::var("MATRIX_RAT_TEST_REGISTRATION_TOKEN")
             .unwrap_or_else(|_| "devtoken".to_owned());
         let stamp = std::time::SystemTime::now()
@@ -1552,7 +1877,7 @@ mod tests {
         b_events: UnboundedReceiver<MatrixEvent>,
     }
 
-    fn worker_paths(root: &std::path::Path, device: &str) -> Paths {
+    pub(in crate::matrix) fn worker_paths(root: &std::path::Path, device: &str) -> Paths {
         let dir = root.join(device);
         let paths = Paths {
             config_dir: dir.join("config"),
@@ -1566,7 +1891,7 @@ mod tests {
     }
 
     /// Logs a worker in and sets up cross-signing on the new account.
-    async fn first_device(
+    pub(in crate::matrix) async fn first_device(
         root: &std::path::Path,
         name: &str,
         password: &str,
@@ -1709,6 +2034,53 @@ mod tests {
         pair.b.send(MatrixCmd::Verification(VerifyCmd::Request));
         pair.finish().await;
         pair.shut_down().await;
+    }
+
+    /// From the list of sessions: the verified device asks one particular session of the
+    /// account, the two compare emoji, and that session ends up verified (and is shown
+    /// so in the list). Both sessions are logged out at the end.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn a_chosen_session_is_verified() {
+        use crate::matrix::{DevicesCmd, DevicesEvent, SessionTrust};
+        trace();
+        let mut pair = pair("ratchosen").await;
+        pair.a.send(MatrixCmd::Devices(DevicesCmd::Watch(true)));
+        let mut other = None;
+        wait_for(&mut pair.a_events, "the other session in the list", |e| {
+            if let MatrixEvent::Devices(DevicesEvent::List(Ok(list))) = e {
+                other = list
+                    .sessions
+                    .iter()
+                    .find(|s| !s.current && s.trust == SessionTrust::Unverified)
+                    .map(|s| s.device_id.clone());
+            }
+            other.is_some()
+        })
+        .await;
+        pair.a
+            .send(MatrixCmd::Verification(VerifyCmd::RequestDevice {
+                device_id: other.unwrap(),
+            }));
+        pair.finish().await;
+        // Asked afresh (the updates so far went by during the verification).
+        pair.a.send(MatrixCmd::Devices(DevicesCmd::Watch(true)));
+        wait_for(&mut pair.a_events, "both sessions verified", |e| {
+            matches!(e, MatrixEvent::Devices(DevicesEvent::List(Ok(list)))
+                if list.sessions.len() == 2
+                    && list.sessions.iter().all(|s| s.trust == SessionTrust::Verified))
+        })
+        .await;
+        for (handle, mut events) in [(pair.a, pair.a_events), (pair.b, pair.b_events)] {
+            handle.send(MatrixCmd::Logout);
+            wait_for(&mut events, "the logout", |e| {
+                matches!(e, MatrixEvent::NeedLogin { .. })
+            })
+            .await;
+            handle.send(MatrixCmd::Shutdown);
+            while events.recv().await.is_some() {}
+        }
+        let _ = std::fs::remove_dir_all(pair.root);
     }
 
     /// "Ask again" against the real SDK: the first request is withdrawn before the

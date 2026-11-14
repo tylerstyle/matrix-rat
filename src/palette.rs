@@ -96,6 +96,8 @@ pub struct MessageCaps {
     pub can_open_thread: bool,
     pub can_jump_to_reply: bool,
     pub failed_retry: bool,
+    /// The message could not be decrypted, and its key can be looked for again.
+    pub undecryptable: bool,
 }
 
 /// Source message details when the palette is acting as a "Forward to room" picker.
@@ -141,6 +143,7 @@ pub struct PaletteContext {
     pub notifications: bool,
     pub download_dir: String,
     pub verify_status: &'static str,
+    pub backup_status: &'static str,
     pub ignored_users: usize,
     pub wanted_theme: String,
     pub theme_dark: Option<String>,
@@ -639,6 +642,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Delete => sel.has_selection && sel.can_redact,
         Action::PinMessage => sel.can_pin,
         Action::ForwardMessage => sel.can_forward,
+        Action::RetryDecryption => sel.undecryptable,
         Action::OpenPinned => ctx.has_room && !ctx.in_invite,
         Action::Copy => sel.can_copy,
         Action::Save => sel.can_save,
@@ -744,6 +748,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::JumpToReply
                 | Action::PinMessage
                 | Action::ForwardMessage
+                | Action::RetryDecryption
                 | Action::OpenPinned
                 | Action::JumpToNewest
                 | Action::JumpToOldest
@@ -996,6 +1001,49 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::Sessions)),
+            title: "Sessions (devices)",
+            hint: None,
+            aliases: &[
+                "devices",
+                "logins",
+                "sign out session",
+                "rename session",
+                "verify session",
+                "security",
+                "setting",
+            ],
+            enabled: ctx.connected,
+        },
+        SettingItem {
+            target: Target::Action(Action::Setting(Setting::KeyBackup)),
+            title: "Key backup and recovery",
+            hint: Some(ctx.backup_status.to_owned()),
+            aliases: &[
+                "recovery key",
+                "key storage",
+                "secure backup",
+                "encryption",
+                "security",
+                "setting",
+            ],
+            enabled: ctx.connected,
+        },
+        SettingItem {
+            target: Target::Action(Action::Devices(crate::devices::Click::Export)),
+            title: "Export message keys to a file…",
+            hint: None,
+            aliases: &["export room keys", "e2e keys", "key file", "encryption"],
+            enabled: ctx.connected,
+        },
+        SettingItem {
+            target: Target::Action(Action::Devices(crate::devices::Click::Import)),
+            title: "Import message keys from a file…",
+            hint: None,
+            aliases: &["import room keys", "e2e keys", "key file", "encryption"],
+            enabled: ctx.connected,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::IgnoredUsers)),
             title: Setting::IgnoredUsers.label(),
             hint: Some(match ctx.ignored_users {
@@ -1147,6 +1195,7 @@ mod tests {
             notifications: true,
             download_dir: "~/Downloads".to_owned(),
             verify_status: "unknown",
+            backup_status: "unknown",
             ignored_users: 0,
             target: Some(("rust".to_owned(), false)),
             wanted_theme: "rat-dark".to_owned(),

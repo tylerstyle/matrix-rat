@@ -425,6 +425,14 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
         items.push(Item::new("Read by…", "", Run::ReadBy));
     }
     let undecryptable = message.kind == MsgKind::Undecryptable;
+    if undecryptable && facts.connected && on_server && message.utd.is_some() {
+        items.push(Item::action(
+            keys,
+            "Try decrypting again",
+            Timeline,
+            Action::RetryDecryption,
+        ));
+    }
     if sent && addressable && !deleted && !undecryptable {
         items.push(Item::action(
             keys,

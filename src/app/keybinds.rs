@@ -416,7 +416,7 @@ mod tests {
 
             [keys.timeline]
             reply = ["enter", "R"]
-            save = "d"
+            save = "x"
             "#,
         )
         .unwrap();

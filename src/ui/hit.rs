@@ -34,6 +34,8 @@ pub enum InputTarget {
     ReasonConfirm,
     /// Inline ban reason input inside `RoomInfo`.
     BanReason,
+    /// A text field of the sessions popup or the key backup popup, by its slot.
+    Devices(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

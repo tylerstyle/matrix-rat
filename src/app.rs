@@ -2,6 +2,7 @@
 
 mod attach;
 mod complete;
+mod devices;
 mod drafts;
 mod files;
 pub mod global_search;
@@ -313,6 +314,8 @@ pub struct App {
     pub(super) user_search_gen: u64,
     /// Deadline timer start for debounced user directory lookups in `NewPopup`.
     pub(super) user_search_debounce: Option<std::time::Instant>,
+    /// The account's sessions and the key backup, for their popups.
+    pub devices: crate::devices::DevicesState,
 }
 
 impl App {
@@ -483,6 +486,7 @@ impl App {
             ignored_users: std::collections::BTreeSet::new(),
             user_search_gen: 0,
             user_search_debounce: None,
+            devices: Default::default(),
         }
     }
 
@@ -804,6 +808,10 @@ impl App {
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
+            Setting::Sessions => "Enter to view".to_owned(),
+            Setting::KeyBackup => {
+                crate::devices::backup_setting_text(self.verify.security).to_owned()
+            }
             Setting::IgnoredUsers => match self.ignored_users.len() {
                 0 => "None".to_owned(),
                 1 => "1 user".to_owned(),
@@ -892,6 +900,16 @@ impl App {
             Setting::IgnoredUsers => {
                 if delta == 0 {
                     self.open_ignored_users();
+                }
+            }
+            Setting::Sessions => {
+                if delta == 0 {
+                    self.open_sessions();
+                }
+            }
+            Setting::KeyBackup => {
+                if delta == 0 {
+                    self.open_keys();
                 }
             }
             Setting::Logout => {
@@ -1135,6 +1153,7 @@ impl App {
         self.ignored_users.clear();
         self.user_search_gen += 1;
         self.user_search_debounce = None;
+        self.devices = Default::default();
         if let Some(Modal::New(popup)) = &mut self.modal {
             popup.clear_user_search();
         }
@@ -1146,6 +1165,8 @@ impl App {
                     | Modal::Report(_)
                     | Modal::Pinned(_)
                     | Modal::ReasonConfirm(_)
+                    | Modal::Sessions(_)
+                    | Modal::Keys(_)
             )
         ) {
             self.modal = None;
@@ -2458,6 +2479,13 @@ impl App {
             Action::PinMessage => self.toggle_pin_message(None),
             Action::OpenPinned => self.open_pinned(),
             Action::ForwardMessage => self.open_forward_picker(None),
+            Action::RetryDecryption => self.retry_decryption(),
+            Action::Devices(click) => match (&self.modal, click) {
+                (Some(Modal::Sessions(_) | Modal::Keys(_)), _) => self.devices_click(click),
+                (_, crate::devices::Click::Export) => self.open_key_export(),
+                (_, crate::devices::Click::Import) => self.open_key_import(),
+                _ => {}
+            },
             Action::NewRoom
             | Action::RoomInfo
             | Action::LeaveRoom
@@ -2569,6 +2597,9 @@ impl App {
             Some(Modal::Verify(_)) => self.verify_escape(),
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_escape(),
             Some(Modal::Menu(_)) => self.modal = None,
+            Some(Modal::Sessions(_) | Modal::Keys(_)) => {
+                self.devices_click(crate::devices::Click::Cancel);
+            }
             None => {}
         }
     }
@@ -2695,6 +2726,8 @@ impl App {
             Some(Modal::Report(_)) => self.on_report_key(code, mods),
             Some(Modal::Pinned(_)) => self.on_pinned_key(code, mods),
             Some(Modal::ReasonConfirm(_)) => self.on_reason_confirm_key(code, mods),
+            Some(Modal::Sessions(_)) => self.on_sessions_key(code, mods),
+            Some(Modal::Keys(_)) => self.on_keys_key(code, mods),
             None => {}
         }
     }
@@ -2946,6 +2979,10 @@ impl App {
                 result,
             } => {
                 self.on_forward_result(to_room_id, to_room_name, result);
+            }
+            MatrixEvent::Devices(event) => self.on_devices_event(event),
+            MatrixEvent::DecryptionRetried { room_id, result } => {
+                self.on_decryption_retried(&room_id, result);
             }
         }
         // A menu about something that is gone closes.
@@ -3396,6 +3433,9 @@ impl App {
             Some(Modal::IgnoredUsers(_)) => return self.on_ignored_users_paste(first_line),
             Some(Modal::Report(_)) => return self.on_report_paste(first_line),
             Some(Modal::ReasonConfirm(_)) => return self.on_reason_confirm_paste(first_line),
+            Some(Modal::Sessions(_) | Modal::Keys(_)) => {
+                return self.on_devices_paste(&text, first_line);
+            }
             Some(Modal::Pinned(_)) => return,
             None => {}
         }
@@ -3458,6 +3498,10 @@ impl App {
                             )
                         ) {
                             self.modal = None;
+                        }
+                        if matches!(self.modal, Some(Modal::Sessions(_) | Modal::Keys(_))) {
+                            // Like Esc: one step back, and out from the first page.
+                            self.devices_click(crate::devices::Click::Cancel);
                         }
                         if matches!(self.modal, Some(Modal::Search(_))) {
                             self.close_search();
@@ -3648,6 +3692,7 @@ impl App {
                             | Modal::Keybinds(_)
                             | Modal::IgnoredUsers(_)
                             | Modal::Pinned(_)
+                            | Modal::Sessions(_)
                     )
                 ) =>
             {
@@ -3664,6 +3709,11 @@ impl App {
                     Some(Modal::Keybinds(editor)) => editor.scroll_by(delta),
                     Some(Modal::IgnoredUsers(_)) => self.scroll_ignored_users(delta),
                     Some(Modal::Pinned(_)) => self.scroll_pinned(delta),
+                    Some(Modal::Sessions(popup)) => {
+                        if matches!(popup.stage, crate::devices::SessionStage::List) {
+                            popup.step(self.devices.sessions(), delta.signum());
+                        }
+                    }
                     _ => {}
                 }
                 self.dirty = true;
@@ -3722,6 +3772,7 @@ impl App {
 
     fn click_input(&mut self, target: InputTarget, rel_col: usize) {
         match target {
+            InputTarget::Devices(slot) => self.click_devices_field(slot, rel_col),
             InputTarget::Login(slot) => {
                 if let Some(Modal::Login(form)) = &mut self.modal
                     && form.busy.is_none()
@@ -3834,6 +3885,7 @@ impl App {
 
     fn on_tick(&mut self) {
         self.verify_tick();
+        self.devices_watch();
         self.tick_global_search();
         self.release_count_notices(COUNT_NOTICE_WAIT);
         self.save_idle_draft(drafts::IDLE);
@@ -5791,9 +5843,10 @@ mod tests {
         assert!(app.toast.is_some());
 
         // "Key bindings" opens the key-bindings editor; the backdrop closes popups.
-        app.on_event(key(KeyCode::Up));
-        app.on_event(key(KeyCode::Up));
-        app.on_event(key(KeyCode::Up));
+        // (Up from "Log out": ignored users, key backup, sessions, encryption, keys.)
+        for _ in 0..5 {
+            app.on_event(key(KeyCode::Up));
+        }
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::Keybinds(_))) && !app.help_open);
         app.on_event(key(KeyCode::Esc));
