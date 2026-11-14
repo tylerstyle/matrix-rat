@@ -22,7 +22,8 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = with pkgs; [ pkg-config cmake perl ];
   # nixpkgs tells the -sys crates to link the system libraries instead of building
   # their bundled copies.
-  buildInputs = [ pkgs.aws-lc pkgs.sqlite ];
+  # (zstd is used by the message search index.)
+  buildInputs = [ pkgs.aws-lc pkgs.sqlite pkgs.zstd ];
 
   # The test suite runs in scripts/check.sh; skipping it here halves the build time.
   doCheck = false;
