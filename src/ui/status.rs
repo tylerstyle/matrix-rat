@@ -106,6 +106,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             Pane::Composer => {
                 push_action(&mut hints, Context::Composer, A::Send, "send");
                 push_action(&mut hints, Context::Composer, A::Newline, "line break");
+                // One key does both: which, depends on what is in the composer.
+                let up = if app.last_editable().is_some() {
+                    "edit last message"
+                } else {
+                    "select message"
+                };
+                push_action(&mut hints, Context::Composer, A::EditLast, up);
+                // Only if it was given a key of its own here.
                 push_action(
                     &mut hints,
                     Context::Composer,

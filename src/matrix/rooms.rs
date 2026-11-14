@@ -22,7 +22,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
 use super::convert::convert;
-use super::{MatrixCmd, MatrixEvent, threads};
+use super::{MatrixCmd, MatrixEvent, drafts, threads};
 use crate::format::Outgoing;
 use crate::model::ItemRef;
 
@@ -47,6 +47,9 @@ pub struct Timelines {
     thread: Option<String>,
     read_marks: threads::ReadMarks,
     uploads: super::upload::Uploads,
+    /// Rooms and threads (named as by `threads::key`) whose stored draft the UI was
+    /// told.
+    drafts_told: HashSet<String>,
 }
 
 impl Timelines {
@@ -62,6 +65,7 @@ impl Timelines {
             paginator: None,
             thread: None,
             read_marks: Default::default(),
+            drafts_told: HashSet::new(),
         }
     }
 
@@ -138,6 +142,29 @@ impl Timelines {
         Ok(timeline)
     }
 
+    /// Tells the UI the stored draft of a room (or of the thread a command is being
+    /// handled for) when it is opened for the first time. After that the UI has the
+    /// newer text, so it is told only once.
+    async fn tell_draft(&mut self, room: &Room, room_id: &str) {
+        let thread = self.thread.clone();
+        if !self
+            .drafts_told
+            .insert(threads::key(room_id, thread.as_deref()))
+        {
+            return;
+        }
+        match drafts::load(room, thread.as_deref()).await {
+            Ok(text) => {
+                let _ = self.events.send(MatrixEvent::Draft {
+                    room_id: room_id.to_owned(),
+                    thread,
+                    text,
+                });
+            }
+            Err(err) => tracing::warn!(?err, "could not load the draft"),
+        }
+    }
+
     fn fail(&self, what: &str, err: impl std::fmt::Display) {
         tracing::warn!(%err, "{what}");
         let _ = self
@@ -186,6 +213,7 @@ impl Timelines {
                 if room.state() != matrix_sdk::RoomState::Joined {
                     return;
                 }
+                self.tell_draft(&room, &room_id).await;
                 match self.timeline(&room_id).await {
                     Ok(timeline) => {
                         self.forwarder = Some(tokio::spawn(forward(
@@ -423,6 +451,37 @@ impl Timelines {
                         let _ = events.send(event);
                     }
                 });
+            }
+            MatrixCmd::SaveDraft { room_id, text } => {
+                // Awaited here, not in a task of its own: drafts reach the store in
+                // the order they were written, and the one the UI sends right before
+                // `Shutdown` is on disk before the session loop gets to see that.
+                // A failure is only logged; the text is still in the composer.
+                let saved = match self.room(&room_id) {
+                    Ok(room) => drafts::save(&room, self.thread.as_deref(), text).await,
+                    Err(err) => Err(err),
+                };
+                if let Err(err) = saved {
+                    tracing::warn!(?err, "could not save the draft");
+                }
+            }
+            MatrixCmd::ForgetDrafts { room_id, threads } => {
+                // Told again, should the room come back.
+                let in_room = threads::key(&room_id, Some(""));
+                self.drafts_told
+                    .retain(|key| *key != room_id && !key.starts_with(&in_room));
+                // The list can lose a room for a moment; its drafts stay then.
+                let still_in = self.room(&room_id).is_ok_and(|room| {
+                    matches!(
+                        room.state(),
+                        matrix_sdk::RoomState::Joined | matrix_sdk::RoomState::Invited
+                    )
+                });
+                if !still_in
+                    && let Err(err) = drafts::forget(&self.client, &room_id, &threads).await
+                {
+                    tracing::warn!(?err, "could not remove the drafts of a room");
+                }
             }
             // Handled by the session loop.
             MatrixCmd::LoginPassword { .. }

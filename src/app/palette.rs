@@ -44,9 +44,7 @@ impl App {
                 MessageCaps {
                     has_selection: true,
                     own: m.own,
-                    can_edit: m.own
-                        && m.image.is_none()
-                        && matches!(m.kind, MsgKind::Text | MsgKind::Emote),
+                    can_edit: m.editable(),
                     can_copy: !m.body.is_empty(),
                     can_save: self.can_save(),
                     can_open: m.image.is_some() || m.file.is_some() || has_links,
@@ -223,6 +221,11 @@ mod tests {
         Event::Key(crossterm::event::KeyEvent::new(code, mods))
     }
 
+    /// Alt-↑: from the composer to the newest message, whatever the composer holds.
+    fn alt_up() -> Event {
+        key_mod(KeyCode::Up, KeyModifiers::ALT)
+    }
+
     fn ctrl_p() -> Event {
         key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)
     }
@@ -377,7 +380,7 @@ mod tests {
         assert!(app.modal.is_none());
 
         // React requires a selected message; when selected it opens the Emoji reaction picker.
-        app.on_event(key(KeyCode::Up));
+        app.on_event(alt_up());
         app.on_event(ctrl_p());
         type_text(&mut app, "react");
         app.on_event(key(KeyCode::Enter));

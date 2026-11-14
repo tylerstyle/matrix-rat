@@ -2,6 +2,7 @@
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
 mod convert;
+mod drafts;
 mod keyring;
 mod manage;
 mod media;
@@ -185,6 +186,20 @@ pub enum MatrixCmd {
     },
     /// Cancels any running global message search.
     CancelSearch,
+    /// Write the unsent text of a room to the store, to have it back after a restart
+    /// (see [`MatrixEvent::Draft`]). Empty text removes what is stored. Inside
+    /// [`MatrixCmd::InThread`] it is that thread's draft.
+    SaveDraft {
+        room_id: String,
+        text: String,
+    },
+    /// The room is gone from the room list: remove its stored draft and those of
+    /// these threads (by the event they start at), unless the account is still in
+    /// the room after all.
+    ForgetDrafts {
+        room_id: String,
+        threads: Vec<String>,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -235,6 +250,13 @@ impl std::fmt::Debug for MatrixCmd {
                 write!(f, "SearchMessages(generation {generation})")
             }
             Self::CancelSearch => f.write_str("CancelSearch"),
+            // A draft is message text.
+            Self::SaveDraft { room_id, text } => {
+                write!(f, "SaveDraft({room_id}, {} bytes)", text.len())
+            }
+            Self::ForgetDrafts { room_id, threads } => {
+                write!(f, "ForgetDrafts({room_id}, {} threads)", threads.len())
+            }
         }
     }
 }
@@ -379,6 +401,14 @@ pub enum MatrixEvent {
         done: bool,
         note: Option<String>,
     },
+    /// The draft the store holds for a room, or for the thread starting at `thread`;
+    /// empty if there is none. Sent once per session, when the room or thread is
+    /// opened for the first time.
+    Draft {
+        room_id: String,
+        thread: Option<String>,
+        text: String,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -457,6 +487,15 @@ impl std::fmt::Debug for MatrixEvent {
                 hits.len(),
                 note.is_some()
             ),
+            // A draft is message text.
+            Self::Draft {
+                room_id,
+                thread,
+                text,
+            } => match thread {
+                Some(root) => write!(f, "Draft({room_id}, {root}, {} bytes)", text.len()),
+                None => write!(f, "Draft({room_id}, {} bytes)", text.len()),
+            },
         }
     }
 }

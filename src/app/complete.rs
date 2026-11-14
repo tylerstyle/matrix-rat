@@ -90,6 +90,14 @@ impl App {
         }
     }
 
+    /// Drops the marks kept for the drafts of a room and its threads: the room is gone.
+    pub(super) fn forget_room_marks(&mut self, room_id: &str) {
+        self.complete.draft_marks.remove(room_id);
+        self.complete
+            .thread_marks
+            .retain(|(room, _), _| room != room_id);
+    }
+
     pub(super) fn save_room_marks(&mut self, room_id: &str) {
         let marks = std::mem::take(&mut self.complete.marks);
         if !marks.is_empty() {
