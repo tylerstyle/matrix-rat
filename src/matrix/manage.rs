@@ -1850,7 +1850,9 @@ mod tests {
         manage(ManageCmd::Info {
             room_id: public.clone(),
         });
-        let details = info(&mut events, &public, |d| d.joined == 2).await;
+        // `server_members` can report both members before Sliding Sync delivers
+        // the room's alias state event, so wait for synced state too.
+        let details = info(&mut events, &public, |d| d.joined == 2 && d.alias.is_some()).await;
         assert_eq!(details.alias, Some(format!("#{alias}:{server}")));
         assert_eq!(details.encrypted, Some(false));
         // The address is taken now.
