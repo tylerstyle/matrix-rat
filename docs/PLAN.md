@@ -463,6 +463,24 @@ differentiators and can be reviewed with fake data in days.
 
 ### Open requests
 
+- **Roadmap after 0.2.0 (approved by the user 2026-11-14; to be revisited release by release):**
+  - **0.3 "links, triage, safety":** low-priority rooms and "unread only" / "people only"
+    filters; unread and mention counts on spaces; pinned messages and forwarding; ignore/block
+    users and report content; moderator basics (delete others' messages, ban/unban, roles);
+    find people by name when starting a chat or inviting. (Matrix links inside the app, jump
+    to the replied-to message and mark-as-unread already came with 0.2.0.)
+  - **0.4 "people, devices, rooms":** user info and own profile; session list (rename,
+    verify, sign out another device); key backup status and key export/import; clearer
+    "unable to decrypt"; public room directory with preview; room settings for admins.
+  - **0.5 "message types and terminal comforts":** polls; voice/audio/video entries played
+    in the system player; stickers and custom emoji; link previews; code-block colours and
+    copying a block; composing in `$EDITOR`.
+  - **Later, by demand:** space management, threads list, room slash commands, message
+    details, clipboard pictures, notification keywords and do-not-disturb, several accounts
+    in one window, QR login, other terminals' picture protocols, other systems and prebuilt
+    binaries, languages, accessibility, export.
+  - **Not planned:** calls (shown as events only), account deactivation, account creation.
+
 - **0.2.0 scope (agreed 2026-11-14):** after 0.1.1, five features, each written by one agent
   and reviewed by the other until both agree; no further sign-off from the user needed:
   1. jump to a message that is not loaded (event-focused timeline), so that Matrix links,
