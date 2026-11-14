@@ -1955,7 +1955,7 @@ impl App {
 
     /// The user's own latest message that can be edited, if the composer is free for
     /// it: empty, and neither answering nor editing. This is what `Action::EditLast`
-    /// (↑ in the composer) edits.
+    /// edits; it has no key unless the user gave it one.
     pub fn last_editable(&self) -> Option<usize> {
         if !self.composer.is_empty() || self.compose_mode != ComposeMode::Normal {
             return None;
@@ -4055,7 +4055,17 @@ mod tests {
     }
 
     #[test]
-    fn up_in_an_empty_composer_edits_the_own_latest_message() {
+    fn up_in_an_empty_composer_walks_into_the_messages() {
+        let mut app = with_messages(&[(false, "hello"), (true, "mine"), (false, "bye")]);
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(app.composer.is_empty());
+        assert_eq!(app.focus, Pane::Timeline);
+        assert_eq!(app.timeline.selected, Some(2));
+    }
+
+    #[test]
+    fn edit_last_edits_the_own_latest_message() {
         let mut app = with_messages(&[
             (false, "hello"),
             (true, "first"),
@@ -4074,7 +4084,7 @@ mod tests {
             )),
         });
         app.rooms[0].messages[4].kind = MsgKind::Redacted;
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(2));
         assert_eq!(app.composer.text(), "second");
         assert_eq!(app.focus, Pane::Composer);
@@ -4090,24 +4100,24 @@ mod tests {
         assert!(app.composer.is_empty());
 
         // Esc gives it up and leaves the composer empty again.
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(2));
         app.on_event(key(KeyCode::Esc));
         assert_eq!(app.compose_mode, ComposeMode::Normal);
         assert!(app.composer.is_empty());
 
-        // While editing, Up is not "edit the last one" again: it goes to the messages.
-        app.on_event(key(KeyCode::Up));
+        // While editing, Up goes to the messages and leaves the edit as it is.
+        app.perform(Action::EditLast);
         app.on_event(key(KeyCode::Up));
         assert_eq!(app.compose_mode, ComposeMode::Edit(2));
         assert_eq!(app.focus, Pane::Timeline);
     }
 
     #[test]
-    fn up_edits_an_action_as_an_action() {
+    fn edit_last_edits_an_action_as_an_action() {
         let mut app = with_messages(&[(true, "waves")]);
         app.rooms[0].messages[0].kind = MsgKind::Emote;
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(0));
         assert_eq!(app.composer.text(), "/me waves");
     }
@@ -4132,10 +4142,10 @@ mod tests {
     }
 
     #[test]
-    fn up_leaves_a_message_that_was_not_sent_to_the_messages_pane() {
+    fn edit_last_leaves_a_message_that_was_not_sent_to_the_messages_pane() {
         let mut app = with_messages(&[(true, "sent"), (true, "not sent")]);
         app.rooms[0].messages[1].state = SendState::Failed;
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Normal);
         assert_eq!(app.focus, Pane::Timeline);
         assert_eq!(app.timeline.selected, Some(1));
@@ -4143,7 +4153,7 @@ mod tests {
         // One that is still on its way can be corrected.
         app.rooms[0].messages[1].state = SendState::Sending;
         app.perform(Action::Focus(Pane::Composer));
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(1));
     }
 
@@ -4166,20 +4176,16 @@ mod tests {
             KeyCode::F(8),
             KeyModifiers::NONE,
         );
-        // Up has no meaning of its own in the composer now.
-        app.on_event(key(KeyCode::Up));
-        assert_eq!(app.compose_mode, ComposeMode::Normal);
-        assert_eq!(app.focus, Pane::Composer);
         app.on_event(key(KeyCode::F(8)));
         assert_eq!(app.compose_mode, ComposeMode::Edit(0));
         assert_eq!(app.composer.text(), "mine");
     }
 
     #[test]
-    fn up_edits_in_the_vim_preset_too() {
+    fn edit_last_works_in_the_vim_preset_too() {
         let mut app = with_messages(&[(true, "mine"), (false, "theirs")]);
         app.keymap = Keymap::from_preset(keymap::Preset::Vim);
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(0));
         // Esc is "to the messages" there and leaves the edit as it is, like one begun
         // with `e`; Ctrl-C gives it up.
@@ -4197,7 +4203,7 @@ mod tests {
     fn ctrl_c_gives_up_an_edit_or_a_reply_even_with_nothing_typed() {
         // An edit whose text was erased by hand.
         let mut app = with_messages(&[(true, "ab"), (false, "theirs")]);
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         app.on_event(key(KeyCode::Backspace));
         app.on_event(key(KeyCode::Backspace));
         assert!(app.composer.is_empty());
@@ -4232,7 +4238,7 @@ mod tests {
     fn the_edit_banner_names_the_key_that_cancels() {
         let mut app = with_messages(&[(true, "mine")]);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         redraw(&mut app, &mut terminal);
         find(&terminal, "✎ Editing your message · Esc cancel");
 
@@ -4860,9 +4866,9 @@ mod tests {
         assert!(app.composer.is_empty());
         assert_eq!(app.compose_mode, ComposeMode::Normal);
 
-        // If the message being edited disappears, its text is not left as a draft.
+        // (EditLast edits our latest message.)
         // (Up in the empty composer edits our latest message.)
-        app.on_event(key(KeyCode::Up));
+        app.perform(Action::EditLast);
         assert_eq!(app.composer.text(), "second");
         app.on_matrix(timeline(&app, vec![remote("0", "ann", "older")]));
         assert_eq!(app.compose_mode, ComposeMode::Normal);
