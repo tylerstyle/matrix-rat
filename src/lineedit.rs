@@ -67,6 +67,20 @@ pub struct LineEdit {
     scroll_col: usize,
 }
 
+/// Bytes a secret field has room for from the start.
+const SECRET_ROOM: usize = 256;
+
+/// What was typed into a secret field (a password, a passphrase, a recovery key) is
+/// wiped from memory when the field goes away. What `take_string` handed out is the
+/// taker's to look after.
+impl Drop for LineEdit {
+    fn drop(&mut self) {
+        if self.secret {
+            zeroize::Zeroize::zeroize(&mut self.text);
+        }
+    }
+}
+
 impl std::fmt::Debug for LineEdit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.secret {
@@ -121,10 +135,12 @@ impl LineEdit {
     }
 
     pub fn secret() -> Self {
-        Self {
-            secret: true,
-            ..Self::default()
-        }
+        let mut field = Self::default();
+        field.secret = true;
+        // Room for what is usually typed, so that growing the text does not leave
+        // copies of its beginning behind in memory that was given back.
+        field.text.reserve(SECRET_ROOM);
+        field
     }
 
     pub fn with_max_bytes(mut self, max: usize) -> Self {

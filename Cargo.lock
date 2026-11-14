@@ -2888,6 +2888,7 @@ dependencies = [
  "unicode-width",
  "url",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]
