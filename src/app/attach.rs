@@ -31,7 +31,7 @@ struct Handed {
 #[derive(Debug, Default)]
 pub struct AttachState {
     /// Files waiting to be sent.
-    pending: HashMap<Scope, Vec<Chosen>>,
+    pub(super) pending: HashMap<Scope, Vec<Chosen>>,
     /// The draft put aside while an `/upload` command is typed.
     stash: HashMap<Scope, String>,
     handed: Option<Handed>,
@@ -403,7 +403,11 @@ impl App {
         self.compose_mode = ComposeMode::Normal;
         // The caption was the draft.
         self.forget_sent_draft();
-        self.timeline.scroll = 0;
+        if self.timeline.detached {
+            self.return_to_live();
+        } else {
+            self.timeline.scroll = 0;
+        }
         true
     }
 

@@ -115,6 +115,19 @@ pub struct TimelineState {
     pub drawn: bool,
     /// Event id of the newest message a read receipt was sent for.
     pub marked_read: Option<String>,
+    /// Set when viewing an event-focused `/context` slice instead of the live tail.
+    pub detached: bool,
+    /// Set by the draw when the newest loaded row of a detached slice is on screen.
+    pub want_newer: bool,
+    pub loading_newer: bool,
+    /// The forward end of the detached slice has reached the live tail.
+    pub reached_end: bool,
+    /// The user scrolled towards newer messages since the last forward request.
+    pub newer_armed: bool,
+    /// Message count when the running forward-pagination request was made.
+    pub forward_count_at_request: usize,
+    /// Consecutive forward-pagination requests that added nothing visible.
+    pub empty_forward_batches: u8,
 }
 
 /// Where the composer's text was drawn, for mapping clicks to a cursor position.
@@ -155,6 +168,8 @@ pub struct App {
     recovery_prompted: bool,
     /// Counts timeline requests; see `request_timeline`.
     generation: u64,
+    /// Monotonic allocator shared by live timeline opens and speculative `/context` jumps.
+    next_gen: u64,
     /// The open room was picked by the app, not by the user.
     auto_opened: bool,
     /// False while the terminal window is in the background.
@@ -262,8 +277,12 @@ pub struct App {
     pub keymap: Keymap,
     /// Monotonic counter for active/debounced global search requests.
     search_gen: u64,
-    /// Cross-room search jump waiting for room timeline load/pagination.
+    /// Cross-room / event jump waiting for worker `/context` load.
     pending_jump: Option<global_search::PendingJump>,
+    /// Matrix link or address passed on the command line, opened once after login/rooms arrive.
+    startup_target: Option<String>,
+    /// True once at least one `MatrixEvent::Rooms` list was received in this session.
+    rooms_received: bool,
 }
 
 impl App {
@@ -358,6 +377,7 @@ impl App {
             user_id: None,
             recovery_prompted: false,
             generation: 0,
+            next_gen: 0,
             auto_opened: true,
             window_focused: true,
             edit_stash: None,
@@ -421,6 +441,8 @@ impl App {
             keymap: Keymap::default(),
             search_gen: 0,
             pending_jump: None,
+            startup_target: None,
+            rooms_received: false,
         }
     }
 
@@ -995,6 +1017,7 @@ impl App {
         self.complete.reset_session();
         self.manage = Default::default();
         self.pending_jump = None;
+        self.rooms_received = false;
         self.search_gen += 1;
         if matches!(self.modal, Some(Modal::GlobalSearch(_))) {
             self.modal = None;
@@ -1027,14 +1050,11 @@ impl App {
         self.sync_completion();
     }
 
-    fn open_room(&mut self, index: usize) {
+    pub(super) fn switch_room_state(&mut self, index: usize) {
         if index >= self.rooms.len() {
             return;
         }
         self.auto_opened = false;
-        self.pending_jump = None;
-        // A thread belongs to its room; picking a room (even the same one) leaves it.
-        self.leave_thread();
         if index != self.active {
             if self.typing_sent.take().is_some()
                 && let Some(room_id) = self.room_id()
@@ -1063,10 +1083,22 @@ impl App {
         self.rooms[index].unread = 0;
         self.rooms[index].bold = false;
         self.rooms[index].mention = false;
-        self.timeline = TimelineState::default();
         self.sidebar.filter.clear();
-        self.request_timeline();
         self.request_members_for_open_room();
+    }
+
+    fn open_room(&mut self, index: usize) {
+        if index >= self.rooms.len() {
+            return;
+        }
+        self.cancel_pending_jump();
+        // A thread belongs to its room; picking a room (even the same one) leaves it.
+        self.leave_thread();
+        self.switch_room_state(index);
+        self.timeline = TimelineState::default();
+        self.row_cache = None;
+        self.timeline_rev += 1;
+        self.request_timeline();
         self.set_focus(Pane::Composer);
     }
 
@@ -1241,7 +1273,11 @@ impl App {
                 self.forget_sent_draft();
             }
             self.compose_mode = ComposeMode::Normal;
-            self.timeline.scroll = 0;
+            if self.timeline.detached {
+                self.return_to_live();
+            } else {
+                self.timeline.scroll = 0;
+            }
             return;
         }
 
@@ -1332,6 +1368,13 @@ impl App {
     }
 
     /// Opens the `n`th link of a message in the system browser.
+    pub(super) fn find_joined_room(&self, target: &str) -> Option<usize> {
+        self.rooms.iter().position(|room| {
+            room.kind != RoomKind::Invite
+                && (room.id == target || room.alias.as_deref() == Some(target))
+        })
+    }
+
     fn open_link(&mut self, message: usize, n: usize) -> bool {
         let link = self.messages().get(message).and_then(|m| {
             crate::rich::Rich::of(m.html.as_deref(), &m.body)
@@ -1339,15 +1382,165 @@ impl App {
                 .into_iter()
                 .nth(n)
         });
-        match link {
-            Some(url) => {
-                if self.matrix.is_some() {
-                    open_in_browser(&url);
-                }
-                self.show_toast(format!("Opening {url}"));
-                true
+        let Some(url) = link else {
+            return false;
+        };
+        if !self.try_open_matrix_link(&url) {
+            if self.matrix.is_some() {
+                open_in_browser(&url);
             }
-            None => false,
+            self.show_toast(format!("Opening {url}"));
+        }
+        true
+    }
+
+    fn try_open_matrix_link(&mut self, url: &str) -> bool {
+        if !crate::manage::is_matrix_link(url) {
+            return false;
+        }
+        if matches!(self.modal, Some(Modal::Search(_))) {
+            self.close_search();
+        }
+        match crate::manage::parse_address(url) {
+            Ok(crate::manage::Address::Event { room, event, .. }) => {
+                if let Some(index) = self.find_joined_room(&room) {
+                    let room_id = self.rooms[index].id.clone();
+                    self.jump_to_event(room_id, event, None);
+                } else {
+                    self.show_toast("Join this room before jumping to a message in it");
+                }
+            }
+            Ok(crate::manage::Address::Room { target, via }) => {
+                if let Some(index) = self.find_joined_room(&target) {
+                    let room_id = self.rooms[index].id.clone();
+                    if self.space.is_some() && !self.space_rooms.contains(&room_id) {
+                        self.select_space(None);
+                    }
+                    self.open_room(index);
+                    if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
+                        self.sidebar.cursor = at;
+                        self.sidebar.reveal_cursor = true;
+                    }
+                } else {
+                    let addr = crate::manage::format_join_target(&target, &via);
+                    self.open_new_join(&addr);
+                }
+            }
+            Ok(crate::manage::Address::User(user_id)) => self.open_new_user(&user_id),
+            Err(reason) => self.show_toast(reason),
+        }
+        true
+    }
+
+    fn jump_to_reply(&mut self, index: usize) {
+        let Some(message) = self.messages().get(index) else {
+            return;
+        };
+        let Some(event_id) = message.reply_event.clone() else {
+            let reason = if message.reply_to.is_some() {
+                "Original message is not available"
+            } else {
+                "That message is not a reply"
+            };
+            self.show_toast(reason);
+            return;
+        };
+        let Some(room_id) = self.room_id() else {
+            return;
+        };
+        let thread_root = if self.thread_open()
+            && global_search::find_target_message(
+                self.messages(),
+                &event_id,
+                self.matrix.is_none(),
+                true,
+            )
+            .is_some()
+        {
+            self.thread_key().map(str::to_owned)
+        } else {
+            None
+        };
+        self.jump_to_event(room_id, event_id, thread_root);
+    }
+
+    /// Leaves a detached `/context` slice and reloads the live timeline for the active room
+    /// (or open thread).
+    pub(super) fn return_to_live(&mut self) {
+        self.cancel_pending_jump();
+        let keep_selection = (self.focus == Pane::Timeline)
+            .then_some(self.timeline.selected)
+            .flatten();
+        self.timeline = TimelineState::default();
+        self.timeline.selected = keep_selection;
+        self.row_cache = None;
+        self.timeline_rev += 1;
+        self.repaint = true;
+        if let Some(root) = self.threads.open_root().map(str::to_owned) {
+            self.generation = self.allocate_gen();
+            if let Some(room_id) = self.room_id() {
+                self.send_matrix(MatrixCmd::OpenThread {
+                    room_id,
+                    root,
+                    generation: self.generation,
+                });
+            }
+        } else {
+            self.request_timeline();
+        }
+    }
+
+    /// Opens `startup_target` once login/rooms/sync conditions allow it.
+    pub(super) fn maybe_open_startup_target(&mut self) {
+        let Some(raw) = self.startup_target.as_deref() else {
+            return;
+        };
+        if self.matrix.is_some()
+            && (self.logged_out
+                || self.user_id.is_none()
+                || !self.rooms_received
+                || self.modal.is_some())
+        {
+            return;
+        }
+        let parsed = crate::manage::parse_address(raw);
+        match parsed {
+            Err(reason) => {
+                self.startup_target = None;
+                self.show_toast(reason);
+            }
+            Ok(crate::manage::Address::Event { room, event, .. }) => {
+                if let Some(index) = self.find_joined_room(&room) {
+                    self.startup_target = None;
+                    let room_id = self.rooms[index].id.clone();
+                    self.jump_to_event(room_id, event, None);
+                } else if self.matrix.is_none() || self.sync == Some(SyncStatus::Synced) {
+                    self.startup_target = None;
+                    self.show_toast("Join this room before jumping to a message in it");
+                }
+            }
+            Ok(crate::manage::Address::Room { target, via }) => {
+                if let Some(index) = self.find_joined_room(&target) {
+                    self.startup_target = None;
+                    let room_id = self.rooms[index].id.clone();
+                    if self.space.is_some() && !self.space_rooms.contains(&room_id) {
+                        self.select_space(None);
+                    }
+                    self.open_room(index);
+                    if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
+                        self.sidebar.cursor = at;
+                        self.sidebar.reveal_cursor = true;
+                    }
+                } else if self.matrix.is_none() || self.sync == Some(SyncStatus::Synced) {
+                    self.startup_target = None;
+                    let addr = crate::manage::format_join_target(&target, &via);
+                    self.open_new_join(&addr);
+                }
+            }
+            Ok(crate::manage::Address::User(user_id)) => {
+                self.startup_target = None;
+                self.open_new_user(&user_id);
+            }
         }
     }
 
@@ -1381,10 +1574,17 @@ impl App {
         self.room().map(|room| room.id.clone())
     }
 
+    /// Allocates a strictly increasing timeline/jump generation id so late worker
+    /// events for a superseded view or cancelled jump are dropped.
+    pub(super) fn allocate_gen(&mut self) -> u64 {
+        self.next_gen = self.next_gen.max(self.generation).wrapping_add(1).max(1);
+        self.next_gen
+    }
+
     /// Asks the worker for the open room's timeline. Every call starts a new
     /// generation, so late updates for an earlier room are recognised and dropped.
     fn request_timeline(&mut self) {
-        self.generation += 1;
+        self.generation = self.allocate_gen();
         if let Some(room_id) = self.room_id() {
             self.send_matrix(MatrixCmd::OpenRoom {
                 room_id,
@@ -1394,18 +1594,20 @@ impl App {
     }
 
     /// Called after each draw: loads older messages when the view shows the oldest
-    /// loaded one.
+    /// loaded one, and newer ones when at the bottom of a detached slice.
     pub fn after_draw(&mut self) {
         self.maybe_mark_read();
         self.maybe_load_older();
+        self.maybe_load_newer();
         self.send_image_requests();
     }
 
     /// Sends a read receipt, but only for what the user can actually be looking at:
-    /// the messages are on screen, at the newest one, nothing covers them and the
+    /// the messages are on screen, at the newest live message, nothing covers them and the
     /// terminal window has the focus. Once per newest message.
     fn maybe_mark_read(&mut self) {
         let seen = std::mem::take(&mut self.timeline.drawn)
+            && !self.timeline.detached
             && self.timeline.scroll == 0
             && self.modal.is_none()
             && !self.help_open
@@ -1455,6 +1657,37 @@ impl App {
         self.timeline.count_at_request = count;
         if let Some(room_id) = self.room_id() {
             self.send_matrix(MatrixCmd::Paginate {
+                room_id,
+                generation: self.generation,
+            });
+        }
+    }
+
+    /// Loads newer messages when the newest loaded message of a detached `/context` slice
+    /// is on screen and either the view is not full yet or the user scrolled downward.
+    fn maybe_load_newer(&mut self) {
+        const MAX_EMPTY: u8 = 5;
+        let count = self.messages().len();
+        let view = &mut self.timeline;
+        if !view.detached {
+            view.want_newer = false;
+            return;
+        }
+        if !std::mem::take(&mut view.want_newer) || view.loading_newer || view.reached_end {
+            return;
+        }
+        let filling = !view.view_full && view.empty_forward_batches < MAX_EMPTY;
+        if !(view.newer_armed || filling) {
+            return;
+        }
+        if self.matrix.is_none() || self.room().is_none_or(|r| r.kind == RoomKind::Invite) {
+            return;
+        }
+        self.timeline.newer_armed = false;
+        self.timeline.loading_newer = true;
+        self.timeline.forward_count_at_request = count;
+        if let Some(room_id) = self.room_id() {
+            self.send_matrix(MatrixCmd::PaginateForwards {
                 room_id,
                 generation: self.generation,
             });
@@ -1655,8 +1888,11 @@ impl App {
 
     pub fn perform(&mut self, action: Action) {
         self.dirty = true;
-        if !matches!(action, Action::Quit | Action::Suspend) {
-            self.pending_jump = None;
+        if !matches!(
+            action,
+            Action::Quit | Action::Suspend | Action::Open | Action::JumpToReply
+        ) {
+            self.cancel_pending_jump();
         }
         match action {
             Action::Quit => self.should_quit = true,
@@ -1699,11 +1935,16 @@ impl App {
             Action::PageDown => {
                 let step = self.timeline.page.saturating_sub(1).max(1);
                 self.timeline.scroll = self.timeline.scroll.saturating_sub(step);
+                self.timeline.newer_armed = true;
             }
             Action::JumpToNewest => {
-                self.timeline.scroll = 0;
-                if self.focus == Pane::Timeline {
-                    self.timeline.selected = self.find_selectable(usize::MAX, false);
+                if self.timeline.detached {
+                    self.return_to_live();
+                } else {
+                    self.timeline.scroll = 0;
+                    if self.focus == Pane::Timeline {
+                        self.timeline.selected = self.find_selectable(usize::MAX, false);
+                    }
                 }
             }
             Action::JumpToOldest => {
@@ -1767,6 +2008,13 @@ impl App {
                     Some(newer) => {
                         self.timeline.selected = Some(newer);
                         self.timeline.reveal_selected = true;
+                        if self.timeline.detached {
+                            self.timeline.newer_armed = true;
+                        }
+                    }
+                    None if self.timeline.detached && !self.timeline.reached_end => {
+                        self.timeline.scroll = 0;
+                        self.timeline.newer_armed = true;
                     }
                     None => {
                         self.timeline.scroll = 0;
@@ -1844,6 +2092,7 @@ impl App {
                 }
             }
             Action::Open => {
+                self.cancel_pending_jump();
                 let opened = match self.timeline.selected {
                     Some(i) => {
                         // A file message is about its file, even with a link in the caption.
@@ -1856,6 +2105,11 @@ impl App {
                 };
                 if !opened {
                     self.show_toast("Nothing to open in this message");
+                }
+            }
+            Action::JumpToReply => {
+                if let Some(i) = self.timeline.selected {
+                    self.jump_to_reply(i);
                 }
             }
 
@@ -1935,7 +2189,9 @@ impl App {
 
     /// Only one popup is shown at a time; the help overlay makes way too.
     fn open_modal(&mut self, modal: Modal) {
-        self.pending_jump = None;
+        if !matches!(modal, Modal::Recovery(_)) {
+            self.cancel_pending_jump();
+        }
         self.help_open = false;
         self.modal = Some(modal);
     }
@@ -2013,6 +2269,7 @@ impl App {
             Some(Modal::Recovery(_)) => {
                 self.modal = None;
                 self.show_toast("Encrypted history stays locked until you enter the key");
+                self.maybe_open_startup_target();
             }
             Some(Modal::Emoji(_) | Modal::Settings(_) | Modal::Palette(_) | Modal::Keybinds(_)) => {
                 self.modal = None;
@@ -2182,15 +2439,23 @@ impl App {
                 self.send_matrix(MatrixCmd::Previews(self.room_previews));
                 self.logged_out = false;
                 self.session_started = Some(Instant::now());
+                self.maybe_open_startup_target();
             }
-            MatrixEvent::Sync(status) => self.sync = Some(status),
+            MatrixEvent::Sync(status) => {
+                self.sync = Some(status);
+                if self.sync == Some(SyncStatus::Synced) {
+                    self.maybe_open_startup_target();
+                }
+            }
             // News of a session that has ended must not bring its rooms back.
             MatrixEvent::Rooms(_) if self.logged_out => {}
             MatrixEvent::Rooms(rooms) => {
+                self.rooms_received = true;
                 self.apply_rooms(rooms);
                 // A room that was just joined or created is opened when it is listed.
                 self.open_pending_room();
                 self.search_check_room();
+                self.maybe_open_startup_target();
             }
             MatrixEvent::Recovery(status) => {
                 // Takes precedence over the emoji picker, never over the login form.
@@ -2205,6 +2470,7 @@ impl App {
                     self.modal = None;
                 }
                 self.show_toast("Encrypted history unlocked");
+                self.maybe_open_startup_target();
             }
             MatrixEvent::RecoverResult(Err(error)) => match &mut self.modal {
                 Some(Modal::Recovery(form)) => {
@@ -2218,14 +2484,35 @@ impl App {
                 generation,
                 messages,
                 reached_start,
+                detached,
             } => {
-                if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
+                if self.pending_jump.as_ref().is_some_and(|pending| {
+                    pending.generation == generation && pending.room_id == room_id
+                }) {
+                    self.on_jump_arrived(generation, room_id, messages, reached_start, detached);
+                } else if generation == self.generation
+                    && self.room_id().as_deref() == Some(&room_id)
+                {
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
                     self.search_sync();
                     self.timeline.reached_start |= reached_start;
-                    self.on_jump_timeline();
+                    match detached {
+                        Some(info) => {
+                            self.timeline.detached = true;
+                            self.timeline.reached_end |= info.reached_end;
+                        }
+                        None => {
+                            self.timeline.detached = false;
+                            self.timeline.reached_end = false;
+                            self.timeline.loading_newer = false;
+                            self.timeline.want_newer = false;
+                        }
+                    }
                 }
+            }
+            MatrixEvent::JumpFailed { generation, reason } => {
+                self.on_jump_failed(generation, reason);
             }
             MatrixEvent::Paginated {
                 generation,
@@ -2241,7 +2528,23 @@ impl App {
                         > view.count_at_request;
                     view.empty_batches = if grew { 0 } else { view.empty_batches + 1 };
                     self.search_after_load();
-                    self.try_apply_pending_jump();
+                }
+            }
+            MatrixEvent::PaginatedForwards {
+                generation,
+                reached_end,
+            } => {
+                if generation == self.generation {
+                    let view = &mut self.timeline;
+                    view.loading_newer = false;
+                    view.reached_end |= reached_end;
+                    let grew = self.rooms.get(self.active).map_or(0, |r| r.messages.len())
+                        > view.forward_count_at_request;
+                    view.empty_forward_batches = if grew {
+                        0
+                    } else {
+                        view.empty_forward_batches + 1
+                    };
                 }
             }
             MatrixEvent::Typing { generation, names } => {
@@ -2559,13 +2862,13 @@ impl App {
                     .unwrap_or("Ctrl-Q");
                 self.show_toast(format!("Press {quit} to quit"));
             } else {
-                self.pending_jump = None;
+                self.cancel_pending_jump();
             }
             return;
         }
 
         if self.focus == Pane::Composer && self.complete_key(code, mods) {
-            self.pending_jump = None;
+            self.cancel_pending_jump();
             return;
         }
         let width = self.composer_view.width;
@@ -2573,13 +2876,13 @@ impl App {
             && (code, mods) == (KeyCode::Up, KeyModifiers::NONE)
             && !self.composer.on_first_row(width)
         {
-            self.pending_jump = None;
+            self.cancel_pending_jump();
             self.composer.up(width);
             self.sync_completion();
             return;
         }
         if self.focus == Pane::Composer && self.attach_key(code, mods) {
-            self.pending_jump = None;
+            self.cancel_pending_jump();
             return;
         }
         if let Some(action) = self.keymap.lookup(context, key) {
@@ -2591,7 +2894,7 @@ impl App {
             Pane::Sidebar => {
                 let outcome = self.sidebar.filter.handle_key(code, mods, EditKeys::FULL);
                 if !matches!(outcome, EditOutcome::Ignored) {
-                    self.pending_jump = None;
+                    self.cancel_pending_jump();
                 }
                 if outcome.changed() {
                     self.sidebar.cursor = 0;
@@ -2623,7 +2926,7 @@ impl App {
     pub fn type_char(&mut self, c: char) {
         match self.focus {
             Pane::Sidebar => {
-                self.pending_jump = None;
+                self.cancel_pending_jump();
                 let mut buf = [0u8; 4];
                 if self
                     .sidebar
@@ -2636,7 +2939,7 @@ impl App {
                 }
             }
             Pane::Composer => {
-                self.pending_jump = None;
+                self.cancel_pending_jump();
                 self.composer.insert(c.encode_utf8(&mut [0; 4]));
             }
             Pane::Timeline => {}
@@ -2670,7 +2973,7 @@ impl App {
             _ => handled = false,
         }
         if handled {
-            self.pending_jump = None;
+            self.cancel_pending_jump();
         }
         if self.composer.text() != before {
             self.adjust_marks_for_cursor_edit(before_cursor, before.len());
@@ -2731,7 +3034,7 @@ impl App {
         if self.help_open || self.images.viewer_open() {
             return;
         }
-        self.pending_jump = None;
+        self.cancel_pending_jump();
         // Files dropped on the terminal arrive as a paste of their paths.
         if self.attach_pasted(&text) {
             return;
@@ -2830,7 +3133,7 @@ impl App {
                     Some(HitId::Splitter) => self.dragging_splitter = true,
                     Some(HitId::Room(index)) => self.open_room(index),
                     Some(HitId::RoomFilter) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         self.set_focus(Pane::Sidebar);
                         if let Some((rect, _)) = hit_rect {
                             let rel_col =
@@ -2839,14 +3142,14 @@ impl App {
                         }
                     }
                     Some(HitId::Message(index)) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         self.set_focus(Pane::Timeline);
                         if self.selectable(index) {
                             self.timeline.selected = Some(index);
                         }
                     }
                     Some(HitId::Reaction(msg, reaction)) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         let key = self
                             .messages()
                             .get(msg)
@@ -2857,7 +3160,7 @@ impl App {
                         }
                     }
                     Some(HitId::Link(message, n)) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         self.set_focus(Pane::Timeline);
                         if self.selectable(message) {
                             self.timeline.selected = Some(message);
@@ -2865,7 +3168,7 @@ impl App {
                         self.open_link(message, n);
                     }
                     Some(HitId::ComposerText) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         self.set_focus(Pane::Composer);
                         let view = self.composer_view;
                         let row = (mouse.row - view.area.y) as usize + view.first_row;
@@ -2883,20 +3186,28 @@ impl App {
                     }),
                     Some(HitId::Do(action)) => self.perform(action),
                     Some(HitId::Pane(pane)) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         self.set_focus(pane);
                     }
                     Some(HitId::Overlay) | None => {}
                     Some(HitId::Image(index)) => self.click_image(index),
+                    Some(HitId::ReplyQuote(index)) => {
+                        self.cancel_pending_jump();
+                        self.set_focus(Pane::Timeline);
+                        if self.selectable(index) {
+                            self.timeline.selected = Some(index);
+                        }
+                        self.jump_to_reply(index);
+                    }
                     Some(HitId::Thread(index)) => self.open_thread(index),
                     Some(HitId::Attachment(index)) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         self.remove_attachment(index);
                     }
                     Some(HitId::Palette(index)) => self.run_palette_at(index),
                     Some(HitId::GlobalSearch(index)) => self.activate_global_search(index),
                     Some(HitId::Complete(index)) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         self.accept_completion(Some(index));
                     }
                     // Handled by `menu_mouse` above.
@@ -2973,8 +3284,9 @@ impl App {
                 // The wheel scrolls what is under the pointer, wherever the focus is.
                 match self.hits.pane_at(mouse.column, mouse.row) {
                     Some(Pane::Timeline) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         self.timeline.older_armed |= up;
+                        self.timeline.newer_armed |= !up;
                         self.timeline.scroll = if up {
                             self.timeline.scroll + WHEEL_LINES
                         } else {
@@ -2982,7 +3294,7 @@ impl App {
                         };
                     }
                     Some(Pane::Sidebar) => {
-                        self.pending_jump = None;
+                        self.cancel_pending_jump();
                         // A room at a time, also when rooms take two lines.
                         let step = if self.room_previews { 2 } else { 1 };
                         self.sidebar.scroll = if up {
@@ -3107,6 +3419,7 @@ impl App {
 }
 
 /// Best effort; the login form also shows the address to open by hand.
+#[cfg(not(test))]
 fn open_in_browser(url: &str) {
     use std::process::{Command, Stdio};
     let _ = Command::new("xdg-open")
@@ -3117,7 +3430,18 @@ fn open_in_browser(url: &str) {
         .spawn();
 }
 
-pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
+#[cfg(test)]
+thread_local! {
+    static TEST_OPENED_URLS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn open_in_browser(url: &str) {
+    TEST_OPENED_URLS.with(|urls| urls.borrow_mut().push(url.to_owned()));
+}
+
+pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<String>) -> Result<()> {
     let (portal_scheme, mut scheme_watch) = crate::portal::SchemeWatch::start().await;
     let guard = TerminalGuard::enter(config.mouse)?;
     // Terminal queries (image protocol, background colour) go here: on the alternate
@@ -3145,6 +3469,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool) -> Result<()> {
     // real configuration.
     if !demo {
         app.config_file = Some(paths.config_file());
+    }
+    app.startup_target = target;
+    if demo {
+        app.maybe_open_startup_target();
     }
     let notify_icons = Arc::new(crate::notify::IconCache::new(paths.notify_icons_dir()));
     struct NotifyCacheGuard(Arc<crate::notify::IconCache>);
@@ -4069,6 +4397,7 @@ mod tests {
             generation: app.generation,
             messages,
             reached_start: false,
+            detached: None,
         }
     }
 
@@ -4094,6 +4423,7 @@ mod tests {
             generation: app.generation - 1,
             messages: vec![remote("9", "ann", "late")],
             reached_start: false,
+            detached: None,
         });
         assert!(app.rooms[1].messages.is_empty());
         redraw(&mut app, &mut terminal);
@@ -4491,6 +4821,7 @@ mod tests {
             generation,
             messages: many,
             reached_start: true,
+            detached: None,
         });
         app.on_event(key(KeyCode::PageUp));
         frame(&mut app, &mut terminal);
@@ -5636,5 +5967,549 @@ mod tests {
         app.on_event(click(col + 3 + 2, row));
         app.on_event(key(KeyCode::Char('X')));
         assert_eq!(app.sidebar.filter, "CaXfe\u{0301} ");
+    }
+
+    fn take_opened_urls() -> Vec<String> {
+        TEST_OPENED_URLS.with(|urls| std::mem::take(&mut *urls.borrow_mut()))
+    }
+
+    fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+        format!("{}", terminal.backend())
+    }
+
+    fn toast_text(app: &App) -> Option<&str> {
+        app.toast.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    fn detached_timeline(
+        room_id: &str,
+        generation: u64,
+        target_event: &str,
+        thread_root: Option<&str>,
+        reached_end: bool,
+        messages: Vec<Message>,
+    ) -> MatrixEvent {
+        MatrixEvent::Timeline {
+            room_id: room_id.to_owned(),
+            generation,
+            messages,
+            reached_start: false,
+            detached: Some(crate::matrix::DetachedTimeline {
+                target_event: target_event.to_owned(),
+                thread_root: thread_root.map(str::to_owned),
+                reached_end,
+            }),
+        }
+    }
+
+    #[test]
+    fn unloaded_detached_jump_banner_and_return_to_live_paths() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.rooms[0].messages = (40..50)
+            .map(|i| remote(&i.to_string(), "ann", &format!("live {i}")))
+            .collect();
+        drain(&mut commands);
+
+        // Jump to an unloaded message in the active room.
+        app.jump_to_event("!a".into(), "$ev5".into(), None);
+        let generation = app.next_gen;
+        assert_eq!(
+            drain(&mut commands),
+            [format!("OpenEvent(!a, generation {generation})")]
+        );
+
+        let slice = (0..10)
+            .map(|i| remote(&i.to_string(), "bob", &format!("old {i}")))
+            .collect();
+        app.on_matrix(detached_timeline(
+            "!a", generation, "$ev5", None, false, slice,
+        ));
+        assert!(app.timeline.detached);
+        assert!(!app.timeline.reached_end);
+        assert_eq!(app.timeline.selected, Some(5));
+        assert_eq!(app.focus, Pane::Timeline);
+        redraw(&mut app, &mut terminal);
+        let text = screen_text(&terminal);
+        assert!(text.contains("viewing older messages"), "{text}");
+
+        // End (JumpToNewest) clears detached mode and asks for the live timeline.
+        app.on_event(key(KeyCode::End));
+        assert!(!app.timeline.detached);
+        let cmds = drain(&mut commands);
+        assert!(cmds.iter().any(|c| c == "OpenRoom(!a)"), "{cmds:?}");
+        app.on_matrix(timeline(&app, vec![remote("50", "ann", "live 50")]));
+        assert!(!app.timeline.detached);
+        redraw(&mut app, &mut terminal);
+        assert!(!screen_text(&terminal).contains("viewing older messages"));
+
+        // Clicking the detached banner returns to live too.
+        app.jump_to_event("!a".into(), "$ev5".into(), None);
+        let generation = app.next_gen;
+        drain(&mut commands);
+        let slice = (0..10)
+            .map(|i| remote(&i.to_string(), "bob", &format!("old {i}")))
+            .collect();
+        app.on_matrix(detached_timeline(
+            "!a", generation, "$ev5", None, false, slice,
+        ));
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "viewing older messages");
+        app.on_event(click(col + 1, row));
+        assert!(!app.timeline.detached);
+        let cmds = drain(&mut commands);
+        assert!(cmds.iter().any(|c| c == "OpenRoom(!a)"), "{cmds:?}");
+
+        // Sending a text message while detached returns to the live timeline.
+        app.jump_to_event("!a".into(), "$ev5".into(), None);
+        let generation = app.next_gen;
+        drain(&mut commands);
+        let slice = (0..10)
+            .map(|i| remote(&i.to_string(), "bob", &format!("old {i}")))
+            .collect();
+        app.on_matrix(detached_timeline(
+            "!a", generation, "$ev5", None, false, slice,
+        ));
+        app.set_focus(Pane::Composer);
+        type_text(&mut app, "back to present");
+        app.on_event(key(KeyCode::Enter));
+        assert!(!app.timeline.detached);
+        let cmds = drain(&mut commands);
+        assert!(cmds.iter().any(|c| c == "OpenRoom(!a)"), "{cmds:?}");
+        assert!(cmds.iter().any(|c| c == "Send(!a)"), "{cmds:?}");
+
+        // Sending attachments while detached returns to live too.
+        let note =
+            std::env::temp_dir().join(format!("matrix-rat-jump-note-{}.txt", std::process::id()));
+        std::fs::write(&note, b"hello attachment").unwrap();
+        app.jump_to_event("!a".into(), "$ev5".into(), None);
+        let generation = app.next_gen;
+        drain(&mut commands);
+        let slice = (0..10)
+            .map(|i| remote(&i.to_string(), "bob", &format!("old {i}")))
+            .collect();
+        app.on_matrix(detached_timeline(
+            "!a", generation, "$ev5", None, false, slice,
+        ));
+        app.attach.pending.insert(
+            ("!a".to_owned(), None),
+            vec![crate::upload::Chosen {
+                path: note.clone(),
+                name: "note.txt".to_owned(),
+                size: 16,
+            }],
+        );
+        redraw(&mut app, &mut terminal);
+        app.set_focus(Pane::Composer);
+        app.on_event(key(KeyCode::Enter));
+        let _ = std::fs::remove_file(&note);
+        assert!(!app.timeline.detached);
+        let cmds = drain(&mut commands);
+        assert!(cmds.iter().any(|c| c == "OpenRoom(!a)"), "{cmds:?}");
+        assert!(
+            cmds.iter().any(|c| c == "SendFiles(!a, 1 files)"),
+            "{cmds:?}"
+        );
+
+        // Returning to live inside a detached thread sends OpenThread instead of OpenRoom.
+        app.jump_to_event("!a".into(), "$ev2".into(), Some("$root".into()));
+        let generation = app.next_gen;
+        drain(&mut commands);
+        let thread_slice = vec![
+            remote("1", "bob", "older reply 1"),
+            remote("2", "bob", "older reply 2"),
+        ];
+        app.on_matrix(detached_timeline(
+            "!a",
+            generation,
+            "$ev2",
+            Some("$root"),
+            false,
+            thread_slice,
+        ));
+        assert!(app.thread_open());
+        assert!(app.timeline.detached);
+        app.on_event(key(KeyCode::End));
+        assert!(app.thread_open());
+        assert!(!app.timeline.detached);
+        let cmds = drain(&mut commands);
+        assert!(
+            cmds.iter().any(|c| c == "OpenThread(!a, $root)"),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn jump_failure_toasts_without_touching_active_view() {
+        let (mut app, _terminal, mut commands) = connected();
+        app.rooms[0].messages = vec![remote("1", "ann", "first"), remote("2", "bob", "second")];
+        app.timeline.selected = Some(1);
+        app.timeline.scroll = 4;
+        app.composer.set_text("draft in progress");
+        let saved_gen = app.generation;
+        drain(&mut commands);
+
+        app.jump_to_event("!b".into(), "$missing".into(), None);
+        let jump_gen = app.next_gen;
+        assert_eq!(
+            drain(&mut commands),
+            [format!("OpenEvent(!b, generation {jump_gen})")]
+        );
+
+        // Stale JumpFailed for another generation is ignored.
+        app.on_matrix(MatrixEvent::JumpFailed {
+            generation: jump_gen.saturating_sub(1),
+            reason: "stale failure".into(),
+        });
+        assert!(app.toast.is_none());
+        assert!(app.pending_jump.is_some());
+
+        app.on_matrix(MatrixEvent::JumpFailed {
+            generation: jump_gen,
+            reason: "Message not found".into(),
+        });
+        assert!(app.pending_jump.is_none());
+        assert_eq!(toast_text(&app), Some("Message not found"));
+        assert_eq!(app.active, 0);
+        assert_eq!(app.generation, saved_gen);
+        assert_eq!(app.rooms[0].messages.len(), 2);
+        assert_eq!(app.timeline.selected, Some(1));
+        assert_eq!(app.timeline.scroll, 4);
+        assert_eq!(app.composer.text(), "draft in progress");
+    }
+
+    #[test]
+    fn detached_view_blocks_read_receipts_and_keeps_live_unreads_intact() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.rooms[0].messages = vec![remote("10", "ann", "recent")];
+        redraw(&mut app, &mut terminal);
+        drain(&mut commands);
+
+        app.jump_to_event("!a".into(), "$ev2".into(), None);
+        let generation = app.next_gen;
+        drain(&mut commands);
+        let slice = (0..5)
+            .map(|i| remote(&i.to_string(), "bob", &format!("slice {i}")))
+            .collect();
+        app.on_matrix(detached_timeline(
+            "!a", generation, "$ev2", None, false, slice,
+        ));
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+
+        // Reading a historical slice never marks the live room read.
+        let cmds = drain(&mut commands);
+        assert!(!cmds.iter().any(|c| c.contains("MarkRead")), "{cmds:?}");
+        assert!(app.timeline.marked_read.is_none());
+
+        // Sidebar unread counters continue updating while detached.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 3),
+            summary("!b", "Beta", RoomCategory::Room, 2),
+        ]));
+        assert_eq!(app.rooms[0].unread, 3);
+        assert_eq!(app.rooms[1].unread, 2);
+
+        // Returning to live and redrawing resumes read receipts cleanly.
+        app.on_event(key(KeyCode::End));
+        drain(&mut commands);
+        app.on_matrix(timeline(&app, vec![remote("11", "ann", "newest")]));
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        let cmds = drain(&mut commands);
+        assert!(cmds.iter().any(|c| c == "MarkRead(!a)"), "{cmds:?}");
+    }
+
+    #[test]
+    fn detached_forward_pagination_anchors_view_and_stops_at_end() {
+        let (mut app, mut terminal, mut commands) = connected();
+        drain(&mut commands);
+
+        app.jump_to_event("!a".into(), "$ev5".into(), None);
+        let generation = app.next_gen;
+        drain(&mut commands);
+        let slice: Vec<Message> = (0..25)
+            .map(|i| remote(&i.to_string(), "bob", &format!("msg {i:02}")))
+            .collect();
+        app.on_matrix(detached_timeline(
+            "!a", generation, "$ev5", None, false, slice,
+        ));
+
+        // Scroll down to the bottom of the slice (`scroll == 0`), triggering forward pagination.
+        for _ in 0..8 {
+            app.on_event(key(KeyCode::PageDown));
+        }
+        assert_eq!(app.timeline.scroll, 0);
+        frame(&mut app, &mut terminal);
+        assert_eq!(drain(&mut commands), ["PaginateForwards(!a)"]);
+        assert!(app.timeline.loading_newer);
+        redraw(&mut app, &mut terminal);
+        assert!(screen_text(&terminal).contains("loading newer messages"));
+
+        // Deliver newer messages; viewport anchor keeps bottom visible line above the new messages.
+        let mut expanded: Vec<Message> = (0..32)
+            .map(|i| remote(&i.to_string(), "bob", &format!("msg {i:02}")))
+            .collect();
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: app.generation,
+            messages: expanded.clone(),
+            reached_start: false,
+            detached: Some(crate::matrix::DetachedTimeline {
+                target_event: "$ev5".into(),
+                thread_root: None,
+                reached_end: false,
+            }),
+        });
+        app.on_matrix(MatrixEvent::PaginatedForwards {
+            generation: app.generation,
+            reached_end: false,
+        });
+        assert!(!app.timeline.loading_newer);
+        redraw(&mut app, &mut terminal);
+        let text = screen_text(&terminal);
+        assert!(
+            app.timeline.scroll > 0,
+            "anchor should hold above newer items"
+        );
+        assert!(text.contains("msg 24"), "{text}");
+
+        // Scroll down again to reach the bottom, then hit the end of the timeline.
+        for _ in 0..8 {
+            app.on_event(key(KeyCode::PageDown));
+        }
+        assert_eq!(app.timeline.scroll, 0);
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        assert_eq!(drain(&mut commands), ["PaginateForwards(!a)"]);
+
+        expanded.push(remote("32", "bob", "msg 32"));
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: app.generation,
+            messages: expanded,
+            reached_start: false,
+            detached: Some(crate::matrix::DetachedTimeline {
+                target_event: "$ev5".into(),
+                thread_root: None,
+                reached_end: true,
+            }),
+        });
+        app.on_matrix(MatrixEvent::PaginatedForwards {
+            generation: app.generation,
+            reached_end: true,
+        });
+        assert!(app.timeline.reached_end);
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        assert!(
+            !drain(&mut commands)
+                .iter()
+                .any(|c| c.contains("PaginateForwards"))
+        );
+    }
+
+    #[test]
+    fn opening_links_handles_event_room_user_broken_and_http() {
+        let _ = take_opened_urls();
+        let (mut app, _terminal, mut commands) = connected();
+        app.rooms[0].alias = Some("#alpha:example.org".into());
+        app.rooms[0].messages = vec![remote("1", "ann", "already here")];
+        app.rooms[1].id = "!b:example.org".into();
+        drain(&mut commands);
+
+        // 1. Joined event by room ID -> OpenEvent.
+        assert!(app.try_open_matrix_link("https://matrix.to/#/%21b:example.org/%24old"));
+        let jump1_gen = app.next_gen;
+        assert_eq!(
+            drain(&mut commands),
+            [format!("OpenEvent(!b:example.org, generation {jump1_gen})")]
+        );
+        assert!(take_opened_urls().is_empty());
+
+        // 2. Joined event by room alias ($ev1 loaded in room 0 -> selects locally and cancels prior jump).
+        assert!(app.try_open_matrix_link("matrix:r/alpha:example.org/e/ev1"));
+        assert_eq!(
+            drain(&mut commands),
+            [format!("CancelOpenEvent(generation {jump1_gen})")]
+        );
+        assert_eq!(app.timeline.selected, Some(0));
+
+        // 3. Event in an unjoined room -> toast, never OpenEvent or browser.
+        assert!(app.try_open_matrix_link("https://matrix.to/#/%21unknown:example.org/%24ev"));
+        assert_eq!(
+            toast_text(&app),
+            Some("Join this room before jumping to a message in it")
+        );
+        assert!(drain(&mut commands).is_empty());
+        assert!(take_opened_urls().is_empty());
+
+        // 4. Joined room link -> switches room.
+        assert!(app.try_open_matrix_link("https://matrix.to/#/%21b:example.org"));
+        assert_eq!(app.active, 1);
+        drain(&mut commands);
+
+        // 5. Unjoined room with ?via= -> Stage::Join prefilled.
+        assert!(app.try_open_matrix_link(
+            "https://matrix.to/#/%23public:example.org?via=one.org&via=two.org"
+        ));
+        match &app.modal {
+            Some(Modal::New(popup)) => {
+                assert_eq!(popup.stage, crate::manage::Stage::Join);
+                assert_eq!(
+                    popup.address.as_str(),
+                    "#public:example.org one.org two.org"
+                );
+            }
+            other => panic!("expected Join modal, got {other:?}"),
+        }
+        app.modal = None;
+
+        // 6. User link -> Stage::Direct prefilled.
+        assert!(app.try_open_matrix_link("matrix:u/carol:example.org"));
+        match &app.modal {
+            Some(Modal::New(popup)) => {
+                assert_eq!(popup.stage, crate::manage::Stage::Direct);
+                assert_eq!(popup.user.as_str(), "@carol:example.org");
+            }
+            other => panic!("expected Direct modal, got {other:?}"),
+        }
+        app.modal = None;
+
+        // 7. Broken Matrix link -> toast, never launches browser.
+        assert!(app.try_open_matrix_link("https://matrix.to/#/not-valid"));
+        assert!(app.toast.is_some());
+        assert!(take_opened_urls().is_empty());
+
+        // 8. Normal HTTP link inside a selected message -> opens external browser.
+        let web = remote("2", "ann", "see https://example.com/docs");
+        app.rooms[app.active].messages.push(web);
+        app.timeline.selected = Some(app.rooms[app.active].messages.len() - 1);
+        app.set_focus(Pane::Timeline);
+        app.perform(Action::Open);
+        assert_eq!(take_opened_urls(), ["https://example.com/docs"]);
+    }
+
+    #[test]
+    fn jump_to_reply_supports_loaded_unloaded_quote_click_menu_and_non_replies() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let m0 = remote("0", "ann", "root question");
+        let mut m1 = remote("1", "bob", "loaded reply");
+        m1.reply_to = Some(("ann".into(), "root question".into()));
+        m1.reply_event = Some("$ev0".into());
+        let mut m2 = remote("2", "bob", "unloaded reply");
+        m2.reply_to = Some(("ann".into(), "an earlier message".into()));
+        m2.reply_event = Some("$ev_old".into());
+        app.rooms[0].messages = vec![m0, m1, m2];
+        drain(&mut commands);
+
+        // Loaded reply via `p` key selects target locally.
+        app.set_focus(Pane::Timeline);
+        app.timeline.selected = Some(1);
+        app.on_event(key(KeyCode::Char('p')));
+        assert_eq!(app.timeline.selected, Some(0));
+        assert!(drain(&mut commands).is_empty());
+
+        // Clicking the quote line jumps to m0 too.
+        app.timeline.selected = Some(1);
+        redraw(&mut app, &mut terminal);
+        let (col, quote_row) = find(&terminal, "┃ ann: root question");
+        app.on_event(click(col, quote_row));
+        assert_eq!(app.timeline.selected, Some(0));
+
+        // Message context menu offers "Go to replied message" for replies.
+        app.timeline.selected = Some(1);
+        app.perform(Action::ContextMenu);
+        match &app.modal {
+            Some(Modal::Menu(menu)) => {
+                assert!(
+                    menu.items
+                        .iter()
+                        .any(|item| item.label == "Go to replied message"),
+                    "{:?}",
+                    menu.items
+                );
+            }
+            other => panic!("expected message menu, got {other:?}"),
+        }
+        app.modal = None;
+
+        // Unloaded reply via `p` dispatches OpenEvent.
+        app.timeline.selected = Some(2);
+        app.on_event(key(KeyCode::Char('p')));
+        assert_eq!(
+            drain(&mut commands),
+            [format!("OpenEvent(!a, generation {})", app.next_gen)]
+        );
+
+        // Non-reply message via `p` shows a clear toast.
+        app.cancel_pending_jump();
+        app.timeline.selected = Some(0);
+        app.on_event(key(KeyCode::Char('p')));
+        assert_eq!(toast_text(&app), Some("That message is not a reply"));
+    }
+
+    #[test]
+    fn cli_startup_target_waits_for_sync_and_recovery_and_fires_once() {
+        let (mut app, _terminal) = drawn();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        app.startup_target = Some("https://matrix.to/#/%21b:example.org/%24start".into());
+
+        // NeedLogin must not drop startup_target.
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert!(app.startup_target.is_some());
+        assert!(drain(&mut commands).is_empty());
+
+        // LoggedIn + Recovery(NeedsKey) opens recovery and keeps target deferred.
+        app.modal = None;
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@alice:example.org".into(),
+        });
+        app.on_matrix(MatrixEvent::Recovery(
+            crate::matrix::RecoveryStatus::NeedsKey,
+        ));
+        assert!(matches!(app.modal, Some(Modal::Recovery(_))));
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a:example.org", "Alpha", RoomCategory::Room, 0),
+            summary("!b:example.org", "Beta", RoomCategory::Room, 0),
+        ]));
+        app.on_matrix(MatrixEvent::Sync(SyncStatus::Synced));
+        let pre_cmds = drain(&mut commands);
+        assert!(
+            !pre_cmds.iter().any(|c| c.starts_with("OpenEvent")),
+            "{pre_cmds:?}"
+        );
+
+        // Unlocking recovery executes startup_target once and clears it.
+        app.on_matrix(MatrixEvent::RecoverResult(Ok(())));
+        assert!(app.modal.is_none());
+        assert!(app.startup_target.is_none());
+        let cmds = drain(&mut commands);
+        assert_eq!(
+            cmds,
+            [format!(
+                "OpenEvent(!b:example.org, generation {})",
+                app.next_gen
+            )]
+        );
+
+        // Further room updates never re-trigger the consumed startup_target.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a:example.org", "Alpha", RoomCategory::Room, 0),
+            summary("!b:example.org", "Beta", RoomCategory::Room, 0),
+        ]));
+        assert!(drain(&mut commands).is_empty());
+
+        // Startup link in demo mode works without a worker.
+        let mut demo = App::demo();
+        demo.startup_target = Some("https://matrix.to/#/@alice:example.org".into());
+        demo.maybe_open_startup_target();
+        assert!(demo.startup_target.is_none());
+        assert!(matches!(
+            &demo.modal,
+            Some(Modal::New(popup)) if popup.stage == crate::manage::Stage::Direct
+                && popup.user.as_str() == "@alice:example.org"
+        ));
     }
 }

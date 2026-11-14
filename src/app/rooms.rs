@@ -80,6 +80,22 @@ impl App {
     // ----- new chat or room ----------------------------------------------------------
 
     fn open_new(&mut self, stage: Stage) {
+        self.open_new_with(stage, |_| {});
+    }
+
+    pub(super) fn open_new_user(&mut self, user_id: &str) {
+        self.open_new_with(Stage::Direct, |popup| {
+            popup.user.set(user_id);
+        });
+    }
+
+    pub(super) fn open_new_join(&mut self, address: &str) {
+        self.open_new_with(Stage::Join, |popup| {
+            popup.address.set(address);
+        });
+    }
+
+    fn open_new_with(&mut self, stage: Stage, fill: impl FnOnce(&mut NewPopup)) {
         // From the room info view the form takes its place; any other popup stays.
         let from_info = match &self.modal {
             Some(Modal::RoomInfo(info)) => Some(info.room_id.clone()),
@@ -92,10 +108,12 @@ impl App {
         if let Some(Modal::New(popup)) = &mut self.modal {
             if popup.busy.is_none() {
                 popup.go(stage);
+                fill(popup);
             }
             return;
         }
         let mut popup = NewPopup::new(stage);
+        fill(&mut popup);
         if stage == Stage::Invite {
             let room = match &from_info {
                 Some(id) => self.rooms.iter().find(|room| room.id == *id),
@@ -140,7 +158,10 @@ impl App {
         let prepared: Result<(ManageCmd, &'static str), String> = match popup.stage {
             Stage::Choose => return,
             Stage::Join => parse_address(&popup.address).and_then(|address| match address {
-                Address::Room { target, via } => Ok((
+                Address::Room { target, via }
+                | Address::Event {
+                    room: target, via, ..
+                } => Ok((
                     ManageCmd::Join {
                         request,
                         target,

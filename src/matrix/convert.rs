@@ -164,6 +164,10 @@ fn event_message(
                     ),
                     _ => (String::new(), "an earlier message".to_owned()),
                 });
+            message.reply_event = content
+                .in_reply_to
+                .as_ref()
+                .map(|reply| reply.event_id.to_string());
             match &content.kind {
                 MsgLikeKind::Message(msg) => {
                     message.edited = msg.is_edited();

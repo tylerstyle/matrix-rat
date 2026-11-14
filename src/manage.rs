@@ -2,7 +2,7 @@
 //! the two popups ("New chat or room" and "Room info").
 
 use matrix_sdk::ruma::matrix_uri::MatrixId;
-use matrix_sdk::ruma::{MatrixToUri, MatrixUri, RoomAliasId, RoomId, ServerName, UserId};
+use matrix_sdk::ruma::{EventId, MatrixToUri, MatrixUri, RoomAliasId, RoomId, ServerName, UserId};
 
 use crate::lineedit::{EditOutcome, LineEdit};
 use crate::matrix::{MemberRole, NotifyLevel, RoomDetails, RoomMember};
@@ -19,6 +19,12 @@ pub enum Address {
         /// Servers that know the room, for joining by id.
         via: Vec<String>,
     },
+    /// A message inside a room (`!id:server` or `#alias:server`, `$event`).
+    Event {
+        room: String,
+        event: String,
+        via: Vec<String>,
+    },
     User(String),
 }
 
@@ -27,8 +33,19 @@ impl std::fmt::Debug for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Room { via, .. } => write!(f, "Address::Room(via {} servers)", via.len()),
+            Self::Event { via, .. } => write!(f, "Address::Event(via {} servers)", via.len()),
             Self::User(_) => f.write_str("Address::User"),
         }
+    }
+}
+
+/// Formats a room address (`#alias:server` or `!id:server`) and `via` servers as
+/// accepted by the Join input.
+pub fn format_join_target(target: &str, via: &[String]) -> String {
+    if via.is_empty() {
+        target.to_owned()
+    } else {
+        format!("{target} {}", via.join(" "))
     }
 }
 
@@ -93,6 +110,13 @@ fn checked_room(id: &str) -> Option<String> {
     RoomId::parse(id).ok().map(|id| id.to_string())
 }
 
+fn checked_event(id: &str) -> Option<String> {
+    if !clean_id(id) || !id.starts_with('$') {
+        return None;
+    }
+    EventId::parse(id).ok().map(|event| event.to_string())
+}
+
 fn checked_user(id: &str) -> Option<String> {
     if !clean_id(id) {
         return None;
@@ -127,6 +151,18 @@ fn matrix_to_rest(link: &str) -> Option<&str> {
     }
     let lower = link.to_ascii_lowercase();
     (lower.starts_with("https://matrix.to") || lower.starts_with("http://matrix.to")).then_some("")
+}
+
+/// True if `url` is a Matrix link (`matrix:` or `matrix.to/#`) that should be handled in-app
+/// rather than opened in an external browser.
+pub fn is_matrix_link(url: &str) -> bool {
+    let trimmed = url.trim();
+    let trimmed = trimmed.strip_prefix('<').unwrap_or(trimmed);
+    let trimmed = trimmed.strip_suffix('>').unwrap_or(trimmed).trim();
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("matrix:")
+        || lower.starts_with("https://matrix.to/#")
+        || lower.starts_with("http://matrix.to/#")
 }
 
 /// Checks the identifier parts of a link's path: as many as allowed, none empty. The
@@ -218,11 +254,10 @@ pub fn parse_address(input: &str) -> Result<Address, String> {
     };
 
     // From a link: what it decodes to has to pass the same checks as what is typed.
-    let room = match &id {
-        MatrixId::Room(id) => id.to_string(),
-        MatrixId::RoomAlias(alias) => alias.to_string(),
-        // A link to a message: the room it is in.
-        MatrixId::Event(room, _) => room.to_string(),
+    let (room, event) = match &id {
+        MatrixId::Room(id) => (id.to_string(), None),
+        MatrixId::RoomAlias(alias) => (alias.to_string(), None),
+        MatrixId::Event(room, event) => (room.to_string(), Some(event.to_string())),
         MatrixId::User(user) => {
             return checked_user(user.as_str())
                 .map(Address::User)
@@ -233,6 +268,14 @@ pub fn parse_address(input: &str) -> Result<Address, String> {
     let target = checked_room(&room).ok_or_else(|| NOT_AN_ADDRESS.to_owned())?;
     for server in link_via {
         push_via(&mut via, server.as_str())?;
+    }
+    if let Some(event) = event {
+        let event = checked_event(&event).ok_or_else(|| NOT_AN_ADDRESS.to_owned())?;
+        return Ok(Address::Event {
+            room: target,
+            event,
+            via,
+        });
     }
     Ok(Address::Room { target, via })
 }
@@ -884,10 +927,14 @@ mod tests {
             parse_address("https://matrix.to/#/!abc:example.org?via=example.org&via=matrix.org"),
             room("!abc:example.org", &["example.org", "matrix.org"])
         );
-        // A link to a message leads to its room.
+        // A link to a message identifies both its room and event.
         assert_eq!(
             parse_address("https://matrix.to/#/!abc:example.org/$event?via=example.org"),
-            room("!abc:example.org", &["example.org"])
+            Ok(Address::Event {
+                room: "!abc:example.org".to_owned(),
+                event: "$event".to_owned(),
+                via: vec!["example.org".to_owned()],
+            })
         );
         assert_eq!(
             parse_address("https://matrix.to/#/@bob:example.org"),
@@ -906,6 +953,14 @@ mod tests {
         assert_eq!(
             parse_address("matrix:roomid/abc:example.org?via=example.org&action=join"),
             room("!abc:example.org", &["example.org"])
+        );
+        assert_eq!(
+            parse_address("matrix:roomid/abc:example.org/e/event?via=example.org"),
+            Ok(Address::Event {
+                room: "!abc:example.org".to_owned(),
+                event: "$event".to_owned(),
+                via: vec!["example.org".to_owned()],
+            })
         );
         assert_eq!(
             parse_address("matrix:u/bob:example.org?action=chat"),

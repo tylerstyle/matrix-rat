@@ -82,6 +82,8 @@ pub struct Message {
     pub html: Option<String>,
     /// Sender and text of the message this one replies to.
     pub reply_to: Option<(String, String)>,
+    /// Event id of the message this one replies to.
+    pub reply_event: Option<String>,
     pub reactions: Vec<Reaction>,
     /// Set for picture messages; `body` then holds the text shown when pictures are off.
     pub image: Option<ImageInfo>,

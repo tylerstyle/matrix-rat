@@ -116,7 +116,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
 | `↑` in an empty composer | edit your last message (`Esc` cancels; with the `vim` preset, `Ctrl-C`) |
-| `↑` from the composer | walk into the messages (from the first line of a draft, or when you have no message to edit); then `Enter` reply, `e` edit, `r` react, `t` thread, `o` open, `v` view picture, `s` save, `c` copy, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of a draft, or when you have no message to edit); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `o` open, `v` view picture, `s` save, `c` copy, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |

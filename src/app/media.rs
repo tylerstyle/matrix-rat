@@ -62,7 +62,7 @@ impl App {
             self.show_toast("Pictures are turned off in the configuration");
             return true;
         }
-        self.pending_jump = None;
+        self.cancel_pending_jump();
         self.help_open = false;
         self.images.open_viewer(&info);
         // The request goes out with the next frame.
@@ -72,7 +72,7 @@ impl App {
 
     /// A click on a picture selects its message and opens the viewer.
     pub(super) fn click_image(&mut self, index: usize) {
-        self.pending_jump = None;
+        self.cancel_pending_jump();
         self.set_focus(Pane::Timeline);
         if self.selectable(index) {
             self.timeline.selected = Some(index);
