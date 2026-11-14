@@ -942,6 +942,9 @@ pub(super) async fn emit_room_power(events: &UnboundedSender<MatrixEvent>, room:
 #[derive(Default)]
 struct MemberList {
     entries: Vec<Entry>,
+    /// `entries` is a complete snapshot of the room (not lazy-loaded, waiting,
+    /// partial, or stale after an error).
+    complete: bool,
     /// The room's counts when `entries` was last read from the store.
     counts: Option<(u64, u64)>,
     /// Counts the server's own list did not match either (or could not be had for):
@@ -959,6 +962,21 @@ impl MemberList {
         entries_agree(&self.entries, (joined, invited))
     }
 
+    /// Fills the details' member list, admin count, error, and (once the list is
+    /// complete) counts so the header never disagrees with the people shown.
+    fn apply(&mut self, current: &mut RoomDetails, levels: Option<&RoomPowerLevels>, own: &UserId) {
+        current.members = self.present(levels, own);
+        current.admin_count = current
+            .members
+            .iter()
+            .filter(|m| !m.invited && !m.banned && m.role >= MemberRole::Admin)
+            .count();
+        current.members_error.clone_from(&self.error);
+        if self.complete && !current.members_loading && !current.members_partial {
+            (current.joined, current.invited) = entry_counts(&self.entries);
+        }
+    }
+
     /// The list for the screen. Roles and sorting are only redone when the people or
     /// the power levels changed.
     fn present(&mut self, levels: Option<&RoomPowerLevels>, own: &UserId) -> Vec<RoomMember> {
@@ -973,17 +991,22 @@ impl MemberList {
     }
 }
 
+fn entry_counts(entries: &[Entry]) -> (u64, u64) {
+    let mut joined = 0;
+    let mut invited = 0;
+    for entry in entries {
+        match entry.status {
+            EntryStatus::Joined => joined += 1,
+            EntryStatus::Invited => invited += 1,
+            EntryStatus::Banned => {}
+        }
+    }
+    (joined, invited)
+}
+
 /// Whether a list has as many joined and invited people as the room says it has.
-fn entries_agree(entries: &[Entry], (joined, invited): (u64, u64)) -> bool {
-    let listed_joined = entries
-        .iter()
-        .filter(|entry| entry.status == EntryStatus::Joined)
-        .count() as u64;
-    let listed_invited = entries
-        .iter()
-        .filter(|entry| entry.status == EntryStatus::Invited)
-        .count() as u64;
-    listed_joined == joined && listed_invited == invited
+fn entries_agree(entries: &[Entry], counts: (u64, u64)) -> bool {
+    entry_counts(entries) == counts
 }
 
 fn role(level: UserPowerLevel) -> MemberRole {
@@ -1259,34 +1282,44 @@ async fn watch(
                         list.error = None;
                     }
                     Ok(_) => {}
-                    Err(error) => list.error = Some(error),
+                    Err(error) => {
+                        list.error = Some(error);
+                        list.complete = false;
+                    }
                 }
             }
             let since = list.asked.map(|at| at.elapsed());
             if force_refresh && !too_large {
                 force_refresh = false;
                 current.members_loading = true;
+                list.complete = false;
             } else {
                 force_refresh = false;
                 match plan(list.agrees(counts), counts, list.gave_up, since) {
-                    Plan::Fine => list.error = None,
+                    Plan::Fine => {
+                        list.error = None;
+                        list.complete = true;
+                    }
                     Plan::GaveUp => {}
-                    Plan::TooLarge => current.members_partial = true,
-                    Plan::Wait(time) => wait = Some(time),
-                    Plan::Ask => current.members_loading = true,
+                    Plan::TooLarge => {
+                        current.members_partial = true;
+                        list.complete = false;
+                    }
+                    Plan::Wait(time) => {
+                        wait = Some(time);
+                        list.complete = false;
+                    }
+                    Plan::Ask => {
+                        current.members_loading = true;
+                        list.complete = false;
+                    }
                 }
             }
         } else {
             force_refresh = false;
             list = MemberList::default();
         }
-        current.members = list.present(levels.as_ref(), &own);
-        current.admin_count = current
-            .members
-            .iter()
-            .filter(|m| !m.invited && !m.banned && m.role >= MemberRole::Admin)
-            .count();
-        current.members_error.clone_from(&list.error);
+        list.apply(&mut current, levels.as_ref(), &own);
         let ask = current.members_loading;
         if sent.as_ref() != Some(&current) {
             if !emit(Ok(current.clone())) {
@@ -1300,6 +1333,7 @@ async fn watch(
                 Ok(entries) => {
                     list.entries = entries;
                     list.error = None;
+                    list.complete = true;
                     if !list.agrees(counts) {
                         list.gave_up = Some(counts);
                     }
@@ -1307,17 +1341,12 @@ async fn watch(
                 // What is shown stays; the reason goes next to it.
                 Err(error) => {
                     list.error = Some(error);
+                    list.complete = false;
                     list.gave_up = Some(counts);
                 }
             }
             current.members_loading = false;
-            current.members = list.present(levels.as_ref(), &own);
-            current.admin_count = current
-                .members
-                .iter()
-                .filter(|m| !m.invited && !m.banned && m.role >= MemberRole::Admin)
-                .count();
-            current.members_error.clone_from(&list.error);
+            list.apply(&mut current, levels.as_ref(), &own);
             if !emit(Ok(current.clone())) {
                 return;
             }
@@ -1604,7 +1633,7 @@ mod tests {
             d.members.len() == 2 && d.members.iter().all(|m| !m.invited)
         })
         .await;
-        assert_eq!(details.joined, 2);
+        assert_eq!((details.joined, details.invited), (2, 0));
         assert_eq!(details.members[1].role, MemberRole::User);
         assert!(details.members[0].own);
 
@@ -1870,11 +1899,67 @@ mod tests {
 
     #[test]
     fn lists_are_compared_with_the_rooms_counts() {
-        let entries = [entry("a", false), entry("b", false), entry("c", true)];
+        let mut banned = entry("d", false);
+        banned.status = EntryStatus::Banned;
+        let entries = [
+            entry("a", false),
+            entry("b", false),
+            entry("c", true),
+            banned,
+        ];
         assert!(entries_agree(&entries, (2, 1)));
         assert!(!entries_agree(&entries, (3, 0)));
         assert!(!entries_agree(&entries, (2, 0)));
         assert!(entries_agree(&[], (0, 0)));
+    }
+
+    #[test]
+    fn complete_member_list_overrides_stale_summary_counts() {
+        let own = UserId::parse("@me:example.org").unwrap();
+        let mut banned = entry("mallory", false);
+        banned.status = EntryStatus::Banned;
+        let mut list = MemberList {
+            entries: vec![entry("alice", false), entry("bob", false), banned],
+            complete: true,
+            ..MemberList::default()
+        };
+
+        // Complete list: header counts come from the list, excluding banned users.
+        let mut details = RoomDetails {
+            joined: 1,
+            invited: 1,
+            ..RoomDetails::default()
+        };
+        list.apply(&mut details, None, &own);
+        assert_eq!((details.joined, details.invited), (2, 0));
+
+        // Still loading, partial, or incomplete: keep the room summary's counts.
+        let mut loading = RoomDetails {
+            joined: 1,
+            invited: 1,
+            members_loading: true,
+            ..RoomDetails::default()
+        };
+        list.apply(&mut loading, None, &own);
+        assert_eq!((loading.joined, loading.invited), (1, 1));
+
+        let mut partial = RoomDetails {
+            joined: 25_000,
+            invited: 3,
+            members_partial: true,
+            ..RoomDetails::default()
+        };
+        list.apply(&mut partial, None, &own);
+        assert_eq!((partial.joined, partial.invited), (25_000, 3));
+
+        list.complete = false;
+        let mut incomplete = RoomDetails {
+            joined: 1,
+            invited: 1,
+            ..RoomDetails::default()
+        };
+        list.apply(&mut incomplete, None, &own);
+        assert_eq!((incomplete.joined, incomplete.invited), (1, 1));
     }
 
     #[test]
