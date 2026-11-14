@@ -787,6 +787,8 @@ mod tests {
                 preview: None,
                 avatar: Some(format!("mxc://example.org/avatar{n}")),
                 alias: None,
+                direct: false,
+                muted: false,
             })
             .collect();
         app.on_matrix(MatrixEvent::Rooms(rooms));
@@ -858,10 +860,10 @@ mod tests {
     #[test]
     fn room_pictures_replace_the_tile_for_visible_rows_only() {
         let (mut app, mut terminal, mut commands) = app_with_rooms(kitty(), 60);
-        // Asked for once, and only for the rooms on screen: 26 rows of list below
-        // the filter line, one of them the section title.
+        // Asked for once, and only for the rooms on screen: 25 rows of list below
+        // the filter line and quick-filter chips, one of them the section title.
         let wanted = avatar_fetches(&mut commands);
-        assert_eq!(wanted.len(), 25, "{wanted:?}");
+        assert_eq!(wanted.len(), 24, "{wanted:?}");
         assert!(wanted.contains(&"mxc://example.org/avatar0".to_owned()));
         assert!(!wanted.contains(&"mxc://example.org/avatar40".to_owned()));
         frame(&mut app, &mut terminal);

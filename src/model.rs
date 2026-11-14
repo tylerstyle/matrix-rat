@@ -7,14 +7,16 @@ pub enum RoomKind {
     Favourite,
     Person,
     Room,
+    LowPriority,
 }
 
 impl RoomKind {
-    pub const SECTIONS: [RoomKind; 4] = [
+    pub const SECTIONS: [RoomKind; 5] = [
         RoomKind::Invite,
         RoomKind::Favourite,
         RoomKind::Person,
         RoomKind::Room,
+        RoomKind::LowPriority,
     ];
 
     pub fn title(self) -> &'static str {
@@ -23,8 +25,17 @@ impl RoomKind {
             RoomKind::Favourite => "Favourites",
             RoomKind::Person => "People",
             RoomKind::Room => "Rooms",
+            RoomKind::LowPriority => "Low priority",
         }
     }
+}
+
+/// Aggregated unread state for a space (or "All rooms").
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceUnread {
+    pub unread: bool,
+    pub notifications: u64,
+    pub mention: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +355,10 @@ pub struct Room {
     pub server_count: u64,
     /// Canonical room alias (e.g. `#rust:matrix.org`), if any.
     pub alias: Option<String>,
+    /// True for direct chats (`m.direct`), even when moved to Favourites or Low priority.
+    pub direct: bool,
+    /// True when the room's notification mode is `Mute` (excluded from space unread counts).
+    pub muted: bool,
 }
 
 pub const OWN_NAME: &str = "you";
@@ -393,6 +408,8 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         preview: None,
         server_count: 0,
         alias: None,
+        direct: kind == RoomKind::Person,
+        muted: false,
     }
 }
 

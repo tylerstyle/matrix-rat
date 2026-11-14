@@ -512,11 +512,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(line, inner);
         return;
     };
-    let prefix = if room.kind == RoomKind::Person {
-        "@"
-    } else {
-        "#"
-    };
+    let prefix = if room.direct { "@" } else { "#" };
     let in_thread = app.threads.open.is_some();
     let title = if in_thread {
         format!("Thread · {prefix}{}", room.name)
@@ -577,9 +573,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     if app.timeline.detached {
         let banner_rect = Rect::new(inner.x, inner.y, inner.width, 1);
+        let new_note = if app.timeline.detached_new > 0 {
+            format!(" · {} new", app.timeline.detached_new)
+        } else {
+            String::new()
+        };
         let text = match app.keymap.jump_to_newest_label() {
-            Some(key) => format!(" viewing older messages · {key} / click to return to now"),
-            None => " viewing older messages · click to return to now".to_owned(),
+            Some(key) => {
+                format!(" viewing older messages{new_note} · {key} / click to return to now")
+            }
+            None => format!(" viewing older messages{new_note} · click to return to now"),
         };
         let label = truncate(&text, banner_rect.width as usize);
         frame.render_widget(

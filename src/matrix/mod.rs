@@ -35,6 +35,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use futures::{StreamExt, pin_mut};
 use matrix_sdk::encryption::recovery::RecoveryState;
+use matrix_sdk::notification_settings::RoomNotificationMode;
 use matrix_sdk::{Client, RoomState, SessionChange};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::room_list_service::RoomListItem;
@@ -364,6 +365,7 @@ pub enum RoomCategory {
     Favourite,
     Person,
     Room,
+    LowPriority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,6 +389,10 @@ pub struct RoomSummary {
     pub avatar: Option<String>,
     /// Canonical alias (e.g. `#rust:matrix.org`), when set.
     pub alias: Option<String>,
+    /// True for direct chats (`m.direct`), even when moved to Favourites or Low priority.
+    pub direct: bool,
+    /// True when the room's notification mode is `Mute`.
+    pub muted: bool,
 }
 
 /// A user returned by the homeserver's user directory search.
@@ -458,6 +464,12 @@ pub enum MatrixEvent {
     PaginatedForwards {
         generation: u64,
         reached_end: bool,
+    },
+    /// While viewing a detached `/context` slice, how many new messages have
+    /// arrived on the live timeline meanwhile.
+    DetachedNew {
+        generation: u64,
+        count: u32,
     },
     /// Opening an event-focused timeline failed; the previous view was kept.
     JumpFailed {
@@ -600,6 +612,9 @@ impl std::fmt::Debug for MatrixEvent {
                 f,
                 "PaginatedForwards(generation {generation}, end: {reached_end})"
             ),
+            Self::DetachedNew { generation, count } => {
+                write!(f, "DetachedNew(generation {generation}, count: {count})")
+            }
             Self::JumpFailed { generation, reason } => {
                 write!(f, "JumpFailed(generation {generation}, {reason})")
             }
@@ -1127,6 +1142,8 @@ impl Worker {
         pin_mut!(space_changes);
         self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
 
+        let mut notify_changes = client.notification_settings().await.subscribe_to_changes();
+        let mut notify_open = true;
         let mut manager = manage::Manager::new(client.clone(), self.events.clone());
         let end = loop {
             tokio::select! {
@@ -1135,6 +1152,18 @@ impl Worker {
                         diff.apply(&mut space_filters);
                     }
                     self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
+                }
+                change = notify_changes.recv(), if notify_open => {
+                    match change {
+                        Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            self.emit(MatrixEvent::Rooms(
+                                summarize(&rooms, &mut previews, &ignored).await,
+                            ));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            notify_open = false;
+                        }
+                    }
                 }
                 incoming = verifier.next_incoming() => verifier.on_incoming(incoming).await,
                 Some(diffs) = entries.next() => {
@@ -1415,10 +1444,13 @@ async fn summarize(
             continue;
         }
         let direct = room.is_direct().await.unwrap_or(false);
+        let muted = room.notification_mode().await == Some(RoomNotificationMode::Mute);
         let category = if invited {
             RoomCategory::Invite
         } else if room.is_favourite() {
             RoomCategory::Favourite
+        } else if room.is_low_priority() {
+            RoomCategory::LowPriority
         } else if direct {
             RoomCategory::Person
         } else {
@@ -1467,6 +1499,8 @@ async fn summarize(
             alias: room
                 .canonical_alias()
                 .map(|alias| crate::text::sanitize_line(alias.as_str())),
+            direct,
+            muted,
         });
     }
     summaries

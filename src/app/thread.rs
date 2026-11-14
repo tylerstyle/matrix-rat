@@ -861,6 +861,8 @@ mod tests {
             preview: None,
             avatar: None,
             alias: None,
+            direct: false,
+            muted: false,
         }]));
         assert!(!app.thread_open());
         assert_eq!(app.rooms[app.active].id, "!b");

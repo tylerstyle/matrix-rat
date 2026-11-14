@@ -88,6 +88,10 @@ pub struct SidebarState {
     /// Position of the keyboard cursor among the visible rooms.
     pub cursor: usize,
     pub filter: LineEdit,
+    /// Session-only quick filter: only show unread rooms (plus the open room).
+    pub unread_only: bool,
+    /// Session-only quick filter: only show direct chats (plus the open room).
+    pub people_only: bool,
     pub width: u16,
     pub scroll: usize,
     pub reveal_cursor: bool,
@@ -138,6 +142,8 @@ pub struct TimelineState {
     pub forward_count_at_request: usize,
     /// Consecutive forward-pagination requests that added nothing visible.
     pub empty_forward_batches: u8,
+    /// New remote messages arrived on the room/thread's live timeline while detached.
+    pub detached_new: u32,
 }
 
 /// Where the composer's text was drawn, for mapping clicks to a cursor position.
@@ -485,6 +491,11 @@ impl App {
                         self.space.is_none()
                             || room.kind == RoomKind::Invite
                             || self.space_rooms.contains(&room.id)
+                    })
+                    .filter(|(i, room)| {
+                        *i == self.active
+                            || ((!self.sidebar.unread_only || room.shows_unread())
+                                && (!self.sidebar.people_only || room.direct))
                     })
                     .filter(|(_, room)| room.name.to_lowercase().contains(&needle))
                     .map(|(i, _)| i)
@@ -904,6 +915,7 @@ impl App {
             && !self.help_open
             && !self.images.viewer_open()
             && self.timeline.scroll == 0
+            && !self.timeline.detached
             && self.room().is_some_and(|room| room.id == notice.room_id)
             && self.threads.open_root() == notice.thread.as_deref();
         if self.notify_mode == crate::notify::NotifyMode::Off || watching || self.logged_out {
@@ -1079,6 +1091,8 @@ impl App {
         self.space = None;
         self.space_at = None;
         self.space_rooms.clear();
+        self.sidebar.unread_only = false;
+        self.sidebar.people_only = false;
         self.session_started = None;
         self.pending_notices.clear();
         if let Some(cache) = &self.notify_icons {
@@ -1202,10 +1216,8 @@ impl App {
         self.set_focus(Pane::Composer);
     }
 
-    /// The name of the selected space, for the room list's header. A space inside
-    /// another is shown with its parent, so it is clear where it sits.
-    pub fn space_name(&self) -> Option<String> {
-        let at = self.space_at?;
+    /// The display label of the space at `at` ("Parent › Child" for sub-spaces).
+    pub(crate) fn space_display_name(&self, at: usize) -> Option<String> {
         let space = self.spaces.get(at)?;
         if space.level == 0 {
             return Some(space.name.clone());
@@ -1214,6 +1226,78 @@ impl App {
             Some(parent) => Some(format!("{} › {}", parent.name, space.name)),
             None => Some(space.name.clone()),
         }
+    }
+
+    /// The name of the selected space, for the room list's header. A space inside
+    /// another is shown with its parent, so it is clear where it sits.
+    pub fn space_name(&self) -> Option<String> {
+        self.space_display_name(self.space_at?)
+    }
+
+    fn space_room_ids(&self, at: usize) -> std::collections::HashSet<&str> {
+        let mut ids = std::collections::HashSet::new();
+        let Some(space) = self.spaces.get(at) else {
+            return ids;
+        };
+        ids.extend(space.rooms.iter().map(String::as_str));
+        // A top-level space lists only what is directly in it; the rooms of the
+        // spaces inside it follow in the list and belong to the view as well,
+        // deduplicated so shared rooms inside the tree count once.
+        if space.level == 0 {
+            for inner in self.spaces[at + 1..].iter().take_while(|s| s.level > 0) {
+                ids.extend(inner.rooms.iter().map(String::as_str));
+            }
+        }
+        ids
+    }
+
+    fn aggregate_space_unread(&self, include: impl Fn(&Room) -> bool) -> crate::model::SpaceUnread {
+        let mut out = crate::model::SpaceUnread::default();
+        for room in &self.rooms {
+            if room.muted || !include(room) {
+                continue;
+            }
+            if room.shows_unread() {
+                out.unread = true;
+            }
+            out.notifications = out.notifications.saturating_add(u64::from(room.unread));
+            out.mention |= room.mention;
+        }
+        out
+    }
+
+    /// Aggregated unread state across all non-muted rooms.
+    pub fn all_spaces_unread(&self) -> crate::model::SpaceUnread {
+        self.aggregate_space_unread(|_| true)
+    }
+
+    /// Unread state for the space at `at` (sub-spaces count into their level-0 parent
+    /// without internal double-counting; muted rooms excluded).
+    pub fn space_unread(&self, at: usize) -> crate::model::SpaceUnread {
+        let ids = self.space_room_ids(at);
+        self.aggregate_space_unread(|room| ids.contains(room.id.as_str()))
+    }
+
+    /// Aggregated unread state for the currently selected space, if any.
+    pub fn selected_space_unread(&self) -> Option<crate::model::SpaceUnread> {
+        self.space_at.map(|at| self.space_unread(at))
+    }
+
+    /// Unread state for rooms in other spaces outside the currently selected space
+    /// (muted rooms excluded). Empty when "All rooms" is active.
+    pub fn other_spaces_unread(&self) -> crate::model::SpaceUnread {
+        if self.space_at.is_none() {
+            return crate::model::SpaceUnread::default();
+        }
+        let mut other_ids = std::collections::HashSet::new();
+        for space in &self.spaces {
+            for id in &space.rooms {
+                if !self.space_rooms.contains(id.as_str()) {
+                    other_ids.insert(id.as_str());
+                }
+            }
+        }
+        self.aggregate_space_unread(|room| other_ids.contains(room.id.as_str()))
     }
 
     /// Narrows the room list to the space at this position in `spaces` (`None`: all
@@ -1232,17 +1316,31 @@ impl App {
         let Some(at) = at.filter(|at| *at < self.spaces.len()) else {
             return;
         };
-        let space = &self.spaces[at];
-        self.space_rooms.extend(space.rooms.iter().cloned());
-        // A top-level space lists only what is directly in it; the rooms of the
-        // spaces inside it follow in the list and belong to the view as well.
-        if space.level == 0 {
-            for inner in self.spaces[at + 1..].iter().take_while(|s| s.level > 0) {
-                self.space_rooms.extend(inner.rooms.iter().cloned());
-            }
-        }
-        self.space = Some(space.id.clone());
+        self.space_rooms = self
+            .space_room_ids(at)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        self.space = Some(self.spaces[at].id.clone());
         self.space_at = Some(at);
+    }
+
+    fn toggle_sidebar_filter(&mut self, unread: bool) {
+        let cursor_id = self.cursor_room().map(|r| self.rooms[r].id.clone());
+        if unread {
+            self.sidebar.unread_only = !self.sidebar.unread_only;
+        } else {
+            self.sidebar.people_only = !self.sidebar.people_only;
+        }
+        let visible = self.visible_rooms();
+        if let Some(id) = cursor_id
+            && let Some(pos) = visible.iter().position(|&i| self.rooms[i].id == id)
+        {
+            self.sidebar.cursor = pos;
+        } else {
+            self.sidebar.cursor = self.sidebar.cursor.min(visible.len().saturating_sub(1));
+        }
+        self.sidebar.reveal_cursor = true;
     }
 
     /// Alt-S and the arrows in the room list: all rooms, then each space in turn.
@@ -2271,6 +2369,8 @@ impl App {
             Action::SearchEverywhere => self.open_global_search(),
             Action::SpaceNext => self.step_space(1),
             Action::SpacePrev => self.step_space(-1),
+            Action::FilterUnread => self.toggle_sidebar_filter(true),
+            Action::FilterPeople => self.toggle_sidebar_filter(false),
             Action::RoomPrev => self.step_room(-1),
             Action::RoomNext => self.step_room(1),
             Action::Save => {
@@ -2648,11 +2748,17 @@ impl App {
                         }
                         None => {
                             self.timeline.detached = false;
+                            self.timeline.detached_new = 0;
                             self.timeline.reached_end = false;
                             self.timeline.loading_newer = false;
                             self.timeline.want_newer = false;
                         }
                     }
+                }
+            }
+            MatrixEvent::DetachedNew { generation, count } => {
+                if generation == self.generation && self.timeline.detached {
+                    self.timeline.detached_new = count;
                 }
             }
             MatrixEvent::JumpFailed { generation, reason } => {
@@ -2807,6 +2913,7 @@ impl App {
                     RoomCategory::Favourite => RoomKind::Favourite,
                     RoomCategory::Person => RoomKind::Person,
                     RoomCategory::Room => RoomKind::Room,
+                    RoomCategory::LowPriority => RoomKind::LowPriority,
                 };
                 let known = old.remove(&summary.id);
                 // The server counts what the account's rules say deserves a
@@ -2842,6 +2949,8 @@ impl App {
                 room.avatar = summary.avatar;
                 room.preview = summary.preview;
                 room.alias = summary.alias;
+                room.direct = summary.direct;
+                room.muted = summary.muted;
                 room
             })
             .collect();
@@ -2930,9 +3039,16 @@ impl App {
     fn back(&mut self) {
         if self.help_open {
             self.help_open = false;
-        } else if self.focus == Pane::Sidebar && !self.sidebar.filter.is_empty() {
+        } else if self.focus == Pane::Sidebar
+            && (!self.sidebar.filter.is_empty()
+                || self.sidebar.unread_only
+                || self.sidebar.people_only)
+        {
             self.sidebar.filter.clear();
+            self.sidebar.unread_only = false;
+            self.sidebar.people_only = false;
             self.sidebar.cursor = 0;
+            self.sidebar.reveal_cursor = true;
         } else if self.focus != Pane::Composer {
             self.set_focus(Pane::Composer);
         } else if self.compose_mode != ComposeMode::Normal {
@@ -4382,6 +4498,8 @@ mod tests {
             marked_unread: false,
             avatar: None,
             alias: None,
+            direct: category == RoomCategory::Person,
+            muted: false,
         }
     }
 
@@ -6992,5 +7110,315 @@ mod tests {
             Some(Modal::New(popup)) if popup.stage == crate::manage::Stage::Direct
                 && popup.user.as_str() == "@alice:example.org"
         ));
+    }
+
+    #[test]
+    fn detached_banner_counts_new_messages_and_ignores_notices_when_detached() {
+        use crate::matrix::Notice;
+        use crate::notify::NotifyMode;
+        let (mut app, mut terminal, mut commands) = connected();
+        app.notify_mode = NotifyMode::Terminal;
+        app.rooms[0].messages = vec![remote("1", "ann", "live msg")];
+        drain(&mut commands);
+
+        let notice = |room: &str, thread: Option<&str>| {
+            MatrixEvent::Notice(Notice {
+                room_id: room.into(),
+                room: "Alpha".into(),
+                sender: "bob".into(),
+                body: "ping".into(),
+                highlight: false,
+                thread: thread.map(str::to_owned),
+            })
+        };
+
+        // Live view at bottom & focused: notice suppressed because message is on screen.
+        app.on_matrix(notice("!a", None));
+        assert!(app.take_notices().0.is_empty());
+
+        // Jump to an unloaded message: detached slice opens at generation `g`.
+        app.jump_to_event("!a".into(), "$old1".into(), None);
+        let generation = app.next_gen;
+        drain(&mut commands);
+        app.on_matrix(detached_timeline(
+            "!a",
+            generation,
+            "$old1",
+            None,
+            false,
+            vec![
+                remote("1", "bob", "old one"),
+                Message {
+                    item: Some(crate::model::ItemRef::Event("$old1".into())),
+                    ..remote("2", "bob", "old target")
+                },
+            ],
+        ));
+        assert!(app.timeline.detached);
+        assert_eq!(app.timeline.scroll, 0);
+
+        // Even with scroll == 0 and window focused, a new live message triggers a notice
+        // when viewing a detached slice (`!detached` is required for watching).
+        app.on_matrix(notice("!a", None));
+        assert_eq!(app.take_notices().0.len(), 1);
+
+        // Stale generation DetachedNew is ignored; matching generation updates banner.
+        app.on_matrix(MatrixEvent::DetachedNew {
+            generation: generation - 1,
+            count: 9,
+        });
+        assert_eq!(app.timeline.detached_new, 0);
+        app.on_matrix(MatrixEvent::DetachedNew {
+            generation,
+            count: 3,
+        });
+        assert_eq!(app.timeline.detached_new, 3);
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "viewing older messages · 3 new · End");
+
+        // Pagination within the same detached slice preserves detached_new.
+        app.on_matrix(detached_timeline(
+            "!a",
+            generation,
+            "$old1",
+            None,
+            false,
+            vec![remote("0", "bob", "older still")],
+        ));
+        assert_eq!(app.timeline.detached_new, 3);
+
+        // Works identically inside a detached thread.
+        app.jump_to_event("!a".into(), "$reply_old".into(), Some("$root".into()));
+        let tgen = app.next_gen;
+        app.on_matrix(detached_timeline(
+            "!a",
+            tgen,
+            "$reply_old",
+            Some("$root"),
+            false,
+            vec![Message {
+                item: Some(crate::model::ItemRef::Event("$reply_old".into())),
+                ..remote("3", "bob", "old reply")
+            }],
+        ));
+        app.on_matrix(MatrixEvent::DetachedNew {
+            generation: tgen,
+            count: 2,
+        });
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "viewing older messages · 2 new · End");
+
+        // Returning to live clears detached_new.
+        app.perform(Action::JumpToNewest);
+        assert_eq!(app.timeline.detached_new, 0);
+    }
+
+    #[test]
+    fn room_list_quick_filters_combine_and_reset_on_esc_and_logout() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let mut dm_fav = summary("!dmfav", "Alice", RoomCategory::Favourite, 1);
+        dm_fav.direct = true;
+        let mut dm_read = summary("!dm", "Dan", RoomCategory::Person, 0);
+        dm_read.direct = true;
+        let mut low_unread = summary("!low", "LowNews", RoomCategory::LowPriority, 4);
+        low_unread.direct = false;
+        let ch_unread = summary("!unread", "Rust", RoomCategory::Room, 2);
+        let ch_open = summary("!open", "OpenChannel", RoomCategory::Room, 0);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            dm_fav, ch_open, dm_read, ch_unread, low_unread,
+        ]));
+        app.open_room(1); // OpenChannel (`!open`, read group room)
+        drain(&mut commands);
+
+        let names = |app: &App| -> Vec<String> {
+            app.visible_rooms()
+                .into_iter()
+                .map(|i| app.rooms[i].name.clone())
+                .collect()
+        };
+        assert_eq!(
+            names(&app),
+            ["Alice", "Dan", "OpenChannel", "Rust", "LowNews"]
+        );
+
+        // Alt-O ("Unread only"): keeps unread rooms + OpenChannel (active).
+        app.on_event(key_mod(KeyCode::Char('o'), KeyModifiers::ALT));
+        assert!(app.sidebar.unread_only);
+        assert_eq!(names(&app), ["Alice", "OpenChannel", "Rust", "LowNews"]);
+
+        // Alt-D ("People only"): combined AND filter -> direct unread (Alice) + OpenChannel (active).
+        app.on_event(key_mod(KeyCode::Char('d'), KeyModifiers::ALT));
+        assert!(app.sidebar.people_only);
+        assert_eq!(names(&app), ["Alice", "OpenChannel"]);
+
+        // Toggle Unread off via clicking chip -> People only (Alice in Favourites + Dan + OpenChannel).
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "● Unread");
+        app.on_event(click(col + 2, row));
+        assert!(!app.sidebar.unread_only);
+        assert_eq!(names(&app), ["Alice", "Dan", "OpenChannel"]);
+
+        // Combine with space + text filter.
+        app.on_matrix(MatrixEvent::Spaces(vec![crate::matrix::SpaceSummary {
+            id: "!sp".into(),
+            name: "Friends".into(),
+            level: 0,
+            rooms: vec!["!dmfav".into(), "!open".into()],
+        }]));
+        app.select_space(Some(0));
+        assert_eq!(names(&app), ["Alice", "OpenChannel"]);
+        app.sidebar.filter.set("ali");
+        assert_eq!(names(&app), ["Alice"]);
+        app.sidebar.filter.clear();
+
+        // Command palette toggles People off cleanly.
+        app.on_event(key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        type_text(&mut app, "Filter: People");
+        app.on_event(key(KeyCode::Enter));
+        assert!(!app.sidebar.people_only);
+
+        // Narrow sidebar (inner.width < 18): compact indicator instead of chip strip.
+        app.sidebar.width = 16;
+        app.perform(Action::FilterUnread);
+        app.perform(Action::FilterPeople);
+        redraw(&mut app, &mut terminal);
+        let screen = screen_text(&terminal);
+        assert!(!screen.contains("● Unread"), "{screen}");
+        find(&terminal, " UP");
+
+        // Esc in sidebar resets quick filters and typed filter.
+        app.sidebar.filter.set("rust");
+        app.set_focus(Pane::Sidebar);
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.sidebar.filter.is_empty());
+        assert!(!app.sidebar.unread_only);
+        assert!(!app.sidebar.people_only);
+
+        // Session-only: reset_session clears quick filters, and Config ignores them.
+        app.perform(Action::FilterUnread);
+        app.perform(Action::FilterPeople);
+        app.reset_session();
+        assert!(!app.sidebar.unread_only);
+        assert!(!app.sidebar.people_only);
+        let cfg = Config::parse("unread_only = true\npeople_only = true\n").unwrap();
+        let fresh = App::new(&cfg, PathBuf::new(), None);
+        assert!(!fresh.sidebar.unread_only);
+        assert!(!fresh.sidebar.people_only);
+    }
+
+    #[test]
+    fn space_unread_counts_subspaces_muted_shared_other_indicator_and_palette() {
+        use crate::matrix::SpaceSummary;
+        let (mut app, mut terminal, _commands) = connected();
+        let r_parent = summary("!rp", "ParentRoom", RoomCategory::Room, 2);
+        let mut r_sub = summary("!rs", "SubRoom", RoomCategory::Room, 3);
+        r_sub.mention = true;
+        let mut r_muted = summary("!rm", "MutedRoom", RoomCategory::Room, 9);
+        r_muted.muted = true;
+        r_muted.mention = true;
+        let r_shared = summary("!rsh", "SharedRoom", RoomCategory::Room, 4);
+        let mut r_marked = summary("!rmk", "MarkedRoom", RoomCategory::LowPriority, 0);
+        r_marked.marked_unread = true;
+        let mut r_direct_low = summary("!dl", "Dana", RoomCategory::LowPriority, 0);
+        r_direct_low.direct = true;
+        r_direct_low.marked_unread = true;
+
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            r_parent,
+            r_sub,
+            r_muted,
+            r_shared,
+            r_marked,
+            r_direct_low,
+        ]));
+        app.on_matrix(MatrixEvent::Spaces(vec![
+            // Parent Work lists !rp AND !rs directly; Team also lists !rs and !rm and !rsh -> !rs must not double-count, !rm is muted!
+            SpaceSummary {
+                id: "!work".into(),
+                name: "Work".into(),
+                level: 0,
+                rooms: vec!["!rp".into(), "!rs".into()],
+            },
+            SpaceSummary {
+                id: "!team".into(),
+                name: "Team".into(),
+                level: 1,
+                rooms: vec!["!rs".into(), "!rm".into(), "!rsh".into()],
+            },
+            // Second top-level space Play shares !rsh and contains marked-unread !rmk.
+            SpaceSummary {
+                id: "!play".into(),
+                name: "Play".into(),
+                level: 0,
+                rooms: vec!["!rsh".into(), "!rmk".into()],
+            },
+        ]));
+
+        // Work (level 0): !rp(2) + !rs(3,@) + !rsh(4) = 9, mention = true (!rm muted excluded, !rs counted once!).
+        assert_eq!(
+            app.space_unread(0),
+            crate::model::SpaceUnread {
+                unread: true,
+                notifications: 9,
+                mention: true,
+            }
+        );
+        // Team (sub-space): !rs(3,@) + !rsh(4) = 7, mention = true.
+        assert_eq!(
+            app.space_unread(1),
+            crate::model::SpaceUnread {
+                unread: true,
+                notifications: 7,
+                mention: true,
+            }
+        );
+        // Play (level 0): !rsh(4) + !rmk(marked, 0) = 4, unread = true, mention = false (!rsh counts in BOTH Work and Play!).
+        assert_eq!(
+            app.space_unread(2),
+            crate::model::SpaceUnread {
+                unread: true,
+                notifications: 4,
+                mention: false,
+            }
+        );
+
+        // Selecting Work: other_spaces_unread sees !rmk (marked_unread, 0 notifications -> unread: true), ignores Team rooms already in Work!
+        app.select_space(Some(0));
+        assert_eq!(
+            app.other_spaces_unread(),
+            crate::model::SpaceUnread {
+                unread: true,
+                notifications: 0,
+                mention: false,
+            }
+        );
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "◂ Work 9 ▸ •");
+
+        // Selecting Play: other spaces (!rp 2 + !rs 3,@) -> 5 unread + mention indicator "+5".
+        app.select_space(Some(2));
+        assert_eq!(
+            app.other_spaces_unread(),
+            crate::model::SpaceUnread {
+                unread: true,
+                notifications: 5,
+                mention: true,
+            }
+        );
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "◂ Play 4 ▸ +5");
+
+        // All rooms: no "other" indicator.
+        app.select_space(None);
+        assert!(!app.other_spaces_unread().unread);
+
+        // Command palette shows spaces with unread counts and switches to Work › Team.
+        app.on_event(key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        redraw(&mut app, &mut terminal);
+        type_text(&mut app, "Work Team");
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "7 unread · @");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.space_name().as_deref(), Some("Work › Team"));
     }
 }

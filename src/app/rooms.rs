@@ -520,26 +520,39 @@ impl App {
             }
             Click::MemberRemove => self.remove_member(),
             Click::MemberIgnore => self.toggle_ignore_member(),
-            Click::Favourite => {
-                let Some(room) = self.target_room().and_then(|index| self.rooms.get(index)) else {
-                    self.show_toast("No room is open");
-                    return;
-                };
-                if room.kind == RoomKind::Invite {
-                    self.show_toast("Accept the invitation first");
-                    return;
-                }
-                let on = room.kind != RoomKind::Favourite;
-                let room_id = room.id.clone();
-                if !self.manage(ManageCmd::SetFavourite { room_id, on }) {
-                    self.show_toast(NO_ACCOUNT);
-                }
-            }
+            Click::Favourite => self.toggle_room_tag(false),
+            Click::LowPriority => self.toggle_room_tag(true),
             // The name above the messages is the open room's, wherever the focus is.
             Click::OpenInfo => {
                 let open = (self.active < self.rooms.len()).then_some(self.active);
                 self.open_info(open, None);
             }
+        }
+    }
+
+    fn toggle_room_tag(&mut self, low_priority: bool) {
+        let Some(room) = self.target_room().and_then(|index| self.rooms.get(index)) else {
+            self.show_toast("No room is open");
+            return;
+        };
+        if room.kind == RoomKind::Invite {
+            self.show_toast("Accept the invitation first");
+            return;
+        }
+        let room_id = room.id.clone();
+        let command = if low_priority {
+            ManageCmd::SetLowPriority {
+                room_id,
+                on: room.kind != RoomKind::LowPriority,
+            }
+        } else {
+            ManageCmd::SetFavourite {
+                room_id,
+                on: room.kind != RoomKind::Favourite,
+            }
+        };
+        if !self.manage(command) {
+            self.show_toast(NO_ACCOUNT);
         }
     }
 
@@ -566,22 +579,48 @@ impl App {
             return;
         }
         let (command, pending, busy) = match row {
-            InfoRow::Favourite => {
-                let on = !info
-                    .details
-                    .as_ref()
-                    .map_or(info.kind == RoomKind::Favourite, |details| {
-                        details.favourite
-                    });
+            InfoRow::Favourite | InfoRow::LowPriority => {
+                let low_priority = row == InfoRow::LowPriority;
+                let on = !info.details.as_ref().map_or(
+                    if low_priority {
+                        info.kind == RoomKind::LowPriority
+                    } else {
+                        info.kind == RoomKind::Favourite
+                    },
+                    |details| {
+                        if low_priority {
+                            details.low_priority
+                        } else {
+                            details.favourite
+                        }
+                    },
+                );
                 // Shown at once; the server's answer corrects it if need be.
                 if let Some(details) = &mut info.details {
-                    details.favourite = on;
+                    if low_priority {
+                        details.low_priority = on;
+                        if on {
+                            details.favourite = false;
+                        }
+                    } else {
+                        details.favourite = on;
+                        if on {
+                            details.low_priority = false;
+                        }
+                    }
                 }
-                (
-                    ManageCmd::SetFavourite { room_id, on },
-                    Pending::Change(Change::Favourite(on)),
-                    "Saving…",
-                )
+                let (cmd, change) = if low_priority {
+                    (
+                        ManageCmd::SetLowPriority { room_id, on },
+                        Change::LowPriority(on),
+                    )
+                } else {
+                    (
+                        ManageCmd::SetFavourite { room_id, on },
+                        Change::Favourite(on),
+                    )
+                };
+                (cmd, Pending::Change(change), "Saving…")
             }
             InfoRow::Notify => {
                 let Some(details) = &mut info.details else {
@@ -891,6 +930,8 @@ impl App {
             Change::Topic => "Topic changed",
             Change::Favourite(true) => "Added to favourites",
             Change::Favourite(false) => "Removed from favourites",
+            Change::LowPriority(true) => "Marked low priority",
+            Change::LowPriority(false) => "Removed from low priority",
             Change::Notify => "",
         };
         match &mut self.modal {
@@ -1030,6 +1071,7 @@ fn demo_details(room: &crate::model::Room) -> RoomDetails {
         joined: members.len() as u64,
         invited: 0,
         favourite: room.kind == RoomKind::Favourite,
+        low_priority: room.kind == RoomKind::LowPriority,
         notify: Some(NotifyLevel::All),
         can_rename: false,
         can_set_topic: false,
@@ -1103,6 +1145,8 @@ mod tests {
             preview: None,
             avatar: None,
             alias: None,
+            direct: category == RoomCategory::Person,
+            muted: false,
         }
     }
 
@@ -1690,6 +1734,26 @@ mod tests {
             },
         );
         assert!(info(&app).details.as_ref().unwrap().favourite);
+        // Low priority is mutually exclusive with favourite.
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(info(&app).current(), Some(InfoRow::LowPriority));
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetLowPriority { room_id, on: true }] if room_id == ROOM
+        ));
+        {
+            let d = info(&app).details.as_ref().unwrap();
+            assert!(d.low_priority && !d.favourite);
+        }
+        answer(
+            &mut app,
+            ManageEvent::Done {
+                room_id: ROOM.into(),
+                change: Change::LowPriority(true),
+                result: Ok(()),
+            },
+        );
         // Notifications: arrows step through the three modes.
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Right));
@@ -2285,7 +2349,10 @@ mod tests {
             summary("!inv:example.org", "Party", RoomCategory::Room),
         ]));
         assert_eq!(info(&app).confirm, None);
-        assert_eq!(info(&app).rows(), [InfoRow::Favourite, InfoRow::Leave]);
+        assert_eq!(
+            info(&app).rows(),
+            [InfoRow::Favourite, InfoRow::LowPriority, InfoRow::Leave]
+        );
         let text = screen(&mut app, &mut terminal);
         find(&text, "Leave room");
         assert!(!text.contains("Decline invitation"));
@@ -2341,6 +2408,7 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected();
         with_info(&mut app, &mut commands);
         // In the middle of renaming, the right to do so is taken away.
+        app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Enter));
@@ -2575,6 +2643,8 @@ mod tests {
         app.on_event(key(KeyCode::Home));
         find(&screen(&mut app, &mut small), "│ Rats ");
         app.on_event(key(KeyCode::Down));
+        find(&screen(&mut app, &mut small), "› Low priority");
+        app.on_event(key(KeyCode::Down));
         find(&screen(&mut app, &mut small), "› Notifications");
     }
 
@@ -2795,5 +2865,134 @@ mod tests {
         app.on_event(key(KeyCode::Delete));
         assert!(info(&app).confirm.is_some());
         assert_eq!(info(&app).filter, "bo");
+    }
+
+    #[test]
+    fn low_priority_section_order_toggles_and_mutual_exclusion() {
+        assert_eq!(
+            RoomKind::SECTIONS,
+            [
+                RoomKind::Invite,
+                RoomKind::Favourite,
+                RoomKind::Person,
+                RoomKind::Room,
+                RoomKind::LowPriority,
+            ]
+        );
+        assert_eq!(RoomKind::LowPriority.title(), "Low priority");
+
+        let (mut app, mut terminal, mut commands) = connected();
+        let mut dm = summary("!dm:example.org", "Dan", RoomCategory::Person);
+        dm.direct = true;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Rats", RoomCategory::Room),
+            dm,
+            summary("!fav:example.org", "Fav", RoomCategory::Favourite),
+            summary("!inv:example.org", "Invited", RoomCategory::Invite),
+        ]));
+        sent(&mut commands);
+
+        // Sidebar places Low priority after Rooms when synced, and direct DM keeps `@` prefix.
+        let mut low_dm = summary("!dm:example.org", "Dan", RoomCategory::LowPriority);
+        low_dm.direct = true;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Rats", RoomCategory::Room),
+            low_dm,
+            summary("!fav:example.org", "Fav", RoomCategory::Favourite),
+            summary("!inv:example.org", "Invited", RoomCategory::Invite),
+        ]));
+        assert_eq!(app.rooms[1].kind, RoomKind::LowPriority);
+        assert!(app.rooms[1].direct);
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Low priority");
+        let order: Vec<_> = app
+            .visible_rooms()
+            .into_iter()
+            .map(|i| app.rooms[i].name.as_str())
+            .collect();
+        assert_eq!(order, ["Invited", "Fav", "Rats", "Dan"]);
+
+        // Room info toggles LowPriority <-> Favourite cleanly (mutually exclusive).
+        app.open_room(0); // Rats
+        app.on_event(key(KeyCode::F(4)));
+        sent(&mut commands);
+        answer(
+            &mut app,
+            ManageEvent::Info {
+                room_id: ROOM.into(),
+                result: Ok(Box::new(details())),
+            },
+        );
+        // Select Favourite and turn it on.
+        app.on_event(key(KeyCode::Enter));
+        assert!(info(&app).details.as_ref().unwrap().favourite);
+        assert!(!info(&app).details.as_ref().unwrap().low_priority);
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetFavourite { room_id, on: true }] if room_id == ROOM
+        ));
+        answer(
+            &mut app,
+            ManageEvent::Done {
+                room_id: ROOM.into(),
+                change: Change::Favourite(true),
+                result: Ok(()),
+            },
+        );
+        // Step down to Low priority and turn it on -> Favourite clears optimistically.
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(info(&app).current(), Some(InfoRow::LowPriority));
+        app.on_event(key(KeyCode::Enter));
+        assert!(info(&app).details.as_ref().unwrap().low_priority);
+        assert!(!info(&app).details.as_ref().unwrap().favourite);
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetLowPriority { room_id, on: true }] if room_id == ROOM
+        ));
+        answer(
+            &mut app,
+            ManageEvent::Done {
+                room_id: ROOM.into(),
+                change: Change::LowPriority(true),
+                result: Ok(()),
+            },
+        );
+        assert_eq!(app.toast.as_ref().unwrap().0, "Marked low priority");
+        app.on_event(key(KeyCode::Esc));
+        sent(&mut commands); // StopInfo from closing RoomInfo
+
+        // Server summary sync updates RoomKind::LowPriority; Command palette toggles it off.
+        let mut dm2 = summary("!dm:example.org", "Dan", RoomCategory::LowPriority);
+        dm2.direct = true;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Rats", RoomCategory::LowPriority),
+            dm2,
+            summary("!fav:example.org", "Fav", RoomCategory::Favourite),
+            summary("!inv:example.org", "Invited", RoomCategory::Invite),
+        ]));
+        assert_eq!(app.rooms[0].kind, RoomKind::LowPriority);
+        app.on_event(ctrl('p'));
+        type_text(&mut app, "Low priority");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetLowPriority { room_id, on: false }] if room_id == ROOM
+        ));
+
+        // Context menu on Dan (LowPriority) shows "Remove from low priority"; on Invited refuses.
+        app.set_focus(Pane::Sidebar);
+        app.sidebar.cursor = 3; // Dan
+        app.perform(Action::ContextMenu);
+        assert!(
+            screen(&mut app, &mut terminal).contains("Remove from low priority"),
+            "{}",
+            screen(&mut app, &mut terminal)
+        );
+        app.on_event(key(KeyCode::Esc));
+
+        app.open_room(3); // Invited
+        sent(&mut commands);
+        app.manage_click(Click::LowPriority);
+        assert!(sent(&mut commands).is_empty());
     }
 }

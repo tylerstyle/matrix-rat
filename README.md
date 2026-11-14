@@ -123,8 +123,9 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Alt-U` | jump to the first unread message (the "new" line) |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
 | `Ctrl-N` | join a room, start a chat (search people by name or ID), create a room |
-| `F4` | room details and members (invite, rename, notifications, favourite, ignore, leave) |
-| `Alt-S` | step through your spaces |
+| `F4` | room details and members (invite, rename, notifications, favourite, low priority, ignore, leave) |
+| `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`) |
+| `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
 | `F2` / `F3` | settings / next theme |
 | `Ctrl-Q` | quit |
@@ -197,7 +198,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`.
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `edit_last` (in an empty composer: edit your last message; otherwise it selects a message like `select_older`).

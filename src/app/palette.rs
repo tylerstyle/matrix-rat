@@ -7,7 +7,7 @@ use crate::action::Action;
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::modal::{Modal, Setting, SettingsMenu};
 use crate::model::{MsgKind, RoomKind, SendState};
-use crate::palette::{MessageCaps, Palette, PaletteContext, RoomItem, Target};
+use crate::palette::{MessageCaps, Palette, PaletteContext, RoomItem, SpaceItem, Target};
 use crate::theme::Theme;
 
 impl App {
@@ -86,6 +86,24 @@ impl App {
             theme_dark: self.theme_dark.clone(),
             theme_light: self.theme_light.clone(),
             themes: self.theme_names.clone(),
+            filter_unread: self.sidebar.unread_only,
+            filter_people: self.sidebar.people_only,
+            all_spaces_unread: self.all_spaces_unread(),
+            all_spaces_active: self.space_at.is_none(),
+            spaces: self
+                .spaces
+                .iter()
+                .enumerate()
+                .map(|(index, space)| SpaceItem {
+                    index,
+                    id: space.id.clone(),
+                    name: self
+                        .space_display_name(index)
+                        .unwrap_or_else(|| space.name.clone()),
+                    unread: self.space_unread(index),
+                    active: self.space_at == Some(index),
+                })
+                .collect(),
             rooms,
             selection,
             target: self.manage_target(),
@@ -145,6 +163,20 @@ impl App {
                     self.perform(Action::OpenRoom(index));
                 } else {
                     self.show_toast("That room is no longer available");
+                }
+            }
+            Target::Space(None) => self.select_space(None),
+            Target::Space(Some((at, id))) => {
+                let resolved = self
+                    .spaces
+                    .get(at)
+                    .is_some_and(|s| s.id == id)
+                    .then_some(at)
+                    .or_else(|| self.spaces.iter().position(|s| s.id == id));
+                if let Some(index) = resolved {
+                    self.select_space(Some(index));
+                } else {
+                    self.show_toast("That space is no longer available");
                 }
             }
             Target::Theme(name) => {

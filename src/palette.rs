@@ -1,5 +1,7 @@
 //! Command palette state, entry collection, and fuzzy ranking.
 
+use std::borrow::Cow;
+
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
@@ -8,12 +10,14 @@ use crate::app::ComposeMode;
 use crate::keymap;
 use crate::lineedit::LineEdit;
 use crate::modal::Setting;
+use crate::model::SpaceUnread;
 
 /// Broad grouping shown alongside each command palette entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
     Action,
     Room,
+    Space,
     Settings,
     Theme,
 }
@@ -23,6 +27,7 @@ impl Category {
         match self {
             Self::Action => "Action",
             Self::Room => "Room",
+            Self::Space => "Space",
             Self::Settings => "Setting",
             Self::Theme => "Theme",
         }
@@ -36,6 +41,8 @@ pub enum Target {
     /// Matrix room id, resolved back to `App::rooms` when executed so background sync
     /// updates cannot redirect to a shifted index.
     Room(String),
+    /// Switch to "All rooms" (`None`) or the space at `(index, id)`.
+    Space(Option<(usize, String)>),
     Theme(String),
 }
 
@@ -61,6 +68,16 @@ pub struct RoomItem {
     pub id: String,
     pub name: String,
     pub unread: u32,
+    pub active: bool,
+}
+
+/// Space metadata needed to populate the space-switching entries.
+#[derive(Debug, Clone)]
+pub struct SpaceItem {
+    pub index: usize,
+    pub id: String,
+    pub name: String,
+    pub unread: SpaceUnread,
     pub active: bool,
 }
 
@@ -105,6 +122,11 @@ pub struct PaletteContext {
     pub theme_dark: Option<String>,
     pub theme_light: Option<String>,
     pub themes: Vec<String>,
+    pub filter_unread: bool,
+    pub filter_people: bool,
+    pub all_spaces_unread: SpaceUnread,
+    pub all_spaces_active: bool,
+    pub spaces: Vec<SpaceItem>,
     pub rooms: Vec<RoomItem>,
     pub selection: MessageCaps,
     /// The room that room-level commands (room info, invite, favourite, leave) would
@@ -137,6 +159,7 @@ impl Palette {
         collect_actions(&ctx, &mut entries);
         collect_room_management(&ctx, &mut entries);
         collect_rooms(&ctx, &mut entries);
+        collect_spaces(&ctx, &mut entries);
         collect_settings(&ctx, &mut entries);
         collect_themes(&ctx, &mut entries);
 
@@ -383,26 +406,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         }
         seen.push(binding.action);
 
-        let (title, aliases): (&str, &[&str]) = match binding.action {
-            Action::Reply if ctx.selection.failed_retry => {
-                ("Try sending again", &["retry failed message", "reply"])
-            }
-            Action::SearchEverywhere => (
-                binding.description,
-                &["search messages", "global search", "find across rooms"],
-            ),
-            Action::FocusRoomFilter => (binding.description, &["filter rooms", "alt-r"]),
-            Action::Open => (binding.description, &["view picture"]),
-            Action::OpenThread => (binding.description, &["thread", "replies"]),
-            Action::JumpToReply => (binding.description, &["parent", "original", "reply"]),
-            Action::Attach => (binding.description, &["upload", "send file", "attach"]),
-            Action::ToggleHelp => (binding.description, &["key bindings", "shortcuts", "help"]),
-            Action::JumpToUnread => (
-                binding.description,
-                &["new messages", "unread line", "first new message"],
-            ),
-            _ => (binding.description, &[]),
-        };
+        let (title, aliases) = action_meta(binding.action, binding.description, ctx);
 
         let enabled = action_enabled(binding.action, ctx);
         let group = if action_contextual(binding.action, ctx) {
@@ -415,7 +419,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             out,
             Target::Action(binding.action),
             Category::Action,
-            title,
+            title.clone(),
             Some(binding.label.to_string()),
             title,
             aliases,
@@ -432,6 +436,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             continue;
         }
         seen.push(binding.action);
+        let (title, aliases) = action_meta(binding.action, binding.description, ctx);
         let enabled = action_enabled(binding.action, ctx);
         let group = if action_contextual(binding.action, ctx) {
             0
@@ -442,10 +447,10 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             out,
             Target::Action(binding.action),
             Category::Action,
-            binding.description,
+            title.clone(),
             None,
-            binding.description,
-            &[],
+            title,
+            aliases,
             enabled,
             group,
         );
@@ -537,7 +542,68 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::AcceptInvite | Action::DeclineInvite => ctx.in_invite,
         Action::RoomInfo => ctx.target.is_some(),
         Action::Search => ctx.has_room && !ctx.in_invite,
+        Action::SpaceNext | Action::SpacePrev => !ctx.spaces.is_empty(),
         _ => true,
+    }
+}
+
+fn action_meta<'a>(
+    action: Action,
+    description: &'a str,
+    ctx: &PaletteContext,
+) -> (Cow<'a, str>, &'static [&'static str]) {
+    match action {
+        Action::Reply if ctx.selection.failed_retry => (
+            Cow::Borrowed("Try sending again"),
+            &["retry failed message", "reply"],
+        ),
+        Action::SearchEverywhere => (
+            Cow::Borrowed(description),
+            &["search messages", "global search", "find across rooms"],
+        ),
+        Action::FocusRoomFilter => (Cow::Borrowed(description), &["filter rooms", "alt-r"]),
+        Action::FilterUnread => (
+            if ctx.filter_unread {
+                Cow::Owned(format!("{description} (on)"))
+            } else {
+                Cow::Borrowed(description)
+            },
+            &[
+                "unread rooms only",
+                "unread only",
+                "quick filter",
+                "unread filter",
+            ],
+        ),
+        Action::FilterPeople => (
+            if ctx.filter_people {
+                Cow::Owned(format!("{description} (on)"))
+            } else {
+                Cow::Borrowed(description)
+            },
+            &[
+                "direct chats only",
+                "people only",
+                "dm filter",
+                "quick filter",
+            ],
+        ),
+        Action::Open => (Cow::Borrowed(description), &["view picture"]),
+        Action::OpenThread => (Cow::Borrowed(description), &["thread", "replies"]),
+        Action::JumpToReply => (Cow::Borrowed(description), &["parent", "original", "reply"]),
+        Action::Attach => (
+            Cow::Borrowed(description),
+            &["upload", "send file", "attach"],
+        ),
+        Action::ToggleHelp => (
+            Cow::Borrowed(description),
+            &["key bindings", "shortcuts", "help"],
+        ),
+        Action::JumpToUnread => (
+            Cow::Borrowed(description),
+            &["new messages", "unread line", "first new message"],
+        ),
+        _ => (Cow::Borrowed(description), &[]),
     }
 }
 
@@ -557,11 +623,63 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::JumpToNewest
                 | Action::JumpToOldest
         ),
-        Pane::Sidebar => action == Action::FocusRoomFilter,
+        Pane::Sidebar => matches!(
+            action,
+            Action::FocusRoomFilter | Action::FilterUnread | Action::FilterPeople
+        ),
         Pane::Composer => matches!(
             action,
             Action::OpenEmoji | Action::Attach | Action::FocusRoomFilter
         ),
+    }
+}
+
+fn format_space_hint(count: SpaceUnread, active: bool) -> Option<String> {
+    let badge = if count.notifications > 0 && count.mention {
+        Some(format!("{} unread · @", count.notifications))
+    } else if count.notifications > 0 {
+        Some(format!("{} unread", count.notifications))
+    } else if count.unread {
+        Some("unread".to_owned())
+    } else {
+        None
+    };
+    match (badge, active) {
+        (Some(b), true) => Some(format!("{b} · current")),
+        (Some(b), false) => Some(b),
+        (None, true) => Some("current".to_owned()),
+        (None, false) => None,
+    }
+}
+
+fn collect_spaces(ctx: &PaletteContext, out: &mut Vec<Entry>) {
+    if ctx.spaces.is_empty() {
+        return;
+    }
+    push_entry(
+        out,
+        Target::Space(None),
+        Category::Space,
+        "Space: All rooms",
+        format_space_hint(ctx.all_spaces_unread, ctx.all_spaces_active),
+        "All rooms",
+        &["all spaces", "show all rooms"],
+        true,
+        3,
+    );
+    for space in &ctx.spaces {
+        let space_alias = format!("space {}", space.name);
+        push_entry(
+            out,
+            Target::Space(Some((space.index, space.id.clone()))),
+            Category::Space,
+            format!("Space: {}", space.name),
+            format_space_hint(space.unread, space.active),
+            space.name.clone(),
+            &[&space_alias],
+            true,
+            3,
+        );
     }
 }
 
@@ -602,12 +720,13 @@ fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
     let in_room = ctx.target.is_some() && !invite;
     let invite_title = format!("Invite someone to {name}…");
     let favourite_title = format!("Favourite on/off for {name}");
+    let low_priority_title = format!("Low priority on/off for {name}");
     let leave_title = if invite {
         format!("Decline the invitation to {name}…")
     } else {
         format!("Leave {name}…")
     };
-    let entries: [(Action, &str, &[&str], bool); 6] = [
+    let entries: [(Action, &str, &[&str], bool); 7] = [
         (
             Action::Manage(Click::Stage(Stage::Join)),
             "Join a room…",
@@ -636,6 +755,12 @@ fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             Action::Manage(Click::Favourite),
             &favourite_title,
             &["favorite", "star", "pin room"],
+            in_room,
+        ),
+        (
+            Action::Manage(Click::LowPriority),
+            &low_priority_title,
+            &["low priority", "demote", "quiet"],
             in_room,
         ),
         (
@@ -906,6 +1031,11 @@ mod tests {
                 "gruvbox-dark".to_owned(),
                 "nord".to_owned(),
             ],
+            filter_unread: false,
+            filter_people: false,
+            all_spaces_unread: SpaceUnread::default(),
+            all_spaces_active: true,
+            spaces: Vec::new(),
             rooms: vec![
                 RoomItem {
                     id: "!rust:x".to_owned(),
@@ -1181,6 +1311,7 @@ mod tests {
             ("Invite someone to rust…".to_owned(), true)
         );
         assert!(title(&palette, "Favourite on/off for rust").1);
+        assert!(title(&palette, "Low priority on/off for rust").1);
         assert!(title(&palette, "Room info").1);
         // An invitation can be looked at and declined, nothing else.
         let mut ctx = sample_context();
@@ -1192,12 +1323,19 @@ mod tests {
         );
         assert!(!title(&palette, "Invite someone to Party").1);
         assert!(!title(&palette, "Favourite on/off for Party").1);
+        assert!(!title(&palette, "Low priority on/off for Party").1);
         assert!(title(&palette, "Room info").1);
         // No room to act on (even with one open behind a filtered list): all off.
         let mut ctx = sample_context();
         ctx.target = None;
         let palette = Palette::open(ctx);
-        for start in ["Leave", "Invite someone", "Favourite on/off", "Room info"] {
+        for start in [
+            "Leave",
+            "Invite someone",
+            "Favourite on/off",
+            "Low priority on/off",
+            "Room info",
+        ] {
             assert!(!title(&palette, start).1, "{start}");
         }
         // The ways to a new chat or room need no room at all.
@@ -1214,5 +1352,78 @@ mod tests {
         ctx.target = Some(("x".repeat(200), false));
         let palette = Palette::open(ctx);
         assert!(title(&palette, "Leave").0.chars().count() < 50);
+    }
+
+    #[test]
+    fn spaces_and_filter_entries_reflect_state_and_counts() {
+        let mut ctx = sample_context();
+        ctx.filter_unread = true;
+        ctx.filter_people = false;
+        ctx.all_spaces_unread = SpaceUnread {
+            unread: true,
+            notifications: 7,
+            mention: false,
+        };
+        ctx.all_spaces_active = false;
+        ctx.spaces = vec![
+            SpaceItem {
+                index: 0,
+                id: "!work:x".into(),
+                name: "Work".into(),
+                unread: SpaceUnread {
+                    unread: true,
+                    notifications: 5,
+                    mention: true,
+                },
+                active: true,
+            },
+            SpaceItem {
+                index: 1,
+                id: "!fun:x".into(),
+                name: "Work › Fun".into(),
+                unread: SpaceUnread {
+                    unread: true,
+                    notifications: 0,
+                    mention: false,
+                },
+                active: false,
+            },
+        ];
+
+        let p = Palette::open(ctx);
+        let unread_entry = p
+            .entries
+            .iter()
+            .find(|e| e.target == Target::Action(Action::FilterUnread))
+            .unwrap();
+        assert_eq!(unread_entry.title, "Filter: Unread only (on)");
+        let people_entry = p
+            .entries
+            .iter()
+            .find(|e| e.target == Target::Action(Action::FilterPeople))
+            .unwrap();
+        assert_eq!(people_entry.title, "Filter: People only");
+
+        let all_space = p
+            .entries
+            .iter()
+            .find(|e| e.target == Target::Space(None))
+            .unwrap();
+        assert_eq!(all_space.category, Category::Space);
+        assert_eq!(all_space.hint.as_deref(), Some("7 unread"));
+
+        let work = p
+            .entries
+            .iter()
+            .find(|e| e.target == Target::Space(Some((0, "!work:x".into()))))
+            .unwrap();
+        assert_eq!(work.hint.as_deref(), Some("5 unread · @ · current"));
+
+        let fun = p
+            .entries
+            .iter()
+            .find(|e| e.target == Target::Space(Some((1, "!fun:x".into()))))
+            .unwrap();
+        assert_eq!(fun.hint.as_deref(), Some("unread"));
     }
 }

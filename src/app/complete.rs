@@ -460,6 +460,8 @@ mod tests {
             avatar: None,
             preview: None,
             alias: alias.map(str::to_owned),
+            direct: false,
+            muted: false,
         }
     }
 

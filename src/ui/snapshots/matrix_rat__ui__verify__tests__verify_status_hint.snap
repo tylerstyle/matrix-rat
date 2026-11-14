@@ -4,9 +4,9 @@ expression: "render(&mut app, 100, 8)"
 ---
 "╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
 "│ Filter rooms…        ││● dave  10:02                                                            ││"
-"│ Favourites           ││  Shipping a TUI client on top of it this week 🐀                        ┃│" Hidden by multi-width symbols: [(73, " ")]
-"│▌R  rust              │╰ carol is typing… ────────────────────────────────────────────────────────╯"
-"│ M  matrix-rat        │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
-"│ People               ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│ ○ Unread  ○ People   ││  Shipping a TUI client on top of it this week 🐀                        ┃│" Hidden by multi-width symbols: [(73, " ")]
+"│ Favourites           │╰ carol is typing… ────────────────────────────────────────────────────────╯"
+"│▌R  rust              │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
+"│ M  matrix-rat        ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ● demo data  ⚠ unverified device — verify  Enter send            F1 help  F2 settings  F3 rat-dark "
