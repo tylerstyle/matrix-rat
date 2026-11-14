@@ -506,6 +506,16 @@ pub fn room_items(room: &Room, keys: &Keymap) -> Vec<Item> {
         "",
         Run::Do(Action::Manage(Click::Favourite)),
     ));
+    let low_priority = if room.kind == RoomKind::LowPriority {
+        "Remove from low priority"
+    } else {
+        "Move to low priority"
+    };
+    items.push(Item::new(
+        low_priority,
+        "",
+        Run::Do(Action::Manage(Click::LowPriority)),
+    ));
     items.push(Item::new("Notification mode…", "", Run::Notifications));
     items.push(Item::action(keys, "Leave…", Sidebar, Action::LeaveRoom));
     items
@@ -820,6 +830,7 @@ mod tests {
                 "Room info",
                 "Mark as unread",
                 "Add to favourites",
+                "Move to low priority",
                 "Notification mode…",
                 "Leave…"
             ]
@@ -834,12 +845,13 @@ mod tests {
                 "Room info",
                 "Mark as read",
                 "Remove from favourites",
+                "Move to low priority",
                 "Notification mode…",
                 "Leave…"
             ]
         );
         // Leaving goes through the question in the room info.
-        assert_eq!(items[5].run, Some(Run::Do(Action::LeaveRoom)));
+        assert_eq!(items[6].run, Some(Run::Do(Action::LeaveRoom)));
         assert_eq!(items[1].hint, "F4");
         room.kind = RoomKind::Invite;
         assert_eq!(

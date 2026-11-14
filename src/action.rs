@@ -77,6 +77,10 @@ pub enum Action {
     /// Narrow the room list to the next or previous space ("all rooms" in between).
     SpaceNext,
     SpacePrev,
+    /// Toggle the "unread only" quick filter in the room list.
+    FilterUnread,
+    /// Toggle the "people / direct chats only" quick filter in the room list.
+    FilterPeople,
     /// Save the selected message's file or picture to the download folder.
     Save,
     /// A control of the device verification popup.

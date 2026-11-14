@@ -423,7 +423,7 @@ mod tests {
         let mut app = App::new(&cfg, PathBuf::new(), None);
         assert!(matches!(&app.toast, Some((msg, _)) if msg.contains("Key bindings: 2 problem(s)")));
 
-        let mut term = terminal(100, 30);
+        let mut term = terminal(100, 34);
         // Clear startup toast so status hints appear on screen.
         app.toast = None;
         app.focus = Pane::Sidebar;

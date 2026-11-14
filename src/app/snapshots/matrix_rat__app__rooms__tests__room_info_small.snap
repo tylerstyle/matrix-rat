@@ -4,7 +4,7 @@ expression: "screen(&mut app, &mut small)"
 ---
 "╭ 2 #Rats ───────────────────────────────────╮"
 "│╭ Room info ───────────────────────────────╮│"
-"││   Favourite         ○ off                ││"
+"││   Low priority      ○ off                ││"
 "││   Notifications     ◂ All messages ▸     ││"
 "││   Rename…                                ││"
 "││   Change topic…                          ││"

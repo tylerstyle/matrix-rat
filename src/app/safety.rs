@@ -470,6 +470,8 @@ mod tests {
             preview: None,
             avatar: None,
             alias: None,
+            direct: false,
+            muted: false,
         }]));
         app.on_matrix(MatrixEvent::Timeline {
             room_id: ROOM.into(),
@@ -516,6 +518,7 @@ mod tests {
                 joined: 3,
                 invited: 0,
                 favourite: false,
+                low_priority: false,
                 notify: Some(NotifyLevel::All),
                 can_rename: false,
                 can_set_topic: false,
@@ -1050,6 +1053,8 @@ mod tests {
             preview: None,
             avatar: None,
             alias: None,
+            direct: false,
+            muted: false,
         };
         app.on_matrix(MatrixEvent::Rooms(vec![
             base_room(ROOM, "Rats", 0),

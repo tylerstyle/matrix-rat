@@ -96,6 +96,10 @@ pub enum ManageCmd {
         room_id: String,
         on: bool,
     },
+    SetLowPriority {
+        room_id: String,
+        on: bool,
+    },
     SetNotify {
         room_id: String,
         level: NotifyLevel,
@@ -117,6 +121,7 @@ impl std::fmt::Debug for ManageCmd {
             Self::SetName { room_id, .. } => write!(f, "SetName({room_id})"),
             Self::SetTopic { room_id, .. } => write!(f, "SetTopic({room_id})"),
             Self::SetFavourite { room_id, on } => write!(f, "SetFavourite({room_id}, {on})"),
+            Self::SetLowPriority { room_id, on } => write!(f, "SetLowPriority({room_id}, {on})"),
             Self::SetNotify { room_id, level } => write!(f, "SetNotify({room_id}, {level:?})"),
         }
     }
@@ -130,6 +135,7 @@ pub enum Change {
     Name,
     Topic,
     Favourite(bool),
+    LowPriority(bool),
     Notify,
 }
 
@@ -225,6 +231,7 @@ pub struct RoomDetails {
     pub joined: u64,
     pub invited: u64,
     pub favourite: bool,
+    pub low_priority: bool,
     /// `None` for rooms we are not in.
     pub notify: Option<NotifyLevel>,
     pub can_rename: bool,
@@ -399,20 +406,20 @@ impl Manager {
                 });
             }
             ManageCmd::SetFavourite { room_id, on } => {
-                tokio::spawn(async move {
-                    let result = match room(&client, &room_id) {
-                        Ok(room) => room
-                            .set_is_favourite(on, None)
-                            .await
-                            .map_err(|err| failed("change the favourites", &err)),
-                        Err(err) => Err(err),
-                    };
-                    emit(ManageEvent::Done {
-                        room_id,
-                        change: Change::Favourite(on),
-                        result,
-                    });
-                });
+                self.spawn_tag(
+                    room_id,
+                    "change the favourites",
+                    Change::Favourite(on),
+                    move |room| async move { room.set_is_favourite(on, None).await },
+                );
+            }
+            ManageCmd::SetLowPriority { room_id, on } => {
+                self.spawn_tag(
+                    room_id,
+                    "change low priority",
+                    Change::LowPriority(on),
+                    move |room| async move { room.set_is_low_priority(on, None).await },
+                );
             }
             ManageCmd::SetNotify { room_id, level } => {
                 tokio::spawn(async move {
@@ -425,6 +432,26 @@ impl Manager {
                 });
             }
         }
+    }
+
+    fn spawn_tag<F, Fut>(&self, room_id: String, what: &'static str, change: Change, work: F)
+    where
+        F: FnOnce(Room) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + Send,
+    {
+        let client = self.client.clone();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let result = match room(&client, &room_id) {
+                Ok(room) => work(room).await.map_err(|err| failed(what, &err)),
+                Err(err) => Err(err),
+            };
+            let _ = events.send(MatrixEvent::Manage(ManageEvent::Done {
+                room_id,
+                change,
+                result,
+            }));
+        });
     }
 }
 
@@ -884,6 +911,7 @@ async fn head(room: &Room, levels: Option<&RoomPowerLevels>) -> RoomDetails {
         joined: room.joined_members_count(),
         invited: room.invited_members_count(),
         favourite: room.is_favourite(),
+        low_priority: room.is_low_priority(),
         notify,
         can_rename: can(&|levels| levels.user_can_send_state(own, StateEventType::RoomName)),
         can_set_topic: can(&|levels| levels.user_can_send_state(own, StateEventType::RoomTopic)),
@@ -1662,5 +1690,114 @@ mod tests {
             ["a.org", "b.org", "c.org", "d.org", "e.org"]
         );
         assert_eq!(VIA_MAX, crate::manage::VIA_MAX);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a local homeserver (scripts/dev-homeserver.sh)"]
+    async fn low_priority_tag_syncs_and_clears_favourite() {
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let username = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let root = std::env::temp_dir().join(format!("matrix-rat-lowprio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password,
+        });
+        loop {
+            match events.recv().await.expect("worker stopped") {
+                MatrixEvent::LoggedIn { .. } => break,
+                MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                _ => {}
+            }
+        }
+
+        handle.send(MatrixCmd::Manage(ManageCmd::Create {
+            request: 0,
+            name: format!("matrix-rat lowprio {}", std::process::id()),
+            topic: None,
+            alias: None,
+            encrypted: false,
+        }));
+        let room_id = opened(&mut events).await.expect("created room");
+
+        async fn wait_category(
+            events: &mut UnboundedReceiver<MatrixEvent>,
+            room_id: &str,
+            wanted: super::super::RoomCategory,
+        ) {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    match events.recv().await.expect("worker event") {
+                        MatrixEvent::Rooms(list) => {
+                            if list.iter().any(|r| r.id == room_id && r.category == wanted) {
+                                return;
+                            }
+                        }
+                        MatrixEvent::Error(err) => panic!("{err}"),
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("timed out waiting for room category sync");
+        }
+
+        // 1. Favourite on -> RoomCategory::Favourite & details.favourite.
+        handle.send(MatrixCmd::Manage(ManageCmd::SetFavourite {
+            room_id: room_id.clone(),
+            on: true,
+        }));
+        done(&mut events, Change::Favourite(true)).await;
+        wait_category(&mut events, &room_id, super::super::RoomCategory::Favourite).await;
+
+        // 2. Low priority on -> replaces Favourite (mutually exclusive).
+        handle.send(MatrixCmd::Manage(ManageCmd::SetLowPriority {
+            room_id: room_id.clone(),
+            on: true,
+        }));
+        done(&mut events, Change::LowPriority(true)).await;
+        wait_category(
+            &mut events,
+            &room_id,
+            super::super::RoomCategory::LowPriority,
+        )
+        .await;
+        handle.send(MatrixCmd::Manage(ManageCmd::Info {
+            room_id: room_id.clone(),
+        }));
+        let d = info(&mut events, &room_id, |d| d.low_priority && !d.favourite).await;
+        assert!(d.low_priority && !d.favourite);
+
+        // 3. Favourite on -> clears LowPriority.
+        handle.send(MatrixCmd::Manage(ManageCmd::SetFavourite {
+            room_id: room_id.clone(),
+            on: true,
+        }));
+        done(&mut events, Change::Favourite(true)).await;
+        wait_category(&mut events, &room_id, super::super::RoomCategory::Favourite).await;
+        handle.send(MatrixCmd::Manage(ManageCmd::Info {
+            room_id: room_id.clone(),
+        }));
+        let d = info(&mut events, &room_id, |d| d.favourite && !d.low_priority).await;
+        assert!(d.favourite && !d.low_priority);
+
+        // Clean up.
+        handle.send(MatrixCmd::Manage(ManageCmd::Leave { room_id }));
+        let _ = next_manage(&mut events).await;
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root);
     }
 }

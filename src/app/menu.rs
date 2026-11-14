@@ -470,7 +470,9 @@ impl App {
     fn perform_for_room(&mut self, at: usize, action: Action) {
         if !matches!(
             action,
-            Action::RoomInfo | Action::LeaveRoom | Action::Manage(Click::Favourite)
+            Action::RoomInfo
+                | Action::LeaveRoom
+                | Action::Manage(Click::Favourite | Click::LowPriority)
         ) {
             debug_assert!(false, "not a room action of the menu: {action:?}");
             return;
@@ -649,6 +651,8 @@ mod tests {
             mention: false,
             avatar: None,
             alias: None,
+            direct: category == RoomCategory::Person,
+            muted: false,
         }
     }
 
@@ -1057,6 +1061,7 @@ mod tests {
                 "Room info",
                 "Mark as unread",
                 "Add to favourites",
+                "Move to low priority",
                 "Notification mode…",
                 "Leave…"
             ]

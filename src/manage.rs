@@ -394,6 +394,8 @@ pub enum Click {
     MemberIgnore,
     /// Favourite on or off for the room in question, without a popup.
     Favourite,
+    /// Low priority on or off for the room in question, without a popup.
+    LowPriority,
     /// Room info for the open room, whatever has the focus (its name was clicked).
     OpenInfo,
 }
@@ -554,6 +556,7 @@ impl NewPopup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfoRow {
     Favourite,
+    LowPriority,
     Notify,
     Name,
     Topic,
@@ -690,6 +693,7 @@ impl InfoPopup {
         let mut rows = Vec::new();
         if !self.invited() {
             rows.push(InfoRow::Favourite);
+            rows.push(InfoRow::LowPriority);
             if let Some(details) = &self.details {
                 if details.notify.is_some() {
                     rows.push(InfoRow::Notify);
@@ -1093,15 +1097,18 @@ mod tests {
     #[test]
     fn info_rows_follow_permissions_and_the_filter() {
         let mut popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Room);
-        assert_eq!(popup.rows(), [InfoRow::Favourite, InfoRow::Leave]);
+        assert_eq!(
+            popup.rows(),
+            [InfoRow::Favourite, InfoRow::LowPriority, InfoRow::Leave]
+        );
         popup.set_details(details(&[
             ("alice", false),
             ("bob", false),
             ("carol", true),
         ]));
-        assert_eq!(popup.rows().len(), 6 + 3);
+        assert_eq!(popup.rows().len(), 7 + 3);
         popup.set_filter("BO".into());
-        assert_eq!(popup.rows().len(), 6 + 1);
+        assert_eq!(popup.rows().len(), 7 + 1);
         assert_eq!(popup.selected_member().unwrap().name, "bob");
         // Emptying the filter keeps the member selected, wherever it is now.
         popup.set_filter(String::new());
@@ -1123,6 +1130,7 @@ mod tests {
             popup.rows(),
             [
                 InfoRow::Favourite,
+                InfoRow::LowPriority,
                 InfoRow::Notify,
                 InfoRow::Leave,
                 InfoRow::Member(0)
@@ -1451,7 +1459,10 @@ mod tests {
         assert!(popup.confirm.is_some());
         assert!(popup.set_kind(RoomKind::Room));
         assert_eq!(popup.confirm, None);
-        assert_eq!(popup.rows(), [InfoRow::Favourite, InfoRow::Leave]);
+        assert_eq!(
+            popup.rows(),
+            [InfoRow::Favourite, InfoRow::LowPriority, InfoRow::Leave]
+        );
         assert_eq!(popup.leave_label(), "Leave room");
     }
 

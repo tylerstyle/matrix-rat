@@ -743,7 +743,7 @@ mod tests {
         let last = app.keymap.bindings().last().unwrap().description;
         // When tall enough, everything is there at once; smaller windows scroll.
         app.perform(Action::ToggleHelp);
-        let text = render(&mut app, 100, 32);
+        let text = render(&mut app, 100, 34);
         for binding in app.keymap.bindings() {
             assert!(
                 text.contains(binding.description),
@@ -755,7 +755,7 @@ mod tests {
         assert!(!text.contains("scroll"));
         // In smaller windows what does not fit is a few presses away, in both
         // layouts, and the way back as well.
-        for (w, h) in [(100, 30), (100, 24), (80, 24), (60, 12)] {
+        for (w, h) in [(100, 32), (100, 30), (100, 24), (80, 24), (60, 12)] {
             let mut app = App::demo();
             app.perform(Action::ToggleHelp);
             let text = render(&mut app, w, h);
@@ -911,5 +911,56 @@ mod tests {
         ] {
             render(&mut completed, w, h);
         }
+    }
+
+    #[test]
+    fn triage_sidebar_spaces_low_priority_and_filters() {
+        use crate::action::Action;
+        use crate::matrix::SpaceSummary;
+        use crate::model::{Room, RoomKind};
+
+        let mut app = App::demo();
+        let mut quiet = Room::new("!quiet:example.org", "archive", RoomKind::LowPriority);
+        quiet.unread = 1;
+        quiet.bold = true;
+        let mut direct_low = Room::new("!dm_low:example.org", "erin", RoomKind::LowPriority);
+        direct_low.direct = true;
+        direct_low.unread = 2;
+        direct_low.bold = true;
+        app.rooms.push(quiet);
+        app.rooms.push(direct_low);
+        app.spaces = vec![
+            SpaceSummary {
+                id: "!work:example.org".into(),
+                name: "Work".into(),
+                level: 0,
+                rooms: vec!["rust".into(), "bob".into(), "!dm_low:example.org".into()],
+            },
+            SpaceSummary {
+                id: "!misc:example.org".into(),
+                name: "Misc".into(),
+                level: 0,
+                rooms: vec!["design".into(), "!quiet:example.org".into()],
+            },
+        ];
+        app.select_space(Some(0));
+        app.perform(Action::FilterUnread);
+        app.timeline.detached = true;
+        app.timeline.detached_new = 3;
+        app.timeline.reached_end = false;
+        app.perform(Action::SelectOlder);
+        app.perform(Action::SelectOlder);
+        insta::assert_snapshot!(render(&mut app, 100, 30));
+    }
+
+    #[test]
+    fn narrow_sidebar_quick_filters() {
+        use crate::action::Action;
+
+        let mut app = App::demo();
+        app.sidebar.width = 16;
+        app.perform(Action::FilterUnread);
+        app.perform(Action::FilterPeople);
+        insta::assert_snapshot!(render(&mut app, 80, 24));
     }
 }

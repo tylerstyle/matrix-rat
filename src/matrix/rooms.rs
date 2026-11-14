@@ -1,6 +1,6 @@
 //! Per-room work: timelines, sending, reactions, receipts, invites.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -12,12 +12,13 @@ use matrix_sdk::ruma::events::Mentions;
 use matrix_sdk::ruma::events::room::message::{
     RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
 };
-use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, RoomId};
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, RoomId};
 use matrix_sdk::{Client, Room, RoomMemberships};
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     MsgLikeKind, RoomExt, Timeline, TimelineDetails, TimelineEventFocusThreadMode,
-    TimelineEventItemId, TimelineFocus, TimelineItem, TimelineReadReceiptTracking,
+    TimelineEventItemId, TimelineFocus, TimelineItem, TimelineItemContent,
+    TimelineReadReceiptTracking,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
@@ -61,6 +62,8 @@ struct DetachedForward {
     target_event: String,
     reached_start: Arc<AtomicBool>,
     reached_end: Arc<AtomicBool>,
+    /// Live timeline for the same room/thread, used only to count newly arriving tail messages.
+    live: Option<Arc<Timeline>>,
 }
 
 pub struct Timelines {
@@ -505,6 +508,10 @@ impl Timelines {
                     }
                 };
                 self.close();
+                let prev_thread = self.thread.take();
+                self.thread = thread.clone();
+                let live = self.timeline(&room_id).await.ok();
+                self.thread = prev_thread;
                 let reached_start = Arc::new(AtomicBool::new(false));
                 let reached_end = Arc::new(AtomicBool::new(false));
                 self.detached = Some(DetachedSlot {
@@ -530,6 +537,7 @@ impl Timelines {
                         target_event,
                         reached_start,
                         reached_end,
+                        live,
                     }),
                     self.ignored.clone(),
                 )));
@@ -1231,6 +1239,130 @@ fn friendly_jump_message(msg: &str) -> String {
     }
 }
 
+fn countable_live_event(
+    item: &TimelineItem,
+    ignored: &IgnoredSet,
+) -> Option<(OwnedEventId, OwnedUserId)> {
+    let event = item.as_event()?;
+    if event.is_own() || ignored.contains(event.sender()) {
+        return None;
+    }
+    let TimelineItemContent::MsgLike(content) = event.content() else {
+        return None;
+    };
+    if matches!(content.kind, MsgLikeKind::Redacted) {
+        return None;
+    }
+    Some((event.event_id()?.to_owned(), event.sender().to_owned()))
+}
+
+/// Counts new remote messages appended to the tail of a live timeline while
+/// the user is looking at a detached `/context` slice.
+struct LiveTailCounter {
+    items: Vector<Arc<TimelineItem>>,
+    seen: HashSet<OwnedEventId>,
+    counted: HashMap<OwnedEventId, OwnedUserId>,
+}
+
+impl LiveTailCounter {
+    fn new(items: Vector<Arc<TimelineItem>>) -> Self {
+        let seen = items
+            .iter()
+            .filter_map(|item| item.as_event()?.event_id().map(ToOwned::to_owned))
+            .collect();
+        Self {
+            items,
+            seen,
+            counted: HashMap::new(),
+        }
+    }
+
+    fn record_seen_item(seen: &mut HashSet<OwnedEventId>, item: &TimelineItem) {
+        if let Some(id) = item.as_event().and_then(|event| event.event_id()) {
+            seen.insert(id.to_owned());
+        }
+    }
+
+    fn record_tail(&mut self, item: &TimelineItem, ignored: &IgnoredSet) {
+        if let Some((id, sender)) = countable_live_event(item, ignored) {
+            if self.seen.insert(id.clone()) {
+                self.counted.insert(id, sender);
+            }
+        } else {
+            Self::record_seen_item(&mut self.seen, item);
+        }
+    }
+
+    fn apply_diffs(
+        &mut self,
+        diffs: Vec<VectorDiff<Arc<TimelineItem>>>,
+        ignored: &IgnoredSet,
+    ) -> Option<u32> {
+        let prev = self.counted.len();
+        let saw_reset = diffs
+            .iter()
+            .any(|diff| matches!(diff, VectorDiff::Clear | VectorDiff::Reset { .. }));
+        if saw_reset {
+            for diff in diffs {
+                diff.apply(&mut self.items);
+            }
+            for item in &self.items {
+                Self::record_seen_item(&mut self.seen, item);
+            }
+        } else {
+            for diff in diffs {
+                match &diff {
+                    VectorDiff::PushBack { value } => self.record_tail(value, ignored),
+                    VectorDiff::Append { values } => {
+                        for value in values {
+                            self.record_tail(value, ignored);
+                        }
+                    }
+                    VectorDiff::Insert { index, value } => {
+                        if !self
+                            .items
+                            .iter()
+                            .skip(*index)
+                            .any(|item| item.as_event().is_some())
+                        {
+                            self.record_tail(value, ignored);
+                        } else {
+                            Self::record_seen_item(&mut self.seen, value);
+                        }
+                    }
+                    VectorDiff::PushFront { value } => {
+                        Self::record_seen_item(&mut self.seen, value);
+                    }
+                    VectorDiff::Set { value, .. } => {
+                        if let Some(id) = value.as_event().and_then(|event| event.event_id()) {
+                            if self.counted.contains_key(id)
+                                && countable_live_event(value, ignored).is_none()
+                            {
+                                self.counted.remove(id);
+                            }
+                            self.seen.insert(id.to_owned());
+                        }
+                    }
+                    VectorDiff::PopFront
+                    | VectorDiff::PopBack
+                    | VectorDiff::Remove { .. }
+                    | VectorDiff::Truncate { .. }
+                    | VectorDiff::Clear
+                    | VectorDiff::Reset { .. } => {}
+                }
+                diff.apply(&mut self.items);
+            }
+        }
+        (self.counted.len() != prev).then_some(self.counted.len() as u32)
+    }
+
+    fn recheck_ignored(&mut self, ignored: &IgnoredSet) -> Option<u32> {
+        let prev = self.counted.len();
+        self.counted.retain(|_, sender| !ignored.contains(sender));
+        (self.counted.len() != prev).then_some(self.counted.len() as u32)
+    }
+}
+
 /// Sends the whole timeline to the UI whenever it changes, and who is typing.
 /// `thread`: the timeline is not the room's but that of the thread starting at this event.
 #[allow(clippy::too_many_arguments)]
@@ -1249,6 +1381,17 @@ async fn forward(
     let own = room.own_user_id().to_owned();
     let (mut items, changes) = timeline.subscribe().await;
     pin_mut!(changes);
+    let (mut live_counter, mut live_changes) = match detached.as_ref().and_then(|d| d.live.as_ref())
+    {
+        Some(live) => {
+            let (live_items, changes) = live.subscribe().await;
+            (
+                Some(LiveTailCounter::new(live_items)),
+                Some(Box::pin(changes)),
+            )
+        }
+        None => (None, None),
+    };
     let (_typing_guard, mut typing) = room.subscribe_to_typing_notifications();
     // Who has read up to where, by name.
     let mut readers = super::receipts::Names::default();
@@ -1361,6 +1504,39 @@ async fn forward(
                 let mut messages = convert(&items, &own, &ignored.borrow());
                 readers.annotate(&room, &mut messages, &items, &own).await;
                 if events.send(snapshot(&items, marks, messages)).is_err() {
+                    return;
+                }
+                let new_count = {
+                    let ignored_set = ignored.borrow();
+                    live_counter
+                        .as_mut()
+                        .and_then(|counter| counter.recheck_ignored(&ignored_set))
+                };
+                if let Some(count) = new_count
+                    && events.send(MatrixEvent::DetachedNew { generation, count }).is_err()
+                {
+                    return;
+                }
+            }
+            diffs = async {
+                match live_changes.as_mut() {
+                    Some(stream) => stream.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(diffs) = diffs else {
+                    live_changes = None;
+                    continue;
+                };
+                let new_count = {
+                    let ignored_set = ignored.borrow();
+                    live_counter
+                        .as_mut()
+                        .and_then(|counter| counter.apply_diffs(diffs, &ignored_set))
+                };
+                if let Some(count) = new_count
+                    && events.send(MatrixEvent::DetachedNew { generation, count }).is_err()
+                {
                     return;
                 }
             }
@@ -2254,6 +2430,183 @@ mod tests {
         .await
         .expect("timed out returning to live timeline");
 
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a local homeserver (scripts/dev-homeserver.sh)"]
+    async fn detached_timeline_reports_new_live_messages() {
+        use matrix_sdk::Client;
+        use matrix_sdk::ruma::api::client::room::create_room::v3::Request as CreateRoom;
+        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+        use std::time::Duration;
+
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let user = std::env::var("MATRIX_RAT_TEST_USER").unwrap_or_else(|_| "alice".to_owned());
+        let password =
+            std::env::var("MATRIX_RAT_TEST_PASSWORD").unwrap_or_else(|_| "alicepass".to_owned());
+        let bob_name = std::env::var("MATRIX_RAT_TEST_USER2").unwrap_or_else(|_| "bob".to_owned());
+        let bob_pass =
+            std::env::var("MATRIX_RAT_TEST_PASSWORD2").unwrap_or_else(|_| "bobpass".to_owned());
+
+        let alice_setup = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .unwrap();
+        alice_setup
+            .matrix_auth()
+            .login_username(&user, &password)
+            .await
+            .unwrap();
+        let bob = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .unwrap();
+        bob.matrix_auth()
+            .login_username(&bob_name, &bob_pass)
+            .await
+            .unwrap();
+
+        let created = alice_setup.create_room(CreateRoom::new()).await.unwrap();
+        let room_id = created.room_id().to_string();
+        created
+            .invite_user_by_id(bob.user_id().unwrap())
+            .await
+            .unwrap();
+        let bob_room = bob.join_room_by_id(created.room_id()).await.unwrap();
+
+        let mut first_event_id = None;
+        for i in 0..65 {
+            let sent = created
+                .send(RoomMessageEventContent::text_plain(format!("old-{i:03}")))
+                .await
+                .unwrap();
+            if i == 0 {
+                first_event_id = Some(sent.response.event_id.to_string());
+            }
+        }
+        let first_event_id = first_event_id.unwrap();
+
+        let root =
+            std::env::temp_dir().join(format!("matrix-rat-detached-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username: user,
+            password,
+        });
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut synced = false;
+            let mut saw_room = false;
+            while !(synced && saw_room) {
+                match events.recv().await.expect("worker event") {
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    MatrixEvent::Sync(crate::matrix::SyncStatus::Synced) => synced = true,
+                    MatrixEvent::Rooms(list) if list.iter().any(|r| r.id == room_id) => {
+                        saw_room = true;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for sync");
+
+        // Open live first so the live timeline is warm and cached.
+        handle.send(MatrixCmd::OpenRoom {
+            room_id: room_id.clone(),
+            generation: 1,
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.expect("worker event") {
+                    MatrixEvent::Timeline {
+                        room_id: r,
+                        generation: 1,
+                        messages,
+                        ..
+                    } if r == room_id && messages.iter().any(|m| m.body == "old-064") => return,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out opening live room");
+
+        // Jump to msg-000 into a detached `/context` timeline.
+        handle.send(MatrixCmd::OpenEvent {
+            room_id: room_id.clone(),
+            event_id: first_event_id,
+            thread_root: None,
+            generation: 2,
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.expect("worker event") {
+                    MatrixEvent::Timeline {
+                        room_id: r,
+                        generation: 2,
+                        detached: Some(_),
+                        ..
+                    } if r == room_id => return,
+                    MatrixEvent::JumpFailed { reason, .. } => panic!("{reason}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out opening detached timeline");
+
+        // Alice sending from another client should NOT increment new count; Bob sending 2 should.
+        created
+            .send(RoomMessageEventContent::text_plain("own later message"))
+            .await
+            .unwrap();
+        bob_room
+            .send(RoomMessageEventContent::text_plain("bob while detached 1"))
+            .await
+            .unwrap();
+        bob_room
+            .send(RoomMessageEventContent::text_plain("bob while detached 2"))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.expect("worker event") {
+                    MatrixEvent::DetachedNew {
+                        generation: 2,
+                        count,
+                    } if count >= 2 => {
+                        assert_eq!(count, 2);
+                        return;
+                    }
+                    MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for DetachedNew count == 2");
+
+        let _ = created.leave().await;
+        let _ = alice_setup.matrix_auth().logout().await;
+        let _ = bob.matrix_auth().logout().await;
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);

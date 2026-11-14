@@ -185,6 +185,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
             Role::Muted
         } else if entry.category == Category::Action {
             Role::StatusKey
+        } else if entry.category == Category::Space {
+            if hint_text.contains('@') {
+                Role::MentionBadge
+            } else if hint_text.contains("unread") {
+                Role::UnreadBadge
+            } else {
+                Role::Muted
+            }
         } else {
             Role::Muted
         };

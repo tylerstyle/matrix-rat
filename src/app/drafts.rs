@@ -471,6 +471,8 @@ mod tests {
             marked_unread: false,
             avatar: None,
             alias: None,
+            direct: false,
+            muted: false,
         }
     }
 

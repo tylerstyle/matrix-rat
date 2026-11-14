@@ -4,17 +4,17 @@ expression: "screen(&mut app, 70, 16)"
 ---
 "╭ 1 Rooms ────────── + ╮╭ 2 #rust ───────────────────────────────────╮"
 "│ Filter rooms…        ││  Good to know, thanks. (edited)           ││"
-"│ Favourites           ││                                           ││"
-"│▌R  rust              ││● dave  10:02                              ││"
-"│ M  matrix-rat        ││  Shipping a TUI client on top of it this  ││"
-"│ People               ││  week 🐀                                  ┃│" Hidden by multi-width symbols: [(33, " ")]
-"│ B  bob            2  │╰ carol is typing… ──────────────────────────╯"
-"│ C  carol             │╭ 3 Message ─────────────────────────────────╮"
-"│ Rooms                ││ ↩ Replying to bob: Yes — startup is i…  ✕  │"
-"│ D  design         5  ││ 📎 holiday.jpg · 1.2 MB  ✕                 │" Hidden by multi-width symbols: [(27, " ")]
-"│ N  nixos             ││ 📎 a rather long file name tha… · 88 B  ✕  │" Hidden by multi-width symbols: [(27, " ")]
-"│ O  off-topic     12  ││ 📎 three.txt · 3 B  ✕                      │" Hidden by multi-width symbols: [(27, " ")]
-"│                      ││ 📎 … and 2 more files                      │" Hidden by multi-width symbols: [(27, " ")]
+"│ ○ Unread  ○ People   ││                                           ││"
+"│ Favourites           ││● dave  10:02                              ││"
+"│▌R  rust              ││  Shipping a TUI client on top of it this  ││"
+"│ M  matrix-rat        ││  week 🐀                                  ┃│" Hidden by multi-width symbols: [(33, " ")]
+"│ People               │╰ carol is typing… ──────────────────────────╯"
+"│ B  bob            2  │╭ 3 Message ─────────────────────────────────╮"
+"│ C  carol             ││ ↩ Replying to bob: Yes — startup is i…  ✕  │"
+"│ Rooms                ││ 📎 holiday.jpg · 1.2 MB  ✕                 │" Hidden by multi-width symbols: [(27, " ")]
+"│ D  design         5  ││ 📎 a rather long file name tha… · 88 B  ✕  │" Hidden by multi-width symbols: [(27, " ")]
+"│ N  nixos             ││ 📎 three.txt · 3 B  ✕                      │" Hidden by multi-width symbols: [(27, " ")]
+"│ O  off-topic     12  ││ 📎 … and 2 more files                      │" Hidden by multi-width symbols: [(27, " ")]
 "│                      ││ With a caption                       📎 ☺  │" Hidden by multi-width symbols: [(64, " ")]
 "╰──────────────────────╯╰────────────────────────────────────────────╯"
 " ● demo data  Enter send            F1 help  F2 settings  F3 rat-dark "

@@ -36,69 +36,75 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let theme = &app.theme;
     let focused = app.focus == Pane::Sidebar;
 
     // Filter line.
     let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let narrow_badge = (inner.width < 18)
+        .then_some(match (app.sidebar.unread_only, app.sidebar.people_only) {
+            (true, true) => " UP",
+            (true, false) => " U",
+            (false, true) => " P",
+            (false, false) => "",
+        })
+        .filter(|s| !s.is_empty());
+    let badge_w = narrow_badge.map_or(0, width) as u16;
+    let filter_text_area = Rect::new(
+        filter_area.x,
+        filter_area.y,
+        filter_area.width.saturating_sub(badge_w),
+        1,
+    );
     let mut filter_cursor = None;
     let filter = if app.sidebar.filter.is_empty() && !focused {
         Line::from(Span::styled(
-            " Filter rooms…",
-            theme.style(Role::Placeholder),
+            truncate(" Filter rooms…", filter_text_area.width as usize),
+            app.theme.style(Role::Placeholder),
         ))
     } else if app.sidebar.filter.is_empty() {
         Line::from(Span::styled(
-            " type to filter…",
-            theme.style(Role::Placeholder),
+            truncate(" type to filter…", filter_text_area.width as usize),
+            app.theme.style(Role::Placeholder),
         ))
     } else {
-        let key_style = theme.style(Role::StatusKey);
-        let max_cols = (filter_area.width as usize).saturating_sub(4);
+        let key_style = app.theme.style(Role::StatusKey);
+        let max_cols = (filter_text_area.width as usize).saturating_sub(4);
         let view = app.sidebar.filter.view(max_cols, false);
         filter_cursor = (focused && !app.help_open && app.modal.is_none()).then(|| {
             Position::new(
-                (filter_area.x + 3 + view.cursor_col as u16)
-                    .min(filter_area.right().saturating_sub(1)),
-                filter_area.y,
+                (filter_text_area.x + 3 + view.cursor_col as u16)
+                    .min(filter_text_area.right().saturating_sub(1)),
+                filter_text_area.y,
             )
         });
         Line::from(vec![Span::styled(" / ", key_style), Span::raw(view.text)])
     };
-    frame.render_widget(&filter, filter_area);
+    frame.render_widget(&filter, filter_text_area);
+    if let Some(badge) = narrow_badge {
+        frame.render_widget(
+            Line::from(Span::styled(badge, app.theme.style(Role::StatusKey))),
+            Rect::new(filter_text_area.right(), filter_area.y, badge_w, 1),
+        );
+    }
     if let Some(pos) = filter_cursor {
         frame.set_cursor_position(pos);
     }
     app.hits.add(filter_area, HitId::RoomFilter);
 
-    // With spaces: one line that says which one the list is narrowed to, with arrows
-    // to step through them.
     let mut top = 1;
-    if !app.spaces.is_empty() && inner.height > 3 && inner.width >= 8 {
-        let area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-        let name = app.space_name().unwrap_or_else(|| "All rooms".to_owned());
-        let label = truncate(&name, (inner.width as usize).saturating_sub(6));
-        let role = if app.space.is_some() {
-            Role::TitleFocused
-        } else {
-            Role::Muted
-        };
-        let arrow = theme.style(Role::StatusKey);
-        let line = Line::from(vec![
-            Span::styled(" ◂ ", arrow),
-            Span::styled(label.clone(), theme.style(role)),
-            Span::styled(" ▸", arrow),
-        ]);
-        frame.render_widget(&line, area);
-        let next_x = area.x + 3 + width(&label) as u16;
-        app.hits
-            .add(area, HitId::Do(crate::action::Action::SpaceNext));
-        app.hits.add(
-            Rect::new(area.x, area.y, 3, 1),
-            HitId::Do(crate::action::Action::SpacePrev),
-        );
-        let _ = next_x;
-        top = 2;
+    // Quick-filter chips ("Unread" / "People") on their own header row when wide.
+    if inner.width >= 18 && inner.height > 3 {
+        let chips_area = Rect::new(inner.x, inner.y + top, inner.width, 1);
+        draw_filter_chips(frame, app, chips_area);
+        top += 1;
+    }
+
+    // With spaces: one line that says which one the list is narrowed to, with arrows
+    // to step through them and unread / other-spaces indicators.
+    if !app.spaces.is_empty() && inner.height > top + 1 && inner.width >= 8 {
+        let area = Rect::new(inner.x, inner.y + top, inner.width, 1);
+        draw_space_header(frame, app, area);
+        top += 1;
     }
     let list = Rect::new(
         inner.x,
@@ -137,21 +143,22 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar.scroll = app.sidebar.scroll.min(rows.len().saturating_sub(height));
 
     if rows.is_empty() {
-        let text = if !app.sidebar.filter.is_empty() {
+        let filtered =
+            !app.sidebar.filter.is_empty() || app.sidebar.unread_only || app.sidebar.people_only;
+        let text = if filtered {
             " no rooms match"
         } else if app.space.is_some() {
             " no rooms here"
-        } else if app.sidebar.filter.is_empty() {
-            " no rooms yet"
         } else {
-            " no rooms match"
+            " no rooms yet"
         };
-        let line = Line::from(Span::styled(text, theme.style(Role::Muted)));
+        let line = Line::from(Span::styled(text, app.theme.style(Role::Muted)));
         frame.render_widget(&line, list);
         return;
     }
 
     // Lines actually drawn: a room's two lines can be cut apart at either edge.
+    let theme = &app.theme;
     let shown = rows.len().saturating_sub(app.sidebar.scroll).min(height);
     for (n, row) in rows
         .iter()
@@ -294,7 +301,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                             .unwrap_or_default();
                         if m.own {
                             format!("You: {line}")
-                        } else if room.kind == crate::model::RoomKind::Person {
+                        } else if room.direct {
                             line.to_owned()
                         } else {
                             format!("{}: {line}", m.sender)
@@ -367,6 +374,134 @@ fn highlight(frame: &mut Frame, app: &App, rect: Rect, index: usize, cursor: boo
     } else if app.hover == Some(HitId::Room(index)) {
         frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
     }
+}
+
+fn draw_filter_chips(frame: &mut Frame, app: &mut App, area: Rect) {
+    let theme = &app.theme;
+    let pad_w: u16 = if area.width >= 19 { 1 } else { 0 };
+    let gap: u16 = 2;
+    let mut spans = Vec::new();
+    if pad_w > 0 {
+        spans.push(Span::raw(" "));
+    }
+    let mut x = area.x + pad_w;
+    let mut chip_rects = Vec::with_capacity(2);
+    for (idx, (label, active, action)) in [
+        (
+            "Unread",
+            app.sidebar.unread_only,
+            crate::action::Action::FilterUnread,
+        ),
+        (
+            "People",
+            app.sidebar.people_only,
+            crate::action::Action::FilterPeople,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if idx > 0 {
+            spans.push(Span::raw("  "));
+            x += gap;
+        }
+        let chip = format!("{} {label}", if active { "●" } else { "○" });
+        let chip_w = width(&chip) as u16;
+        let role = if active {
+            Role::TitleFocused
+        } else {
+            Role::Muted
+        };
+        spans.push(Span::styled(chip, theme.style(role)));
+        let hit = HitId::Do(action);
+        let rect = Rect::new(x, area.y, chip_w.min(area.right().saturating_sub(x)), 1);
+        app.hits.add(rect, hit);
+        chip_rects.push((rect, hit));
+        x += chip_w;
+    }
+    frame.render_widget(Line::from(spans), area);
+    for (rect, hit) in chip_rects {
+        if rect.width > 0 && app.hover == Some(hit) {
+            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
+        }
+    }
+}
+
+fn draw_space_header(frame: &mut Frame, app: &mut App, area: Rect) {
+    let theme = &app.theme;
+    let name = app.space_name().unwrap_or_else(|| "All rooms".to_owned());
+    let cur = app.selected_space_unread();
+    let other = app.other_spaces_unread();
+    let badge_role = |mention: bool| {
+        if mention {
+            Role::MentionBadge
+        } else {
+            Role::UnreadBadge
+        }
+    };
+    let mut cur_badge = cur.and_then(|c| {
+        if c.notifications > 0 {
+            Some((format!(" {}", c.notifications), badge_role(c.mention)))
+        } else if c.unread {
+            Some((" ●".to_owned(), Role::UnreadBadge))
+        } else {
+            None
+        }
+    });
+    let mut other_badge = other.unread.then(|| {
+        let text = if other.notifications > 0 {
+            format!(" +{}", other.notifications)
+        } else {
+            " •".to_owned()
+        };
+        (text, badge_role(other.mention))
+    });
+
+    let avail = area.width as usize;
+    let fixed = 5usize; // " ◂ " + " ▸"
+    let min_label = 3usize.min(avail.saturating_sub(fixed));
+    if let Some((text, _)) = &mut other_badge
+        && fixed + width(text) + min_label > avail
+    {
+        if fixed + 2 + min_label <= avail {
+            *text = " •".to_owned();
+        } else {
+            other_badge = None;
+        }
+    }
+    let other_w = other_badge.as_ref().map_or(0, |(t, _)| width(t));
+    if let Some((text, _)) = &cur_badge
+        && fixed + width(text) + other_w + min_label > avail
+    {
+        cur_badge = None;
+    }
+    let cur_w = cur_badge.as_ref().map_or(0, |(t, _)| width(t));
+    let label = truncate(&name, avail.saturating_sub(fixed + cur_w + other_w));
+
+    let role = if app.space.is_some() {
+        Role::TitleFocused
+    } else {
+        Role::Muted
+    };
+    let arrow = theme.style(Role::StatusKey);
+    let mut spans = vec![
+        Span::styled(" ◂ ", arrow),
+        Span::styled(label, theme.style(role)),
+    ];
+    if let Some((text, badge)) = cur_badge {
+        spans.push(Span::styled(text, theme.style(badge)));
+    }
+    spans.push(Span::styled(" ▸", arrow));
+    if let Some((text, badge)) = other_badge {
+        spans.push(Span::styled(text, theme.style(badge)));
+    }
+    frame.render_widget(Line::from(spans), area);
+    app.hits
+        .add(area, HitId::Do(crate::action::Action::SpaceNext));
+    app.hits.add(
+        Rect::new(area.x, area.y, 3, 1),
+        HitId::Do(crate::action::Action::SpacePrev),
+    );
 }
 
 #[cfg(test)]

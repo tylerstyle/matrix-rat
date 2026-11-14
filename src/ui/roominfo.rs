@@ -783,6 +783,7 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
     }
     let text = match current {
         Some(InfoRow::Favourite) => "Favourites are listed first in the room list.",
+        Some(InfoRow::LowPriority) => "Low priority rooms are listed last in the room list.",
         Some(InfoRow::Notify) => "←→ choose which messages here notify you.",
         Some(InfoRow::Name | InfoRow::Topic) => "Enter to edit.",
         Some(InfoRow::Invite) => "Invite someone by user ID.",
@@ -887,6 +888,7 @@ fn info_row(
 
     let (label, label_style) = match row {
         InfoRow::Favourite => ("Favourite", label_style),
+        InfoRow::LowPriority => ("Low priority", label_style),
         InfoRow::Notify => ("Notifications", label_style),
         InfoRow::Name => ("Rename…", label_style),
         InfoRow::Topic => ("Change topic…", label_style),
@@ -901,13 +903,21 @@ fn info_row(
     app.hits.add(rect, hit(Click::Row(index)));
     let value_x = rect.x + 2 + ACTION_LABEL as u16;
     match row {
-        InfoRow::Favourite => {
-            let on = info
-                .details
-                .as_ref()
-                .map_or(info.kind == crate::model::RoomKind::Favourite, |d| {
-                    d.favourite
-                });
+        InfoRow::Favourite | InfoRow::LowPriority => {
+            let on = info.details.as_ref().map_or(
+                if row == InfoRow::LowPriority {
+                    info.kind == crate::model::RoomKind::LowPriority
+                } else {
+                    info.kind == crate::model::RoomKind::Favourite
+                },
+                |d| {
+                    if row == InfoRow::LowPriority {
+                        d.low_priority
+                    } else {
+                        d.favourite
+                    }
+                },
+            );
             let (text, role) = if on {
                 ("● on", Role::StatusOk)
             } else {
