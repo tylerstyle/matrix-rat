@@ -691,9 +691,11 @@ mod tests {
     use crate::format;
     use crate::model::{Message, RoomPower};
     use crate::paths::Paths;
+    use futures::FutureExt;
     use matrix_sdk::Client;
     use matrix_sdk::config::SyncSettings;
     use matrix_sdk::ruma::RoomId;
+    use std::panic::AssertUnwindSafe;
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -814,25 +816,62 @@ mod tests {
         handle: &MatrixHandle,
         events: &mut UnboundedReceiver<MatrixEvent>,
         room_id: &str,
+        phase: &str,
         pred: impl Fn(&RoomDetails) -> bool,
     ) -> RoomDetails {
         handle.send(MatrixCmd::Manage(ManageCmd::Info {
             room_id: room_id.to_owned(),
         }));
-        tokio::time::timeout(Duration::from_secs(60), async {
+        let mut last: Option<RoomDetails> = None;
+        let res = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 match events.recv().await.expect("worker stopped") {
                     MatrixEvent::Manage(ManageEvent::Info {
                         room_id: id,
                         result: Ok(details),
-                    }) if id == room_id && pred(&details) => return *details,
-                    MatrixEvent::Error(err) => panic!("{err}"),
+                    }) if id == room_id => {
+                        if pred(&details) {
+                            return *details;
+                        }
+                        last = Some(*details);
+                    }
+                    MatrixEvent::Manage(ManageEvent::Info {
+                        room_id: id,
+                        result: Err(err),
+                    }) if id == room_id => panic!("{phase}: ManageEvent::Info failed: {err}"),
+                    MatrixEvent::Error(err) => panic!("{phase}: {err}"),
                     _ => {}
                 }
             }
         })
-        .await
-        .expect("timed out waiting for ManageEvent::Info")
+        .await;
+        match res {
+            Ok(details) => details,
+            Err(_) => {
+                let diag = last.map(|d| {
+                    let members: Vec<_> = d
+                        .members
+                        .iter()
+                        .map(|m| {
+                            (
+                                m.own,
+                                m.role,
+                                m.power_level,
+                                m.invited,
+                                m.banned,
+                                m.bannable,
+                                m.unbannable,
+                            )
+                        })
+                        .collect();
+                    format!(
+                        "joined={}, invited={}, loading={}, err={:?}, members={members:?}",
+                        d.joined, d.invited, d.members_loading, d.members_error
+                    )
+                });
+                panic!("{phase}: timed out waiting for ManageEvent::Info; last={diag:?}");
+            }
+        }
     }
 
     async fn wait_power(
@@ -910,14 +949,18 @@ mod tests {
     }
 
     async fn cleanup_rooms(
-        workers: Vec<(&MatrixHandle, &mut UnboundedReceiver<MatrixEvent>)>,
+        workers: Vec<(
+            &MatrixHandle,
+            &mut UnboundedReceiver<MatrixEvent>,
+            &[String],
+        )>,
         bob: Option<&Client>,
-        room_ids: &[String],
+        bob_room_ids: &[String],
         roots: Vec<PathBuf>,
     ) {
-        for (handle, events) in workers {
+        for (handle, events, leave_ids) in workers {
             handle.send(MatrixCmd::Manage(ManageCmd::StopInfo));
-            for id in room_ids {
+            for id in leave_ids {
                 handle.send(MatrixCmd::Manage(ManageCmd::Leave {
                     room_id: id.clone(),
                 }));
@@ -936,11 +979,25 @@ mod tests {
                 })
                 .await;
             }
+            handle.send(MatrixCmd::Logout);
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    match events.recv().await {
+                        Some(MatrixEvent::NeedLogin { .. }) | None => break,
+                        _ => {}
+                    }
+                }
+            })
+            .await;
             handle.send(MatrixCmd::Shutdown);
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while events.recv().await.is_some() {}
+            })
+            .await;
         }
         if let Some(bob) = bob {
             let _ = bob.sync_once(SyncSettings::default()).await;
-            for id in room_ids {
+            for id in bob_room_ids {
                 if let Ok(rid) = <&RoomId>::try_from(id.as_str())
                     && let Some(room) = bob.get_room(rid)
                 {
@@ -948,6 +1005,7 @@ mod tests {
                     let _ = room.forget().await;
                 }
             }
+            let _ = tokio::time::timeout(Duration::from_secs(10), bob.matrix_auth().logout()).await;
         }
         for root in roots {
             let _ = std::fs::remove_dir_all(root);
@@ -967,13 +1025,10 @@ mod tests {
 
         let room_id = create_room(&h_a, &mut ev_a, "matrix-rat mod unpriv test", false).await;
         let cleanup_ids = vec![room_id.clone()];
-        let h_a_c = h_a.clone();
-        let h_b_c = h_b.clone();
-        let rid_c = room_id.clone();
 
-        let body = tokio::spawn(async move {
-            h_a_c.send(MatrixCmd::Manage(ManageCmd::Invite {
-                room_id: rid_c.clone(),
+        let outcome = AssertUnwindSafe(async {
+            h_a.send(MatrixCmd::Manage(ManageCmd::Invite {
+                room_id: room_id.clone(),
                 user_id: bob_id.clone(),
             }));
             wait_done(&mut ev_a, Change::Invite).await.unwrap();
@@ -982,7 +1037,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     match ev_b.recv().await.expect("worker stopped") {
-                        MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == rid_c) => {
+                        MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == room_id) => {
                             break;
                         }
                         _ => {}
@@ -992,9 +1047,9 @@ mod tests {
             .await
             .expect("bob invite timed out");
 
-            h_b_c.send(MatrixCmd::Manage(ManageCmd::Join {
+            h_b.send(MatrixCmd::Manage(ManageCmd::Join {
                 request: 0,
-                target: rid_c.clone(),
+                target: room_id.clone(),
                 via: Vec::new(),
             }));
             tokio::time::timeout(Duration::from_secs(60), async {
@@ -1002,7 +1057,7 @@ mod tests {
                     match ev_b.recv().await.expect("worker stopped") {
                         MatrixEvent::Rooms(rooms)
                             if rooms.iter().any(|r| {
-                                r.id == rid_c && r.category != super::super::RoomCategory::Invite
+                                r.id == room_id && r.category != super::super::RoomCategory::Invite
                             }) =>
                         {
                             break;
@@ -1014,20 +1069,20 @@ mod tests {
             .await
             .expect("bob join timed out");
 
-            h_b_c.send(MatrixCmd::OpenRoom {
-                room_id: rid_c.clone(),
+            h_b.send(MatrixCmd::OpenRoom {
+                room_id: room_id.clone(),
                 generation: 1,
             });
-            let power = wait_power(&mut ev_b, &rid_c, |_| true).await;
+            let power = wait_power(&mut ev_b, &room_id, |_| true).await;
             assert!(!power.can_ban && !power.can_pin && !power.can_redact_other);
 
             // Bob sends a message and gets its event_id.
-            h_b_c.send(MatrixCmd::Send {
-                room_id: rid_c.clone(),
+            h_b.send(MatrixCmd::Send {
+                room_id: room_id.clone(),
                 message: format::parse("bob plain msg"),
                 reply_to: None,
             });
-            let sent = wait_timeline_msg(&mut ev_b, &rid_c, |msgs| {
+            let sent = wait_timeline_msg(&mut ev_b, &room_id, |msgs| {
                 msgs.iter()
                     .find(|m| m.body.contains("bob plain msg") && m.event_id().is_some())
                     .cloned()
@@ -1036,8 +1091,8 @@ mod tests {
             let event_id = sent.event_id().unwrap().to_owned();
 
             // Trying to pin fails with ActionFailed.
-            h_b_c.send(MatrixCmd::Pin {
-                room_id: rid_c.clone(),
+            h_b.send(MatrixCmd::Pin {
+                room_id: room_id.clone(),
                 event_id,
                 pinned: true,
             });
@@ -1059,38 +1114,29 @@ mod tests {
             .expect("timed out waiting for Pin rejection");
 
             // Trying to ban Alice fails cleanly.
-            h_b_c.send(MatrixCmd::Manage(ManageCmd::Ban {
-                room_id: rid_c.clone(),
+            h_b.send(MatrixCmd::Manage(ManageCmd::Ban {
+                room_id: room_id.clone(),
                 user_id: alice_id,
                 reason: None,
             }));
             let ban_res = wait_done(&mut ev_b, Change::Ban).await;
             assert!(ban_res.is_err(), "expected ban rejection: {ban_res:?}");
-            (ev_a, ev_b)
         })
+        .catch_unwind()
         .await;
 
-        match body {
-            Ok((mut ev_a, mut ev_b)) => {
-                cleanup_rooms(
-                    vec![(&h_a, &mut ev_a), (&h_b, &mut ev_b)],
-                    None,
-                    &cleanup_ids,
-                    vec![root_a, root_b],
-                )
-                .await;
-            }
-            Err(err) => {
-                h_a.send(MatrixCmd::Manage(ManageCmd::Leave {
-                    room_id: room_id.clone(),
-                }));
-                h_b.send(MatrixCmd::Manage(ManageCmd::Leave { room_id }));
-                h_a.send(MatrixCmd::Shutdown);
-                h_b.send(MatrixCmd::Shutdown);
-                let _ = std::fs::remove_dir_all(root_a);
-                let _ = std::fs::remove_dir_all(root_b);
-                std::panic::resume_unwind(err.into_panic());
-            }
+        cleanup_rooms(
+            vec![
+                (&h_a, &mut ev_a, &cleanup_ids),
+                (&h_b, &mut ev_b, &cleanup_ids),
+            ],
+            None,
+            &[],
+            vec![root_a, root_b],
+        )
+        .await;
+        if let Err(err) = outcome {
+            std::panic::resume_unwind(err);
         }
     }
 
@@ -1106,19 +1152,16 @@ mod tests {
         let (bob, bob_id) = login_bob(&hs).await;
         let room_id = create_room(&h_a, &mut ev_a, "matrix-rat mod roleban test", false).await;
         let cleanup_ids = vec![room_id.clone()];
-        let h_a_c = h_a.clone();
-        let rid_c = room_id.clone();
-        let bob_c = bob.clone();
 
-        let body = tokio::spawn(async move {
-            wait_info(&h_a_c, &mut ev_a, &rid_c, |d| {
+        let outcome = AssertUnwindSafe(async {
+            wait_info(&h_a, &mut ev_a, &room_id, "creator-admin", |d| {
                 d.members
                     .iter()
                     .any(|m| m.own && m.role >= MemberRole::Admin)
             })
             .await;
-            invite_and_join_bob(&h_a_c, &mut ev_a, &bob_c, &rid_c, &bob_id).await;
-            let details = wait_info(&h_a_c, &mut ev_a, &rid_c, |d| {
+            invite_and_join_bob(&h_a, &mut ev_a, &bob, &room_id, &bob_id).await;
+            let details = wait_info(&h_a, &mut ev_a, &room_id, "bob-joined", |d| {
                 d.members
                     .iter()
                     .any(|m| m.own && m.role >= MemberRole::Admin)
@@ -1152,13 +1195,13 @@ mod tests {
             );
 
             // Promote Bob to Moderator (50), then reset to Default (0).
-            h_a_c.send(MatrixCmd::Manage(ManageCmd::SetRole {
-                room_id: rid_c.clone(),
+            h_a.send(MatrixCmd::Manage(ManageCmd::SetRole {
+                room_id: room_id.clone(),
                 user_id: bob_id.clone(),
                 level: 50,
             }));
             wait_done(&mut ev_a, Change::SetRole).await.unwrap();
-            let details = wait_info(&h_a_c, &mut ev_a, &rid_c, |d| {
+            let details = wait_info(&h_a, &mut ev_a, &room_id, "bob-mod", |d| {
                 d.members
                     .iter()
                     .any(|m| m.user_id == bob_id && m.power_level == 50)
@@ -1172,13 +1215,13 @@ mod tests {
             assert_eq!(bob_row.role, MemberRole::Moderator);
 
             // Ban Bob with a reason.
-            h_a_c.send(MatrixCmd::Manage(ManageCmd::Ban {
-                room_id: rid_c.clone(),
+            h_a.send(MatrixCmd::Manage(ManageCmd::Ban {
+                room_id: room_id.clone(),
                 user_id: bob_id.clone(),
                 reason: Some("server integration test".into()),
             }));
             wait_done(&mut ev_a, Change::Ban).await.unwrap();
-            let details = wait_info(&h_a_c, &mut ev_a, &rid_c, |d| {
+            let details = wait_info(&h_a, &mut ev_a, &room_id, "bob-banned", |d| {
                 d.members.iter().any(|m| m.user_id == bob_id && m.banned)
             })
             .await;
@@ -1190,43 +1233,28 @@ mod tests {
             assert!(banned_bob.banned && banned_bob.unbannable);
 
             // Unban Bob -> no longer listed among banned or joined members.
-            h_a_c.send(MatrixCmd::Manage(ManageCmd::Unban {
-                room_id: rid_c.clone(),
+            h_a.send(MatrixCmd::Manage(ManageCmd::Unban {
+                room_id: room_id.clone(),
                 user_id: bob_id.clone(),
             }));
             wait_done(&mut ev_a, Change::Unban).await.unwrap();
-            wait_info(&h_a_c, &mut ev_a, &rid_c, |d| {
+            wait_info(&h_a, &mut ev_a, &room_id, "bob-unbanned", |d| {
                 !d.members.iter().any(|m| m.user_id == bob_id)
             })
             .await;
-            ev_a
         })
+        .catch_unwind()
         .await;
 
-        match body {
-            Ok(mut ev_a) => {
-                cleanup_rooms(
-                    vec![(&h_a, &mut ev_a)],
-                    Some(&bob),
-                    &cleanup_ids,
-                    vec![root_a],
-                )
-                .await;
-            }
-            Err(err) => {
-                h_a.send(MatrixCmd::Manage(ManageCmd::Leave {
-                    room_id: room_id.clone(),
-                }));
-                h_a.send(MatrixCmd::Shutdown);
-                if let Ok(rid) = <&RoomId>::try_from(room_id.as_str())
-                    && let Some(room) = bob.get_room(rid)
-                {
-                    let _ = room.leave().await;
-                    let _ = room.forget().await;
-                }
-                let _ = std::fs::remove_dir_all(root_a);
-                std::panic::resume_unwind(err.into_panic());
-            }
+        cleanup_rooms(
+            vec![(&h_a, &mut ev_a, &cleanup_ids)],
+            Some(&bob),
+            &cleanup_ids,
+            vec![root_a],
+        )
+        .await;
+        if let Err(err) = outcome {
+            std::panic::resume_unwind(err);
         }
     }
 
@@ -1242,16 +1270,13 @@ mod tests {
 
         let room_id = create_room(&h1, &mut ev1, "matrix-rat mod pin test", false).await;
         let cleanup_ids = vec![room_id.clone()];
-        let h1_c = h1.clone();
-        let h2_c = h2.clone();
-        let rid_c = room_id.clone();
 
-        let body = tokio::spawn(async move {
+        let outcome = AssertUnwindSafe(async {
             // Wait for second client to know about the room before fetching pinned.
             tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     match ev2.recv().await.expect("worker stopped") {
-                        MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == rid_c) => break,
+                        MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == room_id) => break,
                         _ => {}
                     }
                 }
@@ -1259,16 +1284,16 @@ mod tests {
             .await
             .expect("second client did not see room");
 
-            h1_c.send(MatrixCmd::OpenRoom {
-                room_id: rid_c.clone(),
+            h1.send(MatrixCmd::OpenRoom {
+                room_id: room_id.clone(),
                 generation: 1,
             });
-            h1_c.send(MatrixCmd::Send {
-                room_id: rid_c.clone(),
+            h1.send(MatrixCmd::Send {
+                room_id: room_id.clone(),
                 message: format::parse("pin worthy message"),
                 reply_to: None,
             });
-            let msg = wait_timeline_msg(&mut ev1, &rid_c, |msgs| {
+            let msg = wait_timeline_msg(&mut ev1, &room_id, |msgs| {
                 msgs.iter()
                     .find(|m| m.body.contains("pin worthy message") && m.event_id().is_some())
                     .cloned()
@@ -1277,16 +1302,16 @@ mod tests {
             let event_id = msg.event_id().unwrap().to_owned();
 
             // Pin from client 1.
-            h1_c.send(MatrixCmd::Pin {
-                room_id: rid_c.clone(),
+            h1.send(MatrixCmd::Pin {
+                room_id: room_id.clone(),
                 event_id: event_id.clone(),
                 pinned: true,
             });
             tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     match ev1.recv().await.expect("worker stopped") {
-                        MatrixEvent::PinnedEvents { room_id, ids }
-                            if room_id == rid_c && ids.contains(&event_id) =>
+                        MatrixEvent::PinnedEvents { room_id: id, ids }
+                            if id == room_id && ids.contains(&event_id) =>
                         {
                             break;
                         }
@@ -1301,17 +1326,17 @@ mod tests {
             .expect("timed out waiting for PinnedEvents");
 
             // Client 2 (without having opened the room's timeline!) fetches pinned events via load_or_fetch_event.
-            h2_c.send(MatrixCmd::FetchPinned {
-                room_id: rid_c.clone(),
+            h2.send(MatrixCmd::FetchPinned {
+                room_id: room_id.clone(),
             });
             tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     match ev2.recv().await.expect("worker stopped") {
                         MatrixEvent::PinnedList {
-                            room_id,
+                            room_id: id,
                             items,
                             error,
-                        } if room_id == rid_c => {
+                        } if id == room_id => {
                             if items.iter().any(|it| {
                                 it.event_id == event_id && it.snippet.contains("pin worthy")
                             }) {
@@ -1319,8 +1344,8 @@ mod tests {
                                 break;
                             }
                             tokio::time::sleep(Duration::from_millis(250)).await;
-                            h2_c.send(MatrixCmd::FetchPinned {
-                                room_id: rid_c.clone(),
+                            h2.send(MatrixCmd::FetchPinned {
+                                room_id: room_id.clone(),
                             });
                         }
                         _ => {}
@@ -1331,16 +1356,16 @@ mod tests {
             .expect("client 2 did not fetch pinned message");
 
             // Unpin from client 1 -> FetchPinned on client 2 returns empty.
-            h1_c.send(MatrixCmd::Pin {
-                room_id: rid_c.clone(),
+            h1.send(MatrixCmd::Pin {
+                room_id: room_id.clone(),
                 event_id: event_id.clone(),
                 pinned: false,
             });
             tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
-                    if let MatrixEvent::PinnedEvents { room_id, ids } =
+                    if let MatrixEvent::PinnedEvents { room_id: id, ids } =
                         ev1.recv().await.expect("worker stopped")
-                        && room_id == rid_c
+                        && id == room_id
                         && ids.is_empty()
                     {
                         break;
@@ -1350,52 +1375,43 @@ mod tests {
             .await
             .expect("timed out waiting for unpin");
 
-            h2_c.send(MatrixCmd::FetchPinned {
-                room_id: rid_c.clone(),
+            h2.send(MatrixCmd::FetchPinned {
+                room_id: room_id.clone(),
             });
             tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     if let MatrixEvent::PinnedList {
-                        room_id,
+                        room_id: id,
                         items,
                         error: None,
                     } = ev2.recv().await.expect("worker stopped")
-                        && room_id == rid_c
+                        && id == room_id
                     {
                         if items.is_empty() {
                             break;
                         }
                         tokio::time::sleep(Duration::from_millis(250)).await;
-                        h2_c.send(MatrixCmd::FetchPinned {
-                            room_id: rid_c.clone(),
+                        h2.send(MatrixCmd::FetchPinned {
+                            room_id: room_id.clone(),
                         });
                     }
                 }
             })
             .await
             .expect("client 2 did not see unpinned empty list");
-            (ev1, ev2)
         })
+        .catch_unwind()
         .await;
 
-        match body {
-            Ok((mut ev1, mut ev2)) => {
-                cleanup_rooms(
-                    vec![(&h1, &mut ev1), (&h2, &mut ev2)],
-                    None,
-                    &cleanup_ids,
-                    vec![root1, root2],
-                )
-                .await;
-            }
-            Err(err) => {
-                h1.send(MatrixCmd::Manage(ManageCmd::Leave { room_id }));
-                h1.send(MatrixCmd::Shutdown);
-                h2.send(MatrixCmd::Shutdown);
-                let _ = std::fs::remove_dir_all(root1);
-                let _ = std::fs::remove_dir_all(root2);
-                std::panic::resume_unwind(err.into_panic());
-            }
+        cleanup_rooms(
+            vec![(&h1, &mut ev1, &cleanup_ids), (&h2, &mut ev2, &[])],
+            None,
+            &[],
+            vec![root1, root2],
+        )
+        .await;
+        if let Err(err) = outcome {
+            std::panic::resume_unwind(err);
         }
     }
 
@@ -1415,22 +1431,17 @@ mod tests {
         let sample_file = root.join("forward-note.txt");
         std::fs::write(&sample_file, b"hello forwarded attachment\n").unwrap();
 
-        let h_c = handle.clone();
-        let src_c = src_room.clone();
-        let dst_c = dst_room.clone();
-        let file_c = sample_file.clone();
-
-        let body = tokio::spawn(async move {
-            h_c.send(MatrixCmd::OpenRoom {
-                room_id: src_c.clone(),
+        let outcome = AssertUnwindSafe(async {
+            handle.send(MatrixCmd::OpenRoom {
+                room_id: src_room.clone(),
                 generation: 1,
             });
-            h_c.send(MatrixCmd::Send {
-                room_id: src_c.clone(),
+            handle.send(MatrixCmd::Send {
+                room_id: src_room.clone(),
                 message: format::parse("root message"),
                 reply_to: None,
             });
-            let base = wait_timeline_msg(&mut events, &src_c, |msgs| {
+            let base = wait_timeline_msg(&mut events, &src_room, |msgs| {
                 msgs.iter()
                     .find(|m| m.body.contains("root message") && m.event_id().is_some())
                     .cloned()
@@ -1439,12 +1450,12 @@ mod tests {
             let base_id = base.event_id().unwrap().to_owned();
 
             // Send a reply to strip when forwarded, plus a file attachment.
-            h_c.send(MatrixCmd::Send {
-                room_id: src_c.clone(),
+            handle.send(MatrixCmd::Send {
+                room_id: src_room.clone(),
                 message: format::parse("forwarded standalone reply"),
                 reply_to: Some(base_id),
             });
-            let reply_msg = wait_timeline_msg(&mut events, &src_c, |msgs| {
+            let reply_msg = wait_timeline_msg(&mut events, &src_room, |msgs| {
                 msgs.iter()
                     .find(|m| {
                         m.body.contains("forwarded standalone reply") && m.event_id().is_some()
@@ -1454,13 +1465,13 @@ mod tests {
             .await;
             let reply_event_id = reply_msg.event_id().unwrap().to_owned();
 
-            h_c.send(MatrixCmd::SendFiles {
-                room_id: src_c.clone(),
-                files: vec![file_c],
+            handle.send(MatrixCmd::SendFiles {
+                room_id: src_room.clone(),
+                files: vec![sample_file.clone()],
                 caption: None,
                 reply_to: None,
             });
-            let file_msg = wait_timeline_msg(&mut events, &src_c, |msgs| {
+            let file_msg = wait_timeline_msg(&mut events, &src_room, |msgs| {
                 msgs.iter()
                     .find(|m| m.file.is_some() && m.event_id().is_some())
                     .cloned()
@@ -1470,17 +1481,17 @@ mod tests {
 
             // Forward both to dst_room.
             for eid in [reply_event_id, file_event_id] {
-                h_c.send(MatrixCmd::Forward {
-                    from_room_id: src_c.clone(),
+                handle.send(MatrixCmd::Forward {
+                    from_room_id: src_room.clone(),
                     event_id: eid,
-                    to_room_id: dst_c.clone(),
+                    to_room_id: dst_room.clone(),
                 });
                 tokio::time::timeout(Duration::from_secs(60), async {
                     loop {
                         match events.recv().await.expect("worker stopped") {
                             MatrixEvent::ForwardResult {
                                 to_room_id, result, ..
-                            } if to_room_id == dst_c => {
+                            } if to_room_id == dst_room => {
                                 result.expect("ForwardResult failed");
                                 break;
                             }
@@ -1494,49 +1505,40 @@ mod tests {
             }
 
             // Open dst_room and verify standalone reply + file arrived without reply relation.
-            h_c.send(MatrixCmd::OpenRoom {
-                room_id: dst_c.clone(),
+            // Wait for both in one pass because both may already be present in the initial snapshot.
+            handle.send(MatrixCmd::OpenRoom {
+                room_id: dst_room.clone(),
                 generation: 2,
             });
-            let copied_text = wait_timeline_msg(&mut events, &dst_c, |msgs| {
-                msgs.iter()
-                    .find(|m| m.body.contains("forwarded standalone reply"))
-                    .cloned()
+            let copied_text = wait_timeline_msg(&mut events, &dst_room, |msgs| {
+                let text = msgs
+                    .iter()
+                    .find(|m| m.body.contains("forwarded standalone reply"))?;
+                let has_file = msgs.iter().any(|m| {
+                    m.file
+                        .as_ref()
+                        .is_some_and(|f| f.name == "forward-note.txt")
+                });
+                has_file.then(|| text.clone())
             })
             .await;
             assert!(
                 copied_text.reply_to.is_none() && copied_text.reply_event.is_none(),
                 "expected standalone forward without reply relation: {copied_text:?}"
             );
-            wait_timeline_msg(&mut events, &dst_c, |msgs| {
-                msgs.iter()
-                    .find(|m| {
-                        m.file
-                            .as_ref()
-                            .is_some_and(|f| f.name == "forward-note.txt")
-                    })
-                    .cloned()
-            })
-            .await;
-
-            events
         })
+        .catch_unwind()
         .await;
 
-        match body {
-            Ok(mut events) => {
-                cleanup_rooms(vec![(&handle, &mut events)], None, &cleanup_ids, vec![root]).await;
-            }
-            Err(err) => {
-                for id in &cleanup_ids {
-                    handle.send(MatrixCmd::Manage(ManageCmd::Leave {
-                        room_id: id.clone(),
-                    }));
-                }
-                handle.send(MatrixCmd::Shutdown);
-                let _ = std::fs::remove_dir_all(root);
-                std::panic::resume_unwind(err.into_panic());
-            }
+        cleanup_rooms(
+            vec![(&handle, &mut events, &cleanup_ids)],
+            None,
+            &[],
+            vec![root],
+        )
+        .await;
+        if let Err(err) = outcome {
+            std::panic::resume_unwind(err);
         }
     }
 }

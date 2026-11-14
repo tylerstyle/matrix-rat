@@ -1220,7 +1220,7 @@ impl Worker {
                 let refresh = manage_refresh.clone();
                 async move {
                     manage::emit_room_power(&events, &room).await;
-                    refresh.notify_one();
+                    manage::bump_refresh(&refresh);
                 }
             },
         );
@@ -1229,7 +1229,7 @@ impl Worker {
             move |_ev: matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent| {
                 let refresh = member_refresh.clone();
                 async move {
-                    refresh.notify_one();
+                    manage::bump_refresh(&refresh);
                 }
             },
         );

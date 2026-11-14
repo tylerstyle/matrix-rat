@@ -19,8 +19,8 @@ use matrix_sdk::ruma::{
     UserId,
 };
 use matrix_sdk::{Client, NotificationSettingsError, Room, RoomMemberships, RoomState};
-use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::MatrixEvent;
@@ -308,20 +308,25 @@ pub struct Manager {
     /// Keeps the open room info view current.
     watcher: Option<JoinHandle<()>>,
     /// Wakes the open room info watcher after local moderation or membership changes.
-    refresh: Arc<Notify>,
+    refresh: Arc<watch::Sender<u64>>,
+}
+
+pub(super) fn bump_refresh(refresh: &watch::Sender<u64>) {
+    refresh.send_modify(|n| *n = n.wrapping_add(1));
 }
 
 impl Manager {
     pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
+        let (refresh, _) = watch::channel(0u64);
         Self {
             client,
             events,
             watcher: None,
-            refresh: Arc::new(Notify::new()),
+            refresh: Arc::new(refresh),
         }
     }
 
-    pub fn refresh_signal(&self) -> Arc<Notify> {
+    pub fn refresh_signal(&self) -> Arc<watch::Sender<u64>> {
         self.refresh.clone()
     }
 
@@ -389,11 +394,14 @@ impl Manager {
             }
             ManageCmd::Info { room_id } => {
                 self.stop();
+                // Subscribe before spawning so changes arriving during the initial
+                // store read still mark this watcher's receiver dirty.
+                let refresh = self.refresh.subscribe();
                 self.watcher = Some(tokio::spawn(watch(
                     client,
                     room_id,
                     self.events.clone(),
-                    self.refresh.clone(),
+                    refresh,
                 )));
             }
             ManageCmd::StopInfo => self.stop(),
@@ -420,7 +428,7 @@ impl Manager {
                         })
                         .await;
                     if result.is_ok() {
-                        refresh.notify_one();
+                        bump_refresh(&refresh);
                     }
                     emit(ManageEvent::Done {
                         room_id,
@@ -446,7 +454,7 @@ impl Manager {
                         })
                         .await;
                     if result.is_ok() {
-                        refresh.notify_one();
+                        bump_refresh(&refresh);
                     }
                     emit(ManageEvent::Done {
                         room_id,
@@ -464,7 +472,7 @@ impl Manager {
                         })
                         .await;
                     if result.is_ok() {
-                        refresh.notify_one();
+                        bump_refresh(&refresh);
                     }
                     emit(ManageEvent::Done {
                         room_id,
@@ -501,7 +509,7 @@ impl Manager {
                                 && let Ok(r) = ok_room
                             {
                                 emit_room_power(&events_tx, &r).await;
-                                refresh.notify_one();
+                                bump_refresh(&refresh);
                             }
                             res
                         }
@@ -1232,7 +1240,7 @@ async fn watch(
     client: Client,
     room_id: String,
     events: UnboundedSender<MatrixEvent>,
-    refresh: Arc<Notify>,
+    mut refresh: watch::Receiver<u64>,
 ) {
     let emit = |result: Result<RoomDetails, String>| {
         events
@@ -1255,6 +1263,10 @@ async fn watch(
     let mut sent: Option<RoomDetails> = None;
     let mut force_refresh = false;
     loop {
+        if refresh.has_changed().unwrap_or(false) {
+            force_refresh = true;
+        }
+        refresh.borrow_and_update();
         // Looked at afresh every time: an invitation may have been accepted meanwhile.
         let joined = match room.state() {
             RoomState::Left | RoomState::Banned => return,
@@ -1357,14 +1369,20 @@ async fn watch(
             Some(time) => {
                 tokio::select! {
                     change = changes.next() => if change.is_none() { return },
-                    () = refresh.notified() => { force_refresh = true; }
+                    changed = refresh.changed() => {
+                        if changed.is_err() { return; }
+                        force_refresh = true;
+                    }
                     () = tokio::time::sleep(time) => {}
                 }
             }
             None => {
                 tokio::select! {
                     change = changes.next() => if change.is_none() { return },
-                    () = refresh.notified() => { force_refresh = true; }
+                    changed = refresh.changed() => {
+                        if changed.is_err() { return; }
+                        force_refresh = true;
+                    }
                 }
             }
         }
