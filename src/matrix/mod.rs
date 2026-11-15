@@ -273,6 +273,11 @@ pub enum MatrixCmd {
         /// Its `mxc://` address.
         url: String,
     },
+    /// Fetch the picture of a custom emoji; answered with [`MatrixEvent::EmotePicture`].
+    FetchEmotePicture {
+        /// Its `mxc://` address.
+        url: String,
+    },
     /// Like [`MatrixCmd::OpenRoom`], for the thread that starts at the event `root`
     /// (which may have no replies yet).
     OpenThread {
@@ -507,6 +512,7 @@ impl MatrixCmd {
             // The source of an encrypted file carries its key.
             Self::FetchImage { full, .. } => ("FetchImage", vec![Some(format!("full: {full}"))]),
             Self::FetchAvatar { .. } => ("FetchAvatar", vec![]),
+            Self::FetchEmotePicture { .. } => ("FetchEmotePicture", vec![]),
             // The address is from a message.
             Self::LinkPreview { .. } => ("LinkPreview", vec![]),
             Self::Verification(command) => ("Verification", vec![Some(format!("{command:?}"))]),
@@ -854,6 +860,11 @@ pub enum MatrixEvent {
         url: String,
         result: Result<crate::images::Decoded, String>,
     },
+    /// Outcome of [`MatrixCmd::FetchEmotePicture`].
+    EmotePicture {
+        url: String,
+        result: Result<crate::images::Decoded, String>,
+    },
     /// The largest file the server accepts, in bytes.
     UploadLimit(u64),
     /// The first file of a [`MatrixCmd::SendFiles`] could not be sent, so none was:
@@ -1075,6 +1086,7 @@ impl MatrixEvent {
                 vec![Some(format!("full: {whole}")), ok(result.is_ok())],
             ),
             Self::Avatar { result, .. } => ("Avatar", vec![ok(result.is_ok())]),
+            Self::EmotePicture { result, .. } => ("EmotePicture", vec![ok(result.is_ok())]),
             Self::LinkPreview { result, .. } => (
                 "LinkPreview",
                 vec![Some(format!("found: {}", result.is_some()))],

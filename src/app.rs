@@ -3140,6 +3140,7 @@ impl App {
                 self.images.on_loaded(&key, full, result);
             }
             MatrixEvent::Avatar { url, result } => self.images.on_avatar(&url, result),
+            MatrixEvent::EmotePicture { url, result } => self.images.on_emote(&url, result),
             MatrixEvent::LinkPreview { url, result } => self.on_link_preview(&url, result),
             MatrixEvent::Spaces(_) if self.logged_out => {}
             MatrixEvent::Spaces(spaces) => self.apply_spaces(spaces),

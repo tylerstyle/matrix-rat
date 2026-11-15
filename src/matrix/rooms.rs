@@ -1110,6 +1110,7 @@ impl Timelines {
                 Err(err) => self.fail("Could not leave", err),
             },
             MatrixCmd::FetchAvatar { url } => self.media.fetch_avatar(url),
+            MatrixCmd::FetchEmotePicture { url } => self.media.fetch_emote(url),
             MatrixCmd::LinkPreview { url } => self.previews.fetch(url),
             MatrixCmd::FetchImage {
                 key,

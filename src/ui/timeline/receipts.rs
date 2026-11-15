@@ -11,6 +11,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::{INDENT, Row};
+use crate::images::EMOTE_CELLS;
 use crate::model::{ReadBy, Room, RoomKind};
 use crate::text::{truncate, width};
 use crate::theme::{Role, Theme};
@@ -59,6 +60,9 @@ pub(super) fn add(mut rows: Vec<Row>, room: &Room, max_width: usize, theme: &The
             // "… ✓" over the end of the text. (Nothing can be written over a
             // picture; who read that is in the menu.)
             cut(&mut row.line, max_width - 3);
+            // An emoji's picture cut into is not drawn over the marker.
+            row.emotes
+                .retain(|spot| usize::from(spot.col) + usize::from(EMOTE_CELLS.0) <= max_width - 3);
             let muted = Style {
                 fg: theme.style(Role::Muted).fg,
                 ..Style::new()

@@ -22,10 +22,14 @@ impl App {
         self.dirty = true;
     }
 
-    /// Hands any pending avatar fetch requests to the worker immediately.
+    /// Hands any pending room picture and custom emoji picture requests to the worker
+    /// immediately.
     pub(super) fn send_avatar_requests(&mut self) {
         for url in self.images.take_avatar_requests() {
             self.send_matrix(MatrixCmd::FetchAvatar { url });
+        }
+        for url in self.images.take_emote_requests() {
+            self.send_matrix(MatrixCmd::FetchEmotePicture { url });
         }
     }
 
@@ -770,6 +774,128 @@ mod tests {
         app.images.begin_frame();
         app.images.request(&info);
         assert_eq!(app.images.take_requests().len(), 1);
+    }
+
+    fn emote_fetches(commands: &mut UnboundedReceiver<MatrixCmd>) -> Vec<String> {
+        let mut seen = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            if let MatrixCmd::FetchEmotePicture { url } = command {
+                seen.push(url);
+            }
+        }
+        seen
+    }
+
+    /// A message with custom emoji `names` in its text (their pictures at
+    /// `mxc://example.org/<name>`) and a reaction made with `:party:`.
+    fn with_emoji(id: &str, names: &[&str]) -> Message {
+        let html: String = names
+            .iter()
+            .map(|name| {
+                format!("<img data-mx-emoticon src=\"mxc://example.org/{name}\" alt=\":{name}:\"> ")
+            })
+            .collect();
+        Message {
+            html: Some(format!("look {html}here")),
+            reactions: vec![crate::model::Reaction {
+                key: "mxc://example.org/party".into(),
+                count: 3,
+                own: false,
+            }],
+            ..text(id, "look here")
+        }
+    }
+
+    #[test]
+    fn custom_emoji_become_pictures_when_they_arrive() {
+        let (mut app, mut terminal, mut commands) =
+            app_with(kitty(), vec![with_emoji("1", &["blob"])]);
+        // Their names until the pictures are there; both are asked for, once.
+        assert!(screen(&terminal).contains("look :blob: here"));
+        assert!(screen(&terminal).contains(" :?: 3 "));
+        assert_eq!(
+            emote_fetches(&mut commands),
+            ["mxc://example.org/blob", "mxc://example.org/party"]
+        );
+        frame(&mut app, &mut terminal);
+        assert!(emote_fetches(&mut commands).is_empty());
+        assert!(kitty_cells(terminal.backend().buffer()).is_empty());
+
+        // One arrives: the rows are laid out again, two cells kept for it and the
+        // picture in them, the data travelling in the first.
+        app.on_matrix(MatrixEvent::EmotePicture {
+            url: "mxc://example.org/blob".into(),
+            result: Ok(decoded(64, 64)),
+        });
+        frame(&mut app, &mut terminal);
+        let row = row_of(&terminal, "look") as u16;
+        assert!(!screen(&terminal).contains(":blob:"));
+        let buffer = terminal.backend().buffer();
+        let look = (0..buffer.area.width - 4)
+            .find(|&x| (0..4).all(|n| buffer[(x + n, row)].symbol() == &"look"[n as usize..][..1]))
+            .unwrap();
+        // Right after "look ", where the name was.
+        let cells = kitty_cells(buffer);
+        assert_eq!(cells.len(), 2);
+        assert_eq!((cells[0].0, cells[0].1), (look + 5, row));
+        assert_eq!((cells[1].0, cells[1].1), (look + 6, row));
+        assert!(cells[0].2.starts_with("\x1b_G"));
+        assert_eq!(buffer[(look + 7, row)].symbol(), " ");
+        assert_eq!(buffer[(look + 8, row)].symbol(), "h");
+        // The reaction's picture failed: it keeps its name.
+        app.on_matrix(MatrixEvent::EmotePicture {
+            url: "mxc://example.org/party".into(),
+            result: Err("could not be loaded".into()),
+        });
+        frame(&mut app, &mut terminal);
+        assert!(screen(&terminal).contains(" :?: 3 "));
+        assert_eq!(kitty_cells(terminal.backend().buffer()).len(), 2);
+        assert!(emote_fetches(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn a_screen_of_new_custom_emoji_is_fetched_a_few_at_a_time() {
+        let names: Vec<String> = (0..20).map(|n| format!("e{n}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (mut app, mut terminal, mut commands) =
+            app_with(kitty(), vec![with_emoji("1", &names)]);
+        let first = emote_fetches(&mut commands);
+        assert_eq!(first.len(), crate::images::EMOTE_IN_FLIGHT);
+        frame(&mut app, &mut terminal);
+        assert!(emote_fetches(&mut commands).is_empty());
+        // Each answer lets one more go.
+        app.on_matrix(MatrixEvent::EmotePicture {
+            url: first[0].clone(),
+            result: Ok(decoded(64, 64)),
+        });
+        frame(&mut app, &mut terminal);
+        assert_eq!(emote_fetches(&mut commands).len(), 1);
+
+        // Without kitty's protocol, none at all.
+        for graphics in [Graphics::halfblocks(), Graphics::off()] {
+            let (_app, terminal, mut commands) = app_with(graphics, vec![with_emoji("1", &names)]);
+            assert!(emote_fetches(&mut commands).is_empty());
+            assert!(screen(&terminal).contains(":e0:"));
+        }
+    }
+
+    #[test]
+    fn a_custom_emoji_arriving_under_a_popup_is_sent_when_the_popup_is_gone() {
+        let (mut app, mut terminal, _commands) =
+            app_with(kitty(), vec![with_emoji("1", &["blob"])]);
+        app.perform(Action::ToggleHelp);
+        app.on_matrix(MatrixEvent::EmotePicture {
+            url: "mxc://example.org/blob".into(),
+            result: Ok(decoded(64, 64)),
+        });
+        frame(&mut app, &mut terminal);
+        // Its cells are kept, but nothing went to the terminal under the popup.
+        assert!(kitty_cells(terminal.backend().buffer()).is_empty());
+        app.perform(Action::ToggleHelp);
+        frame(&mut app, &mut terminal);
+        let cells = kitty_cells(terminal.backend().buffer());
+        assert_eq!(cells.len(), 2);
+        assert!(cells[0].2.starts_with("\x1b_G"));
     }
 
     /// An app connected to a fake worker with `count` rooms, each with a picture.

@@ -1,4 +1,5 @@
-//! Drawing pictures: between the messages, and in the full-window viewer.
+//! Drawing pictures: between the messages, small ones (room pictures, custom emoji),
+//! and in the full-window viewer.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -102,6 +103,38 @@ pub fn draw_avatar(
         .is_some_and(|cell| cell.symbol().starts_with('\x1b'));
     if pending && carries_data {
         images.sent_avatar(url, area.x, area.y);
+    }
+}
+
+/// Draws a custom emoji's picture over the two cells kept for it, once it is there.
+/// Until then, and wherever pictures cannot be drawn, the cells stay as they are.
+pub fn draw_emote(
+    frame: &mut Frame,
+    images: &mut ImageStore,
+    theme: &Theme,
+    url: &str,
+    area: Rect,
+    covered: bool,
+) {
+    let Some(encoded) = images.emote(url, covered) else {
+        return;
+    };
+    let pending = !encoded.shown;
+    // The background (a selected message, a reaction chip) stays behind the
+    // picture's transparent parts; underlines and the like of the text around do not
+    // belong on it.
+    frame
+        .buffer_mut()
+        .set_style(area, Style::new().remove_modifier(Modifier::all()));
+    render(frame, theme, encoded, area, 0);
+    // The same emoji is often on screen many times: only the first one drawn carries
+    // the data, as with room pictures.
+    let carries_data = frame
+        .buffer_mut()
+        .cell((area.x, area.y))
+        .is_some_and(|cell| cell.symbol().starts_with('\x1b'));
+    if pending && carries_data {
+        images.sent_emote(url, area.x, area.y);
     }
 }
 
