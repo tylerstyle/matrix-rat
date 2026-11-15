@@ -1578,10 +1578,11 @@ impl InfoPopup {
         self.role_chooser = None;
         // The user has chosen for themselves.
         self.wanted = None;
-        self.blind = false;
+        let was_blind = std::mem::take(&mut self.blind);
         // Up from the first row: what stands above it (name, topic, facts) comes
-        // back into view; in a low window the rows alone can fill it.
-        if delta < 0 && self.selected == 0 {
+        // back into view; in a low window the rows alone can fill it. (Not while the
+        // row itself was out of view behind a filter: then it is shown first.)
+        if delta < 0 && self.selected == 0 && !was_blind {
             self.scroll = self.scroll.saturating_sub(delta.unsigned_abs());
             self.reveal = false;
             return;

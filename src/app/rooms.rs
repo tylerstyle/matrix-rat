@@ -1198,7 +1198,8 @@ impl App {
                     self.info_activate(row, 0);
                 }
             }
-            KeyCode::Enter => {
+            // Not on a row that is out of view behind a filter nobody matches.
+            KeyCode::Enter if !blind => {
                 if let Some(row) = row {
                     self.info_activate(row, 0);
                 }
@@ -1224,6 +1225,7 @@ impl App {
             }
             KeyCode::Char('b')
                 if mods == KeyModifiers::ALT
+                    && !blind
                     && matches!(row, Some(InfoRow::Member(_) | InfoRow::KnockRequest(_))) =>
             {
                 self.open_ban_prompt();
@@ -3641,6 +3643,28 @@ mod tests {
         )));
         assert!(info(&app).confirm.is_none());
         assert!(sent(&mut commands).is_empty());
+
+        // Enter does not run a row that is out of view: not Leave, not a setting.
+        for row in [InfoRow::Leave, direct, InfoRow::Favourite] {
+            select(&mut app, row);
+            type_text(&mut app, "zed");
+            assert!(info(&app).typing_blind());
+            app.on_event(key(KeyCode::Enter));
+            assert!(info(&app).confirm.is_none(), "{row:?}");
+            assert_eq!(info(&app).filter.as_str(), "zed");
+            assert!(sent(&mut commands).is_empty(), "{row:?}");
+            app.on_event(key(KeyCode::Esc));
+        }
+        // Up from the first row while it is out of view brings it into view.
+        if let Some(Modal::RoomInfo(info)) = &mut app.modal {
+            info.selected = 0;
+        }
+        type_text(&mut app, "zed");
+        assert!(info(&app).typing_blind());
+        app.on_event(key(KeyCode::Up));
+        assert!(!info(&app).typing_blind());
+        assert!(info(&app).reveal && info(&app).selected == 0);
+        app.on_event(key(KeyCode::Esc));
 
         // Chosen with the arrows, a row is in view again, however low the window.
         let mut short = Terminal::new(TestBackend::new(100, 18)).unwrap();
