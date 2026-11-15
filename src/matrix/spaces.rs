@@ -92,7 +92,7 @@ pub async fn summarize(
                 .filter(|child| !left.is_left(&child.id))
                 .map(|child| child.id.to_string())
                 .collect();
-            summary.can_edit = may_edit(&space).await;
+            summary.can_edit = may_edit(&space, left).await;
         }
         out.push(summary);
     }
@@ -236,9 +236,11 @@ fn order_children(mut children: Vec<ChildEvent>) -> (Vec<ChildEvent>, bool) {
 }
 
 /// Whether we may change what is in `space`. Without power levels in the store, the
-/// rules of a room that has none apply (its creators may), as for the room info.
-async fn may_edit(space: &Room) -> bool {
+/// rules of a room that has none apply (its creators may), as for the room info. Not
+/// in a space left here, which can look joined while it is not (see `super::left`).
+async fn may_edit(space: &Room, left: &LeftRooms) -> bool {
     space.state() == RoomState::Joined
+        && !left.gone(space)
         && space
             .power_levels_or_default()
             .await
@@ -264,9 +266,14 @@ fn space_name(display_name: &str) -> String {
     }
 }
 
-/// The rooms of `space` for its info. Names come from this client where it is in the
+/// The rooms of `space` for its info. Names come from this client where it knows the
 /// room, else from `named`.
-pub(super) async fn space_details(client: &Client, space: &Room, named: &Named) -> SpaceDetails {
+pub(super) async fn space_details(
+    client: &Client,
+    space: &Room,
+    named: &Named,
+    left: &LeftRooms,
+) -> SpaceDetails {
     let (events, more) = child_events(space).await;
     let mut children = Vec::with_capacity(events.len());
     for event in events {
@@ -282,9 +289,12 @@ pub(super) async fn space_details(client: &Client, space: &Room, named: &Named) 
                         .map(|name| name.to_string())
                         .unwrap_or_default(),
                 };
+                // Not one left here, which can look joined while it is not (see
+                // `super::left`): it is offered the way in, as any room we are not
+                // in. Its name stays the one known here, from when it was ours.
                 (
                     clean_name(&name),
-                    room.state() == RoomState::Joined,
+                    room.state() == RoomState::Joined && !left.gone(&room),
                     room.is_space(),
                 )
             }
@@ -313,7 +323,7 @@ pub(super) async fn space_details(client: &Client, space: &Room, named: &Named) 
     SpaceDetails {
         children,
         more,
-        can_edit: may_edit(space).await,
+        can_edit: may_edit(space, left).await,
     }
 }
 
@@ -423,13 +433,14 @@ pub(super) async fn answer_create(
 /// whose `m.space.child` event does that.
 pub(super) async fn answer_edit(
     client: Client,
+    left: LeftRooms,
     events: UnboundedSender<MatrixEvent>,
     request: u64,
     space_id: String,
     child_id: String,
     edit: SpaceEdit,
 ) {
-    let result = edit_space(&client, &space_id, &child_id, edit).await;
+    let result = edit_space(&client, &left, &space_id, &child_id, edit).await;
     let _ = events.send(MatrixEvent::Manage(ManageEvent::SpaceEdited {
         request,
         space_id,
@@ -470,8 +481,11 @@ async fn create_space(
     Ok(created.room_id().to_string())
 }
 
+/// A space or room left here can look joined while it is not (see `super::left`):
+/// `left` tells those apart.
 async fn edit_space(
     client: &Client,
+    left: &LeftRooms,
     space_id: &str,
     child_id: &str,
     edit: SpaceEdit,
@@ -480,10 +494,10 @@ async fn edit_space(
     let space = super::manage::room(client, space_id)?;
     let child =
         RoomId::parse(child_id).map_err(|_| format!("Could not {what}: that is not a room id."))?;
-    if space.state() != RoomState::Joined || !space.is_space() {
+    if space.state() != RoomState::Joined || left.gone(&space) || !space.is_space() {
         return Err(format!("Could not {what}: you are not in that space."));
     }
-    if !may_edit(&space).await {
+    if !may_edit(&space, left).await {
         return Err(format!(
             "Could not {what}: you are not allowed to change the rooms of this space."
         ));
@@ -496,7 +510,7 @@ async fn edit_space(
             }
             let room = client
                 .get_room(&child)
-                .filter(|room| room.state() == RoomState::Joined)
+                .filter(|room| room.state() == RoomState::Joined && !left.gone(room))
                 .ok_or_else(|| format!("Could not {what}: you are not in that room."))?;
             // Sent again, its order and suggestion would be lost.
             if child_content(&space, &child).await.is_some() {
@@ -516,7 +530,8 @@ async fn edit_space(
                 .send_state_event_raw("m.space.child", child.as_str(), serde_json::json!({}))
                 .await
                 .map_err(|err| failed(what, &err))?;
-            if let Some(room) = client.get_room(&child) {
+            // Only in a room we are in: the server would refuse it anyway.
+            if let Some(room) = client.get_room(&child).filter(|room| !left.gone(room)) {
                 link_parent(&room, &space, &own, false).await;
             }
         }
@@ -914,9 +929,112 @@ mod tests {
             } }))
         .await;
         let client = fake::client(&server).await;
-        assert!(may_edit(&get(&client, "!made:localhost")).await);
         // Power levels that leave us out are kept to.
-        assert!(!may_edit(&get(&client, "!ruled:localhost")).await);
+        let left = LeftRooms::default();
+        assert!(!may_edit(&get(&client, "!ruled:localhost"), &left).await);
+        assert!(may_edit(&get(&client, "!made:localhost"), &left).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_room_or_space_left_here_is_shown_as_one_we_are_not_in() {
+        const SPACE: &str = "!space:localhost";
+        let child = |id: &str| fake::state("m.space.child", id, json!({ "via": ["localhost"] }));
+        let server = fake::Server::start(json!({ "join": {
+                SPACE: fake::joined(true, vec![child("!room:localhost"), child("!sub:localhost")]),
+                "!room:localhost": fake::joined(false, vec![]),
+                "!sub:localhost": fake::joined(true, vec![]),
+            } }))
+        .await;
+        let client = fake::client(&server).await;
+        let space = get(&client, SPACE);
+        let left = LeftRooms::default();
+        let rows = |details: &SpaceDetails| -> Vec<(String, bool, bool)> {
+            details
+                .children
+                .iter()
+                .map(|child| (child.room_id.clone(), child.joined, child.space))
+                .collect()
+        };
+        let details = space_details(&client, &space, &Named::new(), &left).await;
+        assert_eq!(
+            rows(&details),
+            [
+                ("!room:localhost".to_owned(), true, false),
+                ("!sub:localhost".to_owned(), true, true)
+            ]
+        );
+        assert!(details.can_edit);
+        // Left here, both still look joined: they are offered the way back in.
+        for id in ["!room:localhost", "!sub:localhost"] {
+            left.mark(&RoomId::parse(id).unwrap());
+        }
+        let details = space_details(&client, &space, &Named::new(), &left).await;
+        assert_eq!(
+            rows(&details),
+            [
+                ("!room:localhost".to_owned(), false, false),
+                ("!sub:localhost".to_owned(), false, true)
+            ]
+        );
+        // The space is still ours to change; once left here, it is not.
+        assert!(details.can_edit);
+        left.mark(space.room_id());
+        assert!(
+            !space_details(&client, &space, &Named::new(), &left)
+                .await
+                .can_edit
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_room_or_space_left_here_is_not_changed_as_if_we_were_in_it() {
+        const SPACE: &str = "!space:localhost";
+        let server = fake::Server::start(json!({ "join": {
+                SPACE: fake::joined(true, vec![fake::state(
+                    "m.space.child",
+                    "!held:localhost",
+                    json!({ "via": ["localhost"] }),
+                )]),
+                "!gone:localhost": fake::joined(false, vec![]),
+                "!held:localhost": fake::joined(false, vec![fake::state(
+                    "m.space.parent",
+                    SPACE,
+                    json!({ "via": ["localhost"] }),
+                )]),
+            } }))
+        .await;
+        let client = fake::client(&server).await;
+        let left = LeftRooms::default();
+        for id in ["!gone:localhost", "!held:localhost"] {
+            left.mark(&RoomId::parse(id).unwrap());
+        }
+        // A room left here, though it looks joined, is not put into the space.
+        assert_eq!(
+            edit_space(&client, &left, SPACE, "!gone:localhost", SpaceEdit::Add).await,
+            Err("Could not add the room to the space: you are not in that room.".to_owned())
+        );
+        assert!(server.sent_state(SPACE).is_empty());
+        assert!(server.sent_state("!gone:localhost").is_empty());
+        // One that is taken out keeps its own link to the space: it is not ours to
+        // change any more.
+        assert_eq!(
+            edit_space(&client, &left, SPACE, "!held:localhost", SpaceEdit::Remove).await,
+            Ok(())
+        );
+        assert_eq!(server.sent_state(SPACE).len(), 1);
+        assert!(server.sent_state("!held:localhost").is_empty());
+        // Nothing at all is changed in a space left here.
+        left.mark(&RoomId::parse(SPACE).unwrap());
+        for edit in [SpaceEdit::Add, SpaceEdit::Remove, SpaceEdit::Suggest(true)] {
+            assert_eq!(
+                edit_space(&client, &left, SPACE, "!held:localhost", edit).await,
+                Err(format!(
+                    "Could not {}: you are not in that space.",
+                    edit.what()
+                ))
+            );
+        }
+        assert_eq!(server.sent_state(SPACE).len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

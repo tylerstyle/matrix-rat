@@ -1021,6 +1021,7 @@ impl Manager {
                     refresh,
                     own_room_names,
                     self.notify.clone(),
+                    self.left.clone(),
                 )));
             }
             ManageCmd::StopInfo => self.stop(),
@@ -1422,6 +1423,7 @@ impl Manager {
             } => {
                 tokio::spawn(super::spaces::answer_edit(
                     self.client.clone(),
+                    self.left.clone(),
                     self.events.clone(),
                     request,
                     space_id,
@@ -2506,6 +2508,7 @@ async fn watch(
     mut refresh: watch::Receiver<u64>,
     own_room_names: super::people::OwnRoomNames,
     notify_settings: NotificationSettings,
+    left: super::left::LeftRooms,
 ) {
     let emit = |result: Result<RoomDetails, String>| {
         events
@@ -2551,17 +2554,17 @@ async fn watch(
         }
         refresh.borrow_and_update();
         // Looked at afresh every time: an invitation may have been accepted meanwhile.
-        let joined = match room.state() {
-            // The room list tells of a room that is gone, but not of a space deeper
-            // than the list of spaces goes: the view is told here.
-            RoomState::Left | RoomState::Banned => {
-                let _ = events.send(MatrixEvent::Manage(ManageEvent::Gone {
-                    room_id: room_id.clone(),
-                }));
-                return;
-            }
-            state => state == RoomState::Joined,
-        };
+        let state = room.state();
+        // The room list tells of a room that is gone, but not of a space deeper than
+        // the list of spaces goes: the view is told here. A room left here is gone too,
+        // though a late answer can bring it back looking joined (see `super::left`).
+        if matches!(state, RoomState::Left | RoomState::Banned) || left.gone(&room) {
+            let _ = events.send(MatrixEvent::Manage(ManageEvent::Gone {
+                room_id: room_id.clone(),
+            }));
+            return;
+        }
+        let joined = state == RoomState::Joined;
         let levels = if joined {
             Some(room.power_levels_or_default().await)
         } else {
@@ -2589,7 +2592,8 @@ async fn watch(
         current.local_aliases = local_aliases.clone();
         current.local_aliases_error = local_aliases_error.clone();
         if joined && room.is_space() {
-            current.space = Some(super::spaces::space_details(&client, &room, &space_names).await);
+            current.space =
+                Some(super::spaces::space_details(&client, &room, &space_names, &left).await);
         }
         let counts = (current.joined, current.invited);
         let mut wait = None;
@@ -2723,7 +2727,7 @@ async fn watch(
                 space_names_loaded = true;
                 space_names = super::spaces::hierarchy_names(&client, &room).await;
                 current.space =
-                    Some(super::spaces::space_details(&client, &room, &space_names).await);
+                    Some(super::spaces::space_details(&client, &room, &space_names, &left).await);
             }
             if !emit(Ok(current.clone())) {
                 return;
@@ -2923,6 +2927,40 @@ mod tests {
                 changes,
                 Default::default(),
                 settings,
+                LeftRooms::default(),
+            ),
+        )
+        .await
+        .expect("the watch went on");
+        assert!(matches!(
+            received.try_recv(),
+            Ok(MatrixEvent::Manage(ManageEvent::Gone { room_id })) if room_id == "!gone:localhost"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_info_of_a_room_left_here_that_looks_joined_is_told_it_is_gone() {
+        use super::super::spaces::fake;
+        let server = fake::Server::start(serde_json::json!({ "join": {
+            "!gone:localhost": fake::joined(true, vec![]),
+        } }))
+        .await;
+        let client = fake::client(&server).await;
+        let settings = client.notification_settings().await;
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (_refresh, changes) = watch::channel(0u64);
+        let left = LeftRooms::default();
+        left.mark(room_id!("!gone:localhost"));
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            watch(
+                client,
+                "!gone:localhost".into(),
+                events,
+                changes,
+                Default::default(),
+                settings,
+                left,
             ),
         )
         .await
