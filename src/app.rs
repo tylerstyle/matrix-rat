@@ -2271,8 +2271,8 @@ impl App {
         self.toggle_reaction_named(msg, key, shortcode);
     }
 
-    /// [`App::toggle_reaction`] with the name of the custom emoji `key` is the address
-    /// of, as it was chosen: two packs may name the same picture differently.
+    /// [`App::toggle_reaction`], with the `shortcode` a custom emoji was chosen by: two
+    /// packs may name the same picture differently.
     fn toggle_reaction_named(&mut self, msg: usize, key: &str, shortcode: Option<String>) {
         if self.matrix.is_some() {
             let item = self.messages().get(msg).and_then(|m| m.item.clone());

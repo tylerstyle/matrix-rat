@@ -311,7 +311,7 @@ impl EmojiPicker {
 
     /// Offers the custom emoji of `catalog` too. Only filters again when they changed.
     /// Packs that arrive while the picker is open leave the selection on the emoji it
-    /// was on, at the same height in the grid, when that one is still offered.
+    /// was on where that one is still offered, and the view where it was.
     pub fn set_custom(&mut self, catalog: &EmoteCatalog) {
         let custom: Vec<CustomEmoji> = catalog.emojis().cloned().collect();
         if custom == self.custom {
