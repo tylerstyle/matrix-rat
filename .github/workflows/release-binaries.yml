@@ -3,6 +3,8 @@
 # keeps the archives with the run, to try the recipe without touching a release.
 #
 # The actions are pinned to exact commits: a tag can be moved, a commit cannot.
+# Building and publishing are separate jobs: the build runs code from many crates
+# (build scripts, macros) and never holds a token that can write.
 name: Release binaries
 
 on:
@@ -27,9 +29,6 @@ jobs:
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
-    permissions:
-      # To attach the archives to the release; nothing else is written.
-      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -43,6 +42,16 @@ jobs:
       - name: Build tools
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y cmake perl pkg-config
 
+      # A release whose tag and Cargo.toml disagree would get archives named for
+      # another version.
+      - name: The tag is this version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          [ "$TAG" = "v$version" ] || { echo "tag $TAG, but Cargo.toml says $version"; exit 1; }
+
       - name: Build
         run: cargo build --release --locked
 
@@ -55,7 +64,6 @@ jobs:
           cp target/release/matrix-rat README.md LICENSE NOTICE "$name/"
           mkdir "$name/share"
           cp contrib/matrix-rat.desktop assets/icon.svg assets/icon-outline.svg assets/icon-256.png "$name/share/"
-          strip "$name/matrix-rat"
           "$name/matrix-rat" --version
           tar -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
@@ -69,10 +77,20 @@ jobs:
             ${{ steps.pack.outputs.name }}.tar.gz.sha256
           if-no-files-found: error
 
-      - name: Attach to the release
-        if: github.event_name == 'release'
-        env:
+  publish:
+    name: Attach to the release
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      # To attach the archives to the release; nothing else is written.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          merge-multiple: true
+      - env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name }}
-          NAME: ${{ steps.pack.outputs.name }}
-        run: gh release upload "$TAG" "$NAME.tar.gz" "$NAME.tar.gz.sha256" --clobber
+        run: gh release upload "$TAG" matrix-rat-*.tar.gz matrix-rat-*.tar.gz.sha256 --clobber

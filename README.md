@@ -88,9 +88,10 @@ Ubuntu 22.04, Debian 12, Fedora 36 and later): releases from 0.7.0 on carry a
 [releases page](https://github.com/tylerstyle/matrix-rat/releases).
 
 ```sh
-sha256sum -c matrix-rat-*.tar.gz.sha256    # the file is the one that was built
-tar -xzf matrix-rat-*.tar.gz
-install -Dm755 matrix-rat-*/matrix-rat ~/.local/bin/matrix-rat
+f=matrix-rat-0.7.0-x86_64-unknown-linux-gnu   # the archive you downloaded, without .tar.gz
+sha256sum -c $f.tar.gz.sha256                 # the file is the one that was built
+tar -xzf $f.tar.gz
+install -Dm755 $f/matrix-rat ~/.local/bin/matrix-rat
 ```
 
 The archive also holds the launcher entry and the icon (`share/`), to copy if you want
