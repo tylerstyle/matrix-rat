@@ -429,6 +429,15 @@ impl SecretServiceKeyring {
     }
 
     async fn connect(&self) -> Result<Connection, KeyringError> {
+        // A test never talks to the keyring of whoever runs it: forgetting a login
+        // asks for an entry to be deleted, and a locked keyring answers that with an
+        // unlock prompt on that person's screen. Tests give an address of their own.
+        #[cfg(test)]
+        if self.address.is_none() {
+            return Err(KeyringError::Unavailable(
+                "tests do not use the session's keyring".into(),
+            ));
+        }
         if self.address.is_none() && !has_session_bus_hint() {
             return Err(KeyringError::Unavailable("no D-Bus session bus".into()));
         }
@@ -724,6 +733,17 @@ mod tests {
     use zbus::names::UniqueName;
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_test_never_reaches_the_keyring_of_the_session() {
+        // Whatever the environment says: without an address of its own, nothing is
+        // connected to.
+        let keyring = SecretServiceKeyring::new();
+        assert!(matches!(
+            keyring.connect().await,
+            Err(KeyringError::Unavailable(_))
+        ));
+    }
 
     #[derive(Default)]
     struct MockKeyring {
@@ -1047,7 +1067,12 @@ mod tests {
 
     fn start_private_dbus_daemon() -> DbusDaemonGuard {
         let mut child = Command::new("dbus-daemon")
-            .args(["--session", "--print-address=1", "--nofork"])
+            // Not `--session`: that could start the desktop's own keyring.
+            .args([
+                crate::testbus::config_arg().as_str(),
+                "--print-address=1",
+                "--nofork",
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
