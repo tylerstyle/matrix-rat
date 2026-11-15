@@ -36,6 +36,8 @@ mod previews;
 mod rich;
 mod terminal;
 mod termquery;
+#[cfg(test)]
+mod testbus;
 mod text;
 mod theme;
 mod ui;
