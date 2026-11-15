@@ -129,9 +129,9 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
-| `Ctrl-N` | join a room, browse public rooms, start a chat (search people by name or ID), create a room (`info` or `Enter` for User info) |
+| `Ctrl-N` | join a room, browse public rooms, start a chat (search people by name or ID), create a room or a space (`info` or `Enter` for User info) |
 | `F4` | room details, Room settings (join rule, history, encryption, picture, addresses, direct chat, permissions), join requests, members (`Enter` on a member for User info) |
-| `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`) |
+| `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`); right-click the header for the space's info and its rooms (see Spaces below) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
 | `Alt-I` | attach the picture in the clipboard (a screenshot, a picture copied in the browser); needs `wl-clipboard` on Wayland or `xclip` on X11 |
@@ -322,7 +322,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
@@ -359,6 +359,16 @@ Setting `preset = "vim"` keeps the default keys and adds:
 
 ## Good to know
 
+- **Spaces** narrow the room list (`Alt-S`, or the line above the list). Right-click
+  that line, or `Ctrl-P` "Space info", for the space's info: name, topic, members and
+  settings as for a room, and its **Rooms**, marked when you are not in one or when
+  the space suggests it. `Enter` opens a room (or previews one you are not in, to join
+  from), `Space` marks it suggested or not, `Del` twice takes it out of the space, and
+  "Add a room…" picks one of your rooms or spaces to put in. A room's menu, its info
+  and `Ctrl-P` offer "Add to a space…" and, while the list is narrowed to a space the
+  room is in, "Remove from" that space. `Ctrl-N` creates a space. Changing what is in a
+  space takes the right to do so there; where you may change the room as well, it names
+  the space as its parent too. The demo (`--demo`) has a space to try all this on.
 - **Bridged chats** (Signal, WhatsApp…) show a quiet "sent on the sender's behalf" remark:
   the bridge encrypts for the people on the other side.
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
