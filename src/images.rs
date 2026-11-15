@@ -512,7 +512,9 @@ impl Entry {
 }
 
 /// How a picture message is laid out in the timeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Slot {
     /// Pictures are off: the message shows its text instead.
     Off,
@@ -520,6 +522,18 @@ pub enum Slot {
     Failed(String),
     /// Columns and rows kept free for the picture.
     Cells(u16, u16),
+}
+
+/// Outside tests: why a picture failed can be an error's own words.
+#[cfg(not(test))]
+impl std::fmt::Debug for Slot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("Off"),
+            Self::Failed(_) => f.write_str("Failed"),
+            Self::Cells(columns, rows) => write!(f, "Cells({columns}, {rows})"),
+        }
+    }
 }
 
 enum ViewerState {

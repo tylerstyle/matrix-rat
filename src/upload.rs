@@ -272,12 +272,24 @@ pub fn command_files(argument: &str) -> Result<Vec<Chosen>, String> {
 }
 
 /// What Tab makes of a path being typed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Completion {
     /// The path, extended as far as it is certain.
     pub text: String,
     /// What could follow, when there is more than one possibility.
     pub options: Vec<String>,
+}
+
+/// Outside tests: the paths stay out of logs.
+#[cfg(not(test))]
+impl std::fmt::Debug for Completion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Completion")
+            .field("options", &self.options.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Completes the last component of `typed` from the folder it is in. `None` when

@@ -72,10 +72,23 @@ pub struct Format {
     pub emote: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Segment {
     pub text: String,
     pub format: Format,
+}
+
+/// Outside tests: the text is the message's, only its length is shown.
+#[cfg(not(test))]
+impl std::fmt::Debug for Segment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Segment")
+            .field("bytes", &self.text.len())
+            .field("format", &self.format)
+            .finish()
+    }
 }
 
 impl Segment {
@@ -105,7 +118,9 @@ impl std::fmt::Debug for Emote {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct RichLine {
     /// Quote bars and list markers; repeated (as spaces for markers) on wrapped rows.
     pub prefix: String,
@@ -118,8 +133,23 @@ pub struct RichLine {
     pub block: Option<usize>,
 }
 
+/// Outside tests: the prefix (quote bars, list numbers) and the text are the message's.
+#[cfg(not(test))]
+impl std::fmt::Debug for RichLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RichLine")
+            .field("prefix_bytes", &self.prefix.len())
+            .field("segments", &self.segments)
+            .field("preformatted", &self.preformatted)
+            .field("block", &self.block)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A `<pre>` block's content as the sender wrote it, for copying.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct CodeBlock {
     /// The language from `class="language-…"`, if the sender gave one.
     pub lang: Option<String>,
@@ -128,7 +158,20 @@ pub struct CodeBlock {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Outside tests: the code and its language are the message's.
+#[cfg(not(test))]
+impl std::fmt::Debug for CodeBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeBlock")
+            .field("lang", &self.lang.is_some())
+            .field("bytes", &self.text.len())
+            .finish()
+    }
+}
+
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Rich {
     pub lines: Vec<RichLine>,
     pub links: Vec<String>,
@@ -137,6 +180,19 @@ pub struct Rich {
     /// Every custom emoji with a picture that could be shown, in order (pieces refer to
     /// them by index). One in a code block is only its name.
     pub emotes: Vec<Emote>,
+}
+
+/// Outside tests: the links are the message's; its parts show only their shape.
+#[cfg(not(test))]
+impl std::fmt::Debug for Rich {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rich")
+            .field("lines", &self.lines)
+            .field("links", &self.links.len())
+            .field("code_blocks", &self.code_blocks)
+            .field("emotes", &self.emotes)
+            .finish()
+    }
 }
 
 impl Rich {
@@ -305,11 +361,22 @@ fn find_plain_link(rest: &str) -> Option<(usize, usize)> {
         .min_by_key(|&(pos, _)| pos)
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 enum Token<'a> {
     Open(String, &'a str),
     Close(String),
     Text(&'a str),
+}
+
+/// Hand-written: tags, attributes and text are the message's.
+impl std::fmt::Debug for Token<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open(..) => f.write_str("Open"),
+            Self::Close(_) => f.write_str("Close"),
+            Self::Text(text) => write!(f, "Text({} bytes)", text.len()),
+        }
+    }
 }
 
 fn tokenize(html: &str) -> Vec<Token<'_>> {
@@ -837,12 +904,24 @@ pub fn from_html(html: &str) -> Rich {
 }
 
 /// One display row: its prefix and styled pieces.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct WrappedRow {
     pub prefix: String,
     pub segments: Vec<Segment>,
     /// The code block this row belongs to, if any.
     pub block: Option<usize>,
+}
+
+/// Hand-written: the prefix is the message's (its pieces show their text in tests
+/// only, where `Segment` is derived).
+impl std::fmt::Debug for WrappedRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WrappedRow")
+            .field("prefix_bytes", &self.prefix.len())
+            .field("segments", &self.segments)
+            .field("block", &self.block)
+            .finish()
+    }
 }
 
 /// Wraps to `max` columns, breaking at word boundaries and keeping each line's prefix.
@@ -1166,7 +1245,7 @@ mod tests {
             ) {
                 let total =
                     width(&row.prefix) + row.segments.iter().map(|s| width(&s.text)).sum::<usize>();
-                assert!(total <= max.max(4), "{max}: {row:?}");
+                assert!(total <= max.max(4), "{max}: {:?} {row:?}", row.prefix);
             }
         }
     }
@@ -1251,7 +1330,7 @@ mod tests {
             "</blockquote>".repeat(100)
         );
         for row in wrap(&from_html(&deep), 20) {
-            assert!(width(&row.prefix) <= 8, "{row:?}");
+            assert!(width(&row.prefix) <= 8, "{:?}", row.prefix);
         }
         let rich = from_html(
             "<a href=\" https://ok.example \">x</a><a href=\"https://bad example\">y</a>",

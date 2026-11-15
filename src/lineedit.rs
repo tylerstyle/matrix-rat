@@ -49,11 +49,21 @@ impl EditKeys {
 }
 
 /// Visible slice of a [`LineEdit`] fitted inside a viewport width.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LineView {
     pub text: String,
     /// Terminal column of the cursor relative to the start of `text`, in `0..=max_cols`.
     pub cursor_col: usize,
+}
+
+/// Hand-written: the text is what was typed.
+impl std::fmt::Debug for LineView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LineView")
+            .field("bytes", &self.text.len())
+            .field("cursor_col", &self.cursor_col)
+            .finish()
+    }
 }
 
 /// State of a single-line text input: UTF-8 text, grapheme-boundary cursor, optional
