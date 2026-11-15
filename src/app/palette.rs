@@ -546,6 +546,7 @@ mod tests {
             key: key_url.clone(),
             name: "spec.pdf".into(),
             size: Some(128),
+            kind: crate::model::MediaKind::File,
             source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
                 matrix_sdk::ruma::OwnedMxcUri::from(key_url),
             )),

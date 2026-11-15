@@ -110,23 +110,109 @@ impl Rich {
     }
 }
 
+/// Checks an RFC 5870 `geo:` URI so only safe, syntactically valid coordinates
+/// with no whitespace, control characters, or shell-special markup become links.
+pub fn safe_geo_uri(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("geo:") else {
+        return false;
+    };
+    if rest.is_empty()
+        || rest.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | '"' | '\'' | '\\' | '`')
+        })
+    {
+        return false;
+    }
+    let mut parts = rest.split(';');
+    let Some(coords) = parts.next() else {
+        return false;
+    };
+    let mut nums = coords.split(',');
+    let (Some(lat_s), Some(lon_s)) = (nums.next(), nums.next()) else {
+        return false;
+    };
+    let alt_s = nums.next();
+    if nums.next().is_some() {
+        return false;
+    }
+    let valid_coord_str = |v: &str| {
+        !v.is_empty()
+            && v.bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.'))
+    };
+    if !valid_coord_str(lat_s) || !valid_coord_str(lon_s) {
+        return false;
+    }
+    let (Ok(lat), Ok(lon)) = (lat_s.parse::<f64>(), lon_s.parse::<f64>()) else {
+        return false;
+    };
+    if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+        return false;
+    }
+    if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+        return false;
+    }
+    if let Some(alt_s) = alt_s {
+        if !valid_coord_str(alt_s) {
+            return false;
+        }
+        let Ok(alt) = alt_s.parse::<f64>() else {
+            return false;
+        };
+        if !alt.is_finite() {
+            return false;
+        }
+    }
+    for param in parts {
+        let Some((name, value)) = param.split_once('=') else {
+            return false;
+        };
+        if name.is_empty()
+            || value.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'~' | b'%'))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn find_plain_link(rest: &str) -> Option<(usize, usize)> {
     let web = ["https://", "http://"]
         .into_iter()
         .filter_map(|scheme| rest.find(scheme).map(|pos| (pos, scheme.len())))
         .min_by_key(|&(pos, _)| pos);
+    let is_boundary = |pos: usize| {
+        pos == 0
+            || !rest[..pos]
+                .ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+    };
     let matrix = rest
         .match_indices("matrix:")
+        .find(|&(pos, _)| is_boundary(pos))
+        .map(|(pos, s)| (pos, s.len()));
+    let geo = rest
+        .match_indices("geo:")
         .find(|&(pos, _)| {
-            pos == 0
-                || !rest[..pos]
-                    .ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+            if !is_boundary(pos) {
+                return false;
+            }
+            let tail = &rest[pos..];
+            let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+            let candidate =
+                tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'', '"']);
+            safe_geo_uri(candidate)
         })
         .map(|(pos, s)| (pos, s.len()));
-    match (web, matrix) {
-        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
-        (a, b) => a.or(b),
-    }
+    [web, matrix, geo]
+        .into_iter()
+        .flatten()
+        .min_by_key(|&(pos, _)| pos)
 }
 
 #[derive(Debug, PartialEq)]
@@ -491,10 +577,11 @@ impl Builder {
                 if let Some(href) = attribute(attributes, "href") {
                     let href = sanitize(&decode_entities(href)).trim().to_owned();
                     // Only addresses that are safe to hand to the system opener.
-                    let safe = ["https://", "http://", "mailto:", "matrix:"]
+                    let safe = (["https://", "http://", "mailto:", "matrix:"]
                         .iter()
                         .any(|scheme| href.starts_with(scheme))
-                        && !href.contains(char::is_whitespace);
+                        && !href.contains(char::is_whitespace))
+                        || safe_geo_uri(&href);
                     if safe {
                         format.link = Some(self.rich.links.len());
                         self.rich.links.push(href);
@@ -934,5 +1021,28 @@ mod tests {
             "<a href=\" https://ok.example \">x</a><a href=\"https://bad example\">y</a>",
         );
         assert_eq!(rich.links, ["https://ok.example"]);
+    }
+
+    #[test]
+    fn geo_uris_are_validated_and_linked() {
+        assert!(safe_geo_uri("geo:51.5074,-0.1278"));
+        assert!(safe_geo_uri("geo:-33.8688,151.2093,12.5;crs=wgs84;u=35"));
+        assert!(!safe_geo_uri("geo:95.0,0.0"));
+        assert!(!safe_geo_uri("geo:0.0,185.0"));
+        assert!(!safe_geo_uri("geo:51.5,-0.1;u=evil<script>"));
+        assert!(!safe_geo_uri("geo:bad"));
+
+        let plain = Rich::plain(
+            "Meet at geo:51.5074,-0.1278;u=35. Skip geo:bad and still link https://example.org",
+        );
+        assert_eq!(
+            plain.links,
+            ["geo:51.5074,-0.1278;u=35", "https://example.org"]
+        );
+
+        let html = from_html(
+            "<a href=\"geo:48.8566,2.3522\">Paris</a> <a href=\"geo:999,0\">Nowhere</a>",
+        );
+        assert_eq!(html.links, ["geo:48.8566,2.3522"]);
     }
 }

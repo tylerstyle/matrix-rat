@@ -13,6 +13,7 @@ mod menu;
 mod modal;
 mod palette;
 mod people;
+mod poll;
 mod roominfo;
 mod search;
 mod sidebar;

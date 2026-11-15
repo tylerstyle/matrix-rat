@@ -279,7 +279,16 @@ fn describe(event: &AnySyncTimelineEvent) -> String {
             Some(message) => match &message.content.msgtype {
                 MessageType::Image(_) => "sent a picture".to_owned(),
                 MessageType::Video(_) => "sent a video".to_owned(),
-                MessageType::Audio(_) => "sent an audio message".to_owned(),
+                MessageType::Audio(audio) => {
+                    if audio.voice.is_some() {
+                        "sent a voice message".to_owned()
+                    } else {
+                        "sent an audio message".to_owned()
+                    }
+                }
+                MessageType::Location(loc) => {
+                    format!("sent a location: {}", super::convert::location_label(loc))
+                }
                 MessageType::File(file) => format!("sent a file: {}", file.filename()),
                 other => other.body().to_owned(),
             },
@@ -287,6 +296,16 @@ fn describe(event: &AnySyncTimelineEvent) -> String {
         },
         AnySyncMessageLikeEvent::RoomEncrypted(_) => "Encrypted message".to_owned(),
         AnySyncMessageLikeEvent::Sticker(_) => "sent a sticker".to_owned(),
+        AnySyncMessageLikeEvent::UnstablePollStart(poll) => match poll.as_original() {
+            Some(poll) => format!("started a poll: {}", poll.content.poll_start().question.text),
+            None => "New activity".to_owned(),
+        },
+        AnySyncMessageLikeEvent::PollStart(_) => "started a poll".to_owned(),
+        AnySyncMessageLikeEvent::UnstablePollResponse(_)
+        | AnySyncMessageLikeEvent::PollResponse(_) => "voted in a poll".to_owned(),
+        AnySyncMessageLikeEvent::UnstablePollEnd(_) | AnySyncMessageLikeEvent::PollEnd(_) => {
+            "ended a poll".to_owned()
+        }
         _ => "New activity".to_owned(),
     }
 }

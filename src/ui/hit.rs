@@ -47,6 +47,10 @@ pub enum InputTarget {
     RoomSettingAvatar,
     /// Alias input inside `SettingSubview::Addresses`.
     RoomSettingAlias,
+    /// Question input inside `PollFormPopup`.
+    PollQuestion,
+    /// Answer input inside `PollFormPopup`, by 0-based index.
+    PollAnswer(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +83,8 @@ pub enum HitId {
     Overlay,
     /// The picture of the message at this index.
     Image(usize),
+    /// The play badge / summary line of an audio, voice, or video message.
+    PlayMedia(usize),
     /// The thread line under the message at this index.
     Thread(usize),
     /// The quoted-reply row above the message at this index.
@@ -129,6 +135,18 @@ pub enum HitId {
     ReasonConfirmBtn(bool),
     /// Clickable "Open ->" affordance on a forward-success toast.
     Toast,
+    /// Clickable poll answer row in the timeline (message index, answer index).
+    PollAnswer(usize, usize),
+    /// Focusable/clickable slot inside `PollFormPopup`.
+    PollFormSlot(usize),
+    /// Remove-answer button (`×`) on an answer row in `PollFormPopup`.
+    PollFormRemove(usize),
+    /// Stepper `-1`/`+1` on max selections in `PollFormPopup`.
+    PollFormMaxStep(i8),
+    /// Answer row inside `PollVotePopup`.
+    PollVoteAnswer(usize),
+    /// Submit (`true`) or Cancel (`false`) button inside `PollVotePopup`.
+    PollVoteBtn(bool),
 }
 
 #[derive(Debug, Default)]

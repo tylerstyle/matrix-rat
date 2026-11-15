@@ -123,6 +123,8 @@ pub struct Message {
     pub file: Option<Attachment>,
     /// Set for a message that started a thread.
     pub thread: Option<ThreadSummary>,
+    /// Set for Matrix poll start events (`org.matrix.msc3381.poll.start` / `m.poll.*`).
+    pub poll: Option<PollInfo>,
     /// Bytes sent and bytes in all, while a file of ours is on its way to the server.
     pub upload: Option<(u64, u64)>,
     /// Why sending failed, in a few words.
@@ -288,7 +290,7 @@ impl Shield {
     }
 }
 
-/// The one line under a message that started a thread.
+/// One line under a message that started a thread.
 #[derive(Debug, Clone, Default)]
 pub struct ThreadSummary {
     pub replies: u32,
@@ -299,6 +301,119 @@ pub struct ThreadSummary {
     /// The replies themselves, for the demo only; with an account they are loaded
     /// when the thread is opened.
     pub demo_replies: Vec<Message>,
+}
+
+/// One answer option in a Matrix poll (`m.poll.*`).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct PollAnswer {
+    pub id: String,
+    pub text: String,
+    pub votes: u32,
+    /// Whether the signed-in account currently votes for this answer.
+    pub own: bool,
+}
+
+impl std::fmt::Debug for PollAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PollAnswer").finish_non_exhaustive()
+    }
+}
+
+/// A Matrix poll (MSC3381 / `m.poll.*`) attached to a timeline message.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct PollInfo {
+    pub question: String,
+    pub disclosed: bool,
+    /// Maximum answers a voter may pick (`1` = single choice, `> 1` = multiple choice).
+    pub max_selections: u64,
+    pub answers: Vec<PollAnswer>,
+    /// Distinct non-ignored voters across all answers (masked while undisclosed & open).
+    pub total_voters: u32,
+    pub ended: bool,
+    /// Whether the SDK considers this poll editable (own, no votes recorded, not ended).
+    pub editable: bool,
+}
+
+impl std::fmt::Debug for PollInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PollInfo")
+            .field("disclosed", &self.disclosed)
+            .field("max_selections", &self.max_selections)
+            .field("answers", &self.answers.len())
+            .field("ended", &self.ended)
+            .field("editable", &self.editable)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PollInfo {
+    /// Whether vote counts, bars and voter totals may be shown yet.
+    ///
+    /// Undisclosed polls hide counts and totals until an `m.poll.end` event arrives;
+    /// while open, only the signed-in user's own selection mark is visible.
+    pub fn shows_counts(&self) -> bool {
+        self.disclosed || self.ended
+    }
+
+    /// Whether voters may select more than one answer.
+    pub fn is_multi(&self) -> bool {
+        self.max_selections > 1
+    }
+
+    /// Effective selection limit for multi-choice polls, clamped to existing answers.
+    pub fn effective_max(&self) -> usize {
+        if self.answers.is_empty() {
+            return 0;
+        }
+        usize::try_from(self.max_selections)
+            .unwrap_or(self.answers.len())
+            .clamp(1, self.answers.len())
+    }
+
+    /// Answer IDs the signed-in account currently votes for, in display order.
+    pub fn own_selection_ids(&self) -> Vec<String> {
+        self.answers
+            .iter()
+            .filter(|a| a.own)
+            .map(|a| a.id.clone())
+            .collect()
+    }
+
+    /// Highest vote count among answers once ended and revealed, or `0` when open or empty.
+    pub fn winner_max(&self) -> u32 {
+        if !(self.ended && self.shows_counts()) {
+            return 0;
+        }
+        self.answers.iter().map(|a| a.votes).max().unwrap_or(0)
+    }
+
+    /// Next answer ID list when toggling answer `idx` directly from the timeline:
+    /// single-choice switches immediately (or retracts if clicking the already-selected
+    /// answer), while multi-choice toggles `idx` up to [`Self::effective_max`]. Returns
+    /// `Err(max)` if adding `idx` would exceed `max`.
+    pub fn toggled_selection(&self, idx: usize) -> Result<Vec<String>, usize> {
+        let Some(target) = self.answers.get(idx) else {
+            return Ok(self.own_selection_ids());
+        };
+        if !self.is_multi() {
+            return Ok(if target.own {
+                Vec::new()
+            } else {
+                vec![target.id.clone()]
+            });
+        }
+        let max = self.effective_max();
+        let mut next = self.own_selection_ids();
+        if let Some(pos) = next.iter().position(|id| id == &target.id) {
+            next.remove(pos);
+            return Ok(next);
+        }
+        if next.len() >= max {
+            return Err(max);
+        }
+        next.push(target.id.clone());
+        Ok(next)
+    }
 }
 
 impl ThreadSummary {
@@ -315,6 +430,17 @@ impl ThreadSummary {
 }
 
 /// Something that can be saved to disk: a file, or the original of a picture.
+/// What kind of attachment this is, for typed labels and playback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaKind {
+    #[default]
+    File,
+    Audio,
+    Voice,
+    Video,
+    Picture,
+}
+
 #[derive(Clone)]
 pub struct Attachment {
     /// The file's `mxc://` address.
@@ -323,6 +449,7 @@ pub struct Attachment {
     pub name: String,
     /// Size in bytes, as stated by the sender.
     pub size: Option<u64>,
+    pub kind: MediaKind,
     pub source: Box<matrix_sdk::ruma::events::room::MediaSource>,
 }
 
@@ -347,6 +474,8 @@ pub struct ImageInfo {
     pub dimensions: Option<(u32, u32)>,
     /// File size in bytes, as stated by the sender.
     pub size: Option<u64>,
+    /// Whether this picture is an `m.sticker` (small size, no caption line).
+    pub sticker: bool,
 }
 
 #[derive(Clone)]
@@ -383,6 +512,7 @@ impl ImageInfo {
                 key: self.key.clone(),
                 name: self.name.clone(),
                 size: self.size,
+                kind: MediaKind::Picture,
                 source: Box::new(media.full.clone()),
             }),
         }
@@ -422,13 +552,26 @@ impl Message {
         }
     }
 
-    /// Whether the user can change this message: their own text or `/me` action, not
-    /// a file, a picture or something deleted.
+    /// Whether the user can change this message: their own text, `/me` action, or an
+    /// open unvoted poll, not a file, a picture, or something deleted.
     pub fn editable(&self) -> bool {
+        if let Some(poll) = &self.poll {
+            return self.own && !poll.ended && poll.editable;
+        }
         self.own
             && self.image.is_none()
             && self.file.is_none()
             && matches!(self.kind, MsgKind::Text | MsgKind::Emote)
+    }
+
+    /// Whether `file` is audio, voice, or video (played rather than opened as a document).
+    pub fn is_playable(&self) -> bool {
+        self.file.as_ref().is_some_and(|file| {
+            matches!(
+                file.kind,
+                MediaKind::Audio | MediaKind::Voice | MediaKind::Video
+            )
+        })
     }
 
     /// What saving this message would write to disk, if anything.
@@ -747,6 +890,7 @@ pub fn demo_rooms() -> Vec<Room> {
         caption: Some("Warm to cool, light at the top.".into()),
         dimensions: Some((480, 270)),
         size: None,
+        sticker: false,
     });
 
     let mut welcome = room(
@@ -804,4 +948,107 @@ pub fn demo_rooms() -> Vec<Room> {
             )],
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_debug_is_redacted_and_helpers_behave() {
+        let mut poll = PollInfo {
+            question: "Secret lunch question?".into(),
+            disclosed: false,
+            max_selections: 2,
+            answers: vec![
+                PollAnswer {
+                    id: "ans-1".into(),
+                    text: "Private pizza".into(),
+                    votes: 3,
+                    own: true,
+                },
+                PollAnswer {
+                    id: "ans-2".into(),
+                    text: "Secret sushi".into(),
+                    votes: 3,
+                    own: false,
+                },
+                PollAnswer {
+                    id: "ans-3".into(),
+                    text: "Salad".into(),
+                    votes: 1,
+                    own: false,
+                },
+            ],
+            total_voters: 6,
+            ended: false,
+            editable: true,
+        };
+        let dbg = format!("{poll:?}");
+        assert!(!dbg.contains("Secret"));
+        assert!(!dbg.contains("Private"));
+        assert!(!dbg.contains("ans-1"));
+        assert!(!dbg.contains('6'));
+        let adbg = format!("{:?}", poll.answers[0]);
+        assert!(!adbg.contains("Private"));
+        assert!(!adbg.contains("ans-1"));
+        assert!(!adbg.contains('3'));
+
+        assert!(!poll.shows_counts());
+        assert!(poll.is_multi());
+        assert_eq!(poll.effective_max(), 2);
+        assert_eq!(poll.winner_max(), 0);
+        assert_eq!(poll.toggled_selection(1).unwrap(), vec!["ans-1", "ans-2"]);
+
+        poll.answers[1].own = true;
+        assert_eq!(poll.toggled_selection(2), Err(2));
+        assert_eq!(poll.toggled_selection(0).unwrap(), vec!["ans-2"]);
+
+        poll.ended = true;
+        assert!(poll.shows_counts());
+        assert_eq!(poll.winner_max(), 3);
+
+        let single = PollInfo {
+            question: "Yes or no?".into(),
+            disclosed: true,
+            max_selections: 1,
+            answers: vec![
+                PollAnswer {
+                    id: "a1".into(),
+                    text: "Yes".into(),
+                    votes: 1,
+                    own: true,
+                },
+                PollAnswer {
+                    id: "a2".into(),
+                    text: "No".into(),
+                    votes: 0,
+                    own: false,
+                },
+            ],
+            total_voters: 1,
+            ended: false,
+            editable: false,
+        };
+        assert!(!single.is_multi());
+        assert_eq!(single.toggled_selection(0).unwrap(), Vec::<String>::new());
+        assert_eq!(single.toggled_selection(1).unwrap(), vec!["a2"]);
+
+        let own_editable = Message {
+            own: true,
+            poll: Some(PollInfo {
+                ended: false,
+                editable: true,
+                ..single.clone()
+            }),
+            ..Message::default()
+        };
+        assert!(own_editable.editable());
+        let voted = Message {
+            own: true,
+            poll: Some(single),
+            ..Message::default()
+        };
+        assert!(!voted.editable());
+    }
 }

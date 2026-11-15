@@ -753,6 +753,110 @@ impl Timelines {
                 })
                 .await;
             }
+            MatrixCmd::SendSticker {
+                room_id,
+                name,
+                url,
+                dimensions,
+                size,
+                mime,
+            } => {
+                self.with_timeline(&room_id, "Could not send sticker", |timeline| async move {
+                    let mxc: matrix_sdk::ruma::OwnedMxcUri = url.into();
+                    if !mxc.is_valid() {
+                        bail!("invalid sticker mxc URL");
+                    }
+                    let mut info = matrix_sdk::ruma::events::room::ImageInfo::new();
+                    if let Some((w, h)) = dimensions {
+                        info.width = Some(w.into());
+                        info.height = Some(h.into());
+                    }
+                    if let Some(sz) = size.and_then(|s| matrix_sdk::ruma::UInt::try_from(s).ok()) {
+                        info.size = Some(sz);
+                    }
+                    if let Some(m) = mime {
+                        info.mimetype = Some(m);
+                    }
+                    let body = crate::text::sanitize_line(&name);
+                    let content =
+                        matrix_sdk::ruma::events::sticker::StickerEventContent::new(body, info, mxc);
+                    timeline.send(content.into()).await?;
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::SendPoll {
+                room_id,
+                question,
+                answers,
+                disclosed,
+                max_selections,
+            } => {
+                self.with_timeline(&room_id, "Could not start poll", |timeline| async move {
+                    let (block, fallback) =
+                        poll_start_block(&question, &answers, disclosed, max_selections)?;
+                    let content = matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent::New(
+                        matrix_sdk::ruma::events::poll::unstable_start::NewUnstablePollStartEventContent::plain_text(
+                            fallback, block,
+                        ),
+                    );
+                    timeline.send(content.into()).await?;
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::EditPoll {
+                room_id,
+                item,
+                question,
+                answers,
+                disclosed,
+                max_selections,
+            } => {
+                self.with_active_timeline(&room_id, "Could not edit poll", |timeline| async move {
+                    let (block, fallback) =
+                        poll_start_block(&question, &answers, disclosed, max_selections)?;
+                    let edited = EditedContent::PollStart {
+                        fallback_text: fallback,
+                        new_content: block,
+                    };
+                    timeline.edit(&item_id(&item)?, edited).await?;
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::VotePoll {
+                room_id,
+                poll_event_id,
+                answers,
+            } => {
+                self.with_active_timeline(&room_id, "Could not vote", |timeline| async move {
+                    let poll_id = EventId::parse(&poll_event_id)
+                        .map_err(|_| anyhow!("invalid poll event id"))?;
+                    let content = matrix_sdk::ruma::events::poll::unstable_response::UnstablePollResponseEventContent::new(
+                        answers, poll_id,
+                    );
+                    timeline.send(content.into()).await?;
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::EndPoll {
+                room_id,
+                poll_event_id,
+            } => {
+                self.with_active_timeline(&room_id, "Could not end poll", |timeline| async move {
+                    let poll_id = EventId::parse(&poll_event_id)
+                        .map_err(|_| anyhow!("invalid poll event id"))?;
+                    let fallback = end_poll_fallback(&timeline, &poll_id).await;
+                    let content = matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
+                        fallback, poll_id,
+                    );
+                    timeline.send(content.into()).await?;
+                    Ok(())
+                })
+                .await;
+            }
             MatrixCmd::ToggleReaction { room_id, item, key } => {
                 self.with_active_timeline(&room_id, "Could not react", |timeline| async move {
                     timeline.toggle_reaction(&item_id(&item)?, &key).await?;
@@ -1210,6 +1314,98 @@ fn item_id(item: &ItemRef) -> Result<TimelineEventItemId> {
             TimelineEventItemId::TransactionId(OwnedTransactionId::from(id.as_str()))
         }
     })
+}
+
+fn poll_start_block(
+    question: &str,
+    answers: &[String],
+    disclosed: bool,
+    max_selections: u32,
+) -> Result<(
+    matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartContentBlock,
+    String,
+)> {
+    use matrix_sdk::ruma::events::poll::start::PollKind;
+    use matrix_sdk::ruma::events::poll::unstable_start::{
+        UnstablePollAnswer, UnstablePollAnswers, UnstablePollStartContentBlock,
+    };
+
+    let clean_question = crate::text::sanitize_line(question.trim());
+    if clean_question.is_empty() {
+        bail!("poll question cannot be empty");
+    }
+    let clean_answers: Vec<String> = answers
+        .iter()
+        .map(|s| crate::text::sanitize_line(s.trim()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if clean_answers.len() < 2 {
+        bail!("a poll needs at least two answers");
+    }
+    if clean_answers.len() > 20 {
+        bail!("a poll can have at most 20 answers");
+    }
+    let cap = max_selections.clamp(1, clean_answers.len() as u32);
+    let poll_answers: Vec<UnstablePollAnswer> = clean_answers
+        .iter()
+        .enumerate()
+        .map(|(i, text)| UnstablePollAnswer::new(format!("a{}", i + 1), text.clone()))
+        .collect();
+    let wrapped = UnstablePollAnswers::try_from(poll_answers)
+        .map_err(|err| anyhow!("invalid poll answers: {err}"))?;
+    let mut block = UnstablePollStartContentBlock::new(clean_question.clone(), wrapped);
+    block.kind = if disclosed {
+        PollKind::Disclosed
+    } else {
+        PollKind::Undisclosed
+    };
+    block.max_selections = cap.into();
+    let lines = clean_answers
+        .iter()
+        .enumerate()
+        .map(|(i, ans)| format!("{}. {ans}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((block, format!("{clean_question}\n{lines}")))
+}
+
+async fn end_poll_fallback(timeline: &Timeline, poll_id: &EventId) -> String {
+    let items = timeline.items().await;
+    for item in items.iter() {
+        let Some(event) = item.as_event() else {
+            continue;
+        };
+        if event.event_id() != Some(poll_id) {
+            continue;
+        }
+        if let TimelineItemContent::MsgLike(msg) = event.content()
+            && let MsgLikeKind::Poll(poll) = &msg.kind
+        {
+            let results = poll.results();
+            let counts: Vec<(&str, usize)> = results
+                .answers
+                .iter()
+                .map(|a| {
+                    let c = results.votes.get(&a.id).map_or(0, Vec::len);
+                    (a.text.as_str(), c)
+                })
+                .collect();
+            let top = counts.iter().map(|(_, c)| *c).max().unwrap_or(0);
+            if top == 0 {
+                return "The poll has ended with no votes.".to_owned();
+            }
+            let winners: Vec<&str> = counts
+                .into_iter()
+                .filter(|(_, c)| *c == top)
+                .map(|(t, _)| t)
+                .collect();
+            return match winners.as_slice() {
+                [one] => format!("Poll ended. Top answer: {one}"),
+                many => format!("Poll ended. Top answers: {}", many.join(", ")),
+            };
+        }
+    }
+    "Poll ended.".to_owned()
 }
 
 const MAX_COMPLETION_MEMBERS: usize = 50_000;

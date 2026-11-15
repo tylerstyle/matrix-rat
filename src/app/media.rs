@@ -70,14 +70,22 @@ impl App {
         true
     }
 
-    /// A click on a picture selects its message and opens the viewer.
+    /// A click on a picture or playable media selects its message and opens/plays it.
     pub(super) fn click_image(&mut self, index: usize) {
         self.cancel_pending_jump();
         self.set_focus(Pane::Timeline);
         if self.selectable(index) {
             self.timeline.selected = Some(index);
         }
-        self.open_image(index);
+        if self
+            .messages()
+            .get(index)
+            .is_some_and(|m| m.file.is_some())
+        {
+            self.save_attachment(true);
+        } else {
+            self.open_image(index);
+        }
     }
 
     pub(super) fn on_viewer_key(&mut self, code: KeyCode, mods: KeyModifiers) {

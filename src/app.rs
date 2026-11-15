@@ -12,6 +12,7 @@ mod menu;
 mod moderation;
 mod palette;
 mod people;
+mod poll;
 mod rooms;
 mod safety;
 pub mod search;
@@ -1221,6 +1222,8 @@ impl App {
                     | Modal::Keys(_)
                     | Modal::UserInfo(_)
                     | Modal::OwnProfile(_)
+                    | Modal::PollForm(_)
+                    | Modal::PollVote(_)
             )
         ) {
             self.modal = None;
@@ -1513,7 +1516,7 @@ impl App {
         // An `/upload` command attaches; with files waiting, Enter sends those. An
         // edit comes first: its text is a message, and files wait until it is done.
         if !matches!(self.compose_mode, ComposeMode::Edit(_))
-            && (self.upload_command() || self.send_attachments())
+            && (self.upload_command() || self.poll_command() || self.send_attachments())
         {
             return;
         }
@@ -2073,6 +2076,10 @@ impl App {
         let Some(message) = self.messages().get(index) else {
             return;
         };
+        if message.poll.is_some() {
+            self.open_poll_edit(index);
+            return;
+        }
         // An action stays an action when edited.
         let text = if message.kind == MsgKind::Emote {
             format!("/me {}", message.body)
@@ -2444,11 +2451,14 @@ impl App {
                 self.cancel_pending_jump();
                 let opened = match self.timeline.selected {
                     Some(i) => {
-                        // A file message is about its file, even with a link in the caption.
+                        // A file or playable media message is about its file, even with
+                        // a video thumbnail or a link in the caption.
                         let has_file = self.messages().get(i).is_some_and(|m| m.file.is_some());
-                        self.open_image(i)
-                            || (has_file && self.save_attachment(true))
-                            || self.open_link(i, 0)
+                        if has_file {
+                            self.save_attachment(true)
+                        } else {
+                            self.open_image(i) || self.open_link(i, 0)
+                        }
                     }
                     None => false,
                 };
@@ -2548,6 +2558,7 @@ impl App {
                 _ => {}
             },
             Action::UserInfo => self.open_user_info_from_selection(),
+            Action::CreatePoll => self.open_poll_create(""),
             Action::NewRoom
             | Action::RoomInfo
             | Action::LeaveRoom
@@ -2650,7 +2661,9 @@ impl App {
                 | Modal::IgnoredUsers(_)
                 | Modal::Report(_)
                 | Modal::Pinned(_)
-                | Modal::ReasonConfirm(_),
+                | Modal::ReasonConfirm(_)
+                | Modal::PollForm(_)
+                | Modal::PollVote(_),
             ) => {
                 self.modal = None;
             }
@@ -2794,6 +2807,8 @@ impl App {
             Some(Modal::Keys(_)) => self.on_keys_key(code, mods),
             Some(Modal::UserInfo(_)) => self.on_user_info_key(code, mods),
             Some(Modal::OwnProfile(_)) => self.on_own_profile_key(code, mods),
+            Some(Modal::PollForm(_)) => self.on_poll_form_key(code, mods),
+            Some(Modal::PollVote(_)) => self.on_poll_vote_key(code, mods),
             None => {}
         }
     }
@@ -3369,6 +3384,34 @@ impl App {
             self.cancel_pending_jump();
             return;
         }
+        if self.focus == Pane::Timeline
+            && (code, mods) == (KeyCode::Enter, KeyModifiers::NONE)
+            && let Some(i) = self.timeline.selected
+            && self
+                .messages()
+                .get(i)
+                .is_some_and(|m| {
+                    m.poll.is_some() && m.kind != MsgKind::Redacted && m.state == SendState::Sent
+                })
+        {
+            self.cancel_pending_jump();
+            self.open_poll_vote(i);
+            return;
+        }
+        if self.focus == Pane::Timeline
+            && (code, mods) == (KeyCode::Enter, KeyModifiers::NONE)
+            && self
+                .timeline
+                .selected
+                .and_then(|i| self.messages().get(i))
+                .is_some_and(|m| {
+                    m.is_playable() && m.kind != MsgKind::Redacted && m.state != SendState::Failed
+                })
+        {
+            self.cancel_pending_jump();
+            self.save_attachment(true);
+            return;
+        }
         if let Some(action) = self.keymap.lookup(context, key) {
             self.perform(action);
             return;
@@ -3516,6 +3559,8 @@ impl App {
             Some(Modal::IgnoredUsers(_)) => return self.on_ignored_users_paste(first_line),
             Some(Modal::Report(_)) => return self.on_report_paste(first_line),
             Some(Modal::ReasonConfirm(_)) => return self.on_reason_confirm_paste(first_line),
+            Some(Modal::PollForm(_)) => return self.on_poll_form_paste(first_line),
+            Some(Modal::PollVote(_)) => return,
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
@@ -3580,6 +3625,8 @@ impl App {
                                     | Modal::Report(_)
                                     | Modal::Pinned(_)
                                     | Modal::ReasonConfirm(_)
+                                    | Modal::PollForm(_)
+                                    | Modal::PollVote(_)
                             )
                         ) || matches!(
                             &self.modal,
@@ -3709,7 +3756,7 @@ impl App {
                         self.set_focus(pane);
                     }
                     Some(HitId::Overlay) | None => {}
-                    Some(HitId::Image(index)) => self.click_image(index),
+                    Some(HitId::Image(index) | HitId::PlayMedia(index)) => self.click_image(index),
                     Some(HitId::ReplyQuote(index)) => {
                         self.cancel_pending_jump();
                         self.set_focus(Pane::Timeline);
@@ -3765,6 +3812,13 @@ impl App {
                     Some(HitId::ReasonConfirmBtn(true)) => self.submit_reason_confirm(),
                     Some(HitId::ReasonConfirmBtn(false)) => self.modal = None,
                     Some(HitId::Toast) => self.click_forward_toast(),
+                    Some(HitId::PollAnswer(msg, ans)) => self.click_timeline_poll_answer(msg, ans),
+                    Some(HitId::PollFormSlot(slot)) => self.click_poll_form_slot(slot),
+                    Some(HitId::PollFormRemove(idx)) => self.remove_poll_answer(idx),
+                    Some(HitId::PollFormMaxStep(delta)) => self.step_poll_max(delta),
+                    Some(HitId::PollVoteAnswer(idx)) => self.click_poll_vote_answer(idx),
+                    Some(HitId::PollVoteBtn(true)) => self.submit_poll_vote(),
+                    Some(HitId::PollVoteBtn(false)) => self.modal = None,
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -3797,6 +3851,8 @@ impl App {
                             | Modal::Sessions(_)
                             | Modal::UserInfo(_)
                             | Modal::Settings(_)
+                            | Modal::PollForm(_)
+                            | Modal::PollVote(_)
                     )
                 ) =>
             {
@@ -3819,6 +3875,9 @@ impl App {
                         }
                     }
                     Some(Modal::UserInfo(_)) => self.scroll_user_info(delta),
+                    Some(Modal::PollForm(_) | Modal::PollVote(_)) => {
+                        self.scroll_poll_modal(delta);
+                    }
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.
                     Some(Modal::Settings(menu)) if menu.editing.is_none() => {
@@ -4002,6 +4061,20 @@ impl App {
                 if let Some(Modal::Report(form)) = &mut self.modal {
                     form.focus = ReportForm::REASON;
                     form.reason.place(rel_col, false);
+                }
+            }
+            InputTarget::PollQuestion => {
+                if let Some(Modal::PollForm(form)) = &mut self.modal {
+                    form.focus = 0;
+                    form.question.place(rel_col, false);
+                }
+            }
+            InputTarget::PollAnswer(i) => {
+                if let Some(Modal::PollForm(form)) = &mut self.modal
+                    && i < form.answers.len()
+                {
+                    form.focus = 1 + i;
+                    form.answers[i].place(rel_col, false);
                 }
             }
             InputTarget::ReasonConfirm => {
@@ -4489,6 +4562,7 @@ mod tests {
             key: "k".into(),
             name: "a.pdf".into(),
             size: None,
+            kind: crate::model::MediaKind::File,
             source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
                 "mxc://example.org/a".into(),
             )),

@@ -165,6 +165,8 @@ pub struct UserProfile {
     pub avatar: Option<String>,
     pub verify: UserVerifyStatus,
     pub shared_rooms: Vec<UserSharedRoom>,
+    /// True when fallback room member checks left candidates unqueried or errored/timed out.
+    pub shared_rooms_incomplete: bool,
     /// Member details & moderation permissions in the context room, when applicable.
     pub room_member: Option<RoomMember>,
     pub room_name: Option<String>,
@@ -184,6 +186,7 @@ impl fmt::Debug for UserProfile {
             .field("has_avatar", &self.avatar.is_some())
             .field("verify", &self.verify)
             .field("shared_rooms", &self.shared_rooms.len())
+            .field("shared_rooms_incomplete", &self.shared_rooms_incomplete)
             .field("has_room_member", &self.room_member.is_some())
             .field("own", &self.own)
             .finish()
@@ -491,7 +494,9 @@ async fn fetch_user_profile(
         _ => ContextRoomInfo::default(),
     };
 
-    let mut shared_rooms = collect_shared_rooms(client, &parsed, room_id, cooldown).await;
+    let (mut shared_rooms, mut shared_rooms_incomplete) =
+        collect_shared_rooms(client, &parsed, room_id, cooldown).await;
+    shared_rooms_incomplete |= ctx.shared_check_failed;
     if let Some(ctx_shared) = ctx.shared_room
         && !shared_rooms.iter().any(|r| r.room_id == ctx_shared.room_id)
     {
@@ -529,6 +534,7 @@ async fn fetch_user_profile(
         avatar,
         verify,
         shared_rooms,
+        shared_rooms_incomplete,
         room_member: ctx.member,
         room_name: ctx.room_name,
         own_is_creator: ctx.own_is_creator,
@@ -547,6 +553,7 @@ struct ContextRoomInfo {
     own_power_level: i64,
     admin_count: usize,
     shared_room: Option<UserSharedRoom>,
+    shared_check_failed: bool,
     avatar_fallback: Option<String>,
 }
 
@@ -630,12 +637,12 @@ async fn resolve_context_member(
     client: &Client,
     room: &Room,
     target: &UserId,
-) -> Option<ResolvedMember> {
+) -> (Option<ResolvedMember>, bool) {
     if let Ok(Some(member)) = room.get_member_no_sync(target).await {
-        return Some(member_from_local(&member, false));
+        return (Some(member_from_local(&member, false)), false);
     }
     if room.state() != RoomState::Joined {
-        return None;
+        return (None, false);
     }
     if !room.are_members_synced() {
         let count = room
@@ -643,8 +650,9 @@ async fn resolve_context_member(
             .saturating_add(room.invited_members_count());
         if count <= SHARED_ROOM_MAX_MEMBERS {
             return match tokio::time::timeout(KEYS_TIMEOUT, room.get_member(target)).await {
-                Ok(Ok(Some(member))) => Some(member_from_local(&member, false)),
-                _ => None,
+                Ok(Ok(Some(member))) => (Some(member_from_local(&member, false)), false),
+                Ok(Ok(None)) => (None, false),
+                Ok(Err(_)) | Err(_) => (None, true),
             };
         }
     }
@@ -652,8 +660,9 @@ async fn resolve_context_member(
     // early `OwnMembers::ensure` sync) or the room exceeds `SHARED_ROOM_MAX_MEMBERS`: fetch only
     // `m.room.member/{target}` rather than trusting stale cache state or downloading all members.
     match fetch_single_member_state(client, room, target).await {
-        SingleMemberFetch::Found(member) => Some(member),
-        SingleMemberFetch::NotFound | SingleMemberFetch::Failed => None,
+        SingleMemberFetch::Found(member) => (Some(member), false),
+        SingleMemberFetch::NotFound => (None, false),
+        SingleMemberFetch::Failed => (None, true),
     }
 }
 
@@ -697,11 +706,13 @@ fn classify_fallback(
     }
 }
 
+/// Returns selected fallback rooms plus whether any candidates were skipped due to cooldown or cap.
 fn select_fallback_candidates(
     mut candidates: Vec<FallbackCandidate>,
     cooldown: &MemberSyncCooldown,
     now: Instant,
-) -> Vec<FallbackCandidate> {
+) -> (Vec<FallbackCandidate>, bool) {
+    let total = candidates.len();
     candidates.retain(|c| !cooldown.is_cooling_down(&c.room_id, now));
     candidates.sort_by(|a, b| {
         b.direct
@@ -710,7 +721,8 @@ fn select_fallback_candidates(
             .then_with(|| a.room_id.cmp(&b.room_id))
     });
     candidates.truncate(SHARED_ROOM_MAX_SYNCS);
-    candidates
+    let left_unqueried = candidates.len() < total;
+    (candidates, left_unqueried)
 }
 
 async fn context_room_info(
@@ -731,9 +743,11 @@ async fn context_room_info(
             ..ContextRoomInfo::default()
         };
     }
-    let Some(resolved) = resolve_context_member(client, &room, target).await else {
+    let (resolved, failed) = resolve_context_member(client, &room, target).await;
+    let Some(resolved) = resolved else {
         return ContextRoomInfo {
             room_name: Some(rname),
+            shared_check_failed: failed && state == RoomState::Joined && !room.is_space(),
             ..ContextRoomInfo::default()
         };
     };
@@ -791,6 +805,7 @@ async fn context_room_info(
         own_power_level,
         admin_count,
         shared_room,
+        shared_check_failed: false,
         avatar_fallback: resolved.avatar_url,
     }
 }
@@ -851,12 +866,13 @@ async fn fallback_check_room(
 ///      key rotations are avoided.
 ///
 /// Rooms whose fallback errors or misses the deadline enter [`SHARED_ROOM_COOLDOWN`].
+/// Also returns `true` when fallback checks left candidates unqueried or failed/timed out.
 async fn collect_shared_rooms(
     client: &Client,
     target: &UserId,
     skip_room_id: Option<&str>,
     cooldown: &MemberSyncCooldown,
-) -> Vec<UserSharedRoom> {
+) -> (Vec<UserSharedRoom>, bool) {
     let mut rooms_out = Vec::new();
     let mut raw_candidates = Vec::new();
     let mut candidate_rooms: HashMap<String, Room> = HashMap::new();
@@ -911,7 +927,8 @@ async fn collect_shared_rooms(
         candidate_rooms.insert(rid, room);
     }
 
-    let chosen = select_fallback_candidates(raw_candidates, cooldown, Instant::now());
+    let (chosen, mut incomplete) =
+        select_fallback_candidates(raw_candidates, cooldown, Instant::now());
     if !chosen.is_empty() {
         let chosen_ids: Vec<String> = chosen.iter().map(|c| c.room_id.clone()).collect();
         let mut completed: HashMap<String, bool> = HashMap::new();
@@ -947,13 +964,16 @@ async fn collect_shared_rooms(
         for rid in chosen_ids {
             match completed.get(&rid).copied() {
                 Some(true) => cooldown.clear(&rid),
-                Some(false) | None => cooldown.record_failure(rid, done_at),
+                Some(false) | None => {
+                    incomplete = true;
+                    cooldown.record_failure(rid, done_at);
+                }
             }
         }
     }
 
     sort_shared_rooms(&mut rooms_out);
-    rooms_out
+    (rooms_out, incomplete)
 }
 
 async fn find_member_avatar(
@@ -1188,6 +1208,7 @@ mod tests {
             avatar: Some(secret_avatar.to_owned()),
             verify: UserVerifyStatus::Verified,
             shared_rooms: vec![shared],
+            shared_rooms_incomplete: false,
             room_member: None,
             room_name: Some(secret_room.to_owned()),
             own_is_creator: false,
@@ -1369,13 +1390,46 @@ mod tests {
             });
         }
 
-        let picked = select_fallback_candidates(raw, &cooldown, now);
+        let (picked, left_unqueried) = select_fallback_candidates(raw, &cooldown, now);
+        assert!(left_unqueried);
         assert_eq!(picked.len(), SHARED_ROOM_MAX_SYNCS);
         assert!(!picked.iter().any(|c| c.room_id == "!cool:hs"));
         assert!(!picked.iter().any(|c| c.room_id == "!large-group:hs"));
         assert_eq!(picked[0].room_id, "!dm-a:hs");
         assert_eq!(picked[1].room_id, "!dm-b:hs");
         assert_eq!(picked[2].room_id, "!expired:hs");
+
+        // Fewer than cap and none in cooldown -> nothing left unqueried.
+        let small: Vec<FallbackCandidate> = (0..3)
+            .map(|i| FallbackCandidate {
+                room_id: format!("!ok-{i}:hs"),
+                direct: false,
+                members_count: 5,
+                mode: FallbackMode::SyncMembers,
+            })
+            .collect();
+        let (picked_small, incomplete_small) = select_fallback_candidates(small, &cooldown, now);
+        assert_eq!(picked_small.len(), 3);
+        assert!(!incomplete_small);
+
+        // Fewer than cap, but one is in cooldown -> left_unqueried is true.
+        let cooled = vec![
+            FallbackCandidate {
+                room_id: "!cool:hs".to_owned(),
+                direct: false,
+                members_count: 5,
+                mode: FallbackMode::SyncMembers,
+            },
+            FallbackCandidate {
+                room_id: "!ok:hs".to_owned(),
+                direct: false,
+                members_count: 5,
+                mode: FallbackMode::SyncMembers,
+            },
+        ];
+        let (picked_cooled, incomplete_cooled) = select_fallback_candidates(cooled, &cooldown, now);
+        assert_eq!(picked_cooled.len(), 1);
+        assert!(incomplete_cooled);
     }
 
     #[test]

@@ -2092,4 +2092,53 @@ mod tests {
         let other = app.rooms.iter().find(|r| r.id == OTHER).unwrap();
         assert_eq!(other.messages[0].sender, "alice");
     }
+
+    #[test]
+    fn user_info_marks_shared_rooms_maybe_more_when_incomplete() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.open_user_info(BOB.into(), Some(ROOM.into()), Some("Bob".into()));
+        let req = match drain_cmds(&mut commands).pop() {
+            Some(MatrixCmd::FetchUserProfile { request, .. }) => request,
+            other => panic!("expected FetchUserProfile, got {other:?}"),
+        };
+
+        // Case 1: some shared rooms found + candidates left unqueried / timed out.
+        app.on_matrix(MatrixEvent::UserProfile {
+            request: req,
+            result: Ok(Box::new(UserProfile {
+                user_id: BOB.into(),
+                display_name: Some("Bob".into()),
+                shared_rooms: vec![UserSharedRoom {
+                    room_id: OTHER.into(),
+                    name: "Design".into(),
+                    direct: false,
+                    invited: false,
+                }],
+                shared_rooms_incomplete: true,
+                ..UserProfile::default()
+            })),
+        });
+        let text = screen(&mut app, &mut terminal);
+        assert!(text.contains("Shared rooms (1, maybe more)"), "{text}");
+
+        // Case 2: zero shared rooms found, yet fallback checks were incomplete.
+        app.on_event(key(KeyCode::Esc));
+        app.open_user_info(CAROL.into(), Some(ROOM.into()), Some("Carol".into()));
+        let req2 = match drain_cmds(&mut commands).pop() {
+            Some(MatrixCmd::FetchUserProfile { request, .. }) => request,
+            other => panic!("expected FetchUserProfile, got {other:?}"),
+        };
+        app.on_matrix(MatrixEvent::UserProfile {
+            request: req2,
+            result: Ok(Box::new(UserProfile {
+                user_id: CAROL.into(),
+                display_name: Some("Carol".into()),
+                shared_rooms: Vec::new(),
+                shared_rooms_incomplete: true,
+                ..UserProfile::default()
+            })),
+        });
+        let text2 = screen(&mut app, &mut terminal);
+        assert!(text2.contains("Shared rooms (0, maybe more)"), "{text2}");
+    }
 }

@@ -141,4 +141,6 @@ pub enum Action {
     RetryDecryption,
     /// Open profile details for the selected sender or target user.
     UserInfo,
+    /// Open the poll creation form for the active room or thread.
+    CreatePoll,
 }

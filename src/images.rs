@@ -605,8 +605,28 @@ impl ImageStore {
         self.graphics.protocol.is_some()
     }
 
-    fn is_kitty(&self) -> bool {
+    pub fn is_kitty(&self) -> bool {
         matches!(self.graphics.protocol, Some(Protocol::Kitty { .. }))
+    }
+
+    pub fn avatar_ready(&self, url: &str) -> bool {
+        matches!(
+            self.avatars.get(url),
+            Some(Avatar {
+                state: AvatarState::Ready { .. },
+                ..
+            })
+        )
+    }
+
+    pub fn avatar_failed(&self, url: &str) -> bool {
+        matches!(
+            self.avatars.get(url),
+            Some(Avatar {
+                state: AvatarState::Failed,
+                ..
+            })
+        )
     }
 
     /// Viewer encodings are then done on a thread and delivered through `sender`.
@@ -644,7 +664,10 @@ impl ImageStore {
         {
             return Slot::Failed(reason.clone());
         }
-        let limit = inline_limit(width);
+        let mut limit = inline_limit(width);
+        if info.sticker {
+            limit = (limit.0.min(18), limit.1.min(7));
+        }
         match info.dimensions.or(self.learned.get(&info.key).copied()) {
             Some(pixels) => {
                 let (cols, rows) = fit_cells(pixels, self.graphics.font, limit);
@@ -891,6 +914,7 @@ impl ImageStore {
         if !matches!(avatar.state, AvatarState::Loading { .. }) {
             return;
         }
+        self.layout_rev += 1;
         avatar.state = match result {
             Ok(decoded) => AvatarState::Ready {
                 pixels: decoded.pixels,
@@ -1290,6 +1314,7 @@ pub mod testing {
             caption: None,
             dimensions,
             size: Some(2048),
+            sticker: false,
         }
     }
 

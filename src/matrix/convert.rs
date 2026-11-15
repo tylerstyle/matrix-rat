@@ -4,9 +4,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Local, TimeZone};
-use matrix_sdk::ruma::events::room::message::MessageType;
+use matrix_sdk::ruma::events::room::message::{
+    LocationMessageEventContent, MessageType, UnstableAmplitude,
+};
 use matrix_sdk::ruma::events::room::{ImageInfo as RumaImageInfo, MediaSource};
-use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedUserId, UserId};
+use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedUserId, UInt, UserId};
 use matrix_sdk_base::crypto::types::events::UtdCause;
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
@@ -15,8 +17,8 @@ use matrix_sdk_ui::timeline::{
 };
 
 use crate::model::{
-    Attachment, ImageInfo, ImageSource, ItemRef, MediaRef, Message, MsgKind, Reaction, SendState,
-    Shield, UtdWhy,
+    Attachment, ImageInfo, ImageSource, ItemRef, MediaKind, MediaRef, Message, MsgKind, Reaction,
+    SendState, Shield, UtdWhy,
 };
 use crate::text::{sanitize, sanitize_line};
 
@@ -91,12 +93,27 @@ pub(super) fn preview(content: &TimelineItemContent) -> String {
             MsgLikeKind::Message(message) => match message.msgtype() {
                 MessageType::Image(_) => "sent a picture".to_owned(),
                 MessageType::Video(_) => "sent a video".to_owned(),
-                MessageType::Audio(_) => "sent an audio message".to_owned(),
+                MessageType::Audio(audio) => {
+                    if audio.voice.is_some() {
+                        "sent a voice message".to_owned()
+                    } else {
+                        "sent an audio message".to_owned()
+                    }
+                }
+                MessageType::Location(loc) => format!("📍 {}", location_label(loc)),
                 MessageType::File(file) => format!("📎 {}", file.filename()),
                 other => other.body().to_owned(),
             },
             MsgLikeKind::Sticker(_) => "sent a sticker".to_owned(),
-            MsgLikeKind::Poll(_) => "started a poll".to_owned(),
+            MsgLikeKind::Poll(poll) => {
+                let q = sanitize_line(&poll.results().question);
+                let q = q.trim();
+                if q.is_empty() {
+                    "started a poll".to_owned()
+                } else {
+                    format!("📊 {q}")
+                }
+            }
             MsgLikeKind::Redacted => "deleted a message".to_owned(),
             MsgLikeKind::UnableToDecrypt(_) => "encrypted message".to_owned(),
             _ => String::new(),
@@ -254,38 +271,89 @@ fn event_message(
                         }
                         MessageType::File(c) => {
                             let size = c.info.as_ref().and_then(|info| info.size);
-                            attach(
+                            attach_media(
                                 &mut message,
+                                MediaKind::File,
                                 "📎",
                                 &c.source,
                                 c.filename(),
                                 c.caption(),
                                 size,
+                                None,
+                                None,
                             )
                         }
                         MessageType::Video(c) => {
-                            let size = c.info.as_ref().and_then(|info| info.size);
-                            attach(
+                            let info = c.info.as_deref();
+                            let summary = attach_media(
                                 &mut message,
+                                MediaKind::Video,
                                 "🎞 ",
                                 &c.source,
                                 c.filename(),
                                 c.caption(),
-                                size,
-                            )
+                                info.and_then(|i| i.size),
+                                info.and_then(|i| i.duration),
+                                None,
+                            );
+                            if let Some(thumb_src) =
+                                info.and_then(|i| i.thumbnail_source.clone())
+                            {
+                                let thumb_info =
+                                    info.and_then(|i| i.thumbnail_info.as_deref());
+                                let dimensions = thumb_info
+                                    .and_then(|ti| parse_dimensions(ti.width, ti.height))
+                                    .or_else(|| info.and_then(|i| parse_dimensions(i.width, i.height)));
+                                let size = thumb_info.and_then(|ti| ti.size).map(u64::from);
+                                let name = message
+                                    .file
+                                    .as_ref()
+                                    .map_or_else(|| "video".to_owned(), |f| f.name.clone());
+                                message.image = Some(ImageInfo {
+                                    key: sanitize_line(&media_source_key(&thumb_src)),
+                                    source: ImageSource::Matrix(Box::new(MediaRef {
+                                        full: thumb_src,
+                                        thumbnail: None,
+                                    })),
+                                    name,
+                                    caption: None,
+                                    dimensions,
+                                    size,
+                                    sticker: false,
+                                });
+                            }
+                            summary
                         }
                         MessageType::Audio(c) => {
+                            let is_voice = c.voice.is_some();
+                            let (kind, icon) = if is_voice {
+                                (MediaKind::Voice, "🎤")
+                            } else {
+                                (MediaKind::Audio, "🔊")
+                            };
+                            let duration = c
+                                .info
+                                .as_ref()
+                                .and_then(|info| info.duration)
+                                .or_else(|| c.audio.as_ref().map(|audio| audio.duration));
+                            let waveform = c
+                                .audio
+                                .as_ref()
+                                .and_then(|audio| waveform_bars(&audio.waveform));
                             let size = c.info.as_ref().and_then(|info| info.size);
-                            attach(
+                            attach_media(
                                 &mut message,
-                                "🔊",
+                                kind,
+                                icon,
                                 &c.source,
                                 c.filename(),
                                 c.caption(),
                                 size,
+                                duration,
+                                waveform.as_deref(),
                             )
                         }
-                        MessageType::Location(c) => format!("📍 {}", c.body),
+                        MessageType::Location(c) => format_location(c),
                         other => other.body().to_owned(),
                     };
                 }
@@ -303,16 +371,19 @@ fn event_message(
                 }
                 MsgLikeKind::Sticker(sticker) => {
                     let content = sticker.content();
-                    let image = image_info(
+                    let mut image = image_info(
                         MediaSource::from(content.source.clone()),
                         &content.body,
                         None,
                         Some(&content.info),
                     );
+                    image.sticker = true;
                     message.body = format!("[sticker] {}", image.name);
                     message.image = Some(image);
                 }
-                MsgLikeKind::Poll(_) => message.body = "[poll]".to_owned(),
+                MsgLikeKind::Poll(poll) => {
+                    convert_poll(&mut message, poll, event.is_editable(), own, ignored);
+                }
                 _ => message.body = "[unsupported message]".to_owned(),
             }
         }
@@ -398,30 +469,146 @@ fn shield(event: &EventTimelineItem) -> Option<Shield> {
     }
 }
 
-/// Marks a message as carrying a file and returns the line that stands for it.
-fn attach(
+fn media_source_key(source: &MediaSource) -> String {
+    match source {
+        MediaSource::Plain(uri) => uri.to_string(),
+        MediaSource::Encrypted(file) => file.url.to_string(),
+    }
+}
+
+fn parse_dimensions(width: Option<UInt>, height: Option<UInt>) -> Option<(u32, u32)> {
+    let width = u32::try_from(u64::from(width?)).ok()?;
+    let height = u32::try_from(u64::from(height?)).ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs() + u64::from(duration.subsec_millis() >= 500);
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    let rem = secs % 60;
+    if hours > 0 {
+        format!("{hours}:{mins:02}:{rem:02}")
+    } else {
+        format!("{mins}:{rem:02}")
+    }
+}
+
+fn waveform_bars(amplitudes: &[UnstableAmplitude]) -> Option<String> {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    const MAX_BARS: usize = 24;
+    if amplitudes.is_empty() {
+        return None;
+    }
+    let to_bar = |raw: u64| -> char {
+        let idx = ((raw.min(1024) * 7) / 1024) as usize;
+        BARS[idx]
+    };
+    let bars: String = if amplitudes.len() <= MAX_BARS {
+        amplitudes
+            .iter()
+            .map(|sample| to_bar(u64::from(sample.get())))
+            .collect()
+    } else {
+        (0..MAX_BARS)
+            .map(|bucket| {
+                let start = bucket * amplitudes.len() / MAX_BARS;
+                let end = ((bucket + 1) * amplitudes.len() / MAX_BARS).max(start + 1);
+                let peak = amplitudes[start..end]
+                    .iter()
+                    .map(|sample| u64::from(sample.get()))
+                    .max()
+                    .unwrap_or(0);
+                to_bar(peak)
+            })
+            .collect()
+    };
+    Some(bars)
+}
+
+pub(super) fn location_label(c: &LocationMessageEventContent) -> String {
+    let uri = sanitize_line(c.geo_uri());
+    let desc = c
+        .location
+        .as_ref()
+        .and_then(|loc| loc.description.as_deref())
+        .map(sanitize_line)
+        .filter(|d| !d.trim().is_empty())
+        .or_else(|| {
+            let plain = sanitize_line(c.plain_text_representation());
+            (!plain.trim().is_empty() && plain != uri).then_some(plain)
+        });
+    if let Some(desc) = desc {
+        return desc;
+    }
+    if crate::rich::safe_geo_uri(&uri) {
+        return uri;
+    }
+    "Location".to_owned()
+}
+
+fn format_location(c: &LocationMessageEventContent) -> String {
+    let uri = sanitize_line(c.geo_uri());
+    let safe_uri = crate::rich::safe_geo_uri(&uri);
+    let desc = c
+        .location
+        .as_ref()
+        .and_then(|loc| loc.description.as_deref())
+        .map(sanitize_line)
+        .filter(|d| !d.trim().is_empty())
+        .or_else(|| {
+            let plain = sanitize_line(c.plain_text_representation());
+            (!plain.trim().is_empty() && plain != uri).then_some(plain)
+        });
+    match (desc, safe_uri) {
+        (Some(desc), true) if desc.contains(&uri) => format!("📍 {desc}"),
+        (Some(desc), true) => format!("📍 {desc} · {uri}"),
+        (Some(desc), false) => format!("📍 {desc}"),
+        (None, true) => format!("📍 {uri}"),
+        (None, false) => "📍 Location".to_owned(),
+    }
+}
+
+/// Marks a message as carrying a file or playable media and returns the summary text.
+#[allow(clippy::too_many_arguments)]
+fn attach_media(
     message: &mut Message,
+    kind: MediaKind,
     icon: &str,
     source: &MediaSource,
     filename: &str,
     caption: Option<&str>,
-    size: Option<matrix_sdk::ruma::UInt>,
+    size: Option<UInt>,
+    duration: Option<std::time::Duration>,
+    waveform: Option<&str>,
 ) -> String {
-    let key = match source {
-        MediaSource::Plain(uri) => uri.to_string(),
-        MediaSource::Encrypted(file) => file.url.to_string(),
-    };
+    let key = media_source_key(source);
     let name = sanitize_line(filename);
     let name = if name.trim().is_empty() {
-        "attachment".to_owned()
+        match kind {
+            MediaKind::Voice => "voice message",
+            MediaKind::Audio => "audio",
+            MediaKind::Video => "video",
+            MediaKind::File | MediaKind::Picture => "attachment",
+        }
+        .to_owned()
     } else {
         name
     };
     let size = size.map(u64::from);
-    let mut text = match size {
-        Some(size) => format!("{icon} {name} · {}", crate::images::human_size(size)),
-        None => format!("{icon} {name}"),
-    };
+    let mut text = format!("{icon} {name}");
+    if let Some(duration) = duration {
+        text.push_str(" · ");
+        text.push_str(&format_duration(duration));
+    }
+    if let Some(size) = size {
+        text.push_str(" · ");
+        text.push_str(&crate::images::human_size(size));
+    }
+    if let Some(bars) = waveform {
+        text.push('\n');
+        text.push_str(bars);
+    }
     if let Some(caption) = caption.map(sanitize).filter(|c| !c.trim().is_empty()) {
         text.push('\n');
         text.push_str(&caption);
@@ -430,6 +617,7 @@ fn attach(
         key: sanitize_line(&key),
         name,
         size,
+        kind,
         source: Box::new(source.clone()),
     });
     text
@@ -442,16 +630,9 @@ fn image_info(
     caption: Option<&str>,
     info: Option<&RumaImageInfo>,
 ) -> ImageInfo {
-    let key = match &source {
-        MediaSource::Plain(uri) => uri.to_string(),
-        MediaSource::Encrypted(file) => file.url.to_string(),
-    };
+    let key = media_source_key(&source);
     let name = sanitize_line(filename);
-    let dimensions = info.and_then(|info| {
-        let width = u32::try_from(u64::from(info.width?)).ok()?;
-        let height = u32::try_from(u64::from(info.height?)).ok()?;
-        (width > 0 && height > 0).then_some((width, height))
-    });
+    let dimensions = info.and_then(|info| parse_dimensions(info.width, info.height));
     let thumbnail = info.and_then(|info| {
         let size = info
             .thumbnail_info
@@ -476,6 +657,7 @@ fn image_info(
             .filter(|caption| !caption.trim().is_empty()),
         dimensions,
         size: info.and_then(|info| info.size).map(u64::from),
+        sticker: false,
     }
 }
 
@@ -495,6 +677,106 @@ fn system(message: &mut Message, text: String) {
 fn system_owned(mut message: Message, text: String) -> Message {
     system(&mut message, text);
     message
+}
+
+fn convert_poll(
+    message: &mut Message,
+    poll: &matrix_sdk_ui::timeline::PollState,
+    editable: bool,
+    own: &UserId,
+    ignored: &HashSet<OwnedUserId>,
+) {
+    let results = poll.results();
+    let disclosed = matches!(
+        results.kind,
+        matrix_sdk::ruma::events::poll::start::PollKind::Disclosed
+    );
+    let answers: Vec<(String, String)> = results
+        .answers
+        .into_iter()
+        .map(|answer| (answer.id, answer.text))
+        .collect();
+    convert_poll_parts(
+        message,
+        &results.question,
+        disclosed,
+        results.max_selections,
+        answers,
+        &results.votes,
+        results.end_time.is_some(),
+        results.has_been_edited,
+        editable,
+        own,
+        ignored,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_poll_parts(
+    message: &mut Message,
+    raw_question: &str,
+    disclosed: bool,
+    max_selections: u64,
+    raw_answers: Vec<(String, String)>,
+    votes_by_answer: &std::collections::HashMap<String, Vec<String>>,
+    ended: bool,
+    has_been_edited: bool,
+    editable: bool,
+    own: &UserId,
+    ignored: &HashSet<OwnedUserId>,
+) {
+    let question = sanitize_line(raw_question.trim());
+    let mut voters: HashSet<String> = HashSet::new();
+    let answers: Vec<crate::model::PollAnswer> = raw_answers
+        .into_iter()
+        .map(|(id, text)| {
+            let mut votes = 0u32;
+            let mut own_voted = false;
+            if let Some(list) = votes_by_answer.get(&id) {
+                for uid in list {
+                    let is_ignored =
+                        <&UserId>::try_from(uid.as_str()).is_ok_and(|u| ignored.contains(u));
+                    if is_ignored {
+                        continue;
+                    }
+                    votes = votes.saturating_add(1);
+                    if uid == own.as_str() {
+                        own_voted = true;
+                    }
+                    voters.insert(uid.clone());
+                }
+            }
+            crate::model::PollAnswer {
+                id,
+                text: sanitize_line(text.trim()),
+                votes,
+                own: own_voted,
+            }
+        })
+        .collect();
+
+    // Never include vote counts or voter totals in the plain-text fallback body so
+    // undisclosed polls cannot leak results through search, quotes or plain rendering.
+    let options: Vec<&str> = answers
+        .iter()
+        .map(|a| a.text.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    message.body = if options.is_empty() {
+        format!("📊 {question}")
+    } else {
+        format!("📊 {question} ({})", options.join(" / "))
+    };
+    message.edited |= has_been_edited;
+    message.poll = Some(crate::model::PollInfo {
+        question,
+        disclosed,
+        max_selections,
+        answers,
+        total_voters: voters.len() as u32,
+        ended,
+        editable: editable && !ended,
+    });
 }
 
 #[cfg(test)]
@@ -615,5 +897,205 @@ mod tests {
             day_label(&(now - Duration::days(9)), &now),
             "Tue 3 Nov 2026"
         );
+    }
+
+    #[test]
+    fn voice_audio_video_and_location_formatting() {
+        use matrix_sdk::ruma::events::location::LocationContent;
+        use matrix_sdk::ruma::events::room::ThumbnailInfo;
+        use matrix_sdk::ruma::events::room::message::{
+            AudioInfo, AudioMessageEventContent, LocationMessageEventContent,
+            UnstableAudioDetailsContentBlock, UnstableVoiceContentBlock, VideoInfo,
+            VideoMessageEventContent,
+        };
+        use matrix_sdk::ruma::mxc_uri;
+
+        assert_eq!(format_duration(std::time::Duration::from_secs(0)), "0:00");
+        assert_eq!(
+            format_duration(std::time::Duration::from_millis(65_600)),
+            "1:06"
+        );
+        assert_eq!(
+            format_duration(std::time::Duration::from_secs(3661)),
+            "1:01:01"
+        );
+
+        assert!(waveform_bars(&[]).is_none());
+        let short: Vec<UnstableAmplitude> = [0u16, 512, 1024]
+            .into_iter()
+            .map(|n| UnstableAmplitude::new(n.into()))
+            .collect();
+        assert_eq!(waveform_bars(&short).as_deref(), Some("▁▄█"));
+        let long: Vec<UnstableAmplitude> = (0u16..48)
+            .map(|n| UnstableAmplitude::new(((n * 21) % 1024).into()))
+            .collect();
+        assert_eq!(waveform_bars(&long).unwrap().chars().count(), 24);
+
+        let mut voice_msg = Message::default();
+        let mut voice_info = AudioInfo::new();
+        voice_info.size = UInt::new(2_000);
+        voice_info.duration = Some(std::time::Duration::from_secs(12));
+        let mut voice_content = AudioMessageEventContent::plain(
+            "voice.ogg".to_owned(),
+            mxc_uri!("mxc://example.org/v").to_owned(),
+        );
+        voice_content.info = Some(Box::new(voice_info));
+        voice_content.audio = Some(UnstableAudioDetailsContentBlock::new(
+            std::time::Duration::from_secs(12),
+            short.clone(),
+        ));
+        voice_content.voice = Some(UnstableVoiceContentBlock::new());
+        let body = attach_media(
+            &mut voice_msg,
+            MediaKind::Voice,
+            "🎤",
+            &voice_content.source,
+            voice_content.filename(),
+            voice_content.caption(),
+            voice_content.info.as_ref().and_then(|i| i.size),
+            voice_content
+                .info
+                .as_ref()
+                .and_then(|i| i.duration)
+                .or_else(|| voice_content.audio.as_ref().map(|a| a.duration)),
+            voice_content
+                .audio
+                .as_ref()
+                .and_then(|a| waveform_bars(&a.waveform))
+                .as_deref(),
+        );
+        assert_eq!(body, "🎤 voice.ogg · 0:12 · 2.0 kB\n▁▄█");
+        assert!(voice_msg.is_playable());
+        assert_eq!(voice_msg.file.as_ref().unwrap().kind, MediaKind::Voice);
+
+        let mut audio_msg = Message::default();
+        let audio_content = AudioMessageEventContent::plain(
+            "song.flac".to_owned(),
+            mxc_uri!("mxc://example.org/a").to_owned(),
+        );
+        let audio_body = attach_media(
+            &mut audio_msg,
+            MediaKind::Audio,
+            "🔊",
+            &audio_content.source,
+            audio_content.filename(),
+            audio_content.caption(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(audio_body, "🔊 song.flac");
+        assert_eq!(audio_msg.file.as_ref().unwrap().kind, MediaKind::Audio);
+
+        let mut video_info = VideoInfo::new();
+        video_info.duration = Some(std::time::Duration::from_secs(90));
+        video_info.size = UInt::new(4_000_000);
+        let mut tinfo = ThumbnailInfo::new();
+        tinfo.width = UInt::new(320);
+        tinfo.height = UInt::new(180);
+        video_info.thumbnail_info = Some(Box::new(tinfo));
+        video_info.thumbnail_source = Some(MediaSource::Plain(
+            mxc_uri!("mxc://example.org/vthumb").to_owned(),
+        ));
+        let mut video = VideoMessageEventContent::plain(
+            "clip.mp4".to_owned(),
+            mxc_uri!("mxc://example.org/vid").to_owned(),
+        );
+        video.info = Some(Box::new(video_info));
+        assert_eq!(
+            format_duration(video.info.as_ref().unwrap().duration.unwrap()),
+            "1:30"
+        );
+        // Location formatting respects description + validates geo URIs.
+        let mut loc = LocationMessageEventContent::new(
+            "London".to_owned(),
+            "geo:51.5074,-0.1278".to_owned(),
+        );
+        loc.location = Some(LocationContent::new("geo:51.5074,-0.1278".to_owned()));
+        if let Some(ref mut inner) = loc.location {
+            inner.description = Some("Big\u{1b}[31m Ben".to_owned());
+        }
+        assert_eq!(format_location(&loc), "📍 Big[31m Ben · geo:51.5074,-0.1278");
+
+        let bad_loc = LocationMessageEventContent::new(
+            "Trap".to_owned(),
+            "javascript:alert(1)".to_owned(),
+        );
+        assert_eq!(format_location(&bad_loc), "📍 Trap");
+    }
+
+    #[test]
+    fn poll_conversion_respects_disclosed_ignored_voters_and_editions() {
+        use matrix_sdk::ruma::owned_user_id;
+        use std::collections::HashMap;
+
+        let own = owned_user_id!("@alice:example.org");
+        let bob = "@bob:example.org".to_owned();
+        let eve = owned_user_id!("@eve:example.org");
+        let ignored = HashSet::from([eve.clone()]);
+
+        let mut votes = HashMap::new();
+        votes.insert("a1".to_owned(), vec![own.to_string(), eve.to_string()]);
+        votes.insert("a2".to_owned(), vec![bob.clone(), eve.to_string()]);
+
+        let mut msg = Message {
+            own: true,
+            ..Message::default()
+        };
+        convert_poll_parts(
+            &mut msg,
+            "Best\u{1b}[31m snack?\nPick one",
+            false,
+            2,
+            vec![
+                ("a1".into(), "Chips\x07".into()),
+                ("a2".into(), "Fruit".into()),
+            ],
+            &votes,
+            false,
+            true,
+            false,
+            &own,
+            &ignored,
+        );
+        let p = msg.poll.as_ref().expect("poll populated");
+        assert!(msg.edited);
+        assert_eq!(p.question, "Best[31m snack? Pick one");
+        assert!(!p.disclosed);
+        assert!(!p.shows_counts());
+        assert!(p.is_multi());
+        assert!(!msg.editable());
+        assert_eq!(p.answers[0].text, "Chips");
+        assert_eq!(p.answers[0].votes, 1);
+        assert!(p.answers[0].own);
+        assert_eq!(p.answers[1].votes, 1);
+        assert!(!p.answers[1].own);
+        assert_eq!(p.total_voters, 2);
+        // Plain fallback must never reveal vote counts for an open undisclosed poll.
+        assert!(!msg.body.contains("1 vote"));
+        assert!(msg.body.contains("Best[31m snack? Pick one"));
+
+        let mut ended_msg = Message {
+            own: true,
+            ..Message::default()
+        };
+        convert_poll_parts(
+            &mut ended_msg,
+            "Winner?",
+            false,
+            1,
+            vec![("a1".into(), "One".into()), ("a2".into(), "Two".into())],
+            &votes,
+            true,
+            false,
+            true,
+            &own,
+            &ignored,
+        );
+        let ended_p = ended_msg.poll.as_ref().unwrap();
+        assert!(ended_p.ended);
+        assert!(ended_p.shows_counts());
+        assert!(!ended_msg.editable());
+        assert_eq!(ended_p.winner_max(), 1);
     }
 }

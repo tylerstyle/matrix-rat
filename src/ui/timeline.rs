@@ -211,6 +211,21 @@ pub fn build_rows(
                 });
             }
 
+            if let Some(poll) = &message.poll
+                && message.kind != MsgKind::Redacted
+            {
+                push_poll_rows(
+                    &mut rows,
+                    i,
+                    message,
+                    poll,
+                    body_width,
+                    max_width,
+                    theme,
+                    text_style,
+                    repeated_shield,
+                );
+            } else {
             // A picture: rows are kept free here and painted over when drawn. Its
             // caption follows as the text; without pictures the text names the file.
             let mut body_text = message.body.as_str();
@@ -234,7 +249,7 @@ pub fn build_rows(
                             });
                         }
                     }
-                    Slot::Failed(reason) => {
+                    Slot::Failed(reason) if message.file.is_none() => {
                         let text = truncate(&format!("🖼  {} — {reason}", image.name), body_width);
                         let end = start + width(&text) as u16;
                         rows.push(Row {
@@ -249,14 +264,17 @@ pub fn build_rows(
                             image: None,
                         });
                     }
-                    Slot::Off => {}
+                    Slot::Failed(_) | Slot::Off => {}
                 }
-                if slot != Slot::Off {
+                if slot != Slot::Off && message.file.is_none() {
                     body_text = image.caption.as_deref().unwrap_or("");
                     text_wanted = !body_text.is_empty();
                 }
             }
 
+            let playable = message.is_playable()
+                && message.kind != MsgKind::Redacted
+                && message.state != SendState::Failed;
             let (body_style, intro) = match message.kind {
                 MsgKind::Emote => (
                     Style::new().fg(theme.user_color(&message.sender)),
@@ -271,6 +289,15 @@ pub fn build_rows(
                     0,
                     Segment {
                         text: intro,
+                        format: Format::default(),
+                    },
+                );
+            }
+            if playable && let Some(first) = rich.lines.first_mut() {
+                first.segments.insert(
+                    0,
+                    Segment {
+                        text: "▶ ".to_owned(),
                         format: Format::default(),
                     },
                 );
@@ -292,27 +319,46 @@ pub fn build_rows(
                 Vec::new()
             };
             let last = wrapped.len().saturating_sub(1);
+            let play_style = Style {
+                fg: theme.style(Role::Link).fg,
+                ..Style::new()
+            }
+            .add_modifier(Modifier::BOLD);
             for (n, row) in wrapped.drain(..).enumerate() {
                 let mut spans = vec![Span::raw(INDENT)];
-                let mut hits = Vec::new();
+                let mut segment_hits = Vec::new();
                 let mut col = INDENT.len();
+                let play_start = col as u16;
                 if !row.prefix.is_empty() {
                     col += width(&row.prefix);
                     spans.push(Span::styled(row.prefix, theme.style(Role::Muted)));
                 }
-                for segment in row.segments {
+                for (seg_idx, segment) in row.segments.into_iter().enumerate() {
                     let segment_width = width(&segment.text);
                     let (text, style) = styled(&segment, body_style, theme, reveal);
                     if let Some(link) = segment.format.link {
-                        hits.push((
+                        segment_hits.push((
                             col as u16,
                             (col + segment_width) as u16,
                             HitId::Link(i, link),
                         ));
                     }
                     col += segment_width;
-                    spans.push(Span::styled(text, style));
+                    if n == 0 && seg_idx == 0 && playable && let Some(rest) = text.strip_prefix("▶ ")
+                    {
+                        spans.push(Span::styled("▶ ", play_style));
+                        if !rest.is_empty() {
+                            spans.push(Span::styled(rest.to_owned(), style));
+                        }
+                    } else {
+                        spans.push(Span::styled(text, style));
+                    }
                 }
+                let mut hits = Vec::new();
+                if n == 0 && playable && (col as u16) > play_start {
+                    hits.push((play_start, col as u16, HitId::PlayMedia(i)));
+                }
+                hits.extend(segment_hits);
                 // "(edited)", "sending" and "not sent" go after the text, or on a row of
                 // their own when there is no room left.
                 match marker(message, repeated_shield) {
@@ -352,6 +398,7 @@ pub fn build_rows(
                         image: None,
                     }),
                 }
+            }
             }
 
             // Reaction chips, wrapped onto further rows when they do not fit.
@@ -486,6 +533,191 @@ fn styled(segment: &Segment, base: Style, theme: &Theme, reveal: bool) -> (Strin
         }
     }
     (segment.text.clone(), style)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_poll_rows(
+    rows: &mut Vec<Row>,
+    i: usize,
+    message: &Message,
+    poll: &crate::model::PollInfo,
+    body_width: usize,
+    max_width: usize,
+    theme: &Theme,
+    text_style: Style,
+    repeated_shield: bool,
+) {
+    let fg_only = |role: Role| Style {
+        fg: theme.style(role).fg,
+        ..Style::new()
+    };
+    let muted = fg_only(Role::Muted);
+    let accent = fg_only(Role::StatusKey).add_modifier(Modifier::BOLD);
+    let bold_text = text_style.add_modifier(Modifier::BOLD);
+
+    // Question header, wrapped to fit after the icon.
+    let q_prefix = "📊 ";
+    let q_width = body_width.saturating_sub(width(q_prefix)).max(1);
+    let q_lines = wrap(&poll.question, q_width);
+    for (idx, line) in q_lines.into_iter().enumerate() {
+        let mut spans = vec![Span::raw(INDENT)];
+        if idx == 0 {
+            spans.push(Span::styled(q_prefix, accent));
+        } else {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::styled(line, bold_text));
+        rows.push(Row::plain(Line::from(spans), Some(i)));
+    }
+
+    // Answer rows.
+    let shows_counts = poll.shows_counts();
+    let winner_max = poll.winner_max();
+    let clickable = !poll.ended && message.state == SendState::Sent;
+    for (a_idx, answer) in poll.answers.iter().enumerate() {
+        let is_winner = winner_max > 0 && answer.votes == winner_max;
+        let mark = match (poll.is_multi(), answer.own) {
+            (false, true) => "● ",
+            (false, false) => "○ ",
+            (true, true) => "[✓] ",
+            (true, false) => "[ ] ",
+        };
+        let mark_style = if answer.own || is_winner {
+            accent
+        } else {
+            muted
+        };
+        let text_role = if is_winner || answer.own {
+            bold_text
+        } else {
+            text_style
+        };
+
+        let mut spans = vec![Span::raw(INDENT), Span::styled(mark, mark_style)];
+        let mut used = width(mark);
+        if shows_counts {
+            let pct = if poll.total_voters > 0 {
+                ((u64::from(answer.votes) * 100) / u64::from(poll.total_voters)).min(100)
+            } else {
+                0
+            };
+            let win_tag = if is_winner { " ★" } else { "" };
+            let count_str = format!(" {} ({pct}%){win_tag}", answer.votes);
+            let bar_w = if body_width >= 30 {
+                (body_width / 4).clamp(4, 12)
+            } else {
+                0
+            };
+            let bar_total_w = if bar_w > 0 { bar_w + 1 } else { 0 };
+            let label_budget = body_width
+                .saturating_sub(used + bar_total_w + width(&count_str))
+                .max(1);
+            let label = truncate(&answer.text, label_budget);
+            used += width(&label);
+            spans.push(Span::styled(label, text_role));
+            if bar_w > 0 {
+                let mut filled = if poll.total_voters > 0 {
+                    ((u64::from(answer.votes) * bar_w as u64 + u64::from(poll.total_voters) / 2)
+                        / u64::from(poll.total_voters))
+                    .min(bar_w as u64) as usize
+                } else {
+                    0
+                };
+                if answer.votes > 0 && filled == 0 {
+                    filled = 1;
+                }
+                let bar = format!(
+                    " {}{}",
+                    "█".repeat(filled),
+                    "░".repeat(bar_w.saturating_sub(filled))
+                );
+                used += width(&bar);
+                spans.push(Span::styled(
+                    bar,
+                    if is_winner || answer.own {
+                        accent
+                    } else {
+                        fg_only(Role::Link)
+                    },
+                ));
+            }
+            used += width(&count_str);
+            spans.push(Span::styled(
+                count_str,
+                if is_winner { accent } else { muted },
+            ));
+        } else {
+            let label = truncate(&answer.text, body_width.saturating_sub(used).max(1));
+            used += width(&label);
+            spans.push(Span::styled(label, text_role));
+        }
+
+        let start_col = INDENT.len() as u16;
+        let end_col = (INDENT.len() + used).min(max_width) as u16;
+        let hits = if clickable && end_col > start_col {
+            vec![(start_col, end_col, HitId::PollAnswer(i, a_idx))]
+        } else {
+            Vec::new()
+        };
+        rows.push(Row {
+            line: Line::from(spans),
+            msg: Some(i),
+            source: i,
+            hits,
+            image: None,
+        });
+    }
+
+    // Footer metadata line: visibility, choice cap, voter count (when disclosed/ended), and marker.
+    let mut meta = Vec::new();
+    if poll.ended {
+        meta.push("ended".to_owned());
+    }
+    meta.push(if poll.disclosed {
+        "disclosed".to_owned()
+    } else {
+        "undisclosed".to_owned()
+    });
+    if poll.is_multi() {
+        meta.push(format!("up to {}", poll.effective_max()));
+    } else {
+        meta.push("single choice".to_owned());
+    }
+    if shows_counts {
+        meta.push(format!(
+            "{} voter{}",
+            poll.total_voters,
+            if poll.total_voters == 1 { "" } else { "s" }
+        ));
+    } else {
+        meta.push("results hidden until ended".to_owned());
+    }
+    let meta_text = truncate(&meta.join(" · "), body_width);
+    let mut footer_spans = vec![
+        Span::raw(INDENT),
+        Span::styled(meta_text.clone(), muted),
+    ];
+    let col = INDENT.len() + width(&meta_text);
+    match marker(message, repeated_shield) {
+        Some((label, role)) if col + 1 + width(&label) <= max_width => {
+            footer_spans.push(Span::raw(" "));
+            footer_spans.push(Span::styled(label, fg_only(role)));
+            rows.push(Row::plain(Line::from(footer_spans), Some(i)));
+        }
+        Some((label, role)) => {
+            rows.push(Row::plain(Line::from(footer_spans), Some(i)));
+            rows.push(Row::plain(
+                Line::from(vec![
+                    Span::raw(INDENT),
+                    Span::styled(truncate(&label, body_width), fg_only(role)),
+                ]),
+                Some(i),
+            ));
+        }
+        None => {
+            rows.push(Row::plain(Line::from(footer_spans), Some(i)));
+        }
+    }
 }
 
 /// The laid-out rows of the open room, reused between frames while nothing that
@@ -749,7 +981,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m) | HitId::ReplyQuote(m) | HitId::Sender(m)) if m == msg)
+            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::PlayMedia(m) | HitId::PollAnswer(m, _) | HitId::Thread(m) | HitId::ReplyQuote(m) | HitId::Sender(m)) if m == msg)
             {
                 frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }
@@ -780,7 +1012,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .take_while(|row| row.source == source && row.image.is_some())
             .count();
-        if let Some(info) = room.messages.get(source).and_then(|m| m.image.as_ref()) {
+        if let Some(msg) = room.messages.get(source)
+            && let Some(info) = msg.image.as_ref()
+        {
             let rect = Rect::new(
                 content.x + indent,
                 content.y + pad + (n - top) as u16,
@@ -792,6 +1026,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 area: rect,
                 skip: slot.row,
                 size: (slot.cols, slot.rows),
+                play_mark: msg.is_playable() && msg.state != SendState::Failed,
                 covered,
             };
             super::image::draw_inline(frame, &mut app.images, theme, inline);
@@ -971,6 +1206,210 @@ mod tests {
                 &"  💬 12 replies · new · carol: a long answer over two lines".to_owned()
             ),
             "{text:?}"
+        );
+    }
+
+    #[test]
+    fn playable_media_and_location_rows() {
+        use matrix_sdk::ruma::events::room::MediaSource;
+        use matrix_sdk::ruma::mxc_uri;
+
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let mut room = demo_rooms().remove(0);
+
+        let mut voice = room.messages[0].clone();
+        voice.body = "🎤 note.ogg · 0:12 · 2 kB\n▁▃▆█".to_owned();
+        voice.file = Some(crate::model::Attachment {
+            key: "mxc://example.org/v".into(),
+            name: "note.ogg".into(),
+            size: Some(2000),
+            kind: crate::model::MediaKind::Voice,
+            source: Box::new(MediaSource::Plain(
+                mxc_uri!("mxc://example.org/v").to_owned(),
+            )),
+        });
+
+        let mut video = room.messages[0].clone();
+        video.id = "vid".into();
+        video.body = "🎞  clip.mp4 · 1:05 · 4 MB".to_owned();
+        video.file = Some(crate::model::Attachment {
+            key: "mxc://example.org/vid".into(),
+            name: "clip.mp4".into(),
+            size: Some(4_000_000),
+            kind: crate::model::MediaKind::Video,
+            source: Box::new(MediaSource::Plain(
+                mxc_uri!("mxc://example.org/vid").to_owned(),
+            )),
+        });
+        let thumb_key = "mxc://example.org/vthumb";
+        video.image = Some(crate::images::testing::remote_image(thumb_key, Some((320, 180))));
+
+        let mut loc = room.messages[0].clone();
+        loc.id = "loc".into();
+        loc.body = "📍 Big Ben · geo:51.5074,-0.1278".to_owned();
+
+        room.messages = vec![voice, video, loc];
+        for max in [12, 24, 60] {
+            let rows = build_rows(&room, max, &theme, None, &images);
+            for row in &rows {
+                assert!(row.line.width() <= max, "width {max}: {:?}", row.line);
+            }
+        }
+        let rows = build_rows(&room, 60, &theme, None, &images);
+        let text: Vec<String> = rows.iter().map(|r| r.line.to_string()).collect();
+        assert!(
+            text.iter().any(|l| l.contains("▶ 🎤 note.ogg · 0:12 · 2 kB")),
+            "{text:?}"
+        );
+        assert!(text.iter().any(|l| l.contains("▁▃▆█")), "{text:?}");
+        // Video with thumbnail keeps BOTH thumbnail rows and the summary row.
+        assert!(rows.iter().any(|r| r.source == 1 && r.image.is_some()));
+        assert!(
+            text.iter().any(|l| l.contains("▶ 🎞  clip.mp4 · 1:05 · 4 MB")),
+            "{text:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.hits.iter().any(|h| h.2 == HitId::PlayMedia(0)))
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.hits.iter().any(|h| h.2 == HitId::Link(2, 0)))
+        );
+    }
+
+    #[test]
+    fn poll_rows_render_disclosed_undisclosed_and_ended_winners() {
+        use crate::model::{PollAnswer, PollInfo};
+
+        let open_undisclosed = Message {
+            id: "$p1".into(),
+            sender: "alice".into(),
+            day: "Today".into(),
+            time: "12:00".into(),
+            body: "📊 Secret vote?".into(),
+            poll: Some(PollInfo {
+                question: "Secret vote?".into(),
+                disclosed: false,
+                max_selections: 2,
+                answers: vec![
+                    PollAnswer {
+                        id: "a1".into(),
+                        text: "Option A".into(),
+                        votes: 4,
+                        own: true,
+                    },
+                    PollAnswer {
+                        id: "a2".into(),
+                        text: "Option B".into(),
+                        votes: 2,
+                        own: false,
+                    },
+                ],
+                total_voters: 5,
+                ended: false,
+                editable: false,
+            }),
+            ..Message::default()
+        };
+        let ended_disclosed = Message {
+            id: "$p2".into(),
+            sender: "bob".into(),
+            day: "Today".into(),
+            time: "12:05".into(),
+            body: "📊 Best editor?".into(),
+            poll: Some(PollInfo {
+                question: "Best editor?".into(),
+                disclosed: true,
+                max_selections: 1,
+                answers: vec![
+                    PollAnswer {
+                        id: "b1".into(),
+                        text: "Helix".into(),
+                        votes: 3,
+                        own: false,
+                    },
+                    PollAnswer {
+                        id: "b2".into(),
+                        text: "Neovim".into(),
+                        votes: 1,
+                        own: true,
+                    },
+                ],
+                total_voters: 4,
+                ended: true,
+                editable: false,
+            }),
+            ..Message::default()
+        };
+        let room = Room {
+            messages: vec![open_undisclosed, ended_disclosed],
+            ..Room::new("!r:example.org", "test", RoomKind::Room)
+        };
+        let theme = Theme::builtin(crate::theme::DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(crate::images::Graphics::off());
+        let rows = build_rows(&room, 72, &theme, None, &images);
+
+        let p1_text: Vec<String> = rows
+            .iter()
+            .filter(|r| r.source == 0)
+            .map(|r| {
+                r.line
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // Open undisclosed poll marks own vote (`[✓]`), states `undisclosed · up to 2`,
+        // and NEVER leaks vote counts, percentages, bars, or voter counts.
+        assert!(p1_text.iter().any(|l| l.contains("📊 Secret vote?")));
+        assert!(p1_text.iter().any(|l| l.contains("[✓] Option A")));
+        assert!(p1_text.iter().any(|l| l.contains("[ ] Option B")));
+        assert!(
+            p1_text
+                .iter()
+                .any(|l| l.contains("undisclosed · up to 2 · results hidden until ended"))
+        );
+        for line in &p1_text {
+            assert!(!line.contains('%'), "leaked pct in {line}");
+            assert!(!line.contains('█'), "leaked bar in {line}");
+            assert!(!line.contains("voter"), "leaked voters in {line}");
+        }
+        // Open poll answers are clickable.
+        assert!(
+            rows.iter()
+                .any(|r| r.hits.iter().any(|h| h.2 == HitId::PollAnswer(0, 0)))
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.hits.iter().any(|h| h.2 == HitId::PollAnswer(0, 1)))
+        );
+
+        let p2_text: Vec<String> = rows
+            .iter()
+            .filter(|r| r.source == 1)
+            .map(|r| {
+                r.line
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        // Ended disclosed poll shows counts, bars, winner star (`★`), and is not clickable.
+        assert!(p2_text.iter().any(|l| l.contains("Helix") && l.contains("3 (75%) ★")));
+        assert!(p2_text.iter().any(|l| l.contains("● Neovim") && l.contains("1 (25%)")));
+        assert!(
+            p2_text
+                .iter()
+                .any(|l| l.contains("ended · disclosed · single choice · 4 voters"))
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.hits.iter().any(|h| matches!(h.2, HitId::PollAnswer(1, _))))
         );
     }
 }

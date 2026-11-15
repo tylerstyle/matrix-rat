@@ -171,6 +171,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/shrug", "Prepend ¯\\_(ツ)_/¯ to the message"),
     ("/tableflip", "Prepend (╯°□°)╯︵ ┻━┻ to the message"),
     ("/lenny", "Prepend ( ͡° ͜ʖ ͡°) to the message"),
+    ("/poll", "Start a poll"),
     ("/upload", "Attach and upload a file"),
     ("/file", "Attach and upload a file"),
 ];

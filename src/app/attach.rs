@@ -1088,6 +1088,7 @@ mod tests {
             key: "mxc://example.org/report".to_owned(),
             name: "report.pdf".to_owned(),
             size: Some(1000),
+            kind: crate::model::MediaKind::File,
             source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
                 matrix_sdk::ruma::OwnedMxcUri::from("mxc://example.org/report"),
             )),

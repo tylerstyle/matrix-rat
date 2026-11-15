@@ -88,6 +88,10 @@ pub enum Run {
     Report,
     /// Ban the message's sender from the room.
     BanUser,
+    /// Open the poll voting chooser for the targeted poll.
+    VotePoll,
+    /// End our own open poll (`m.poll.end`).
+    EndPoll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,14 +380,19 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
     if sent && addressable && readable {
         items.push(Item::action(keys, "React…", Timeline, Action::React));
     }
-    if message.own
-        && sent
-        && addressable
-        && readable
-        && message.image.is_none()
-        && message.file.is_none()
-    {
+    if sent && addressable && readable && message.editable() {
         items.push(Item::action(keys, "Edit", Timeline, Action::Edit));
+    }
+    if let Some(poll) = &message.poll
+        && !poll.ended
+        && !deleted
+    {
+        if sent && on_server {
+            items.push(Item::new("Vote in poll…", "", Run::VotePoll));
+        }
+        if message.own && sent && on_server {
+            items.push(Item::new("End poll", "", Run::EndPoll).asking_label("Again to end poll"));
+        }
     }
     if !deleted && !message.body.is_empty() {
         items.push(Item::action(keys, "Copy text", Timeline, Action::Copy));
@@ -399,10 +408,15 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
             .is_empty()
     };
     if !deleted {
-        let open = if message.image.is_some() {
+        let open = if let Some(file) = &message.file {
+            let label = match file.kind {
+                crate::model::MediaKind::Audio | crate::model::MediaKind::Voice => "Play audio",
+                crate::model::MediaKind::Video => "Play video",
+                crate::model::MediaKind::File | crate::model::MediaKind::Picture => "Open file",
+            };
+            Some((label, false))
+        } else if message.image.is_some() {
             Some(("View picture", true))
-        } else if message.file.is_some() {
-            Some(("Open file", false))
         } else if has_link() {
             Some(("Open link", false))
         } else {
@@ -414,10 +428,14 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
         }
     }
     if message.attachment().is_some() {
-        let label = if message.image.is_some() {
-            "Save picture"
-        } else {
-            "Save file"
+        let label = match &message.file {
+            Some(file) => match file.kind {
+                crate::model::MediaKind::Audio | crate::model::MediaKind::Voice => "Save audio",
+                crate::model::MediaKind::Video => "Save video",
+                crate::model::MediaKind::File | crate::model::MediaKind::Picture => "Save file",
+            },
+            None if message.image.is_some() => "Save picture",
+            None => "Save file",
         };
         items.push(Item::action(keys, label, Timeline, Action::Save));
     }
@@ -643,6 +661,7 @@ mod tests {
             key: "mxc://example.org/f".into(),
             name: "notes.pdf".into(),
             size: None,
+            kind: crate::model::MediaKind::File,
             source: Box::new(MediaSource::Plain(
                 mxc_uri!("mxc://example.org/f").to_owned(),
             )),
@@ -784,6 +803,7 @@ mod tests {
             caption: None,
             dimensions: None,
             size: None,
+            sticker: false,
         });
         let items = message_items(&picture, CONNECTED, &keys());
         assert!(labels(&items).contains(&"View picture"));
@@ -797,6 +817,28 @@ mod tests {
         assert!(labels(&items).contains(&"Open file"));
         assert!(labels(&items).contains(&"Save file"));
         assert!(!labels(&items).contains(&"Open link"));
+
+        let mut voice = text(false);
+        voice.file = Some(Attachment {
+            kind: crate::model::MediaKind::Voice,
+            ..file()
+        });
+        let voice_items = message_items(&voice, CONNECTED, &keys());
+        let voice_labels = labels(&voice_items);
+        assert!(voice_labels.contains(&"Play audio"));
+        assert!(voice_labels.contains(&"Save audio"));
+
+        let mut video = text(false);
+        video.file = Some(Attachment {
+            kind: crate::model::MediaKind::Video,
+            ..file()
+        });
+        video.image = picture.image.clone();
+        let video_items = message_items(&video, CONNECTED, &keys());
+        let video_labels = labels(&video_items);
+        assert!(video_labels.contains(&"Play video"));
+        assert!(video_labels.contains(&"Save video"));
+        assert!(!video_labels.contains(&"View picture"));
     }
 
     #[test]
