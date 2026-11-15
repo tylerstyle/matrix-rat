@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🐀 matrix-rat
+<img src="assets/icon.svg" alt="The matrix-rat icon: a rat in a chef's hat looking over a terminal window" width="112">
+
+# matrix-rat
 
 **A Matrix client for the terminal that is as comfortable with a rat, ehm, I mean mouse, as with a keyboard.**
 
