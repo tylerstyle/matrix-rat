@@ -60,8 +60,9 @@ struct Entry {
 #[derive(Clone, Default)]
 pub struct LeftRooms {
     rooms: Arc<Mutex<HashMap<OwnedRoomId, Entry>>>,
-    /// The room list is to be made again: a room turned out to be joined after all, or
-    /// an answer changed when to ask next.
+    /// The room list (and the spaces) are to be made again: a room turned out to be
+    /// joined after all, an invitation or a knock for one came, or an answer changed
+    /// when to ask next.
     wake: Arc<Notify>,
 }
 
@@ -175,8 +176,16 @@ impl LeftRooms {
             return Look::Show;
         };
         match state {
+            // News: shown again. That includes an invitation that was declined here and
+            // that a late answer brings back as one: invitations carry no time, so it
+            // cannot be told from a new one, and hiding a real one would be worse than
+            // showing a stale one, which is declined once more.
             RoomState::Invited | RoomState::Knocked => {
                 rooms.remove(room_id);
+                drop(rooms);
+                // The spaces leave out a room that was left: they are to be made again
+                // too, which the list's wake-up does.
+                self.wake.notify_one();
                 Look::Show
             }
             RoomState::Left | RoomState::Banned => {
@@ -256,9 +265,10 @@ impl LeftRooms {
     }
 
     /// Resolves when the room list is to be made again: a room kept out of it turned out
-    /// to be joined, an answer changed when to ask next, or it is time to ask about one
-    /// (which is done while the list is made). The rooms themselves may not change
-    /// meanwhile, and then nothing else would make the list again.
+    /// to be joined, an invitation or a knock for one came, an answer changed when to
+    /// ask next, or it is time to ask about one (which is done while the list is made).
+    /// The rooms themselves may not change meanwhile, and then nothing else would make
+    /// the list (or the spaces) again.
     pub async fn due(&self) {
         let next = self.next_ask();
         let time_to_ask = async {
@@ -719,6 +729,27 @@ mod tests {
             assert!(!left.is_left(room));
             assert!(!left.gone_as(room, RoomState::Joined));
         }
+    }
+
+    #[tokio::test]
+    async fn an_invitation_to_a_room_left_here_has_the_list_and_the_spaces_made_again() {
+        let left = LeftRooms::default();
+        let room = room_id!("!asked:example.org");
+        left.mark(room);
+        assert_eq!(
+            left.look(room, RoomState::Invited, Instant::now()),
+            Look::Show
+        );
+        tokio::time::timeout(Duration::from_secs(5), left.due())
+            .await
+            .expect("made again without the room left out");
+        // Once: shown again, the invitation is no longer news.
+        assert_eq!(
+            left.look(room, RoomState::Invited, Instant::now()),
+            Look::Show
+        );
+        let again = tokio::time::timeout(Duration::from_millis(50), left.due()).await;
+        assert!(again.is_err(), "nothing new to make them again for");
     }
 
     #[test]

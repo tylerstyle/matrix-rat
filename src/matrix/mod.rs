@@ -1878,9 +1878,10 @@ impl Worker {
                         }
                     }
                 }
-                // A room kept out of the list is one the account is in after all, or
-                // it is time to ask the server about one. (A space can be such a room:
-                // the spaces are told again too.)
+                // A room kept out of the list is one the account is in after all, an
+                // invitation or a knock for one came (making the list showed it), or it
+                // is time to ask the server about one. (A space can be such a room, and
+                // the spaces leave out the rooms that were left: they are told again too.)
                 () = left.due() => {
                     // One that is back has its latest message followed from now on.
                     previews.listen(client, &rooms, left);
