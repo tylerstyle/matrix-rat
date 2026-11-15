@@ -6,11 +6,20 @@ use crate::emoji;
 use crate::lineedit::LineEdit;
 use crate::matrix::{CustomEmoji, EmoteCatalog, ReauthKind, ReauthTarget, StickerItem};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReauthInfo {
     pub user_id: String,
     pub device_id: String,
     pub kind: ReauthKind,
+}
+
+/// Hand-written: whose account and which device stay out of logs.
+impl std::fmt::Debug for ReauthInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReauthInfo")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]
@@ -215,11 +224,24 @@ pub const EMOJI_CELL: u16 = 3;
 pub const CUSTOM_CELL: u16 = 14;
 
 /// One result of the emoji picker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Pick {
     Unicode(&'static Emoji),
     /// Index into [`EmojiPicker::custom`].
     Custom(usize),
+}
+
+/// Outside tests: which emoji was picked stays out of logs, like a reaction's key.
+#[cfg(not(test))]
+impl std::fmt::Debug for Pick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unicode(_) => f.write_str("Pick::Unicode"),
+            Self::Custom(index) => write!(f, "Pick::Custom({index})"),
+        }
+    }
 }
 
 /// A result of the emoji picker as what it is rather than where it is among the
@@ -1837,7 +1859,7 @@ impl StickerPicker {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Modal {
     Login(LoginForm),
     Recovery(RecoveryForm),
@@ -1884,6 +1906,43 @@ pub enum Modal {
     Threads(ThreadsPopup),
     /// The account's notification keywords.
     Keywords(crate::keywords::KeywordsPopup),
+}
+
+/// Hand-written, so that a new kind of popup is added here by hand: each one holds
+/// something private (what was typed, names, ids, messages), and its own `Debug` must
+/// keep that out of logs before it can be shown here.
+impl std::fmt::Debug for Modal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (name, popup): (&str, &dyn std::fmt::Debug) = match self {
+            Self::Login(popup) => ("Login", popup),
+            Self::Recovery(popup) => ("Recovery", popup),
+            Self::Emoji(popup) => ("Emoji", popup),
+            Self::Settings(popup) => ("Settings", popup),
+            Self::Verify(popup) => ("Verify", popup),
+            Self::Search(popup) => ("Search", popup),
+            Self::Palette(popup) => ("Palette", popup),
+            Self::GlobalSearch(popup) => ("GlobalSearch", popup),
+            Self::New(popup) => ("New", popup),
+            Self::RoomInfo(popup) => ("RoomInfo", popup),
+            Self::UserInfo(popup) => ("UserInfo", popup),
+            Self::OwnProfile(popup) => ("OwnProfile", popup),
+            Self::Menu(popup) => ("Menu", popup),
+            Self::Keybinds(popup) => ("Keybinds", popup),
+            Self::IgnoredUsers(popup) => ("IgnoredUsers", popup),
+            Self::Report(popup) => ("Report", popup),
+            Self::Pinned(popup) => ("Pinned", popup),
+            Self::ReasonConfirm(popup) => ("ReasonConfirm", popup),
+            Self::Sessions(popup) => ("Sessions", popup),
+            Self::Keys(popup) => ("Keys", popup),
+            Self::PollForm(popup) => ("PollForm", popup),
+            Self::PollVote(popup) => ("PollVote", popup),
+            Self::Stickers(popup) => ("Stickers", popup),
+            Self::Details(popup) => ("Details", popup),
+            Self::Threads(popup) => ("Threads", popup),
+            Self::Keywords(popup) => ("Keywords", popup),
+        };
+        f.debug_tuple(name).field(popup).finish()
+    }
 }
 
 #[cfg(test)]
@@ -1971,6 +2030,280 @@ mod tests {
             password: String::from("hunter2").into(),
         };
         assert!(!format!("{command:?}").contains("hunter2"));
+    }
+
+    /// Every kind of popup, each holding recognisable private things (typed text, ids,
+    /// names, paths, messages): none of them shows in `Debug`.
+    #[test]
+    fn no_popup_shows_what_it_holds_in_debug() {
+        use std::path::Path;
+
+        use crate::model::{Message, PollAnswer, PollInfo, RoomKind, ThreadInfo};
+
+        const PRIVATE: &[&str] = &[
+            "secret", "Secret", "alice", "Alice", "hunter2", "DEVHUSH", "/home/", "mxc:",
+        ];
+        let typed = |text: &str| LineEdit::from(text);
+        let secret = |text: &str| {
+            let mut field = LineEdit::secret();
+            field.set(text);
+            field
+        };
+
+        let mut login = LoginForm::reauth(
+            ReauthTarget {
+                homeserver: "https://secret.example.org".into(),
+                user_id: "@alice:secret.example.org".into(),
+                device_id: "DEVHUSH".into(),
+                kind: ReauthKind::Password,
+                client_id: None,
+            },
+            "The session of @alice:secret.example.org expired".into(),
+        );
+        login.password = secret("hunter2");
+        login.error = Some("secret.example.org said no to @alice".into());
+        login.browser_url = Some("https://secret.example.org/sso?alice".into());
+
+        let recovery = RecoveryForm {
+            key: secret("EsTc secret key"),
+            error: Some("the key of alice is wrong".into()),
+            ..RecoveryForm::default()
+        };
+
+        let mut emoji = EmojiPicker::for_reaction(0, "$secret-event:example.org".into());
+        emoji.set_query("secret query".into());
+
+        let settings = SettingsMenu {
+            editing: Some(typed("/home/alice/secret-downloads")),
+            ..SettingsMenu::default()
+        };
+
+        let mut verify = crate::verify::VerifyPopup::set_up();
+        verify.password = Some(secret("hunter2"));
+
+        let mut search = crate::app::search::SearchBar::default();
+        search.query = typed("secret words");
+
+        let mut palette = crate::palette::Palette::open_pick(
+            &[crate::palette::PickItem {
+                id: "!secret-room:example.org".into(),
+                name: "Secret Room".into(),
+                hint: Some("alice's".into()),
+                category: crate::palette::Category::Room,
+            }],
+            crate::palette::Pick::IntoSpace {
+                space_id: "!secret-space:example.org".into(),
+                space_name: "Secret Space".into(),
+                back: None,
+            },
+        );
+        palette.query = typed("secret");
+
+        let mut global = crate::app::global_search::GlobalSearch::new(1);
+        global.query = typed("secret words");
+        global.active_query = "secret words".into();
+        global.note = Some("nothing for secret words".into());
+
+        let mut new = crate::manage::NewPopup::new(crate::manage::Stage::Invite);
+        new.user = typed("@alice:secret.example.org");
+        new.address = typed("#secret:example.org");
+        new.room = Some(("!secret-room:example.org".into(), "Secret Room".into()));
+        new.error = Some("secret.example.org refused".into());
+
+        let info = crate::manage::InfoPopup::new(
+            "!secret-room:example.org",
+            "Secret Room",
+            RoomKind::Room,
+        );
+
+        let user = crate::people::UserInfoPopup::new(
+            "@alice:secret.example.org".into(),
+            Some("!secret-room:example.org".into()),
+            Some("Alice Secret".into()),
+            None,
+            false,
+            0,
+            1,
+            1,
+            true,
+        );
+
+        let profile = crate::matrix::OwnProfile {
+            display_name: Some("Alice Secret".into()),
+            avatar: Some("mxc://secret.example.org/face".into()),
+            room_names: [("!secret-room:example.org".into(), Some("Alice".into()))].into(),
+        };
+        let own = crate::people::OwnProfilePopup::new(
+            Some("@alice:secret.example.org".into()),
+            Some(&profile),
+        );
+
+        let menu = crate::menu::Menu::new(
+            crate::menu::Target::Room {
+                id: "!secret-room:example.org".into(),
+                kind: RoomKind::Room,
+            },
+            "Secret Room",
+            vec![crate::menu::Item {
+                label: "Alice Secret".into(),
+                hint: "12:00".into(),
+                run: None,
+                confirm: None,
+            }],
+            crate::menu::Anchor::at(0, 0),
+        )
+        .unwrap();
+
+        let keybinds = crate::keymap::Editor::new(&crate::keymap::Keymap::default());
+
+        let ignored = IgnoredUsersPopup::new(&["@alice:secret.example.org".to_owned()]);
+
+        let mut report = ReportForm::new(
+            "!secret-room:example.org".into(),
+            "$secret-event:example.org".into(),
+            Some("@alice:secret.example.org".into()),
+            "Alice Secret".into(),
+            false,
+        );
+        report.reason.set("a secret reason");
+
+        let pinned = PinnedPopup::open(
+            "!secret-room:example.org".into(),
+            "Secret Room".into(),
+            true,
+        );
+
+        let mut ban = ReasonConfirmPopup::ban(
+            "!secret-room:example.org".into(),
+            "@alice:secret.example.org".into(),
+            "Alice Secret".into(),
+        );
+        ban.reason.set("a secret reason");
+
+        let sessions = crate::devices::SessionsPopup {
+            stage: crate::devices::SessionStage::Rename(crate::devices::Rename {
+                device_id: "DEVHUSH".into(),
+                name: typed("alice's secret laptop"),
+                request: None,
+                error: Some("secret.example.org said no".into()),
+            }),
+            selected: Some("DEVHUSH".into()),
+            ..crate::devices::SessionsPopup::default()
+        };
+
+        let mut export = crate::devices::ExportForm::new(Path::new("/home/alice/secret-keys.txt"));
+        export.passphrase = secret("hunter2");
+        let keys = crate::devices::KeysPopup {
+            stage: crate::devices::KeysStage::Export(export),
+            focus: None,
+        };
+
+        let poll_form =
+            PollFormPopup::create("!secret-room:example.org".into(), "Secret question?");
+
+        let poll = PollInfo {
+            question: "Secret question?".into(),
+            max_selections: 1,
+            answers: vec![PollAnswer {
+                id: "secret-answer".into(),
+                text: "Secret answer".into(),
+                votes: 1,
+                own: true,
+            }],
+            ..PollInfo::default()
+        };
+        let poll_vote = PollVotePopup::from_poll(
+            "!secret-room:example.org".into(),
+            "$secret-poll:example.org".into(),
+            &poll,
+        );
+
+        let catalog = EmoteCatalog {
+            packs: vec![crate::matrix::EmotePack {
+                id: "!secret-room:example.org".into(),
+                name: "Secret Pack".into(),
+                emojis: Vec::new(),
+                stickers: vec![StickerItem {
+                    shortcode: "secretcat".into(),
+                    name: "Secret Cat".into(),
+                    url: "mxc://secret.example.org/cat".into(),
+                    pack_name: "Secret Pack".into(),
+                    dimensions: None,
+                    size: None,
+                    mime: None,
+                }],
+            }],
+        };
+        let stickers =
+            StickerPicker::new("!secret-room:example.org".into(), "secret", &catalog, false);
+
+        let message = Message {
+            id: "secret-id".into(),
+            item: Some(crate::model::ItemRef::Event(
+                "$secret-event:example.org".into(),
+            )),
+            sender: "Alice Secret".into(),
+            sender_id: Some("@alice:secret.example.org".into()),
+            body: "the secret plans".into(),
+            ..Message::default()
+        };
+        let details = crate::details::DetailsPopup::new(&message, true, true, 1);
+
+        let threads = ThreadsPopup::new(
+            "!secret-room:example.org".into(),
+            "Secret Room".into(),
+            1,
+            vec![ThreadInfo {
+                root: "$secret-root:example.org".into(),
+                sender: "Alice Secret".into(),
+                text: "a secret thread".into(),
+                replies: 2,
+                latest_sender: Some("Alice".into()),
+                latest_when: Some("12:00".into()),
+                unread: true,
+                mine: false,
+            }],
+            false,
+        );
+
+        let mut keywords =
+            crate::keywords::KeywordsPopup::new(Some((vec!["secretword".into()], 1)));
+        keywords.input.set("another secret");
+
+        let popups = [
+            Modal::Login(login),
+            Modal::Recovery(recovery),
+            Modal::Emoji(emoji),
+            Modal::Settings(settings),
+            Modal::Verify(verify),
+            Modal::Search(search),
+            Modal::Palette(palette),
+            Modal::GlobalSearch(global),
+            Modal::New(Box::new(new)),
+            Modal::RoomInfo(Box::new(info)),
+            Modal::UserInfo(Box::new(user)),
+            Modal::OwnProfile(own),
+            Modal::Menu(menu),
+            Modal::Keybinds(keybinds),
+            Modal::IgnoredUsers(ignored),
+            Modal::Report(report),
+            Modal::Pinned(pinned),
+            Modal::ReasonConfirm(ban),
+            Modal::Sessions(Box::new(sessions)),
+            Modal::Keys(Box::new(keys)),
+            Modal::PollForm(poll_form),
+            Modal::PollVote(poll_vote),
+            Modal::Stickers(stickers),
+            Modal::Details(Box::new(details)),
+            Modal::Threads(threads),
+            Modal::Keywords(keywords),
+        ];
+        for popup in &popups {
+            let shown = format!("{popup:?}");
+            for private in PRIVATE {
+                assert!(!shown.contains(private), "{private} in {shown}");
+            }
+        }
     }
 
     #[test]
