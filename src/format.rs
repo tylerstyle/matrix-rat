@@ -277,9 +277,19 @@ fn tidy_fences(text: &str) -> std::borrow::Cow<'_, str> {
     let mut changed = false;
     // The length of the run that opened the block we are in.
     let mut open: Option<usize> = None;
+    // Inside a block fenced with `~~~`, which is left alone as a whole.
+    let mut tildes = false;
     for (n, line) in text.split('\n').enumerate() {
         if n > 0 {
             out.push('\n');
+        }
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if open.is_none() && indent <= 3 && line[indent..].starts_with("~~~") {
+            tildes = !tildes;
+        }
+        if tildes || (open.is_none() && line[indent.min(line.len())..].starts_with("~~~")) {
+            out.push_str(line);
+            continue;
         }
         let Some((ticks, rest)) = fence_start(line) else {
             out.push_str(line);
@@ -340,11 +350,19 @@ fn tidy_fences(text: &str) -> std::borrow::Cow<'_, str> {
 /// `/code [language] text`: a code block without typing any backticks. The first word
 /// is the language if it is one and code follows it.
 fn code_message(argument: &str, preserve_empty: bool) -> Outgoing {
-    let (first, more) = match argument.split_once(char::is_whitespace) {
-        Some((first, more)) => (first, more.trim_start_matches([' ', '\t'])),
+    // After the language: spaces up to the code on the same line, or one line break.
+    // What the code's first line is indented by is the code's.
+    let (first, more) = match argument.find(char::is_whitespace) {
+        Some(at) => {
+            let more = argument[at..].trim_start_matches([' ', '\t']);
+            let more = more
+                .strip_prefix("\r\n")
+                .or_else(|| more.strip_prefix('\n'))
+                .unwrap_or(more);
+            (&argument[..at], more)
+        }
         None => (argument, ""),
     };
-    let more = more.strip_prefix('\n').unwrap_or(more);
     let (lang, code) = if !more.trim().is_empty() && crate::highlight::known(first) {
         (first, more)
     } else {
@@ -839,6 +857,9 @@ mod tests {
                 "{typed}"
             );
         }
+        // Nor inside a block fenced with tildes.
+        let typed = "~~~\n```bash ls -la```\n~~~\nafter";
+        assert!(matches!(tidy_fences(typed), std::borrow::Cow::Borrowed(_)));
         // Inside a block nothing is touched, whatever it looks like.
         let typed = "```\n```bash ls```\n```";
         assert!(matches!(tidy_fences(typed), std::borrow::Cow::Borrowed(_)));
@@ -869,6 +890,13 @@ mod tests {
         assert_eq!(plain, "```rust\nfn main() {\n    a < b;\n}\n```");
         assert!(
             html.contains("a &lt; b;") && html.contains("language-rust"),
+            "{html}"
+        );
+        // The indentation of the first line of code is kept.
+        let (plain, html) = block("/code python\n    return 1\n\n    pass");
+        assert_eq!(plain, "```python\n    return 1\n\n    pass\n```");
+        assert!(
+            html.contains(">    return 1\n\n    pass\n</code>"),
             "{html}"
         );
         // Backticks in the code cannot end the block.
