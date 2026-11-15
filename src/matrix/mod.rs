@@ -8,6 +8,7 @@ mod drafts;
 mod emotes;
 mod keyring;
 mod keywords;
+mod left;
 mod manage;
 mod media;
 mod moderation;
@@ -1697,12 +1698,16 @@ impl Worker {
             notification_settings.clone(),
             self.events.clone(),
         );
+        // Rooms left in this session, which a late sync answer must not bring back.
+        let left = left::LeftRooms::default();
         let mut manager = manage::Manager::new(
             client.clone(),
             self.events.clone(),
             own_room_names.clone(),
             people_mgr.sync_poke(),
             own_refresh.clone(),
+            left.clone(),
+            notification_settings.clone(),
         );
         let mut devices = devices::Devices::new(client.clone(), self.events.clone());
         let mut emote_mgr = emotes::EmoteManager::new(client.clone(), self.events.clone());
@@ -1790,13 +1795,19 @@ impl Worker {
                     match change {
                         Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             self.emit(MatrixEvent::Rooms(
-                                summarize(&rooms, &mut previews, &ignored).await,
+                                summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
                             ));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             notify_open = false;
                         }
                     }
+                }
+                // A room kept out of the list is one the account is in after all.
+                () = left.back() => {
+                    self.emit(MatrixEvent::Rooms(
+                        summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
+                    ));
                 }
                 incoming = verifier.next_incoming() => verifier.on_incoming(incoming).await,
                 // Keys came in from a file: what is on screen may be readable now.
@@ -1811,14 +1822,14 @@ impl Worker {
                     previews.listen(client, &rooms);
                     _notices.arm();
                     self.emit(MatrixEvent::Rooms(
-                        summarize(&rooms, &mut previews, &ignored).await,
+                        summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
                     ));
                 }
                 Ok(()) = ignored.changed() => {
                     previews.lines.clear();
                     timelines.clear_cache();
                     self.emit(MatrixEvent::Rooms(
-                        summarize(&rooms, &mut previews, &ignored).await,
+                        summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
                     ));
                 }
                 () = own_members.finished() => own_members.ensure(&rooms).await,
@@ -1870,7 +1881,7 @@ impl Worker {
                             previews.enabled = wanted;
                             previews.listen(client, &rooms);
                             self.emit(MatrixEvent::Rooms(
-                                summarize(&rooms, &mut previews, &ignored).await,
+                                summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
                             ));
                         }
                     }
@@ -1926,7 +1937,15 @@ impl Worker {
                     }
                     Some(MatrixCmd::CancelDirectorySearch) => dir_searcher.cancel(),
                     Some(MatrixCmd::EnsureEmotePacks { room_id }) => emote_mgr.ensure(room_id),
-                    Some(command) => timelines.handle(command).await,
+                    Some(command) => {
+                        // Accepting an invitation: no longer a room that was left.
+                        if let MatrixCmd::Join { room_id } = &command
+                            && let Ok(room_id) = <&matrix_sdk::ruma::RoomId>::try_from(room_id.as_str())
+                        {
+                            left.clear(room_id);
+                        }
+                        timelines.handle(command).await;
+                    }
                 },
             }
         };
@@ -2124,9 +2143,15 @@ async fn summarize(
     rooms: &Vector<RoomListItem>,
     previews: &mut Previews,
     ignored: &tokio::sync::watch::Receiver<safety::IgnoredSet>,
+    left: &left::LeftRooms,
+    notify_settings: &matrix_sdk::notification_settings::NotificationSettings,
 ) -> Vec<RoomSummary> {
     let mut summaries = Vec::with_capacity(rooms.len());
     for room in rooms {
+        // Left in this session and brought back by a late answer: not a room of ours.
+        if left.hides(room) {
+            continue;
+        }
         // Spaces get their own navigation later; they are not chats.
         if room.is_space() {
             continue;
@@ -2140,7 +2165,8 @@ async fn summarize(
             continue;
         }
         let direct = room.is_direct().await.unwrap_or(false);
-        let muted = room.notification_mode().await == Some(RoomNotificationMode::Mute);
+        let muted = manage::notification_mode(notify_settings, room).await
+            == Some(RoomNotificationMode::Mute);
         let category = if invited {
             RoomCategory::Invite
         } else if knocked {

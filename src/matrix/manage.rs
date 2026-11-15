@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use matrix_sdk::notification_settings::RoomNotificationMode;
+use matrix_sdk::notification_settings::{NotificationSettings, RoomNotificationMode};
 use matrix_sdk::ruma::api::client::membership::get_member_events;
 use matrix_sdk::ruma::api::client::room::aliases::v3::Request as AliasesRequest;
 use matrix_sdk::ruma::api::client::room::create_room::v3::{Request as CreateRequest, RoomPreset};
@@ -751,6 +751,10 @@ pub struct Manager {
     own_room_names: super::people::OwnRoomNames,
     people_poke: Arc<Notify>,
     own_refresh: Arc<watch::Sender<u64>>,
+    /// Rooms left in this session (see [`super::left`]).
+    left: super::left::LeftRooms,
+    /// The session's view of the push rules, which knows a change made here at once.
+    notify: NotificationSettings,
 }
 
 /// Wakes the open room info watcher when the watched room changes.
@@ -802,6 +806,8 @@ impl Manager {
         own_room_names: super::people::OwnRoomNames,
         people_poke: Arc<Notify>,
         own_refresh: Arc<watch::Sender<u64>>,
+        left: super::left::LeftRooms,
+        notify: NotificationSettings,
     ) -> Self {
         Self {
             client,
@@ -811,6 +817,8 @@ impl Manager {
             own_room_names,
             people_poke,
             own_refresh,
+            left,
+            notify,
         }
     }
 
@@ -839,8 +847,15 @@ impl Manager {
                 target,
                 via,
             } => {
+                let left = self.left.clone();
                 tokio::spawn(async move {
                     let result = join(&client, &target, &via).await;
+                    // Joined (again): no longer a room that was left.
+                    if let Ok(room_id) = &result
+                        && let Ok(room_id) = <&RoomId>::try_from(room_id.as_str())
+                    {
+                        left.clear(room_id);
+                    }
                     emit(ManageEvent::Opened { request, result });
                 });
             }
@@ -876,8 +891,16 @@ impl Manager {
                 });
             }
             ManageCmd::Leave { room_id } => {
+                let left = self.left.clone();
                 tokio::spawn(async move {
                     let result = leave(&client, &room_id).await;
+                    // Remembered, so that a sync answer that was on its way cannot
+                    // bring the room back as one the user is in.
+                    if result.is_ok()
+                        && let Ok(room_id) = <&RoomId>::try_from(room_id.as_str())
+                    {
+                        left.mark(room_id);
+                    }
                     emit(ManageEvent::Left { room_id, result });
                 });
             }
@@ -906,6 +929,14 @@ impl Manager {
             }
             ManageCmd::Info { room_id } => {
                 self.stop();
+                // Left in this session: whatever is still known of it here is stale.
+                if <&RoomId>::try_from(room_id.as_str()).is_ok_and(|id| self.left.is_left(id)) {
+                    emit(ManageEvent::Info {
+                        room_id,
+                        result: Err("You are not in this room any more.".to_owned()),
+                    });
+                    return;
+                }
                 // Subscribe before spawning so changes arriving during the initial
                 // store read still mark this watcher's receiver dirty.
                 let refresh = self.refresh.watch(&room_id);
@@ -916,6 +947,7 @@ impl Manager {
                     self.events.clone(),
                     refresh,
                     own_room_names,
+                    self.notify.clone(),
                 )));
             }
             ManageCmd::StopInfo => self.stop(),
@@ -1122,8 +1154,9 @@ impl Manager {
                 );
             }
             ManageCmd::SetNotify { room_id, level } => {
+                let settings = self.notify.clone();
                 tokio::spawn(async move {
-                    let result = set_notify(&client, &room_id, level).await;
+                    let result = set_notify(&settings, &client, &room_id, level).await;
                     emit(ManageEvent::Done {
                         room_id,
                         change: Change::Notify,
@@ -1643,16 +1676,49 @@ where
     work(&room, &user).await.map_err(|err| failed(what, &err))
 }
 
-async fn set_notify(client: &Client, room_id: &str, level: NotifyLevel) -> Result<(), String> {
+/// A room's notification level, read from the session's own view of the push rules.
+///
+/// The SDK's `Room::notification_mode` reads the rules as the last sync stored them.
+/// A change made here is known to `settings` at once, but reaches the store only when
+/// the server sends the rules back, which can take a while (and against one server did
+/// not happen within a minute): a room just muted would go on showing as not muted.
+pub(super) async fn notification_mode(
+    settings: &NotificationSettings,
+    room: &Room,
+) -> Option<RoomNotificationMode> {
+    if room.state() != RoomState::Joined {
+        return None;
+    }
+    if let Some(chosen) = settings
+        .get_user_defined_room_notification_mode(room.room_id())
+        .await
+    {
+        return Some(chosen);
+    }
+    // Not chosen for this room: what the account's defaults say for a room of its kind
+    // (for these rules a chat between exactly two people is one-to-one).
+    let encrypted = room.latest_encryption_state().await.ok()?.is_encrypted();
+    let one_to_one = room.active_members_count() == 2;
+    Some(
+        settings
+            .get_default_room_notification_mode(encrypted.into(), one_to_one.into())
+            .await,
+    )
+}
+
+async fn set_notify(
+    settings: &NotificationSettings,
+    client: &Client,
+    room_id: &str,
+    level: NotifyLevel,
+) -> Result<(), String> {
     let room = room(client, room_id)?;
     let mode = match level {
         NotifyLevel::All => RoomNotificationMode::AllMessages,
         NotifyLevel::Mentions => RoomNotificationMode::MentionsAndKeywordsOnly,
         NotifyLevel::Mute => RoomNotificationMode::Mute,
     };
-    client
-        .notification_settings()
-        .await
+    settings
         .set_room_notification_mode(room.room_id(), mode)
         .await
         .map_err(|err| {
@@ -2065,6 +2131,7 @@ fn build_knock_requests(
 
 async fn head(
     room: &Room,
+    notify_settings: &NotificationSettings,
     levels: Option<&RoomPowerLevels>,
     own_room_names: &super::people::OwnRoomNames,
     raw_knocks: &[RawKnock],
@@ -2088,7 +2155,7 @@ async fn head(
     } else {
         None
     };
-    let notify = match room.notification_mode().await {
+    let notify = match notification_mode(notify_settings, room).await {
         Some(RoomNotificationMode::AllMessages) => Some(NotifyLevel::All),
         Some(RoomNotificationMode::MentionsAndKeywordsOnly) => Some(NotifyLevel::Mentions),
         Some(RoomNotificationMode::Mute) => Some(NotifyLevel::Mute),
@@ -2318,6 +2385,7 @@ async fn watch(
     events: UnboundedSender<MatrixEvent>,
     mut refresh: watch::Receiver<u64>,
     own_room_names: super::people::OwnRoomNames,
+    notify_settings: NotificationSettings,
 ) {
     let emit = |result: Result<RoomDetails, String>| {
         events
@@ -2337,8 +2405,7 @@ async fn watch(
     let own = room.own_user_id().to_owned();
     let mut changes = room.subscribe_info();
     // The notification level is not part of the room: it is in the account's push
-    // rules, and a change of those arrives on its own (kept, or the news stop).
-    let notify_settings = client.notification_settings().await;
+    // rules, and a change of those (made here or arriving) is news of its own.
     let mut notify_changes = notify_settings.subscribe_to_changes();
     let mut notify_open = true;
     let mut list = MemberList::default();
@@ -2379,7 +2446,14 @@ async fn watch(
             local_aliases_loaded = false;
             force_aliases = false;
         }
-        let mut current = head(&room, levels.as_ref(), &own_room_names, &raw_knocks).await;
+        let mut current = head(
+            &room,
+            &notify_settings,
+            levels.as_ref(),
+            &own_room_names,
+            &raw_knocks,
+        )
+        .await;
         current.local_aliases = local_aliases.clone();
         current.local_aliases_error = local_aliases_error.clone();
         let counts = (current.joined, current.invited);
@@ -2816,6 +2890,8 @@ mod tests {
                 && d.encrypted == Some(true)
                 && d.members.len() == 1
                 && d.can_invite
+                && d.can_rename
+                && d.can_set_topic
         })
         .await;
         assert_eq!(details.name, format!("matrix-rat manage test {tag}"));
@@ -2878,6 +2954,16 @@ mod tests {
             room_id: room_id.clone(),
         });
         let details = info(&mut events, &room_id, |d| {
+            // Shown when the test fails: which of the changes did not arrive.
+            eprintln!(
+                "details: favourite={} topic={} name={} notify={:?} loading={} members={}",
+                d.favourite,
+                d.topic == "a new topic",
+                d.name.contains("renamed"),
+                d.notify,
+                d.members_loading,
+                d.members.len()
+            );
             d.favourite
                 && d.topic == "a new topic"
                 && d.name.contains("renamed")
@@ -2976,7 +3062,9 @@ mod tests {
         manage(ManageCmd::Info {
             room_id: chat.clone(),
         });
-        let details = info(&mut events, &chat, |d| d.direct).await;
+        // (The state comes in pieces: that it is direct can be known before that it is
+        // encrypted.)
+        let details = info(&mut events, &chat, |d| d.direct && d.encrypted.is_some()).await;
         assert_eq!(details.encrypted, Some(true));
         manage(ManageCmd::DirectChat {
             request: 45,
@@ -3065,7 +3153,7 @@ mod tests {
                 if result.is_err() {
                     break;
                 }
-                assert!(asked_again < 15, "a forgotten room can still be looked at");
+                assert!(asked_again < 2, "a forgotten room can still be looked at");
                 asked_again += 1;
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 manage(ManageCmd::Info {
