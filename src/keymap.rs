@@ -200,6 +200,7 @@ action_table! {
     Action::CreatePoll => ("create_poll", Context::Global, "Start a poll…"),
     Action::OpenStickers => ("stickers", Context::Global, "Send a sticker…"),
     Action::OpenPinned => ("open_pinned", Context::Timeline, "Pinned messages"),
+    Action::OpenThreads => ("threads", Context::Timeline, "Threads of this room"),
     Action::RetryDecryption => ("retry_decryption", Context::Timeline, "Try decrypting again"),
     Action::JumpToNewest => ("jump_to_newest", Context::Timeline, "Jump to newest"),
     Action::JumpToOldest => ("jump_to_oldest", Context::Timeline, "Jump to oldest"),
@@ -639,6 +640,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::OpenPinned,
         "P",
         "Pinned messages",
+    ),
+    bind(
+        Timeline,
+        Char('T'),
+        NONE,
+        Action::OpenThreads,
+        "T",
+        "Threads of this room",
     ),
     bind(
         Timeline,

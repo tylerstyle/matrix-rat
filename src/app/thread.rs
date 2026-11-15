@@ -22,6 +22,8 @@ pub struct Threads {
     pub open: Option<ThreadView>,
     /// Unsent text per thread (room id and thread), kept while the thread is closed.
     drafts: HashMap<(String, String), String>,
+    /// Counts the listings of the threads popup, to tell their answers apart.
+    pub(super) list_gen: u64,
 }
 
 impl Threads {
@@ -101,6 +103,18 @@ impl App {
     /// Whether the messages pane shows a thread.
     pub fn thread_open(&self) -> bool {
         self.threads.open.is_some()
+    }
+
+    /// The messages of the room at `index` as the room shows them, also while one of
+    /// its threads is shown in their place.
+    pub(super) fn room_messages_of(&self, index: usize) -> &[Message] {
+        match &self.threads.open {
+            Some(view) if index == self.active => &view.room_messages,
+            _ => self
+                .rooms
+                .get(index)
+                .map_or(&[], |room| room.messages.as_slice()),
+        }
     }
 
     /// What names the open thread among the things kept per thread (drafts, files

@@ -53,6 +53,8 @@ pub enum InputTarget {
     PollAnswer(usize),
     /// Filter input of the sticker picker.
     StickerFilter,
+    /// Filter input of the threads popup.
+    ThreadsFilter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +156,12 @@ pub enum HitId {
     PollVoteBtn(bool),
     /// A row of the sticker picker (index into its filtered list); clicking sends it.
     StickerRow(usize),
+    /// A thread in the threads popup (index into what it shows); clicking opens it.
+    ThreadRow(usize),
+    /// The row after the threads in the threads popup that loads more of them.
+    ThreadsMore,
+    /// The "only mine" switch of the threads popup.
+    ThreadsMine,
 }
 
 #[derive(Debug, Default)]

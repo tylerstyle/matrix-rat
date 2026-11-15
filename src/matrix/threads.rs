@@ -1,12 +1,18 @@
-//! Threads: a timeline that shows one thread, and the line under a message that
-//! started one.
+//! Threads: a timeline that shows one thread, the line under a message that started
+//! one, and the list of a room's threads.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use matrix_sdk::ruma::EventId;
+use matrix_sdk::deserialized_responses::TimelineEvent;
+use matrix_sdk::room::ListThreadsOptions;
+use matrix_sdk::ruma::api::client::threads::get_threads::v1::IncludeThreads;
 use matrix_sdk::ruma::events::receipt::{ReceiptThread, ReceiptType};
+use matrix_sdk::ruma::{
+    EventId, MilliSecondsSinceUnixEpoch, OwnedRoomId, OwnedUserId, UInt, UserId,
+};
 use matrix_sdk::{Room, ThreadingSupport};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
@@ -15,8 +21,10 @@ use matrix_sdk_ui::timeline::{
 };
 
 use super::convert::display_name;
-use crate::model::{ItemRef, Message, ThreadSummary};
-use crate::text::{sanitize_line, truncate};
+use super::safety::IgnoredSet;
+use super::{moderation, search};
+use crate::model::{ItemRef, Message, ThreadInfo, ThreadSummary};
+use crate::text::{first_line, sanitize_line, truncate};
 
 /// Replies in threads are shown in their thread only, so they must not count as
 /// unread messages of the room either.
@@ -162,15 +170,13 @@ pub async fn newest_reply(timeline: &Timeline) -> Vec<String> {
 }
 
 /// Event ids of the messages in `items` whose threads have a newest reply the user
-/// has not read: it is someone else's, and neither this session nor a read receipt
-/// of the user's covers it. Only looks at what is stored; nothing is loaded or kept
-/// per thread.
+/// has not read (see [`reply_unread`]). Only looks at what is stored; nothing is
+/// loaded or kept per thread.
 pub async fn unread(
     room: &Room,
     items: &Vector<Arc<TimelineItem>>,
     read: &ReadMarks,
 ) -> HashSet<String> {
-    let own = room.own_user_id();
     let mut unread = HashSet::new();
     for event in items.iter().filter_map(|item| item.as_event()) {
         let Some(root) = event.event_id() else {
@@ -186,32 +192,244 @@ pub async fn unread(
         let TimelineEventItemId::EventId(newest_id) = &newest.identifier else {
             continue;
         };
-        if newest.sender == own
-            || read.covers(
-                &key(room.room_id().as_str(), Some(root.as_str())),
-                newest_id.as_str(),
-            )
+        if reply_unread(
+            room,
+            root,
+            newest_id,
+            &newest.sender,
+            newest.timestamp,
+            read,
+        )
+        .await
         {
-            continue;
-        }
-        // A receipt for the thread, or one for the whole room as clients without
-        // threads send it. The room's own ("main") receipt says nothing about threads.
-        let mut seen = false;
-        for thread in [
-            ReceiptThread::Thread(root.to_owned()),
-            ReceiptThread::Unthreaded,
-        ] {
-            for kind in [ReceiptType::Read, ReceiptType::ReadPrivate] {
-                if let Ok(Some((at, receipt))) = room.load_user_receipt(kind, &thread, own).await {
-                    seen |= at == *newest_id || receipt.ts.is_some_and(|ts| ts >= newest.timestamp);
-                }
-            }
-        }
-        if !seen {
             unread.insert(root.to_string());
         }
     }
     unread
+}
+
+/// Whether `newest`, the newest reply in the thread that starts at `root`, is one the
+/// user has not read: it is someone else's, and neither this session nor a read
+/// receipt of the user's covers it.
+async fn reply_unread(
+    room: &Room,
+    root: &EventId,
+    newest: &EventId,
+    sender: &UserId,
+    at: MilliSecondsSinceUnixEpoch,
+    read: &ReadMarks,
+) -> bool {
+    let own = room.own_user_id();
+    if sender == own
+        || read.covers(
+            &key(room.room_id().as_str(), Some(root.as_str())),
+            newest.as_str(),
+        )
+    {
+        return false;
+    }
+    // A receipt for the thread, or one for the whole room as clients without
+    // threads send it. The room's own ("main") receipt says nothing about threads.
+    for thread in [
+        ReceiptThread::Thread(root.to_owned()),
+        ReceiptThread::Unthreaded,
+    ] {
+        for kind in [ReceiptType::Read, ReceiptType::ReadPrivate] {
+            if let Ok(Some((seen_at, receipt))) = room.load_user_receipt(kind, &thread, own).await
+                && (seen_at.as_str() == newest.as_str() || receipt.ts.is_some_and(|ts| ts >= at))
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Threads asked for at a time; more of a page than this is not looked at.
+const LIST_PAGE: u32 = 25;
+/// How long the homeserver has for a page of its thread list.
+const LIST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Longest start of a thread's first message, and longest name, kept for the list.
+const LIST_TEXT: usize = 200;
+const LIST_NAME: usize = 64;
+/// A continuation token longer than this is not one a sane server sends: the list
+/// ends there.
+const LIST_TOKEN: usize = 1024;
+
+/// A page of a room's threads, the answer to [`super::MatrixCmd::ListThreads`].
+pub struct ThreadPage {
+    pub room_id: String,
+    pub generation: u64,
+    /// Newest activity first, as the server orders them.
+    pub threads: Vec<ThreadInfo>,
+    /// Where the list continues; `None` at its end.
+    pub next: Option<String>,
+}
+
+/// Counts only: the room, the threads and the server's token stay out of logs.
+impl std::fmt::Debug for ThreadPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadPage")
+            .field("generation", &self.generation)
+            .field("threads", &self.threads.len())
+            .field("more", &self.next.is_some())
+            .finish()
+    }
+}
+
+/// One page of the room's threads from the homeserver's thread list, starting at
+/// `from` (`None`: the newest). `mine` asks only for threads the user took part in.
+/// The SDK decrypts the first messages of encrypted rooms. Threads started by ignored
+/// users are left out, as their first message is in the room. `None` when the server
+/// has no such list or could not give it; the reason is logged without the server's
+/// words.
+pub async fn list(
+    room: &Room,
+    from: Option<String>,
+    mine: bool,
+    read: &ReadMarks,
+    ignored: &IgnoredSet,
+) -> Option<(Vec<ThreadInfo>, Option<String>)> {
+    let options = ListThreadsOptions {
+        include_threads: if mine {
+            IncludeThreads::Participated
+        } else {
+            IncludeThreads::All
+        },
+        from,
+        limit: Some(UInt::from(LIST_PAGE)),
+    };
+    let roots = match tokio::time::timeout(LIST_TIMEOUT, room.list_threads(options)).await {
+        Ok(Ok(roots)) => roots,
+        Ok(Err(err)) => {
+            let status = err
+                .as_client_api_error()
+                .map(|err| err.status_code.as_u16());
+            tracing::warn!(?status, "the thread list could not be loaded");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!("the thread list took too long");
+            return None;
+        }
+    };
+    let mut names = HashMap::new();
+    let mut threads = Vec::new();
+    for root in roots.chunk.into_iter().take(LIST_PAGE as usize) {
+        if let Some(thread) = describe(room, root, read, ignored, &mut names).await {
+            threads.push(thread);
+        }
+    }
+    let next = roots
+        .prev_batch_token
+        .filter(|token| !token.is_empty() && token.len() <= LIST_TOKEN);
+    Some((threads, next))
+}
+
+/// What the list shows of the thread that starts at `root`.
+async fn describe(
+    room: &Room,
+    root: TimelineEvent,
+    read: &ReadMarks,
+    ignored: &IgnoredSet,
+    names: &mut HashMap<(OwnedRoomId, OwnedUserId), String>,
+) -> Option<ThreadInfo> {
+    let root_id = root.event_id()?.to_owned();
+    let sender = root.sender()?;
+    let own = room.own_user_id();
+    if sender != own && ignored.contains(&sender) {
+        return None;
+    }
+    let mut thread = ThreadInfo {
+        root: root_id.to_string(),
+        sender: short_name(room, &sender, names).await,
+        text: first_message(&root),
+        replies: root.thread_summary.summary().map_or(0, |s| s.num_replies),
+        mine: sender == own || participated(&root),
+        ..ThreadInfo::default()
+    };
+    // Who wrote the newest reply, and when, are readable in encrypted rooms too.
+    if let Some(newest) = root.bundled_latest_thread_event()
+        && let Some(who) = newest.sender()
+        && (who == own || !ignored.contains(&who))
+    {
+        let at = newest.timestamp_raw();
+        thread.latest_when = at.and_then(when);
+        if let (Some(id), Some(at)) = (newest.event_id(), at) {
+            thread.unread = reply_unread(room, &root_id, id, &who, at, read).await;
+        }
+        thread.latest_sender = Some(short_name(room, &who, names).await);
+    }
+    Some(thread)
+}
+
+async fn short_name(
+    room: &Room,
+    user: &UserId,
+    names: &mut HashMap<(OwnedRoomId, OwnedUserId), String>,
+) -> String {
+    truncate(
+        &search::cached_sender_name(room, user, names).await,
+        LIST_NAME,
+    )
+}
+
+/// The first line of the message a thread starts at, or what stands in for it.
+fn first_message(root: &TimelineEvent) -> String {
+    if root.kind.is_utd() {
+        return "Encrypted message".to_owned();
+    }
+    if moderation::is_event_redacted(root) {
+        return "[message deleted]".to_owned();
+    }
+    let line = search::extract_event_text(root, &[])
+        .map(|text| first_line(&text, LIST_TEXT))
+        .unwrap_or_default();
+    if line.is_empty() {
+        "[message]".to_owned()
+    } else {
+        line
+    }
+}
+
+/// Whether the server says the user took part in the thread, in the summary it adds
+/// to the thread's first message.
+fn participated(root: &TimelineEvent) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Unsigned {
+        #[serde(rename = "m.relations")]
+        relations: Option<Relations>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Relations {
+        #[serde(rename = "m.thread")]
+        thread: Option<Bundled>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Bundled {
+        #[serde(default)]
+        current_user_participated: bool,
+    }
+    matches!(
+        root.raw().get_field::<Unsigned>("unsigned"),
+        Ok(Some(Unsigned {
+            relations: Some(Relations {
+                thread: Some(Bundled {
+                    current_user_participated: true
+                })
+            })
+        }))
+    )
+}
+
+/// When something happened, in short: the time if it was today, else the day.
+fn when(at: MilliSecondsSinceUnixEpoch) -> Option<String> {
+    let (day, time) = moderation::format_day_time(at);
+    match day.as_str() {
+        "" => None,
+        "Today" => Some(time),
+        _ => Some(day),
+    }
 }
 
 /// Finishes the messages of a snapshot: marks the threads with unread replies, or,
@@ -662,5 +880,137 @@ mod tests {
 
     async fn threads_open(room: &Room, root: &str) -> Timeline {
         open(room, root).await.expect("thread timeline")
+    }
+
+    /// The homeserver's thread list, through the worker: a fresh room with two threads,
+    /// listed newest activity first, also when only the user's own are asked for.
+    /// `cargo test thread_list -- --ignored` against a local homeserver (user alice
+    /// unless `MATRIX_RAT_TEST_USER` says otherwise).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver (scripts/dev-homeserver.sh)"]
+    async fn the_thread_list_shows_two_threads_newest_activity_first() {
+        use matrix_sdk::Client;
+        use matrix_sdk::ruma::api::client::room::create_room::v3::Request as CreateRoom;
+        use matrix_sdk::ruma::events::relation::Thread;
+        use matrix_sdk::ruma::events::room::message::{Relation, RoomMessageEventContent};
+        use std::time::Duration;
+
+        use crate::matrix::{MatrixCmd, MatrixEvent, ThreadPage, spawn};
+        use crate::paths::Paths;
+
+        let var = |name: &str| std::env::var(name).ok();
+        let homeserver =
+            var("MATRIX_RAT_TEST_HOMESERVER").unwrap_or_else(|| "http://127.0.0.1:6167".into());
+        let user = var("MATRIX_RAT_TEST_USER").unwrap_or_else(|| "alice".into());
+        let password = var("MATRIX_RAT_TEST_PASSWORD").unwrap_or_else(|| "alicepass".into());
+
+        // A room of its own, with two threads written by a plain client: the second
+        // one's replies are the newest.
+        let setup = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .expect("client");
+        setup
+            .matrix_auth()
+            .login_username(&user, &password)
+            .await
+            .expect("login of the setup client");
+        let room = setup
+            .create_room(CreateRoom::new())
+            .await
+            .expect("create room");
+        let room_id = room.room_id().to_string();
+        let stamp = std::process::id();
+        let text = |what: &str| format!("thread list test {stamp}: {what}");
+        let send = |body: String, root: Option<matrix_sdk::ruma::OwnedEventId>| {
+            let room = room.clone();
+            async move {
+                let mut content = RoomMessageEventContent::text_plain(body);
+                if let Some(root) = root {
+                    content.relates_to = Some(Relation::Thread(Thread::plain(root.clone(), root)));
+                }
+                room.send(content).await.expect("send").response.event_id
+            }
+        };
+        let first = send(text("first"), None).await;
+        send(text("an answer to the first"), Some(first.clone())).await;
+        let second = send(text("second"), None).await;
+        send(text("an answer to the second"), Some(second.clone())).await;
+        send(text("another answer to the second"), Some(second.clone())).await;
+        let _ = setup.matrix_auth().logout().await;
+
+        let root_dir =
+            std::env::temp_dir().join(format!("matrix-rat-thread-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root_dir);
+        let paths = Paths {
+            config_dir: root_dir.join("config"),
+            data_dir: root_dir.join("data"),
+            log_dir: root_dir.join("log"),
+            runtime_dir: root_dir.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username: user,
+            password: password.into(),
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == room_id) => return,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the room did not show up");
+
+        for (generation, mine) in [(1, false), (2, true)] {
+            handle.send(MatrixCmd::ListThreads {
+                room_id: room_id.clone(),
+                from: None,
+                mine,
+                generation,
+            });
+            let page: ThreadPage = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    match events.recv().await.expect("worker stopped") {
+                        MatrixEvent::ThreadsFailed { .. } => panic!("the thread list failed"),
+                        MatrixEvent::Threads(page) if page.generation == generation => {
+                            return page;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("no thread list");
+            assert_eq!(page.room_id, room_id);
+            let roots: Vec<&str> = page.threads.iter().map(|t| t.root.as_str()).collect();
+            assert_eq!(roots, [second.as_str(), first.as_str()], "mine: {mine}");
+            let (newest, oldest) = (&page.threads[0], &page.threads[1]);
+            assert_eq!(newest.text, text("second"));
+            assert_eq!(newest.replies, 2);
+            assert_eq!(oldest.text, text("first"));
+            assert_eq!(oldest.replies, 1);
+            for thread in &page.threads {
+                // All by the user: theirs, with nothing unread.
+                assert!(thread.mine && !thread.unread, "{thread:?}");
+                // Who replied last and when is only known where the server sends the
+                // newest reply as a whole event; some (continuwuity) send its content
+                // only. Either both are there or neither.
+                assert_eq!(thread.latest_sender.is_some(), thread.latest_when.is_some());
+                assert!(!thread.sender.is_empty());
+            }
+            assert!(page.next.is_none());
+        }
+
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root_dir);
     }
 }

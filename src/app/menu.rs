@@ -500,6 +500,7 @@ impl App {
             action,
             Action::RoomInfo
                 | Action::LeaveRoom
+                | Action::OpenThreads
                 | Action::Manage(Click::Favourite | Click::LowPriority)
         ) {
             debug_assert!(false, "not a room action of the menu: {action:?}");
@@ -1094,6 +1095,7 @@ mod tests {
             [
                 "Open",
                 "Room info",
+                "Threads",
                 "Mark as unread",
                 "Add to favourites",
                 "Move to low priority",
