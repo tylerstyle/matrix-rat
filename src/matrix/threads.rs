@@ -1000,7 +1000,10 @@ mod tests {
             for thread in &page.threads {
                 // All by the user: theirs, with nothing unread.
                 assert!(thread.mine && !thread.unread, "{thread:?}");
-                assert!(thread.latest_sender.is_some() && thread.latest_when.is_some());
+                // Who replied last and when is only known where the server sends the
+                // newest reply as a whole event; some (continuwuity) send its content
+                // only. Either both are there or neither.
+                assert_eq!(thread.latest_sender.is_some(), thread.latest_when.is_some());
                 assert!(!thread.sender.is_empty());
             }
             assert!(page.next.is_none());
