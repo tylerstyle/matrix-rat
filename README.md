@@ -223,6 +223,40 @@ addresses, mark direct chats, or adjust action permissions.
 <img src="docs/screenshots/palette.svg" alt="The command palette, filtered by typing" width="860">
 </div>
 
+### Code
+
+**Sending code.** Put a short piece inside a line between single backticks:
+
+```
+the fix is `cargo update -p ring`
+```
+
+For several lines, put a line of three backticks before and after, with the language
+right after the first three. A line break in the composer is `Shift-Enter` (or
+`Alt-Enter`); plain `Enter` sends. Pasting code that has line breaks keeps them, so you
+can type the first line, paste, and type the last:
+
+````
+```rust
+fn main() {
+    println!("hi");
+}
+```
+````
+
+Longer pieces are easier in your editor: `Alt-V` opens it with what you have typed so
+far, and what you save comes back into the composer to be sent.
+
+**Reading code.** A block keeps its indentation and is never re-wrapped. If its sender
+named the language (`rust`, `py`, `js`, `sh`, `json`, `nix`, … about 75 are known), it is
+coloured: keywords, strings, comments, numbers, types and function names. Without a
+language it is shown in one colour.
+
+**Copying code.** A block shows a small `copy` at the right end of its first line: click
+it. By keyboard: `↑` from the composer to the message, then `C`. With several blocks in
+the message you pick one from a list. You get exactly the code, without the backtick
+lines, ready to paste into a terminal or a file. (`c` copies the whole message instead.)
+
 ## Make it yours
 
 Everything is optional. The settings menu (`F2`) covers the common choices and writes
@@ -377,23 +411,17 @@ Setting `preset = "vim"` keeps the default keys and adds:
   killed, the file stays behind in that private folder). The same size limit as for
   other files applies, and a clipboard that does not answer within five seconds is given
   up on.
-- **Copying code**: a message with fenced code blocks shows a small `copy` at the right
-  end of each block's first line (where the line leaves room for it), and `C` (or "Copy
-  code block" in the message menu and the command palette) copies one block: at once
-  if there is only one, else after you pick it from a list showing each block's language
-  and first line. What is copied is the block's text as the sender wrote it, without the
-  fence lines, with its indentation and tabs, and without the one newline that ends the
-  block; control characters and text-direction marks are dropped. Only formatted
-  messages have blocks (Markdown fences from matrix-rat and other clients, `<pre>` HTML);
-  a plain message that merely contains backticks is shown as written and has none. Like
-  all copying here it goes through the terminal (OSC 52), so the terminal must allow it.
-- **Colours in code**: a code block whose sender named its language (```` ```rust ````,
-  ```` ```py ````, …) is coloured: keywords, strings, comments, numbers and constants,
-  types, function names. About 75 common languages are known; blocks without a language,
-  in an unknown one, or very large ones (over 600 lines or 48 KB) stay in the single code
-  colour. The colours are the theme's: `code_text`, `code_keyword`, `code_string`,
+- **Code, the fine print** (how to use it: see [Code](#code) above): what `C` copies is
+  the block's text as the sender wrote it, with its indentation and tabs and without the
+  one newline that ends the block; control characters and text-direction marks are
+  dropped. The `copy` label is left out where the first line has no room for it. Only
+  formatted messages have blocks (three-backtick blocks from matrix-rat and other
+  clients); a plain message that merely contains backticks is shown as written. Like all
+  copying here it goes through the terminal (OSC 52), so the terminal must allow it.
+  Blocks in an unknown language, or very large ones (over 600 lines or 48 KB), are not
+  coloured. The colours belong to the theme: `code_text`, `code_keyword`, `code_string`,
   `code_comment`, `code_constant`, `code_type` and `code_function` in a theme's `[ui]`
-  table (set them all to the same colour to have no colouring).
+  table (set them all to the same colour to have none).
 - **Polls**: `/poll` (with the question after it, if you like) or "Start a poll…" in the
   command palette opens the form: 2 to 20 answers, one choice or several, counts shown
   while it runs or only at the end. In the timeline, click an answer to vote, or select
