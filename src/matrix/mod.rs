@@ -1514,7 +1514,11 @@ impl Worker {
         pin_mut!(space_changes);
         self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
 
-        let mut notify_changes = client.notification_settings().await.subscribe_to_changes();
+        // One instance for the whole session: it hears of changes to the push rules
+        // only while it lives (dropping it removes its listener, and `notify_changes`
+        // would close at once).
+        let notification_settings = client.notification_settings().await;
+        let mut notify_changes = notification_settings.subscribe_to_changes();
         let mut notify_open = true;
         let mut manager = manage::Manager::new(
             client.clone(),
