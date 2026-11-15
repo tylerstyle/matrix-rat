@@ -24,6 +24,7 @@ mod model;
 mod notify;
 mod palette;
 mod paths;
+mod people;
 mod portal;
 mod rich;
 mod terminal;

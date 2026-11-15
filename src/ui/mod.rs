@@ -12,6 +12,7 @@ mod keybinds;
 mod menu;
 mod modal;
 mod palette;
+mod people;
 mod roominfo;
 mod search;
 mod sidebar;

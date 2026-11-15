@@ -72,6 +72,18 @@ impl ThreadView {
         }
     }
 
+    pub(super) fn rename_own_sender(&mut self, name: &str) {
+        if self.root_message.own && self.root_message.sender != name {
+            self.root_message.sender = name.to_owned();
+        }
+        for msg in &mut self.room_messages {
+            if msg.own && msg.sender != name {
+                msg.sender = name.to_owned();
+            }
+        }
+        self.room_rows = None;
+    }
+
     pub(super) fn find_message(&self, event_id: &str) -> Option<&Message> {
         self.room_messages
             .iter()

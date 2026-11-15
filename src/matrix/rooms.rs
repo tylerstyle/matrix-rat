@@ -12,7 +12,7 @@ use matrix_sdk::ruma::events::Mentions;
 use matrix_sdk::ruma::events::room::message::{
     RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
 };
-use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, RoomId};
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, RoomId, UserId};
 use matrix_sdk::{Client, Room, RoomMemberships};
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
@@ -96,6 +96,9 @@ pub struct Timelines {
     drafts_told: HashSet<String>,
     /// Current ignored users (`m.ignored_user_list`), shared with open timelines.
     ignored: watch::Receiver<IgnoredSet>,
+    /// Bumped whenever our own account/room member profile syncs.
+    own_refresh: watch::Receiver<u64>,
+    own_room_names: super::people::OwnRoomNames,
     unread_flags: UnreadFlags,
     pinned_cache: Arc<std::sync::Mutex<super::moderation::PinnedCache>>,
 }
@@ -105,6 +108,8 @@ impl Timelines {
         client: Client,
         events: UnboundedSender<MatrixEvent>,
         ignored: watch::Receiver<IgnoredSet>,
+        own_refresh: watch::Receiver<u64>,
+        own_room_names: super::people::OwnRoomNames,
     ) -> Self {
         let (open_tx, open_rx) = unbounded_channel();
         Self {
@@ -125,6 +130,8 @@ impl Timelines {
             read_marks: Default::default(),
             drafts_told: HashSet::new(),
             ignored,
+            own_refresh,
+            own_room_names,
             unread_flags: UnreadFlags::start(events.clone()),
             pinned_cache: Arc::default(),
             events,
@@ -388,6 +395,8 @@ impl Timelines {
                     self.read_marks.clone(),
                     None,
                     self.ignored.clone(),
+                    self.own_refresh.clone(),
+                    self.own_room_names.clone(),
                 )));
                 return;
             }
@@ -565,6 +574,8 @@ impl Timelines {
                         live,
                     }),
                     self.ignored.clone(),
+                    self.own_refresh.clone(),
+                    self.own_room_names.clone(),
                 )));
             }
         }
@@ -598,6 +609,8 @@ impl Timelines {
                             self.read_marks.clone(),
                             None,
                             self.ignored.clone(),
+                            self.own_refresh.clone(),
+                            self.own_room_names.clone(),
                         )));
                     }
                     Err(err) => self.fail("Could not open the room", format!("{err:#}")),
@@ -1121,7 +1134,11 @@ impl Timelines {
             | MatrixCmd::ReportContent { .. }
             | MatrixCmd::SearchUsers { .. }
             | MatrixCmd::Devices(_)
-            | MatrixCmd::CancelUserSearch => {}
+            | MatrixCmd::CancelUserSearch
+            | MatrixCmd::FetchUserProfile { .. }
+            | MatrixCmd::SetOwnDisplayName { .. }
+            | MatrixCmd::SetOwnAvatar { .. }
+            | MatrixCmd::RemoveOwnAvatar => {}
         }
     }
 }
@@ -1566,6 +1583,21 @@ impl LiveTailCounter {
     }
 }
 
+async fn prepare_messages(
+    room: &Room,
+    items: &Vector<Arc<TimelineItem>>,
+    own: &UserId,
+    ignored: &watch::Receiver<IgnoredSet>,
+    own_room_names: &super::people::OwnRoomNames,
+    readers: &mut super::receipts::Names,
+) -> Vec<crate::model::Message> {
+    let mut messages = convert(items, own, &ignored.borrow());
+    let own_name = super::people::room_own_display_name(room, own_room_names).await;
+    super::convert::apply_own_display_name(&mut messages, own_name.as_deref());
+    readers.annotate(room, &mut messages, items, own).await;
+    messages
+}
+
 /// Sends the whole timeline to the UI whenever it changes, and who is typing.
 /// `thread`: the timeline is not the room's but that of the thread starting at this event.
 #[allow(clippy::too_many_arguments)]
@@ -1579,6 +1611,8 @@ async fn forward(
     read_marks: threads::ReadMarks,
     detached: Option<DetachedForward>,
     mut ignored: watch::Receiver<IgnoredSet>,
+    mut own_refresh: watch::Receiver<u64>,
+    own_room_names: super::people::OwnRoomNames,
 ) {
     let in_thread = thread.is_some();
     let own = room.own_user_id().to_owned();
@@ -1658,8 +1692,8 @@ async fn forward(
     };
     fetch_replies(&items);
     let marks = unread(&items).await;
-    let mut messages = convert(&items, &own, &ignored.borrow());
-    readers.annotate(&room, &mut messages, &items, &own).await;
+    let messages =
+        prepare_messages(&room, &items, &own, &ignored, &own_room_names, &mut readers).await;
     if events.send(snapshot(&items, marks, messages)).is_err() {
         return;
     }
@@ -1690,114 +1724,146 @@ async fn forward(
     let mut clear_paginators = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
-            diffs = changes.next() => {
-                let Some(diffs) = diffs else { return };
-                let saw_clear = diffs.iter().any(|diff| matches!(diff, VectorDiff::Clear));
-                for diff in diffs {
-                    diff.apply(&mut items);
+                diffs = changes.next() => {
+                    let Some(diffs) = diffs else { return };
+                    let saw_clear = diffs.iter().any(|diff| matches!(diff, VectorDiff::Clear));
+                    for diff in diffs {
+                        diff.apply(&mut items);
+                    }
+                    while clear_paginators.try_join_next().is_some() {}
+                    if saw_clear
+                        && items.is_empty()
+                        && detached.is_none()
+                        && room.state() == matrix_sdk::RoomState::Joined
+                    {
+                        // Ignoring or unignoring someone makes the SDK clear the room's event cache;
+                        // load a page immediately so the open chat recovers instead of waiting blank.
+                        let timeline = timeline.clone();
+                        let events = events.clone();
+                        clear_paginators.spawn(async move {
+                            if let Ok(true) = timeline.paginate_backwards(PAGE).await {
+                                let _ = events.send(MatrixEvent::Paginated {
+                                    generation,
+                                    reached_start: true,
+                                });
+                            }
+                        });
+                    }
+                    fetch_replies(&items);
+                    let marks = unread(&items).await;
+                    let messages = prepare_messages(
+            &room,
+            &items,
+            &own,
+            &ignored,
+            &own_room_names,
+            &mut readers,
+        )
+        .await;
+                    if events.send(snapshot(&items, marks, messages)).is_err() {
+                        return;
+                    }
                 }
-                while clear_paginators.try_join_next().is_some() {}
-                if saw_clear
-                    && items.is_empty()
-                    && detached.is_none()
-                    && room.state() == matrix_sdk::RoomState::Joined
-                {
-                    // Ignoring or unignoring someone makes the SDK clear the room's event cache;
-                    // load a page immediately so the open chat recovers instead of waiting blank.
-                    let timeline = timeline.clone();
-                    let events = events.clone();
-                    clear_paginators.spawn(async move {
-                        if let Ok(true) = timeline.paginate_backwards(PAGE).await {
-                            let _ = events.send(MatrixEvent::Paginated {
-                                generation,
-                                reached_start: true,
-                            });
-                        }
-                    });
-                }
-                fetch_replies(&items);
-                let marks = unread(&items).await;
-                let mut messages = convert(&items, &own, &ignored.borrow());
-                readers.annotate(&room, &mut messages, &items, &own).await;
-                if events.send(snapshot(&items, marks, messages)).is_err() {
-                    return;
-                }
-            }
-            changed = ignored.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-                let marks = unread(&items).await;
-                let mut messages = convert(&items, &own, &ignored.borrow());
-                readers.annotate(&room, &mut messages, &items, &own).await;
-                if events.send(snapshot(&items, marks, messages)).is_err() {
-                    return;
-                }
-                let new_count = {
-                    let ignored_set = ignored.borrow();
-                    live_counter
-                        .as_mut()
-                        .and_then(|counter| counter.recheck_ignored(&ignored_set))
-                };
-                if let Some(count) = new_count
-                    && events.send(MatrixEvent::DetachedNew { generation, count }).is_err()
-                {
-                    return;
-                }
-            }
-            diffs = async {
-                match live_changes.as_mut() {
-                    Some(stream) => stream.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                let Some(diffs) = diffs else {
-                    live_changes = None;
-                    continue;
-                };
-                let new_count = {
-                    let ignored_set = ignored.borrow();
-                    live_counter
-                        .as_mut()
-                        .and_then(|counter| counter.apply_diffs(diffs, &ignored_set))
-                };
-                if let Some(count) = new_count
-                    && events.send(MatrixEvent::DetachedNew { generation, count }).is_err()
-                {
-                    return;
-                }
-            }
-            users = typing.recv() => {
-                let names = match users {
-                    Ok(users) => users
-                        .iter()
-                        .filter(|u| !is_ignored_in(&ignored, u))
-                        .map(|u| crate::text::sanitize_line(u.localpart()))
-                        .collect(),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => return,
-                };
-                if events.send(MatrixEvent::Typing { generation, names }).is_err() {
-                    return;
-                }
-            }
-            pinned = pin_stream.next() => {
-                let Some(ids) = pinned else { continue };
-                let next: Vec<String> = ids.into_iter().map(|id| id.to_string()).collect();
-                if next != last_pinned {
-                    last_pinned = next.clone();
-                    if events
-                        .send(MatrixEvent::PinnedEvents {
-                            room_id: room_id.clone(),
-                            ids: next,
-                        })
-                        .is_err()
+                changed = ignored.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let marks = unread(&items).await;
+                    let messages = prepare_messages(
+            &room,
+            &items,
+            &own,
+            &ignored,
+            &own_room_names,
+            &mut readers,
+        )
+        .await;
+                    if events.send(snapshot(&items, marks, messages)).is_err() {
+                        return;
+                    }
+                    let new_count = {
+                        let ignored_set = ignored.borrow();
+                        live_counter
+                            .as_mut()
+                            .and_then(|counter| counter.recheck_ignored(&ignored_set))
+                    };
+                    if let Some(count) = new_count
+                        && events.send(MatrixEvent::DetachedNew { generation, count }).is_err()
                     {
                         return;
                     }
                 }
+                changed = own_refresh.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let marks = unread(&items).await;
+                    let messages = prepare_messages(
+            &room,
+            &items,
+            &own,
+            &ignored,
+            &own_room_names,
+            &mut readers,
+        )
+        .await;
+                    if events.send(snapshot(&items, marks, messages)).is_err() {
+                        return;
+                    }
+                }
+                diffs = async {
+                    match live_changes.as_mut() {
+                        Some(stream) => stream.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let Some(diffs) = diffs else {
+                        live_changes = None;
+                        continue;
+                    };
+                    let new_count = {
+                        let ignored_set = ignored.borrow();
+                        live_counter
+                            .as_mut()
+                            .and_then(|counter| counter.apply_diffs(diffs, &ignored_set))
+                    };
+                    if let Some(count) = new_count
+                        && events.send(MatrixEvent::DetachedNew { generation, count }).is_err()
+                    {
+                        return;
+                    }
+                }
+                users = typing.recv() => {
+                    let names = match users {
+                        Ok(users) => users
+                            .iter()
+                            .filter(|u| !is_ignored_in(&ignored, u))
+                            .map(|u| crate::text::sanitize_line(u.localpart()))
+                            .collect(),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => return,
+                    };
+                    if events.send(MatrixEvent::Typing { generation, names }).is_err() {
+                        return;
+                    }
+                }
+                pinned = pin_stream.next() => {
+                    let Some(ids) = pinned else { continue };
+                    let next: Vec<String> = ids.into_iter().map(|id| id.to_string()).collect();
+                    if next != last_pinned {
+                        last_pinned = next.clone();
+                        if events
+                            .send(MatrixEvent::PinnedEvents {
+                                room_id: room_id.clone(),
+                                ids: next,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
             }
-        }
     }
 }
 

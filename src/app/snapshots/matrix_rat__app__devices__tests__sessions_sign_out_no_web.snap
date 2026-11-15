@@ -28,7 +28,7 @@ expression: text
 "│                      ││  Unable to decrypt: sent before this device was logged in. Verify this   │"
 "│                      ││  device to read it                                                       │"
 "│                      │╰──────────────────────────────────────────────────────────────────────────╯"
-"│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
+"│                      │╭ 3 Message ──────────────────────────────────────────────────── A  alice ─╮"
 "│                      ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ◌ connecting…   Opened in your browser                           F1 help  F2 settings  F3 rat-dark "

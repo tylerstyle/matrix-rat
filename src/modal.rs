@@ -309,6 +309,7 @@ pub enum Setting {
     DownloadDir,
     Keys,
     Encryption,
+    Profile,
     Logout,
     /// Whether the messages say who has read them (shown next to `ReadReceipts`).
     ReadMarkers,
@@ -327,7 +328,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 18] = [
+    pub const ALL: [Setting; 19] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -341,6 +342,7 @@ impl Setting {
         Setting::Notifications,
         Setting::DownloadDir,
         Setting::Keys,
+        Setting::Profile,
         Setting::Encryption,
         Setting::Sessions,
         Setting::KeyBackup,
@@ -354,7 +356,7 @@ impl Setting {
             Setting::Theme => Some("Appearance"),
             Setting::Mouse => Some("Behaviour"),
             Setting::Keys => Some("Help"),
-            Setting::Encryption => Some("Account"),
+            Setting::Profile => Some("Account"),
             _ => None,
         }
     }
@@ -374,6 +376,7 @@ impl Setting {
             Setting::Notifications => "Notifications",
             Setting::DownloadDir => "Download folder",
             Setting::Keys => "Key bindings",
+            Setting::Profile => "Profile",
             Setting::Encryption => "Encryption",
             Setting::Sessions => "Sessions",
             Setting::KeyBackup => "Key backup",
@@ -407,6 +410,7 @@ impl Setting {
             Setting::Keys => {
                 "Edit key bindings or switch presets (F1 still opens the key overview)."
             }
+            Setting::Profile => "Change your display name and profile picture.",
             Setting::Encryption => {
                 "Verify this device with another of your devices, or see its status."
             }
@@ -890,6 +894,10 @@ pub enum Modal {
     /// Join a room, start a direct chat, create a room, or invite someone.
     New(crate::manage::NewPopup),
     RoomInfo(Box<crate::manage::InfoPopup>),
+    /// Profile details, shared rooms, and actions for a user.
+    UserInfo(Box<crate::people::UserInfoPopup>),
+    /// Account display name and avatar editor.
+    OwnProfile(crate::people::OwnProfilePopup),
     /// The context menu of a message, a room, a link or the composer.
     Menu(crate::menu::Menu),
     /// Configure key bindings and preset.

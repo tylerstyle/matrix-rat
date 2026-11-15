@@ -121,8 +121,8 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
-| `Ctrl-N` | join a room, start a chat (search people by name or ID), create a room |
-| `F4` | room details and members (pinned messages, invite, rename, notifications, favourite, low priority, roles, ban/unban, ignore, leave) |
+| `Ctrl-N` | join a room, start a chat (search people by name or ID), create a room (`info` or `Enter` for User info) |
+| `F4` | room details and members (pinned messages, invite, rename, name in room, notifications, favourite, low priority, roles, ban/unban, ignore, leave; `Enter` on a member for User info) |
 | `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
@@ -141,6 +141,15 @@ you can manage ignored users under **Settings → Ignored users** (`F2`). Where 
 permissions allow, the message menu and Room info also let you pin or delete other members'
 messages with a reason, ban or unban users (`Alt-B`), and change roles (`Alt-R`); `P` opens
 pinned messages, and `Forward…` copies a message to another room without its reply or thread context.
+
+Click a sender's name or picture, choose **User info** from the message menu (`m` or palette
+`Ctrl-P`), press `Enter` on a member in Room info (`F4`), or open a `matrix.to` user link
+or user-search result to view their profile, verification state and shared rooms (press
+`Enter` to jump to one, `c` to copy their ID), mention them, open a chat, verify or ignore
+them, or change their role / remove / ban them in the current room. Open **Settings → Profile**
+(`F2`, `Ctrl-P`, or click your name badge on the message box's top border) to update your
+display name or avatar picture (`Tab` completes file paths, or drop an image file onto the
+window), and use **Name in room…** in Room info (`F4`) to set or clear a per-room display name.
 
 **Sessions and keys** live in the settings (`F2`) and the command palette (`Ctrl-P`):
 
@@ -217,7 +226,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**

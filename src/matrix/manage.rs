@@ -19,8 +19,7 @@ use matrix_sdk::ruma::{
     UserId,
 };
 use matrix_sdk::{Client, NotificationSettingsError, Room, RoomMemberships, RoomState};
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::watch;
+use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
 use tokio::task::JoinHandle;
 
 use super::MatrixEvent;
@@ -108,6 +107,10 @@ pub enum ManageCmd {
         room_id: String,
         name: String,
     },
+    SetOwnName {
+        room_id: String,
+        name: Option<String>,
+    },
     SetTopic {
         room_id: String,
         topic: String,
@@ -144,6 +147,7 @@ impl std::fmt::Debug for ManageCmd {
             Self::Unban { room_id, .. } => write!(f, "Unban({room_id})"),
             Self::SetRole { room_id, level, .. } => write!(f, "SetRole({room_id}, {level})"),
             Self::SetName { room_id, .. } => write!(f, "SetName({room_id})"),
+            Self::SetOwnName { room_id, .. } => write!(f, "SetOwnName({room_id})"),
             Self::SetTopic { room_id, .. } => write!(f, "SetTopic({room_id})"),
             Self::SetFavourite { room_id, on } => write!(f, "SetFavourite({room_id}, {on})"),
             Self::SetLowPriority { room_id, on } => write!(f, "SetLowPriority({room_id}, {on})"),
@@ -161,6 +165,7 @@ pub enum Change {
     Unban,
     SetRole,
     Name,
+    OwnName,
     Topic,
     Favourite(bool),
     LowPriority(bool),
@@ -263,6 +268,8 @@ pub struct RoomDetails {
     pub name: String,
     pub topic: String,
     pub alias: Option<String>,
+    /// Own display name overridden/synced in this room, if set.
+    pub own_display_name: Option<String>,
     /// `None`: not known (yet).
     pub encrypted: Option<bool>,
     pub direct: bool,
@@ -309,6 +316,9 @@ pub struct Manager {
     watcher: Option<JoinHandle<()>>,
     /// Wakes the open room info watcher after local moderation or membership changes.
     refresh: Arc<Refresh>,
+    own_room_names: super::people::OwnRoomNames,
+    people_poke: Arc<Notify>,
+    own_refresh: Arc<watch::Sender<u64>>,
 }
 
 /// Wakes the open room info watcher when the watched room changes.
@@ -354,12 +364,21 @@ pub(super) fn bump_refresh(refresh: &Refresh, room_id: &str) {
 }
 
 impl Manager {
-    pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
+    pub fn new(
+        client: Client,
+        events: UnboundedSender<MatrixEvent>,
+        own_room_names: super::people::OwnRoomNames,
+        people_poke: Arc<Notify>,
+        own_refresh: Arc<watch::Sender<u64>>,
+    ) -> Self {
         Self {
             client,
             events,
             watcher: None,
             refresh: Arc::new(Refresh::new()),
+            own_room_names,
+            people_poke,
+            own_refresh,
         }
     }
 
@@ -435,11 +454,13 @@ impl Manager {
                 // Subscribe before spawning so changes arriving during the initial
                 // store read still mark this watcher's receiver dirty.
                 let refresh = self.refresh.watch(&room_id);
+                let own_room_names = self.own_room_names.clone();
                 self.watcher = Some(tokio::spawn(watch(
                     client,
                     room_id,
                     self.events.clone(),
                     refresh,
+                    own_room_names,
                 )));
             }
             ManageCmd::StopInfo => self.stop(),
@@ -576,6 +597,30 @@ impl Manager {
                     });
                 });
             }
+            ManageCmd::SetOwnName { room_id, name } => {
+                let refresh = self.refresh.clone();
+                let own_room_names = self.own_room_names.clone();
+                let people_poke = self.people_poke.clone();
+                let own_refresh = self.own_refresh.clone();
+                tokio::spawn(async move {
+                    let result =
+                        match super::people::set_room_display_name(&client, &room_id, name).await {
+                            Ok(applied) => {
+                                own_room_names.set(&room_id, applied);
+                                bump_refresh(&refresh, &room_id);
+                                own_refresh.send_modify(|n| *n = n.wrapping_add(1));
+                                people_poke.notify_one();
+                                Ok(())
+                            }
+                            Err(err) => Err(err),
+                        };
+                    emit(ManageEvent::Done {
+                        room_id,
+                        change: Change::OwnName,
+                        result,
+                    });
+                });
+            }
             ManageCmd::SetTopic { room_id, topic } => {
                 tokio::spawn(async move {
                     let result = match room(&client, &room_id) {
@@ -649,7 +694,7 @@ impl Drop for Manager {
     }
 }
 
-fn room(client: &Client, room_id: &str) -> Result<Room, String> {
+pub(super) fn room(client: &Client, room_id: &str) -> Result<Room, String> {
     let id = RoomId::parse(room_id).map_err(|_| "That is not a room id.".to_owned())?;
     client
         .get_room(&id)
@@ -929,11 +974,13 @@ async fn set_notify(client: &Client, room_id: &str, level: NotifyLevel) -> Resul
 // ----- the details of a room ---------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum EntryStatus {
+pub(super) enum MemberStatus {
     Joined,
     Invited,
     Banned,
 }
+
+type EntryStatus = MemberStatus;
 
 /// One person in the room, before roles are worked out.
 #[derive(Clone, PartialEq, Eq)]
@@ -1016,7 +1063,21 @@ impl MemberList {
 
     /// Fills the details' member list, admin count, error, and (once the list is
     /// complete) counts so the header never disagrees with the people shown.
-    fn apply(&mut self, current: &mut RoomDetails, levels: Option<&RoomPowerLevels>, own: &UserId) {
+    fn apply(
+        &mut self,
+        current: &mut RoomDetails,
+        levels: Option<&RoomPowerLevels>,
+        own: &UserId,
+        own_name: Option<Option<String>>,
+    ) {
+        if let Some(cached) = own_name {
+            let synced_name = cached.unwrap_or_else(|| own.localpart().to_owned());
+            for entry in &mut self.entries {
+                if entry.user == own {
+                    entry.name.clone_from(&synced_name);
+                }
+            }
+        }
         current.members = self.present(levels, own);
         current.admin_count = current
             .members
@@ -1061,7 +1122,7 @@ fn entries_agree(entries: &[Entry], counts: (u64, u64)) -> bool {
     entry_counts(entries) == counts
 }
 
-fn role(level: UserPowerLevel) -> MemberRole {
+pub(super) fn role(level: UserPowerLevel) -> MemberRole {
     match level {
         UserPowerLevel::Infinite => MemberRole::Owner,
         UserPowerLevel::Int(level) if level >= Int::from(100) => MemberRole::Admin,
@@ -1070,7 +1131,7 @@ fn role(level: UserPowerLevel) -> MemberRole {
     }
 }
 
-fn numeric_level(level: UserPowerLevel) -> i64 {
+pub(super) fn numeric_level(level: UserPowerLevel) -> i64 {
     match level {
         UserPowerLevel::Infinite => i64::MAX,
         UserPowerLevel::Int(level) => i64::from(level),
@@ -1078,37 +1139,39 @@ fn numeric_level(level: UserPowerLevel) -> i64 {
     }
 }
 
+pub(super) fn build_member(
+    user: &UserId,
+    name: &str,
+    status: MemberStatus,
+    levels: Option<&RoomPowerLevels>,
+    own: &UserId,
+) -> RoomMember {
+    let level = levels.map_or(UserPowerLevel::Int(0.into()), |l| l.for_user(user));
+    let invited = status == EntryStatus::Invited;
+    let banned = status == EntryStatus::Banned;
+    let not_self = user != own;
+    RoomMember {
+        user_id: sanitize_line(user.as_str()),
+        name: sanitize_line(name),
+        role: role(level),
+        power_level: numeric_level(level),
+        invited,
+        banned,
+        own: user == own,
+        removable: !banned && not_self && levels.is_some_and(|l| l.user_can_kick_user(own, user)),
+        bannable: !banned && not_self && levels.is_some_and(|l| l.user_can_ban_user(own, user)),
+        unbannable: banned && not_self && levels.is_some_and(|l| l.user_can_unban_user(own, user)),
+        role_editable: !banned
+            && !invited
+            && levels.is_some_and(|l| l.user_can_change_user_power_level(own, user)),
+    }
+}
+
 /// Roles and order: joined, invited, then banned; highest role first, then by name.
 fn present(entries: &[Entry], levels: Option<&RoomPowerLevels>, own: &UserId) -> Vec<RoomMember> {
     let mut members: Vec<RoomMember> = entries
         .iter()
-        .map(|entry| {
-            let level = levels.map_or(UserPowerLevel::Int(0.into()), |l| l.for_user(&entry.user));
-            let invited = entry.status == EntryStatus::Invited;
-            let banned = entry.status == EntryStatus::Banned;
-            let not_self = entry.user != own;
-            RoomMember {
-                user_id: sanitize_line(entry.user.as_str()),
-                name: sanitize_line(&entry.name),
-                role: role(level),
-                power_level: numeric_level(level),
-                invited,
-                banned,
-                own: entry.user == own,
-                removable: !banned
-                    && not_self
-                    && levels.is_some_and(|l| l.user_can_kick_user(own, &entry.user)),
-                bannable: !banned
-                    && not_self
-                    && levels.is_some_and(|l| l.user_can_ban_user(own, &entry.user)),
-                unbannable: banned
-                    && not_self
-                    && levels.is_some_and(|l| l.user_can_unban_user(own, &entry.user)),
-                role_editable: !banned
-                    && !invited
-                    && levels.is_some_and(|l| l.user_can_change_user_power_level(own, &entry.user)),
-            }
-        })
+        .map(|entry| build_member(&entry.user, &entry.name, entry.status, levels, own))
         .collect();
     members.sort_by_cached_key(|member| {
         let bucket = if member.banned {
@@ -1188,7 +1251,11 @@ async fn server_members(client: &Client, room: &Room) -> Result<Vec<Entry>, Stri
 }
 
 /// Everything about the room but its members.
-async fn head(room: &Room, levels: Option<&RoomPowerLevels>) -> RoomDetails {
+async fn head(
+    room: &Room,
+    levels: Option<&RoomPowerLevels>,
+    own_room_names: &super::people::OwnRoomNames,
+) -> RoomDetails {
     let joined = room.state() == RoomState::Joined;
     let own = room.own_user_id();
     let can = |check: &dyn Fn(&RoomPowerLevels) -> bool| levels.is_some_and(check);
@@ -1217,6 +1284,20 @@ async fn head(room: &Room, levels: Option<&RoomPowerLevels>) -> RoomDetails {
     let own_pl = levels.map(|l| l.for_user(own));
     let own_is_creator = matches!(own_pl, Some(UserPowerLevel::Infinite));
     let own_power_level = own_pl.map_or(0, numeric_level);
+    let own_display_name = if joined {
+        if let Some(cached) = own_room_names.get(room.room_id().as_str()) {
+            cached
+        } else {
+            room.get_member_no_sync(own)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|member| member.display_name().map(sanitize_line))
+                .filter(|name| !crate::text::is_blank(name))
+        }
+    } else {
+        None
+    };
     RoomDetails {
         name: sanitize_line(&name),
         topic: sanitize(room.topic().unwrap_or_default().trim()),
@@ -1224,6 +1305,7 @@ async fn head(room: &Room, levels: Option<&RoomPowerLevels>) -> RoomDetails {
             .canonical_alias()
             .or_else(|| room.alt_aliases().into_iter().next())
             .map(|alias| sanitize_line(alias.as_str())),
+        own_display_name,
         encrypted,
         direct: room.is_direct().await.unwrap_or(false),
         joined: room.joined_members_count(),
@@ -1285,6 +1367,7 @@ async fn watch(
     room_id: String,
     events: UnboundedSender<MatrixEvent>,
     mut refresh: watch::Receiver<u64>,
+    own_room_names: super::people::OwnRoomNames,
 ) {
     let emit = |result: Result<RoomDetails, String>| {
         events
@@ -1321,7 +1404,7 @@ async fn watch(
         } else {
             None
         };
-        let mut current = head(&room, levels.as_ref()).await;
+        let mut current = head(&room, levels.as_ref(), &own_room_names).await;
         let counts = (current.joined, current.invited);
         let mut wait = None;
         if joined {
@@ -1375,7 +1458,12 @@ async fn watch(
             force_refresh = false;
             list = MemberList::default();
         }
-        list.apply(&mut current, levels.as_ref(), &own);
+        list.apply(
+            &mut current,
+            levels.as_ref(),
+            &own,
+            own_room_names.get(&room_id),
+        );
         let ask = current.members_loading;
         if sent.as_ref() != Some(&current) {
             if !emit(Ok(current.clone())) {
@@ -1402,7 +1490,12 @@ async fn watch(
                 }
             }
             current.members_loading = false;
-            list.apply(&mut current, levels.as_ref(), &own);
+            list.apply(
+                &mut current,
+                levels.as_ref(),
+                &own,
+                own_room_names.get(&room_id),
+            );
             if !emit(Ok(current.clone())) {
                 return;
             }
@@ -2012,7 +2105,7 @@ mod tests {
             invited: 1,
             ..RoomDetails::default()
         };
-        list.apply(&mut details, None, &own);
+        list.apply(&mut details, None, &own, None);
         assert_eq!((details.joined, details.invited), (2, 0));
 
         // Still loading, partial, or incomplete: keep the room summary's counts.
@@ -2022,7 +2115,7 @@ mod tests {
             members_loading: true,
             ..RoomDetails::default()
         };
-        list.apply(&mut loading, None, &own);
+        list.apply(&mut loading, None, &own, None);
         assert_eq!((loading.joined, loading.invited), (1, 1));
 
         let mut partial = RoomDetails {
@@ -2031,7 +2124,7 @@ mod tests {
             members_partial: true,
             ..RoomDetails::default()
         };
-        list.apply(&mut partial, None, &own);
+        list.apply(&mut partial, None, &own, None);
         assert_eq!((partial.joined, partial.invited), (25_000, 3));
 
         list.complete = false;
@@ -2040,7 +2133,7 @@ mod tests {
             invited: 1,
             ..RoomDetails::default()
         };
-        list.apply(&mut incomplete, None, &own);
+        list.apply(&mut incomplete, None, &own, None);
         assert_eq!((incomplete.joined, incomplete.invited), (1, 1));
     }
 

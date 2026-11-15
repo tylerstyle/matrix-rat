@@ -12,7 +12,8 @@ use super::modal::{button, centered, field, popup, row};
 use crate::action::Action;
 use crate::app::App;
 use crate::manage::{
-    Click, Confirm, InfoPopup, InfoRow, NewPopup, Stage, confirm_keys, notify_label,
+    BanPrompt, Click, Confirm, InfoPopup, InfoRow, NewPopup, RoleChooser, Stage, confirm_keys,
+    notify_label,
 };
 use crate::matrix::RoomMember;
 use crate::text::{sanitize_line, truncate, width, wrap};
@@ -49,7 +50,7 @@ pub fn title_hit(hits: &mut super::hit::HitMap, area: Rect, title: &str) {
 }
 
 /// `text` cut or padded to exactly `columns` on screen.
-fn fit(text: &str, columns: usize) -> String {
+pub(super) fn fit(text: &str, columns: usize) -> String {
     let mut out = truncate(text, columns);
     let used = width(&out);
     out.extend(std::iter::repeat_n(' ', columns.saturating_sub(used)));
@@ -251,7 +252,10 @@ fn user_search_rows(frame: &mut Frame, app: &mut App, theme: &Theme, inner: Rect
             continue;
         }
         let selected = form.user_selected == Some(i);
-        let hovered = app.hover == Some(HitId::UserSearchRow(i));
+        let hovered = matches!(
+            app.hover,
+            Some(HitId::UserSearchRow(h) | HitId::UserSearchInfo(h)) if h == i
+        );
         let marker = if selected { "› " } else { "  " };
         let clean_name = person
             .display_name
@@ -260,18 +264,16 @@ fn user_search_rows(frame: &mut Frame, app: &mut App, theme: &Theme, inner: Rect
             .filter(|s| !s.is_empty());
         let clean_id = sanitize_line(&person.user_id);
         let tile_text = clean_name.as_deref().unwrap_or(&clean_id);
-        let tile_style = ratatui::style::Style::new()
-            .fg(theme.style(Role::UnreadBadge).fg.unwrap_or_default())
-            .bg(theme.user_color(&person.user_id))
-            .add_modifier(Modifier::BOLD);
         let mut used = 2usize;
         let mut spans = vec![Span::styled(marker, theme.style(Role::TitleFocused))];
         if r.width > 5 {
-            spans.push(Span::styled(super::sidebar::initial(tile_text), tile_style));
+            spans.push(super::image::avatar_tile(theme, &person.user_id, tile_text));
             spans.push(Span::raw(" "));
             used += 3;
         }
-        let avail = (r.width as usize).saturating_sub(used);
+        let show_info = (selected || hovered) && (r.width as usize) > used + 12;
+        let info_w: usize = if show_info { 7 } else { 0 };
+        let avail = (r.width as usize).saturating_sub(used + info_w);
         let text_style = if selected {
             theme.style(Role::TitleFocused)
         } else if hovered {
@@ -297,6 +299,19 @@ fn user_search_rows(frame: &mut Frame, app: &mut App, theme: &Theme, inner: Rect
         }
         frame.render_widget(Line::from(spans), r);
         app.hits.add(r, HitId::UserSearchRow(i));
+        if show_info {
+            let info_rect = Rect::new(r.right().saturating_sub(6), r.y, 6, 1);
+            let info_role = if app.hover == Some(HitId::UserSearchInfo(i)) {
+                Role::Hover
+            } else {
+                Role::Pill
+            };
+            frame.render_widget(
+                Line::from(Span::styled(" info ", theme.style(info_role))),
+                info_rect,
+            );
+            app.hits.add(info_rect, HitId::UserSearchInfo(i));
+        }
         if r.width > 5
             && let Some(url) = &person.avatar
         {
@@ -516,7 +531,7 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
     let footer = if info.editing.is_some() {
         "Enter save · Esc cancel"
     } else if matches!(current, Some(InfoRow::Member(_))) {
-        "Enter chat · type to filter · Esc close"
+        "Enter info · type to filter · Esc close"
     } else {
         "↑↓ select · Enter · Esc close"
     };
@@ -733,128 +748,32 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
     if let Some(prompt) = &mut info.ban_prompt
         && prompt_rows >= 2
     {
-        let top = inner.bottom() - u16::from(status) - prompt_rows as u16;
-        let sep_y = top;
-        frame.render_widget(
-            Line::from(Span::styled(
-                "─".repeat(inner.width as usize),
-                theme.style(Role::Border),
-            )),
-            Rect::new(inner.x, sep_y, inner.width, 1),
-        );
-        let label_y = top + 1;
-        if label_y < inner.bottom() - u16::from(status) {
-            let head = format!("Ban {} — Reason (optional):", sanitize_line(&prompt.name));
-            frame.render_widget(
-                Line::from(Span::styled(
-                    fit(&head, inner.width as usize),
-                    theme.style(Role::Error).add_modifier(Modifier::BOLD),
-                )),
-                Rect::new(inner.x, label_y, inner.width, 1),
-            );
-        }
-        let input_y = top + 2;
-        if input_y < inner.bottom() - u16::from(status) {
-            let btn = " [Ban] ";
-            let btn_w = width(btn) as u16;
-            let field_w = inner.width.saturating_sub(btn_w + 1);
-            let max_cols = field_w.saturating_sub(2) as usize;
-            let view = prompt.reason.view(max_cols, false);
-            let field_text = if prompt.reason.is_empty() {
-                Line::from(vec![
-                    Span::styled("› ", theme.style(Role::TitleFocused)),
-                    Span::styled("(optional)", theme.style(Role::Placeholder)),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled("› ", theme.style(Role::TitleFocused)),
-                    Span::styled(view.text, theme.style(Role::Text)),
-                ])
-            };
-            frame.render_widget(field_text, Rect::new(inner.x, input_y, field_w, 1));
-            app.hits.add(
-                Rect::new(inner.x + 2, input_y, field_w.saturating_sub(2), 1),
-                HitId::Input(InputTarget::BanReason),
-            );
-            cursor = Some(Position::new(
-                (inner.x + 2 + view.cursor_col as u16).min(inner.x + field_w.saturating_sub(1)),
-                input_y,
-            ));
-            let btn_rect = Rect::new(inner.x + field_w + 1, input_y, btn_w, 1);
-            let hovered = app.hover == Some(hit(Click::Submit));
-            let bstyle = if hovered {
-                theme
-                    .style(Role::Error)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-            } else {
-                theme.style(Role::Error).add_modifier(Modifier::BOLD)
-            };
-            frame.render_widget(Line::from(Span::styled(btn, bstyle)), btn_rect);
-            app.hits.add(btn_rect, hit(Click::Submit));
+        if let Some(at) = draw_ban_prompt(
+            frame,
+            app,
+            &theme,
+            inner,
+            status,
+            prompt_rows,
+            prompt,
+            InputTarget::BanReason,
+            hit(Click::Submit),
+        ) {
+            cursor = Some(at);
         }
     } else if let Some(chooser) = &info.role_chooser
         && prompt_rows >= 2
     {
-        let top = inner.bottom() - u16::from(status) - prompt_rows as u16;
-        frame.render_widget(
-            Line::from(Span::styled(
-                "─".repeat(inner.width as usize),
-                theme.style(Role::Border),
-            )),
-            Rect::new(inner.x, top, inner.width, 1),
+        draw_role_chooser(
+            frame,
+            app,
+            &theme,
+            inner,
+            status,
+            prompt_rows,
+            chooser,
+            |idx| hit(Click::RoleOption(idx)),
         );
-        let head = format!("Change role for {}", sanitize_line(&chooser.name));
-        frame.render_widget(
-            Line::from(Span::styled(
-                fit(&head, inner.width as usize),
-                theme.style(Role::TitleFocused).add_modifier(Modifier::BOLD),
-            )),
-            Rect::new(inner.x, top + 1, inner.width, 1),
-        );
-        let mut y = top + 2;
-        let limit = inner.bottom() - u16::from(status);
-        for (idx, opt) in chooser.options.iter().enumerate() {
-            if y >= limit {
-                break;
-            }
-            let r = Rect::new(inner.x, y, inner.width, 1);
-            let active = idx == chooser.selected;
-            let hovered = app.hover == Some(hit(Click::RoleOption(idx)));
-            let style = if active {
-                theme.style(Role::Pill)
-            } else if hovered {
-                theme.style(Role::Hover)
-            } else {
-                theme.style(Role::Text)
-            };
-            let (level, label) = *opt;
-            let prefix = if active { "▸ " } else { "  " };
-            let current_mark = if level == chooser.current_level {
-                " (current)"
-            } else {
-                ""
-            };
-            let line = format!("{prefix}{label} ({level}){current_mark}");
-            frame.buffer_mut().set_style(r, style);
-            frame.render_widget(
-                Line::from(Span::styled(fit(&line, inner.width as usize), style)),
-                r,
-            );
-            app.hits.add(r, hit(Click::RoleOption(idx)));
-            y += 1;
-        }
-        if chooser.confirm_last_admin && y < limit {
-            frame.render_widget(
-                Line::from(Span::styled(
-                    fit(
-                        "Last admin! Press Enter again to demote yourself.",
-                        inner.width as usize,
-                    ),
-                    theme.style(Role::Error).add_modifier(Modifier::BOLD),
-                )),
-                Rect::new(inner.x, y, inner.width, 1),
-            );
-        }
     }
 
     if status {
@@ -950,6 +869,7 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
         Some(InfoRow::Name | InfoRow::Topic) => "Enter to edit.",
         Some(InfoRow::Pinned) => "View and jump to pinned messages.",
         Some(InfoRow::Invite) => "Invite someone by user ID.",
+        Some(InfoRow::OwnName) => "Set a display name just for this room (clear for default).",
         Some(InfoRow::Leave) if info.invited() => "",
         Some(InfoRow::Leave) => "Leaving also removes the room and its history from this device.",
         Some(row @ InfoRow::Member(_)) => match info.member(row) {
@@ -978,7 +898,7 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
 }
 
 fn member_hint(member: &RoomMember) -> String {
-    let mut parts = vec!["Enter: chat"];
+    let mut parts = vec!["Enter: user info"];
     if member.role_editable {
         parts.push("Alt-R: role");
     }
@@ -1050,10 +970,10 @@ fn info_row(
     if let Some((editing, text)) = &mut info.editing
         && *editing == row
     {
-        let label = if row == InfoRow::Name {
-            "Name"
-        } else {
-            "Topic"
+        let label = match row {
+            InfoRow::Name => "Name",
+            InfoRow::OwnName => "Your name",
+            _ => "Topic",
         };
         let value_x = rect.x + 2 + ACTION_LABEL as u16;
         let space = (rect.width as usize).saturating_sub(2 + ACTION_LABEL + 1);
@@ -1084,6 +1004,7 @@ fn info_row(
         InfoRow::Name => ("Rename…", label_style),
         InfoRow::Topic => ("Change topic…", label_style),
         InfoRow::Invite => ("Invite someone…", label_style),
+        InfoRow::OwnName => ("Name in room…", label_style),
         InfoRow::Leave => (info.leave_label(), theme.style(Role::Error)),
         InfoRow::Member(_) => ("", label_style),
     };
@@ -1094,6 +1015,25 @@ fn info_row(
     app.hits.add(rect, hit(Click::Row(index)));
     let value_x = rect.x + 2 + ACTION_LABEL as u16;
     match row {
+        InfoRow::OwnName => {
+            let name = info
+                .details
+                .as_ref()
+                .and_then(|d| d.own_display_name.as_deref())
+                .map(sanitize_line)
+                .filter(|s| !s.is_empty());
+            let space = (rect.width as usize).saturating_sub(2 + ACTION_LABEL);
+            match name {
+                Some(name) => spans.push(Span::styled(
+                    truncate(&name, space),
+                    theme.style(Role::Text),
+                )),
+                None => spans.push(Span::styled(
+                    truncate("default", space),
+                    theme.style(Role::Muted),
+                )),
+            }
+        }
         InfoRow::Favourite | InfoRow::LowPriority => {
             let on = info.details.as_ref().map_or(
                 if row == InfoRow::LowPriority {
@@ -1262,5 +1202,156 @@ fn member_row(
         );
         app.hits.add(button_rect, id);
         x += w + 1;
+    }
+}
+
+/// Inline ban-reason prompt drawn at the bottom of Room Info and User Info.
+#[expect(clippy::too_many_arguments)]
+pub(super) fn draw_ban_prompt(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    inner: Rect,
+    status: bool,
+    prompt_rows: usize,
+    prompt: &mut BanPrompt,
+    reason_target: InputTarget,
+    submit_hit: HitId,
+) -> Option<Position> {
+    let top = inner.bottom() - u16::from(status) - prompt_rows as u16;
+    frame.render_widget(
+        Line::from(Span::styled(
+            "─".repeat(inner.width as usize),
+            theme.style(Role::Border),
+        )),
+        Rect::new(inner.x, top, inner.width, 1),
+    );
+    let label_y = top + 1;
+    let limit = inner.bottom() - u16::from(status);
+    if label_y < limit {
+        let head = format!("Ban {} — Reason (optional):", sanitize_line(&prompt.name));
+        frame.render_widget(
+            Line::from(Span::styled(
+                fit(&head, inner.width as usize),
+                theme.style(Role::Error).add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(inner.x, label_y, inner.width, 1),
+        );
+    }
+    let input_y = top + 2;
+    if input_y >= limit {
+        return None;
+    }
+    let btn = " [Ban] ";
+    let btn_w = width(btn) as u16;
+    let field_w = inner.width.saturating_sub(btn_w + 1);
+    let max_cols = field_w.saturating_sub(2) as usize;
+    let view = prompt.reason.view(max_cols, false);
+    let field_text = if prompt.reason.is_empty() {
+        Line::from(vec![
+            Span::styled("› ", theme.style(Role::TitleFocused)),
+            Span::styled("(optional)", theme.style(Role::Placeholder)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("› ", theme.style(Role::TitleFocused)),
+            Span::styled(view.text, theme.style(Role::Text)),
+        ])
+    };
+    frame.render_widget(field_text, Rect::new(inner.x, input_y, field_w, 1));
+    app.hits.add(
+        Rect::new(inner.x + 2, input_y, field_w.saturating_sub(2), 1),
+        HitId::Input(reason_target),
+    );
+    let cursor = Position::new(
+        (inner.x + 2 + view.cursor_col as u16).min(inner.x + field_w.saturating_sub(1)),
+        input_y,
+    );
+    let btn_rect = Rect::new(inner.x + field_w + 1, input_y, btn_w, 1);
+    let hovered = app.hover == Some(submit_hit);
+    let bstyle = if hovered {
+        theme
+            .style(Role::Error)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        theme.style(Role::Error).add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(Line::from(Span::styled(btn, bstyle)), btn_rect);
+    app.hits.add(btn_rect, submit_hit);
+    Some(cursor)
+}
+
+/// Inline role picker drawn at the bottom of Room Info and User Info.
+#[expect(clippy::too_many_arguments)]
+pub(super) fn draw_role_chooser(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    inner: Rect,
+    status: bool,
+    prompt_rows: usize,
+    chooser: &RoleChooser,
+    option_hit: impl Fn(usize) -> HitId,
+) {
+    let top = inner.bottom() - u16::from(status) - prompt_rows as u16;
+    frame.render_widget(
+        Line::from(Span::styled(
+            "─".repeat(inner.width as usize),
+            theme.style(Role::Border),
+        )),
+        Rect::new(inner.x, top, inner.width, 1),
+    );
+    let head = format!("Change role for {}", sanitize_line(&chooser.name));
+    frame.render_widget(
+        Line::from(Span::styled(
+            fit(&head, inner.width as usize),
+            theme.style(Role::TitleFocused).add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(inner.x, top + 1, inner.width, 1),
+    );
+    let mut y = top + 2;
+    let limit = inner.bottom() - u16::from(status);
+    for (idx, opt) in chooser.options.iter().enumerate() {
+        if y >= limit {
+            break;
+        }
+        let r = Rect::new(inner.x, y, inner.width, 1);
+        let active = idx == chooser.selected;
+        let hit_id = option_hit(idx);
+        let hovered = app.hover == Some(hit_id);
+        let style = if active {
+            theme.style(Role::Pill)
+        } else if hovered {
+            theme.style(Role::Hover)
+        } else {
+            theme.style(Role::Text)
+        };
+        let (level, label) = *opt;
+        let prefix = if active { "▸ " } else { "  " };
+        let current_mark = if level == chooser.current_level {
+            " (current)"
+        } else {
+            ""
+        };
+        let line = format!("{prefix}{label} ({level}){current_mark}");
+        frame.buffer_mut().set_style(r, style);
+        frame.render_widget(
+            Line::from(Span::styled(fit(&line, inner.width as usize), style)),
+            r,
+        );
+        app.hits.add(r, hit_id);
+        y += 1;
+    }
+    if chooser.confirm_last_admin && y < limit {
+        frame.render_widget(
+            Line::from(Span::styled(
+                fit(
+                    "Last admin! Press Enter again to demote yourself.",
+                    inner.width as usize,
+                ),
+                theme.style(Role::Error).add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
     }
 }

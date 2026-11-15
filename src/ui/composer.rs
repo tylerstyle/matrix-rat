@@ -32,6 +32,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.hits.add(area, HitId::Pane(Pane::Composer));
+    draw_own_badge(frame, app, area, title);
     // Until a row shows them, waiting files count as not seen.
     app.attach.hidden = !app.attachments().is_empty();
     if inner.width < 3 || inner.height == 0 {
@@ -172,5 +173,60 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if let Some((x, y)) = cursor_pos {
         frame.set_cursor_position(Position::new(x, y));
+    }
+}
+
+/// Compact own-profile pill on the composer's top border when signed in.
+fn draw_own_badge(frame: &mut Frame, app: &mut App, area: Rect, title: &str) {
+    if area.height == 0 || (app.own_profile.is_none() && app.user_id.is_none()) {
+        return;
+    }
+    let name = app
+        .own_profile
+        .as_ref()
+        .and_then(|p| p.display_or_localpart(app.room_id().as_deref(), app.user_id.as_deref()))
+        .or_else(|| {
+            app.user_id
+                .as_deref()
+                .map(crate::matrix::fallback_localpart)
+        })
+        .unwrap_or_else(|| "you".to_owned());
+    let clean_name = crate::text::sanitize_line(&name);
+    let display = if clean_name.is_empty() {
+        "you".to_owned()
+    } else {
+        clean_name
+    };
+    let left_reserved = 6 + crate::text::width(title) as u16;
+    let avail = area.width.saturating_sub(left_reserved + 2) as usize;
+    if avail < 6 {
+        return;
+    }
+    let max_name = avail.saturating_sub(5).min(24);
+    let short_name = truncate(&display, max_name);
+    let pill_w = (1 + 2 + 1 + crate::text::width(&short_name) + 1) as u16;
+    if pill_w >= area.width.saturating_sub(left_reserved) {
+        return;
+    }
+    let pill_x = area.right().saturating_sub(pill_w + 2);
+    let pill_rect = Rect::new(pill_x, area.y, pill_w, 1);
+    let hovered = app.hover == Some(HitId::Button(Button::OwnProfile));
+    let theme = app.theme.clone();
+    let label_role = if hovered { Role::Hover } else { Role::Title };
+    let color_key = app.user_id.as_deref().unwrap_or(&display);
+    let tile = super::image::avatar_tile(&theme, color_key, &display);
+    let line = Line::from(vec![
+        Span::raw(" "),
+        tile,
+        Span::raw(" "),
+        Span::styled(short_name, theme.style(label_role)),
+        Span::raw(" "),
+    ]);
+    frame.render_widget(line, pill_rect);
+    app.hits.add(pill_rect, HitId::Button(Button::OwnProfile));
+    if let Some(url) = app.own_profile.as_ref().and_then(|p| p.avatar.as_deref()) {
+        let cells = Rect::new(pill_x + 1, area.y, 2, 1);
+        let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
+        super::image::draw_avatar(frame, &mut app.images, &theme, url, cells, 0, covered);
     }
 }

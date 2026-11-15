@@ -138,4 +138,6 @@ pub enum Action {
     /// Look once more for the key of the selected message, which could not be
     /// decrypted.
     RetryDecryption,
+    /// Open profile details for the selected sender or target user.
+    UserInfo,
 }

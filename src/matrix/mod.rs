@@ -9,6 +9,7 @@ mod manage;
 mod media;
 mod moderation;
 mod notify;
+mod people;
 mod receipts;
 mod rooms;
 mod safety;
@@ -27,6 +28,9 @@ pub use manage::{
     Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomMember,
 };
 pub use notify::Notice;
+pub use people::{
+    OwnProfile, OwnProfileAction, UserProfile, UserSharedRoom, UserVerifyStatus, fallback_localpart,
+};
 pub use search::SearchHit;
 pub use session::{ReauthKind, ReauthTarget};
 pub use spaces::SpaceSummary;
@@ -288,6 +292,22 @@ pub enum MatrixCmd {
         room_id: String,
         item: ItemRef,
     },
+    /// Fetches profile, verification state, and shared rooms for User Info.
+    FetchUserProfile {
+        request: u64,
+        user_id: String,
+        room_id: Option<String>,
+    },
+    /// Changes the account's global display name.
+    SetOwnDisplayName {
+        name: Option<String>,
+    },
+    /// Uploads and sets a new account avatar picture from disk.
+    SetOwnAvatar {
+        path: std::path::PathBuf,
+    },
+    /// Clears the account's avatar picture.
+    RemoveOwnAvatar,
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -376,6 +396,18 @@ impl std::fmt::Debug for MatrixCmd {
             Self::CancelUserSearch => f.write_str("CancelUserSearch"),
             Self::Devices(command) => write!(f, "Devices({command:?})"),
             Self::RetryDecryption { room_id, .. } => write!(f, "RetryDecryption({room_id})"),
+            Self::FetchUserProfile {
+                request, room_id, ..
+            } => write!(
+                f,
+                "FetchUserProfile(request {request}, has_room: {})",
+                room_id.is_some()
+            ),
+            Self::SetOwnDisplayName { name } => {
+                write!(f, "SetOwnDisplayName(clear: {})", name.is_none())
+            }
+            Self::SetOwnAvatar { .. } => f.write_str("SetOwnAvatar"),
+            Self::RemoveOwnAvatar => f.write_str("RemoveOwnAvatar"),
         }
     }
 }
@@ -643,6 +675,18 @@ pub enum MatrixEvent {
         room_id: String,
         result: Result<bool, String>,
     },
+    /// Synced profile of the logged-in account.
+    OwnProfile(OwnProfile),
+    /// Outcome of an own-profile mutation command.
+    OwnProfileResult {
+        what: OwnProfileAction,
+        result: Result<(), String>,
+    },
+    /// Outcome of [`MatrixCmd::FetchUserProfile`].
+    UserProfile {
+        request: u64,
+        result: Result<Box<UserProfile>, String>,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -789,6 +833,13 @@ impl std::fmt::Debug for MatrixEvent {
                     "DecryptionRetried({room_id}, {:?})",
                     result.as_ref().ok()
                 )
+            }
+            Self::OwnProfile(profile) => write!(f, "OwnProfile({profile:?})"),
+            Self::OwnProfileResult { what, result } => {
+                write!(f, "OwnProfileResult({what:?}, ok: {})", result.is_ok())
+            }
+            Self::UserProfile { request, result } => {
+                write!(f, "UserProfile(request {request}, ok: {})", result.is_ok())
             }
         }
     }
@@ -1229,8 +1280,21 @@ impl Worker {
         self.emit(MatrixEvent::Recovery(recovery_status(recovery.state())));
 
         let mut rooms: Vector<RoomListItem> = Vector::new();
-        let mut timelines =
-            rooms::Timelines::new(client.clone(), self.events.clone(), ignored.clone());
+        let own_refresh = std::sync::Arc::new(tokio::sync::watch::Sender::new(0u64));
+        let own_room_names = people::OwnRoomNames::default();
+        let mut timelines = rooms::Timelines::new(
+            client.clone(),
+            self.events.clone(),
+            ignored.clone(),
+            own_refresh.subscribe(),
+            own_room_names.clone(),
+        );
+        let mut people_mgr = people::People::start(
+            client.clone(),
+            self.events.clone(),
+            own_refresh.clone(),
+            own_room_names.clone(),
+        );
         let mut own_members = notify::OwnMembers::default();
         let mut previews = Previews::default();
         let mut verifier = verify::Verifier::start(client, self.events.clone());
@@ -1245,7 +1309,13 @@ impl Worker {
 
         let mut notify_changes = client.notification_settings().await.subscribe_to_changes();
         let mut notify_open = true;
-        let mut manager = manage::Manager::new(client.clone(), self.events.clone());
+        let mut manager = manage::Manager::new(
+            client.clone(),
+            self.events.clone(),
+            own_room_names.clone(),
+            people_mgr.sync_poke(),
+            own_refresh.clone(),
+        );
         let mut devices = devices::Devices::new(client.clone(), self.events.clone());
         let power_events = self.events.clone();
         let manage_refresh = manager.refresh_signal();
@@ -1261,12 +1331,32 @@ impl Worker {
             },
         );
         let member_refresh = manager.refresh_signal();
+        let own_user_for_member = client.user_id().map(ToOwned::to_owned);
+        let people_poke = people_mgr.sync_poke();
+        let own_timeline_refresh = own_refresh.clone();
+        let member_own_room_names = own_room_names;
         let member_handler = client.add_event_handler(
-            move |_ev: matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent,
+            move |ev: matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent,
                   room: matrix_sdk::Room| {
                 let refresh = member_refresh.clone();
+                let own_id = own_user_for_member.clone();
+                let people_poke = people_poke.clone();
+                let own_timeline_refresh = own_timeline_refresh.clone();
+                let own_room_names = member_own_room_names.clone();
                 async move {
                     manage::bump_refresh(&refresh, room.room_id().as_str());
+                    if own_id
+                        .as_ref()
+                        .is_some_and(|own| ev.state_key() == own.as_str())
+                    {
+                        people::record_own_member_event(
+                            &own_room_names,
+                            room.room_id().as_str(),
+                            &ev,
+                        );
+                        own_timeline_refresh.send_modify(|n| *n = n.wrapping_add(1));
+                        people_poke.notify_one();
+                    }
                 }
             },
         );
@@ -1393,6 +1483,20 @@ impl Worker {
                         user_searcher.start(generation, query);
                     }
                     Some(MatrixCmd::CancelUserSearch) => user_searcher.cancel(),
+                    Some(MatrixCmd::FetchUserProfile {
+                        request,
+                        user_id,
+                        room_id,
+                    }) => people_mgr.fetch_user_profile(request, user_id, room_id),
+                    Some(MatrixCmd::SetOwnDisplayName { name }) => {
+                        people_mgr.set_display_name(name);
+                    }
+                    Some(MatrixCmd::SetOwnAvatar { path }) => {
+                        people_mgr.set_avatar(path);
+                    }
+                    Some(MatrixCmd::RemoveOwnAvatar) => {
+                        people_mgr.remove_avatar();
+                    }
                     Some(command) => timelines.handle(command).await,
                 },
             }
@@ -1400,6 +1504,7 @@ impl Worker {
         client.remove_event_handler(power_handler);
         client.remove_event_handler(member_handler);
         verifier.stop().await;
+        people_mgr.stop();
         manager.stop();
         devices.stop();
         searcher.stop();

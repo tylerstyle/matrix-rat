@@ -220,6 +220,7 @@ impl super::App {
         ignored: bool,
         result: Result<(), String>,
     ) {
+        self.on_user_info_ignore_done(&user_id, ignored, &result);
         match result {
             Ok(()) => {
                 if ignored {
@@ -380,6 +381,10 @@ impl super::App {
         let Some(picked) = popup.user_results.get(index).cloned() else {
             return;
         };
+        if popup.stage == Stage::Direct {
+            self.open_user_info_from_search(index);
+            return;
+        }
         popup.user.set(&picked.user_id);
         popup.error = None;
         self.cancel_user_search();
@@ -915,9 +920,40 @@ mod tests {
         app.on_event(key(KeyCode::Down));
         insta::assert_snapshot!("user_search_dropdown", screen(&mut app, &mut terminal));
 
-        // Navigate back up to None, then down twice -> pick Carol with Enter.
+        // Navigate back up to None, then down twice -> Enter opens User Info for Carol in Direct stage.
         app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        let sent = drain_cmds(&mut commands);
+        assert!(matches!(
+            sent.as_slice(),
+            [MatrixCmd::FetchUserProfile { user_id, .. }] if user_id == CAROL
+        ));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::UserInfo(popup)) if popup.user_id == CAROL
+        ));
+
+        // Return to Stage::Direct; Stage::Invite still fills the field when picking a result.
+        app.on_event(key(KeyCode::Esc));
+        app.perform(Action::Manage(Click::Stage(Stage::Invite)));
+        if let Some(Modal::New(popup)) = &mut app.modal {
+            popup.user.set("car");
+        }
+        app.on_user_search_input_changed();
+        let gi = app.user_search_gen;
+        app.user_search_debounce = Instant::now().checked_sub(Duration::from_millis(300));
+        app.tick_user_search();
+        drain_cmds(&mut commands);
+        app.on_matrix(MatrixEvent::UserSearchResults {
+            generation: gi,
+            results: vec![UserMatch {
+                user_id: CAROL.into(),
+                display_name: Some("Carol".into()),
+                avatar: None,
+            }],
+        });
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Enter));
         assert!(drain_cmds(&mut commands).is_empty());
@@ -929,7 +965,9 @@ mod tests {
             panic!("expected New modal");
         }
 
-        // Direct @user:server submits immediately without waiting for lookup timer.
+        // Back to Direct stage: direct @user:server submits immediately without waiting for lookup timer.
+        app.on_event(key(KeyCode::Esc));
+        app.perform(Action::Manage(Click::Stage(Stage::Direct)));
         if let Some(Modal::New(popup)) = &mut app.modal {
             popup.user.set("@eve:example.org");
         }
