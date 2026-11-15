@@ -31,7 +31,7 @@ notifications and themes that follow your desktop are all there.
 | 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list (kitty graphics only; coloured initials otherwise). |
 | 💬 **Everything a chat needs** | Replies, edits, reactions, threads, polls, stickers and custom emoji, mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
 | 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread to come back to it later (your other clients see that too), or everything as read. |
-| 📎 **Files both ways** | Drop a file into the terminal to attach it, `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
+| 📎 **Files both ways** | Drop a file into the terminal to attach it, or `Alt-I` for the picture in the clipboard; `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
 | 🎨 **Yours to shape** | Twelve built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
@@ -133,6 +133,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
+| `Alt-I` | attach the picture in the clipboard (a screenshot, a picture copied in the browser); needs `wl-clipboard` on Wayland or `xclip` on X11 |
 | `Alt-V` | write the message in your editor (`$VISUAL`, else `$EDITOR`); what you save comes back into the composer, unsent |
 | `F2` / `F3` | settings / next theme |
 | `Ctrl-Q` | quit |
@@ -281,7 +282,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
-- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
+- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**
 
@@ -358,6 +359,19 @@ Setting `preset = "vim"` keeps the default keys and adds:
   when the editor closes; matrix-rat keeps syncing in the background. It works the same
   over SSH and in tmux and in the demo. If you kill matrix-rat while the editor is open,
   the temporary file stays behind (in that private folder).
+- **Pasting a picture** (`Alt-I`, or "Paste picture from clipboard" in the command
+  palette): a terminal pastes only text, so matrix-rat asks the desktop's clipboard tool
+  for the picture: `wl-paste` from **wl-clipboard** on Wayland, else `xclip` on X11
+  (install the one for your desktop; over SSH there is none to ask unless the X display
+  is forwarded). PNG is taken if the clipboard offers it, else JPEG, WebP or GIF. The
+  picture is checked, put into a file readable by you only in
+  `$XDG_RUNTIME_DIR/matrix-rat/`, named after the time in UTC
+  (`pasted-20261115-143012.png`, the name the room sees), and attached like a dropped
+  file: `Enter` sends it, its `✕` (or `Backspace` in an empty message) takes it off. The
+  file is removed once it is sent or taken off, and when matrix-rat ends (if it is
+  killed, the file stays behind in that private folder). The same size limit as for
+  other files applies, and a clipboard that does not answer within five seconds is given
+  up on.
 - **Copying code**: a message with fenced code blocks shows a small `copy` at the right
   end of each block's first line (where the line leaves room for it), and `C` (or "Copy
   code block" in the message menu and the command palette) copies one block: at once
