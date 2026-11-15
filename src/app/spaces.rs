@@ -752,9 +752,10 @@ mod tests {
     use super::*;
     use crate::action::{Action, Pane};
     use crate::app::ui;
-    use crate::manage::{Click, NewPopup, Stage};
+    use crate::manage::{Click, NewPopup, PreviewButton, Stage};
     use crate::matrix::{
-        ManageEvent, MatrixCmd, MatrixEvent, MatrixHandle, RoomCategory, RoomSummary,
+        ManageEvent, MatrixCmd, MatrixEvent, MatrixHandle, PreviewJoinRule, PreviewMembership,
+        RoomCategory, RoomPreview, RoomSummary,
     };
 
     const SPACE: &str = "!work:example.org";
@@ -1312,6 +1313,99 @@ mod tests {
             commands.last().is_some_and(|c| c.starts_with("Preview(")),
             "{commands:?}"
         );
+    }
+
+    fn preview_of(id: &str, space: bool, membership: PreviewMembership) -> RoomPreview {
+        RoomPreview {
+            room_id: id.into(),
+            canonical_alias: None,
+            name: Some("Inner".into()),
+            topic: None,
+            avatar: None,
+            joined_members: 2,
+            join_rule: PreviewJoinRule::Public,
+            encrypted: None,
+            world_readable: false,
+            membership,
+            via: vec!["example.org".into()],
+            space,
+        }
+    }
+
+    /// Previews `id` and delivers the server's answer.
+    fn previewed(app: &mut App, id: &str, space: bool, membership: PreviewMembership) {
+        app.open_room_preview(id, Vec::new());
+        let request = last_request(app);
+        answer(
+            app,
+            ManageEvent::Preview {
+                request,
+                result: Ok(Box::new(preview_of(id, space, membership))),
+            },
+        );
+    }
+
+    fn preview_buttons(app: &App) -> Vec<PreviewButton> {
+        match &app.modal {
+            Some(Modal::New(popup)) => popup.preview_buttons(),
+            other => panic!("no preview: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_space_from_a_preview_is_found_among_the_spaces() {
+        let (mut app, _terminal, mut commands) = connected();
+        // A space we are in, though the answer does not say so: Open selects it.
+        previewed(&mut app, FUN, true, PreviewMembership::None);
+        assert_eq!(
+            preview_buttons(&app),
+            [PreviewButton::Open, PreviewButton::Cancel]
+        );
+        app.perform(Action::Manage(Click::PreviewBtn(0)));
+        assert!(app.modal.is_none());
+        assert_eq!(app.space.as_deref(), Some(FUN));
+
+        // One deeper than the list goes shows its info.
+        previewed(
+            &mut app,
+            "!inner:example.org",
+            true,
+            PreviewMembership::Joined,
+        );
+        sent(&mut commands);
+        app.perform(Action::Manage(Click::PreviewBtn(0)));
+        assert!(info(&app).space);
+        assert_eq!(info(&app).room_id, "!inner:example.org");
+        assert_eq!(described(&mut commands), ["Info(!inner:example.org)"]);
+        app.on_event(key(KeyCode::Esc));
+
+        // Joined from its preview, it is selected once it is listed.
+        previewed(&mut app, "!club:example.org", true, PreviewMembership::None);
+        assert_eq!(
+            preview_buttons(&app),
+            [PreviewButton::Join, PreviewButton::Cancel]
+        );
+        sent(&mut commands);
+        app.perform(Action::Manage(Click::PreviewBtn(0)));
+        let request = last_request(&app);
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::Join { target, .. }] if target == "!club:example.org"
+        ));
+        answer(
+            &mut app,
+            ManageEvent::Opened {
+                request,
+                result: Ok("!club:example.org".into()),
+            },
+        );
+        assert!(app.modal.is_none());
+        app.on_matrix(MatrixEvent::Spaces(vec![
+            space(SPACE, "Work", &[RATS, OUTSIDE], true),
+            space(FUN, "Fun", &[], false),
+            space("!club:example.org", "Club", &[], false),
+        ]));
+        assert_eq!(app.space.as_deref(), Some("!club:example.org"));
     }
 
     #[test]

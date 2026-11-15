@@ -775,6 +775,31 @@ impl App {
         }
     }
 
+    /// "Open" in a preview of a room or space we are in: a room opens; a space is
+    /// what the room list is narrowed to, or, deeper than the list goes, its info.
+    fn open_previewed(&mut self) {
+        let Some(Modal::New(popup)) = &self.modal else {
+            return;
+        };
+        let preview = popup.preview.as_ref();
+        let room_id = preview.map_or_else(|| popup.preview_target.clone(), |p| p.room_id.clone());
+        let room = self
+            .find_joined_room(&room_id)
+            .or_else(|| self.find_joined_room(&popup.preview_target));
+        let listed = self.spaces.iter().position(|space| space.id == room_id);
+        let space = preview
+            .filter(|p| p.space)
+            .map(|p| p.name.clone().unwrap_or_default());
+        self.close_manage();
+        if let Some(index) = room {
+            self.open_joined_room_index(index);
+        } else if let Some(at) = listed {
+            self.select_space(Some(at));
+        } else if let Some(name) = space {
+            self.open_space_info(&room_id, &name, None);
+        }
+    }
+
     fn submit_preview_button(&mut self, button: PreviewButton) {
         match button {
             PreviewButton::Cancel => {
@@ -791,21 +816,7 @@ impl App {
                 }
                 return;
             }
-            PreviewButton::Open => {
-                let idx = match &self.modal {
-                    Some(Modal::New(popup)) => popup
-                        .preview
-                        .as_ref()
-                        .and_then(|p| self.find_joined_room(&p.room_id))
-                        .or_else(|| self.find_joined_room(&popup.preview_target)),
-                    _ => None,
-                };
-                self.close_manage();
-                if let Some(index) = idx {
-                    self.open_joined_room_index(index);
-                }
-                return;
-            }
+            PreviewButton::Open => return self.open_previewed(),
             PreviewButton::Accept => {
                 let room_id = match &self.modal {
                     Some(Modal::New(popup)) => popup
@@ -2047,6 +2058,12 @@ impl App {
         fallback_toast: &str,
         open_toast: Option<&str>,
     ) {
+        // What the preview said: a space is not in the room list once we are in it.
+        let space = matches!(
+            &self.modal,
+            Some(Modal::New(popup)) if popup.request == Some(request)
+                && popup.preview.as_ref().is_some_and(|preview| preview.space)
+        );
         let asked = match &mut self.modal {
             Some(Modal::New(popup)) if popup.request == Some(request) => {
                 popup.request = None;
@@ -2059,6 +2076,12 @@ impl App {
         match (result, asked) {
             (Ok(room_id), true) => {
                 self.close_manage();
+                if space {
+                    // Joined, it is selected once the list of spaces has it; asked
+                    // to join, it waits in the room list as a request does.
+                    self.manage.pending_space = Some((room_id.clone(), Instant::now()));
+                    self.select_pending_space();
+                }
                 self.manage.pending_open = Some((room_id, Instant::now()));
                 self.open_pending_room();
                 if let Some(toast) = open_toast {
@@ -2101,15 +2124,18 @@ impl App {
                 if let Ok(ref preview) = result
                     && preview.membership == PreviewMembership::None
                 {
-                    membership_override =
-                        self.rooms
-                            .iter()
-                            .find(|r| r.id == preview.room_id)
-                            .map(|r| match r.kind {
-                                RoomKind::Invite => PreviewMembership::Invited,
-                                RoomKind::Knock => PreviewMembership::Knocked,
-                                _ => PreviewMembership::Joined,
-                            });
+                    // A space we are in is among the spaces, not the rooms.
+                    let space = self.spaces.iter().any(|space| space.id == preview.room_id);
+                    membership_override = self
+                        .rooms
+                        .iter()
+                        .find(|r| r.id == preview.room_id)
+                        .map(|r| match r.kind {
+                            RoomKind::Invite => PreviewMembership::Invited,
+                            RoomKind::Knock => PreviewMembership::Knocked,
+                            _ => PreviewMembership::Joined,
+                        })
+                        .or(space.then_some(PreviewMembership::Joined));
                 }
                 if let Some(Modal::New(popup)) = &mut self.modal
                     && popup.stage == Stage::Preview
@@ -5604,6 +5630,7 @@ mod tests {
             world_readable: false,
             membership: PreviewMembership::None,
             via: vec!["other.org".into()],
+            space: false,
         };
         for dbg in [
             format!("{page1:?}"),
@@ -5709,6 +5736,7 @@ mod tests {
                     world_readable: false,
                     membership: PreviewMembership::None,
                     via: vec!["other.org".into()],
+                    space: false,
                 })),
             },
         );
@@ -5739,6 +5767,7 @@ mod tests {
                     world_readable: false,
                     membership: PreviewMembership::None,
                     via: vec!["other.org".into()],
+                    space: false,
                 })),
             },
         );
@@ -5862,6 +5891,7 @@ mod tests {
             world_readable: false,
             membership: PreviewMembership::None,
             via: vec![],
+            space: false,
         };
 
         let cases = [
