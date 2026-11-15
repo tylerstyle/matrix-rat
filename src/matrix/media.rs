@@ -155,7 +155,7 @@ impl Media {
                     .get_media_content(&request, false)
                     .await
                     .map_err(|err| {
-                        tracing::debug!(%err, "could not download file");
+                        tracing::debug!(why = %crate::logsafe::kind(&err), "could not download file");
                         "the download failed".to_owned()
                     })?;
                 let name = file.name;
@@ -190,7 +190,7 @@ async fn load(
     tokio::task::spawn_blocking(move || images::decode(&bytes, max))
         .await
         .map_err(|err| {
-            tracing::warn!(%err, "image decoder crashed");
+            tracing::warn!(why = %crate::logsafe::kind(&err), "image decoder crashed");
             FAILED.to_owned()
         })?
 }
@@ -243,7 +243,7 @@ async fn bounded_get(
     limit: u64,
 ) -> Result<Option<Vec<u8>>, Refused> {
     let failed = |err: reqwest::Error| {
-        tracing::debug!(%err, "could not download media");
+        tracing::debug!(why = %crate::logsafe::kind(&err), "could not download media");
         Refused::Failed
     };
     let mut refreshed = false;

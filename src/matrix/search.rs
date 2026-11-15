@@ -77,7 +77,7 @@ pub(crate) fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<Stri
             && !joined_room_ids.contains(&name)
             && let Err(err) = std::fs::remove_dir_all(entry.path())
         {
-            tracing::debug!(%err, room = %name, "could not prune stale search index");
+            tracing::debug!(why = %crate::logsafe::kind(&err), "could not prune stale search index");
         }
     }
 }
@@ -208,7 +208,7 @@ async fn index_redecrypted(client: Client) {
                     )
                     .await
                 {
-                    tracing::warn!(%err, %room_id, "failed to index redecrypted events");
+                    tracing::warn!(why = %crate::logsafe::kind(&err), "failed to index redecrypted events");
                     break;
                 }
             }
@@ -327,7 +327,7 @@ async fn run_search(
                         break;
                     }
                 }
-                tracing::debug!(%err, generation, "global message search failed");
+                tracing::debug!(why = %crate::logsafe::kind(&err), generation, "global message search failed");
                 note = Some("Could not search that query".to_owned());
                 break;
             }

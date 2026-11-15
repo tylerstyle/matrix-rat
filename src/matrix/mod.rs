@@ -36,6 +36,8 @@ pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
 pub use emotes::{CustomEmoji, EmotePack};
 pub use emotes::{EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
 pub use keyring::SecretStoreMode;
+// For `crate::logsafe`, which turns it into a word for the log.
+pub(crate) use keyring::KeyringError;
 pub use keywords::{KeywordsCmd, KeywordsEvent, MAX_KEYWORDS, shown_keywords};
 #[cfg(test)]
 pub use manage::RoomSettingsPower;
@@ -1236,7 +1238,7 @@ impl Worker {
                 let passphrase = active.passphrase.clone();
                 let in_keyring = active.in_keyring;
                 if let Err(err) = session::mark_soft_logout(&self.paths, &active) {
-                    tracing::warn!(?err, "could not record soft logout state");
+                    tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not record soft logout state");
                 }
                 let joined = search::joined_room_ids(&active.client);
                 drop(active);
@@ -1263,7 +1265,11 @@ impl Worker {
                 match tokio::time::timeout(Duration::from_secs(10), active.client.logout()).await {
                     Ok(Ok(())) => {}
                     outcome => {
-                        tracing::warn!(?outcome, "could not log out on the server");
+                        let why = match &outcome {
+                            Ok(Err(err)) => crate::logsafe::kind(err),
+                            _ => crate::logsafe::TIMED_OUT,
+                        };
+                        tracing::warn!(%why, "could not log out on the server");
                         reason = Some(
                             "Logged out here. The server could not be told, so the session \
                              may still be listed on your account."
@@ -1277,7 +1283,7 @@ impl Worker {
             }
             Err(err) => {
                 drop(active);
-                tracing::error!(?err, "session failed");
+                tracing::error!(why = %crate::logsafe::kind_any(&err), "session failed");
                 self.emit(MatrixEvent::Error(format!("{err:#}")));
                 // Keep the session on disk: this may be a temporary problem.
                 // Try again shortly, unless told to stop first.
@@ -1401,7 +1407,7 @@ impl Worker {
             match result {
                 Some(Ok(ok)) => return Some(ok),
                 Some(Err(err)) => {
-                    tracing::warn!(?err, "login failed");
+                    tracing::warn!(why = %crate::logsafe::kind_any(&err), "login failed");
                     let _ = events.send(MatrixEvent::LoginFailed(format!("{err:#}")));
                 }
                 // Cancelled by the user: nothing to report.
@@ -1451,7 +1457,10 @@ impl Worker {
                             if let Err(err) =
                                 session::save_tokens(&paths, &client, &passphrase, in_keyring)
                             {
-                                tracing::error!(?err, "could not save refreshed tokens");
+                                tracing::error!(
+                                    why = %crate::logsafe::kind_any(&err),
+                                    "could not save refreshed tokens"
+                                );
                             }
                         }
                         Ok(SessionChange::UnknownToken { .. }) => {}
@@ -1807,7 +1816,7 @@ impl Worker {
         if matches!(end, SessionEnd::Shutdown)
             && let Err(err) = session::save_tokens(&self.paths, client, passphrase, in_keyring)
         {
-            tracing::error!(?err, "could not save the session");
+            tracing::error!(why = %crate::logsafe::kind_any(&err), "could not save the session");
         }
         Ok(end)
     }
@@ -1940,7 +1949,7 @@ impl Previews {
             let latest = client.latest_events().await;
             for id in new {
                 if let Err(err) = latest.listen_to_room(&id).await {
-                    tracing::debug!(%err, "no latest message for a room");
+                    tracing::debug!(why = %crate::logsafe::kind(&err), "no latest message for a room");
                 }
             }
         });

@@ -28,6 +28,7 @@ use super::convert::convert;
 use super::safety::{IgnoredSet, is_ignored_in};
 use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
 use crate::format::Outgoing;
+use crate::logsafe;
 use crate::model::ItemRef;
 
 /// Recently used timelines stay alive so going back to a room is instant and keeps the
@@ -287,15 +288,17 @@ impl Timelines {
                     text,
                 });
             }
-            Err(err) => tracing::warn!(?err, "could not load the draft"),
+            Err(err) => tracing::warn!(why = %logsafe::kind_any(&err), "could not load the draft"),
         }
     }
 
-    fn fail(&self, what: &str, err: impl std::fmt::Display) {
-        tracing::warn!(%err, "{what}");
+    /// Tells the user what went wrong, in full; the log only gets what kind of error
+    /// it was, as its text can name rooms, people and servers.
+    fn fail(&self, what: &'static str, err: anyhow::Error) {
+        tracing::warn!(why = %logsafe::kind_any(&err), "{what}");
         let _ = self
             .events
-            .send(MatrixEvent::ActionFailed(format!("{what}: {err}")));
+            .send(MatrixEvent::ActionFailed(format!("{what}: {err:#}")));
     }
 
     /// A [`MatrixCmd::SendFiles`] that could not even start is answered like one whose
@@ -317,7 +320,7 @@ impl Timelines {
         let events = self.events.clone();
         tokio::spawn(async move {
             if let Err(err) = work.await {
-                tracing::warn!(?err, "{what}");
+                tracing::warn!(why = %logsafe::kind_any(&err), "{what}");
                 let _ = events.send(MatrixEvent::ActionFailed(format!("{what}: {err:#}")));
             }
         });
@@ -331,7 +334,7 @@ impl Timelines {
     {
         match self.timeline(room_id).await {
             Ok(timeline) => self.spawn(what, work(timeline)),
-            Err(err) => self.fail(what, format!("{err:#}")),
+            Err(err) => self.fail(what, err),
         }
     }
 
@@ -362,7 +365,7 @@ impl Timelines {
     {
         match self.active_timeline(room_id).await {
             Ok((timeline, _)) => self.spawn(what, work(timeline)),
-            Err(err) => self.fail(what, format!("{err:#}")),
+            Err(err) => self.fail(what, err),
         }
     }
 
@@ -651,7 +654,7 @@ impl Timelines {
                             self.own_room_names.clone(),
                         )));
                     }
-                    Err(err) => self.fail("Could not open the room", format!("{err:#}")),
+                    Err(err) => self.fail("Could not open the room", err),
                 }
             }
             MatrixCmd::OpenEvent {
@@ -693,7 +696,7 @@ impl Timelines {
                             let reached_start = match timeline.paginate_backwards(PAGE).await {
                                 Ok(reached_start) => reached_start,
                                 Err(err) => {
-                                    tracing::warn!(?err, "could not load older messages");
+                                    tracing::warn!(why = %logsafe::kind(&err), "could not load older messages");
                                     // Report "done" so the UI does not retry in a loop.
                                     true
                                 }
@@ -708,7 +711,7 @@ impl Timelines {
                         }));
                     }
                     Err(err) => {
-                        self.fail("Could not load older messages", format!("{err:#}"));
+                        self.fail("Could not load older messages", err);
                         // The UI waits for an answer to every request.
                         let _ = self.events.send(MatrixEvent::Paginated {
                             generation,
@@ -752,7 +755,7 @@ impl Timelines {
                     let reached_end = match timeline.paginate_forwards(PAGE).await {
                         Ok(reached_end) => reached_end,
                         Err(err) => {
-                            tracing::warn!(?err, "could not load newer messages");
+                            tracing::warn!(why = %logsafe::kind(&err), "could not load newer messages");
                             true
                         }
                     };
@@ -960,7 +963,7 @@ impl Timelines {
                         tokio::spawn(async move {
                             let result = decrypt_again(&timeline, &event_id).await;
                             if let Err(err) = &result {
-                                tracing::warn!(?err, "could not retry decryption");
+                                tracing::warn!(why = %logsafe::kind_any(err), "could not retry decryption");
                             }
                             answer(result.map_err(|err| format!("{err:#}")), event_id);
                         });
@@ -993,7 +996,7 @@ impl Timelines {
                 if let Ok(room) = self.room(&room_id) {
                     tokio::spawn(async move {
                         if let Err(err) = room.typing_notice(typing).await {
-                            tracing::debug!(?err, "could not send typing notice");
+                            tracing::debug!(why = %logsafe::kind(&err), "could not send typing notice");
                         }
                     });
                 }
@@ -1022,7 +1025,7 @@ impl Timelines {
                         let Some((key, ticket, newest)) = mark else {
                             // The room itself: the read marker follows the receipt.
                             if let Err(err) = mark_room_read(&timeline, receipt, &flags).await {
-                                tracing::debug!(?err, "could not mark the room as read");
+                                tracing::debug!(why = %logsafe::kind_any(&err), "could not mark the room as read");
                             }
                             return;
                         };
@@ -1033,7 +1036,9 @@ impl Timelines {
                                     marks.set(key, ticket, newest);
                                 }
                             }
-                            Err(err) => tracing::debug!(?err, "could not send read receipt"),
+                            Err(err) => {
+                                tracing::debug!(why = %logsafe::kind(&err), "could not send read receipt")
+                            }
                         }
                     });
                 }
@@ -1073,7 +1078,7 @@ impl Timelines {
                             mark_room_read(&timeline, receipt.clone(), &flags).await
                         };
                         if let Err(err) = done.await {
-                            tracing::debug!(?err, "could not mark a room as read");
+                            tracing::debug!(why = %logsafe::kind_any(&err), "could not mark a room as read");
                             failed += 1;
                         }
                     }
@@ -1172,7 +1177,7 @@ impl Timelines {
                     Err(err) => Err(err),
                 };
                 if let Err(err) = saved {
-                    tracing::warn!(?err, "could not save the draft");
+                    tracing::warn!(why = %logsafe::kind_any(&err), "could not save the draft");
                 }
             }
             MatrixCmd::ForgetDrafts { room_id, threads } => {
@@ -1192,7 +1197,7 @@ impl Timelines {
                 if !still_in
                     && let Err(err) = drafts::forget(&self.client, &room_id, &threads).await
                 {
-                    tracing::warn!(?err, "could not remove the drafts of a room");
+                    tracing::warn!(why = %logsafe::kind_any(&err), "could not remove the drafts of a room");
                 }
             }
             // Handled by the session loop.
@@ -1400,7 +1405,7 @@ async fn decrypt_again(timeline: &Timeline, event_id: &str) -> Result<super::Ret
     // `Ok(false)`: this device has no access to a backup. An error is usual too: the
     // backup does not have this key.
     if let Err(err) = backups.download_room_key(room.room_id(), &session_id).await {
-        tracing::debug!(%err, "no key from the backup");
+        tracing::debug!(why = %logsafe::kind(&err), "no key from the backup");
     }
     timeline.retry_decryption([session_id]).await;
     // The answer shows in the timeline; it takes a moment.
@@ -1531,7 +1536,7 @@ async fn load_room_members(room: Room, room_id: String) -> Option<MatrixEvent> {
     let raw_members = match raw_members {
         Ok(members) => members,
         Err(err) => {
-            tracing::warn!(?err, "could not load room members");
+            tracing::warn!(why = %logsafe::kind(&err), "could not load room members");
             return None;
         }
     };
@@ -1643,7 +1648,7 @@ async fn mark_room_read(
     // room as read that the server goes on counting as unread.
     if timeline.latest_event_id().await.is_none() {
         if let Err(err) = timeline.paginate_backwards(PAGE).await {
-            tracing::debug!(?err, "could not load messages to mark as read");
+            tracing::debug!(why = %logsafe::kind(&err), "could not load messages to mark as read");
         }
         if timeline.latest_event_id().await.is_none() {
             // If no visible timeline item exists (e.g. a server that omits ignored events
@@ -1688,7 +1693,7 @@ async fn fallback_latest_event_id(room: &Room) -> Option<matrix_sdk::ruma::Owned
             .iter()
             .find_map(|event| event.event_id().map(ToOwned::to_owned)),
         Err(err) => {
-            tracing::debug!(?err, "could not query room messages to mark as read");
+            tracing::debug!(why = %logsafe::kind(&err), "could not query room messages to mark as read");
             None
         }
     }
@@ -1741,7 +1746,7 @@ impl UnreadFlags {
                         sent.insert(room.room_id().to_owned(), (unread, at));
                     }
                     Err(err) => {
-                        tracing::warn!(%err, "could not change the unread mark");
+                        tracing::warn!(why = %logsafe::kind(&err), "could not change the unread mark");
                         // Only the mark itself is worth a word: taking one back is
                         // a side effect of reading, which went fine.
                         if unread {
@@ -2008,7 +2013,7 @@ async fn forward(
                 let event_id = event_id.to_owned();
                 tokio::spawn(async move {
                     if let Err(err) = timeline.fetch_details_for_event(&event_id).await {
-                        tracing::debug!(?err, "could not fetch the replied-to message");
+                        tracing::debug!(why = %logsafe::kind(&err), "could not fetch the replied-to message");
                     }
                 });
             }

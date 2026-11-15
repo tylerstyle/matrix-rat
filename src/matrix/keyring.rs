@@ -209,8 +209,9 @@ async fn migrate_file_to_keyring<K: KeyringBackend, F: PassphraseFileStore>(
     passphrase: &str,
 ) -> Result<bool, KeyringError> {
     write_and_verify_keyring(keyring, key, passphrase).await?;
-    if let Err(err) = file_store.write_passphrase(None) {
-        tracing::warn!(%err, "migrated passphrase to keyring, but could not strip session file");
+    // The reason is text, which can quote the session file: only the fact is logged.
+    if file_store.write_passphrase(None).is_err() {
+        tracing::warn!("migrated passphrase to keyring, but could not strip session file");
         return Ok(false);
     }
     Ok(true)
@@ -230,7 +231,10 @@ async fn migrate_keyring_to_file<K: KeyringBackend, F: PassphraseFileStore>(
         return Err("session file read-back verification did not match".into());
     }
     if let Err(err) = keyring.delete(key).await {
-        tracing::warn!(%err, "migrated passphrase to session file, but could not remove keyring entry");
+        tracing::warn!(
+            why = %crate::logsafe::kind(&err),
+            "migrated passphrase to session file, but could not remove keyring entry"
+        );
     }
     Ok(())
 }
@@ -260,7 +264,10 @@ pub async fn resolve_passphrase<K: KeyringBackend, F: PassphraseFileStore>(
                             });
                         }
                         Err(err) => {
-                            tracing::debug!(%err, "skipping auto migration to keyring; keeping file copy");
+                            tracing::debug!(
+                                why = %crate::logsafe::kind(&err),
+                                "skipping auto migration to keyring; keeping file copy"
+                            );
                         }
                     }
                 }
@@ -339,7 +346,10 @@ pub async fn prepare_passphrase_for_save<K: KeyringBackend>(
                 match write_and_verify_keyring(keyring, key, passphrase).await {
                     Ok(()) => return Ok(None),
                     Err(err) => {
-                        tracing::debug!(%err, "auto keyring save unavailable; using session file");
+                        tracing::debug!(
+                            why = %crate::logsafe::kind(&err),
+                            "auto keyring save unavailable; using session file"
+                        );
                     }
                 }
             }

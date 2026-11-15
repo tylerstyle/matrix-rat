@@ -262,7 +262,10 @@ impl OwnMembers {
             let room = room.clone();
             self.tasks.spawn(async move {
                 if let Err(err) = room.sync_members().await {
-                    tracing::debug!(%err, "could not fetch members for notifications");
+                    tracing::debug!(
+                        why = %crate::logsafe::kind(&err),
+                        "could not fetch members for notifications"
+                    );
                 }
             });
         }

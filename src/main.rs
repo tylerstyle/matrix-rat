@@ -21,6 +21,7 @@ mod keywords;
 mod lineedit;
 mod lock;
 mod logging;
+mod logsafe;
 mod manage;
 mod matrix;
 mod menu;

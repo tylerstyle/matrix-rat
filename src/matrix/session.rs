@@ -90,7 +90,10 @@ pub struct ReauthOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReauthDecision {
     KeepStore,
-    ReplaceStore { reason: String },
+    /// `reason` is for the log, so it names no user and no device.
+    ReplaceStore {
+        reason: &'static str,
+    },
 }
 
 /// Pure identity verification for re-authentication: only reuse the existing store when
@@ -104,23 +107,17 @@ pub fn verify_reauth_identity(
 ) -> ReauthDecision {
     if actual_user_id != Some(expected_user_id) {
         return ReauthDecision::ReplaceStore {
-            reason: format!(
-                "signed in as a different user ({})",
-                actual_user_id.unwrap_or("unknown")
-            ),
+            reason: "signed in as a different user",
         };
     }
     if actual_device_id != Some(expected_device_id) {
         return ReauthDecision::ReplaceStore {
-            reason: format!(
-                "server issued a new device ID ({})",
-                actual_device_id.unwrap_or("unknown")
-            ),
+            reason: "server issued a new device ID",
         };
     }
     if !store_exists {
         return ReauthDecision::ReplaceStore {
-            reason: "local store no longer exists".into(),
+            reason: "local store no longer exists",
         };
     }
     ReauthDecision::KeepStore
@@ -292,7 +289,10 @@ pub async fn forget_with<K: KeyringBackend>(
     if let Some(key) = key
         && let Err(err) = keyring.delete(&key).await
     {
-        tracing::debug!(%err, "could not delete keyring entry while forgetting session");
+        tracing::debug!(
+            why = %crate::logsafe::kind(&err),
+            "could not delete keyring entry while forgetting session"
+        );
     }
 }
 

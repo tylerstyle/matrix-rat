@@ -1328,10 +1328,16 @@ pub(super) fn room(client: &Client, room_id: &str) -> Result<Room, String> {
 }
 
 /// "Could not join: …", with the reason in words a person can act on.
-pub(super) fn failed(what: &str, err: &matrix_sdk::Error) -> String {
-    // The error's own text can name people, rooms and servers; its kind says enough.
-    tracing::warn!(kind = ?err.client_api_error_kind(), "could not {what}");
-    format!("Could not {what}: {}", explain(err))
+pub(super) fn failed(what: &'static str, err: &matrix_sdk::Error) -> String {
+    failed_saying(what, what, err)
+}
+
+/// [`failed`] for a `shown` text that names a server or a person: the log gets `what`
+/// instead. The error's own text can name people, rooms and servers; its kind says
+/// enough there.
+pub(super) fn failed_saying(what: &'static str, shown: &str, err: &matrix_sdk::Error) -> String {
+    tracing::warn!(why = %crate::logsafe::kind(err), "could not {what}");
+    format!("Could not {shown}: {}", explain(err))
 }
 
 /// The server's own words, made safe and short.
@@ -1547,7 +1553,10 @@ pub(super) async fn cleanup_left_room(client: &Client, room: &Room) {
     if matches!(room.state(), RoomState::Left | RoomState::Banned)
         && let Err(err) = room.clear_composer_draft(None).await
     {
-        tracing::warn!(?err, "could not remove the draft of a room after leaving");
+        tracing::warn!(
+            why = %crate::logsafe::kind(&err),
+            "could not remove the draft of a room after leaving"
+        );
     }
     // Clear the room's event cache while it still exists in `base_client`: calling
     // `room.forget()` first drops it from `base_client`, causing `event_cache().forget_room()`
@@ -1557,7 +1566,7 @@ pub(super) async fn cleanup_left_room(client: &Client, room: &Room) {
         let _ = client.event_cache().forget_room(room.room_id()).await;
         if let Err(err) = room.forget().await {
             tracing::warn!(
-                kind = ?err.client_api_error_kind(),
+                why = %crate::logsafe::kind(&err),
                 "could not forget the room after leaving"
             );
         }
@@ -1568,7 +1577,7 @@ async fn with_member<F>(
     client: &Client,
     room_id: &str,
     user_id: &str,
-    what: &str,
+    what: &'static str,
     work: F,
 ) -> Result<(), String>
 where
@@ -1829,7 +1838,7 @@ fn present(entries: &[Entry], levels: Option<&RoomPowerLevels>, own: &UserId) ->
 async fn stored_members(room: &Room) -> Result<Vec<Entry>, String> {
     let wanted = RoomMemberships::JOIN | RoomMemberships::INVITE | RoomMemberships::BAN;
     let members = room.members_no_sync(wanted).await.map_err(|err| {
-        tracing::warn!(%err, "could not read the room's members");
+        tracing::warn!(why = %crate::logsafe::kind(&err), "could not read the room's members");
         "The member list could not be read.".to_owned()
     })?;
     Ok(members

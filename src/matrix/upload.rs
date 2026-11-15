@@ -19,6 +19,7 @@ use tokio::task::JoinSet;
 
 use super::MatrixEvent;
 use crate::format::Outgoing;
+use crate::logsafe;
 use crate::text::{sanitize_line, truncate};
 use crate::upload::{self, Prepared};
 
@@ -48,7 +49,9 @@ impl Uploads {
                         let _ = tell.send(MatrixEvent::UploadLimit(limit.into()));
                         return;
                     }
-                    Err(err) => tracing::debug!(?err, "could not ask for the upload limit"),
+                    Err(err) => {
+                        tracing::debug!(why = %logsafe::kind(&err), "could not ask for the upload limit")
+                    }
                 }
                 tokio::time::sleep(LIMIT_RETRY).await;
             }
@@ -101,7 +104,7 @@ impl Uploads {
                                     .use_send_queue()
                                     .await
                                     .map_err(|err| {
-                                        tracing::warn!(?err, "could not queue a file for sending");
+                                        tracing::warn!(why = %logsafe::kind(&err), "could not queue a file for sending");
                                         short(&format!("Could not send {name}: {err}"))
                                     })
                             }
@@ -114,7 +117,7 @@ impl Uploads {
                         Err(short(&reason))
                     }
                     Err(err) => {
-                        tracing::warn!(?err, "preparing a file for sending failed");
+                        tracing::warn!(why = %logsafe::kind(&err), "preparing a file for sending failed");
                         Err("Could not send the file".to_owned())
                     }
                 };
