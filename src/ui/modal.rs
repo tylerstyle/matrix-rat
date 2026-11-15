@@ -290,6 +290,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
             | Setting::Mouse
             | Setting::TypingNotices
             | Setting::ReadReceipts
+            | Setting::DoNotDisturb
             | Setting::ReadMarkers
             | Setting::RoomPreviews
             | Setting::Notifications => {

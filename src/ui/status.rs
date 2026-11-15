@@ -70,6 +70,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(format!(" {dot} "), theme.style(dot_role)),
         Span::styled(format!("{text}  "), status),
     ];
+    if app.do_not_disturb {
+        spans.push(Span::styled("do not disturb  ", theme.style(Role::Banner)));
+    }
     super::verify::status_hint(
         &app.verify,
         &app.modal,
