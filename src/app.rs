@@ -287,6 +287,8 @@ pub struct App {
     theme_names: Vec<String>,
     themes_dir: PathBuf,
     truecolor: bool,
+    /// The user asked for no colours (`NO_COLOR`): every theme is shown without them.
+    no_color: bool,
     pub hits: HitMap,
     pub hover: Option<HitId>,
     dragging_splitter: bool,
@@ -399,6 +401,10 @@ impl App {
         }
         app.matrix = matrix;
         app.truecolor = truecolor;
+        app.no_color = crate::theme::no_color_wanted();
+        if app.no_color {
+            app.theme.strip_colors();
+        }
         app.theme_names = Theme::available(&themes_dir);
         app.themes_dir = themes_dir;
         app.sidebar.width = config.sidebar_width;
@@ -524,6 +530,7 @@ impl App {
             theme_names: Theme::builtin_names(),
             themes_dir: PathBuf::new(),
             truecolor: true,
+            no_color: false,
             hits: HitMap::default(),
             hover: None,
             dragging_splitter: false,
@@ -722,6 +729,9 @@ impl App {
                 }
                 if !self.truecolor {
                     theme.downgrade_to_256();
+                }
+                if self.no_color {
+                    theme.strip_colors();
                 }
                 self.theme = theme;
                 self.theme_rev += 1;

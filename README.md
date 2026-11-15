@@ -34,7 +34,7 @@ notifications and themes that follow your desktop are all there.
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
-| 🎨 **Yours to shape** | Eleven built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
+| 🎨 **Yours to shape** | Twelve built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
 | 🔔 **Notifications** | Desktop notifications with the chat's picture (click one to open its room), or plain ones through the terminal; none for what you are reading right now. |
 
 ## Install
@@ -194,8 +194,10 @@ exist only in that file (marked below).
 
 ### Themes
 
-Eleven themes are built in; `F3` cycles them. `theme = "terminal"` uses your terminal's own
-colours. Switch on **Follow dark/light** in the settings (`theme_dark` and `theme_light`
+Twelve themes are built in; `F3` cycles them. `theme = "terminal"` uses your terminal's own
+colours, and `theme = "high-contrast"` is black and white with a few strong colours. With
+the environment variable `NO_COLOR` set, every theme is shown without any colour: what is
+selected or a badge is reversed, the row under the mouse underlined. Switch on **Follow dark/light** in the settings (`theme_dark` and `theme_light`
 in the file) to use one theme by day and another by night, following your desktop.
 
 Theme files in `~/.config/matrix-rat/themes/` are reloaded the moment they change, so

@@ -34,6 +34,10 @@ const BUILTIN: &[(&str, &str)] = &[
         "solarized-light",
         include_str!("../themes/solarized-light.toml"),
     ),
+    (
+        "high-contrast",
+        include_str!("../themes/high-contrast.toml"),
+    ),
     ("terminal", include_str!("../themes/terminal.toml")),
 ];
 
@@ -131,6 +135,8 @@ pub struct Theme {
     users: Vec<Color>,
     /// Set when the terminal has no 24-bit colour.
     low_color: bool,
+    /// Set when the user asked for no colours at all (`NO_COLOR`).
+    no_color: bool,
     /// Problems found while loading (unknown keys, bad colours). Never fatal.
     pub warnings: Vec<String>,
 }
@@ -376,6 +382,7 @@ impl Theme {
             styles,
             users,
             low_color: false,
+            no_color: false,
             warnings,
         })
     }
@@ -384,11 +391,36 @@ impl Theme {
     /// without truecolor support.
     /// A colour that comes from a message rather than from the theme.
     pub fn color(&self, r: u8, g: u8, b: u8) -> Color {
-        if self.low_color {
+        if self.no_color {
+            Color::Reset
+        } else if self.low_color {
             to_256(Color::Rgb(r, g, b))
         } else {
             Color::Rgb(r, g, b)
         }
+    }
+
+    /// For `NO_COLOR`: every colour goes, and what a background said (this is selected,
+    /// this is a badge) is said by reversing or underlining instead. Bold, italic and
+    /// the like stay.
+    pub fn strip_colors(&mut self) {
+        self.no_color = true;
+        let plain_bg = self.style(Role::Text).bg;
+        for role in Role::ALL {
+            let style = &mut self.styles[*role as usize];
+            let marked = style.bg.is_some_and(|bg| bg != Color::Reset) && style.bg != plain_bg;
+            if marked && !style.add_modifier.contains(Modifier::REVERSED) {
+                *style = match role {
+                    // Under the mouse or the cursor all the time: a quiet mark.
+                    Role::Hover | Role::RoomCursor => style.add_modifier(Modifier::UNDERLINED),
+                    Role::Text => *style,
+                    _ => style.add_modifier(Modifier::REVERSED),
+                };
+            }
+            style.fg = None;
+            style.bg = None;
+        }
+        self.users.fill(Color::Reset);
     }
 
     pub fn downgrade_to_256(&mut self) {
@@ -481,6 +513,12 @@ pub enum ColorScheme {
     #[default]
     Dark,
     Light,
+}
+
+/// True when the user asked programs not to use colour: `NO_COLOR` set to anything but
+/// nothing (https://no-color.org).
+pub fn no_color_wanted() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
 }
 
 /// True when the terminal advertises 24-bit colour.
@@ -585,6 +623,44 @@ mod tests {
     fn user_colors_are_stable() {
         let theme = Theme::builtin(DEFAULT_THEME).unwrap();
         assert_eq!(theme.user_color("alice"), theme.user_color("alice"));
+    }
+
+    #[test]
+    fn without_colours_nothing_is_coloured_and_marks_stay_visible() {
+        for name in Theme::builtin_names() {
+            let mut theme = Theme::builtin(&name).unwrap();
+            theme.strip_colors();
+            for role in Role::ALL {
+                let style = theme.style(*role);
+                assert_eq!((style.fg, style.bg), (None, None), "{name} {role:?}");
+            }
+            assert_eq!(theme.user_color("alice"), Color::Reset);
+            assert_eq!(theme.color(255, 0, 0), Color::Reset);
+            // What was told apart by a background still is.
+            for role in [
+                Role::MessageSelected,
+                Role::UnreadBadge,
+                Role::Pill,
+                Role::RoomActive,
+            ] {
+                assert!(
+                    theme.style(role).add_modifier.contains(Modifier::REVERSED),
+                    "{name} {role:?}"
+                );
+            }
+            assert!(
+                !theme
+                    .style(Role::Text)
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+            );
+            assert!(
+                !theme
+                    .style(Role::Hover)
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+            );
+        }
     }
 
     #[test]
