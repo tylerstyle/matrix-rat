@@ -158,9 +158,10 @@ window), and use **Name in room…** in Room info (`F4`) to set or clear a per-r
   it out (the server asks for your account password; on servers with single sign-on or an
   account service, matrix-rat shows that service's page for it instead), `a` shows the
   addresses the sessions were last seen at.
-- **Key backup** says in plain words whether your message keys are backed up on the
-  server and whether this device can read the backup; if it cannot, the recovery key can
-  be entered from there. `e` exports all message keys of this device to a file protected
+- **Key backup** says in plain words what the server has (asked when you open it; if it
+  cannot be asked, that is what it says), whether this device saves its keys to a backup
+  and how far its uploads are, and whether recovery is set up; if this device still
+  needs the recovery key, it can be entered from there. `e` exports all message keys of this device to a file protected
   by a passphrase, `i` imports such a file (from matrix-rat or Element); drop the file
   on the window instead of typing its path.
 - A message that could not be decrypted says why. `d` (or "Try decrypting again" in its
@@ -272,11 +273,18 @@ Setting `preset = "vim"` keeps the default keys and adds:
   recovery key that exist, and tells you when they are missing; to set them up (or reset
   them), use Element: Settings → Encryption.
 - **A key file opens your encrypted history** to whoever has it and its passphrase. It is
-  written for you alone (mode 0600), never over an existing file, and a passphrase of
-  fewer than 8 characters is refused. Delete it when it has done its job.
+  written for you alone (mode 0600), appears under its name only when it is complete,
+  never replaces anything that is there, and a passphrase of fewer than 8 characters is
+  refused. The folder must be on a file system with hard links (not a FAT-formatted
+  stick). Delete the file when it has done its job.
 - **"Verified" in the session list** is checked on this device only when this device is
-  verified itself; until then the list repeats what the server says, and says so. A
-  session's name is whatever that session (or anyone logged in to the account) set.
+  verified itself; until then the list repeats what the server says ("says verified"),
+  and nothing is shown as good news. A session's name is whatever that session (or
+  anyone logged in to the account) set.
+- **Passwords and passphrases** are wiped from matrix-rat's own memory when they have
+  been sent or their field is closed, and are pasted exactly as they are (spaces
+  included). Copies outside its reach remain: your terminal's, and those the Matrix
+  libraries make while a request is on its way.
 - **Logs** are in `~/.local/state/matrix-rat/<profile>/`. At the default level the app
   keeps message text, passwords and keys out of them.
 - **Something stuck?** `Ctrl-Q` quits and `Ctrl-Z` suspends to the shell, also from
