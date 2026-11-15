@@ -585,6 +585,16 @@ impl Timelines {
 
     pub async fn handle(&mut self, command: MatrixCmd) {
         match command {
+            // Polls and stickers have a function of their own, on the heap: the SDK calls
+            // in them are large, and everything in this function adds to the stack it
+            // needs (twice, where a command is handled inside another).
+            command @ (MatrixCmd::SendSticker { .. }
+            | MatrixCmd::SendPoll { .. }
+            | MatrixCmd::EditPoll { .. }
+            | MatrixCmd::VotePoll { .. }
+            | MatrixCmd::EndPoll { .. }) => {
+                Box::pin(self.handle_poll_or_sticker(command)).await;
+            }
             MatrixCmd::OpenRoom {
                 room_id,
                 generation,
@@ -751,111 +761,6 @@ impl Timelines {
                 self.with_active_timeline(&room_id, "Could not edit", |timeline| async move {
                     let content = EditedContent::RoomMessage(content_without_relation(&message)?);
                     timeline.edit(&item_id(&item)?, content).await?;
-                    Ok(())
-                })
-                .await;
-            }
-            MatrixCmd::SendSticker {
-                room_id,
-                name,
-                url,
-                dimensions,
-                size,
-                mime,
-            } => {
-                self.with_timeline(&room_id, "Could not send sticker", |timeline| async move {
-                    let mxc: matrix_sdk::ruma::OwnedMxcUri = url.into();
-                    if !mxc.is_valid() {
-                        bail!("invalid sticker mxc URL");
-                    }
-                    let mut info = matrix_sdk::ruma::events::room::ImageInfo::new();
-                    if let Some((w, h)) = dimensions {
-                        info.width = Some(w.into());
-                        info.height = Some(h.into());
-                    }
-                    if let Some(sz) = size.and_then(|s| matrix_sdk::ruma::UInt::try_from(s).ok()) {
-                        info.size = Some(sz);
-                    }
-                    if let Some(m) = mime {
-                        info.mimetype = Some(m);
-                    }
-                    let body = crate::text::sanitize_line(&name);
-                    let content = matrix_sdk::ruma::events::sticker::StickerEventContent::new(
-                        body, info, mxc,
-                    );
-                    timeline.send(content.into()).await?;
-                    Ok(())
-                })
-                .await;
-            }
-            MatrixCmd::SendPoll {
-                room_id,
-                question,
-                answers,
-                disclosed,
-                max_selections,
-            } => {
-                self.with_timeline(&room_id, "Could not start poll", |timeline| async move {
-                    let (block, fallback) =
-                        poll_start_block(&question, &answers, disclosed, max_selections)?;
-                    let content = matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent::New(
-                        matrix_sdk::ruma::events::poll::unstable_start::NewUnstablePollStartEventContent::plain_text(
-                            fallback, block,
-                        ),
-                    );
-                    timeline.send(content.into()).await?;
-                    Ok(())
-                })
-                .await;
-            }
-            MatrixCmd::EditPoll {
-                room_id,
-                item,
-                question,
-                answers,
-                disclosed,
-                max_selections,
-            } => {
-                self.with_active_timeline(&room_id, "Could not edit poll", |timeline| async move {
-                    let (block, fallback) =
-                        poll_start_block(&question, &answers, disclosed, max_selections)?;
-                    let edited = EditedContent::PollStart {
-                        fallback_text: fallback,
-                        new_content: block,
-                    };
-                    timeline.edit(&item_id(&item)?, edited).await?;
-                    Ok(())
-                })
-                .await;
-            }
-            MatrixCmd::VotePoll {
-                room_id,
-                poll_event_id,
-                answers,
-            } => {
-                self.with_active_timeline(&room_id, "Could not vote", |timeline| async move {
-                    let poll_id = EventId::parse(&poll_event_id)
-                        .map_err(|_| anyhow!("invalid poll event id"))?;
-                    let content = matrix_sdk::ruma::events::poll::unstable_response::UnstablePollResponseEventContent::new(
-                        answers, poll_id,
-                    );
-                    timeline.send(content.into()).await?;
-                    Ok(())
-                })
-                .await;
-            }
-            MatrixCmd::EndPoll {
-                room_id,
-                poll_event_id,
-            } => {
-                self.with_active_timeline(&room_id, "Could not end poll", |timeline| async move {
-                    let poll_id = EventId::parse(&poll_event_id)
-                        .map_err(|_| anyhow!("invalid poll event id"))?;
-                    let fallback = end_poll_fallback(&timeline, &poll_id).await;
-                    let content = matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
-                        fallback, poll_id,
-                    );
-                    timeline.send(content.into()).await?;
                     Ok(())
                 })
                 .await;
@@ -1264,6 +1169,117 @@ impl Timelines {
             | MatrixCmd::SetOwnDisplayName { .. }
             | MatrixCmd::SetOwnAvatar { .. }
             | MatrixCmd::RemoveOwnAvatar => {}
+        }
+    }
+
+    async fn handle_poll_or_sticker(&mut self, command: MatrixCmd) {
+        match command {
+            MatrixCmd::SendSticker {
+                room_id,
+                name,
+                url,
+                dimensions,
+                size,
+                mime,
+            } => {
+                self.with_timeline(&room_id, "Could not send sticker", |timeline| async move {
+                    let mxc: matrix_sdk::ruma::OwnedMxcUri = url.into();
+                    if !mxc.is_valid() {
+                        bail!("invalid sticker mxc URL");
+                    }
+                    let mut info = matrix_sdk::ruma::events::room::ImageInfo::new();
+                    if let Some((w, h)) = dimensions {
+                        info.width = Some(w.into());
+                        info.height = Some(h.into());
+                    }
+                    if let Some(sz) = size.and_then(|s| matrix_sdk::ruma::UInt::try_from(s).ok()) {
+                        info.size = Some(sz);
+                    }
+                    if let Some(m) = mime {
+                        info.mimetype = Some(m);
+                    }
+                    let body = crate::text::sanitize_line(&name);
+                    let content = matrix_sdk::ruma::events::sticker::StickerEventContent::new(
+                        body, info, mxc,
+                    );
+                    timeline.send(content.into()).await?;
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::SendPoll {
+                room_id,
+                question,
+                answers,
+                disclosed,
+                max_selections,
+            } => {
+                self.with_timeline(&room_id, "Could not start poll", |timeline| async move {
+                    let (block, fallback) =
+                        poll_start_block(&question, &answers, disclosed, max_selections)?;
+                    let content = matrix_sdk::ruma::events::poll::unstable_start::UnstablePollStartEventContent::New(
+                        matrix_sdk::ruma::events::poll::unstable_start::NewUnstablePollStartEventContent::plain_text(
+                            fallback, block,
+                        ),
+                    );
+                    timeline.send(content.into()).await?;
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::EditPoll {
+                room_id,
+                item,
+                question,
+                answers,
+                disclosed,
+                max_selections,
+            } => {
+                self.with_active_timeline(&room_id, "Could not edit poll", |timeline| async move {
+                    let (block, fallback) =
+                        poll_start_block(&question, &answers, disclosed, max_selections)?;
+                    let edited = EditedContent::PollStart {
+                        fallback_text: fallback,
+                        new_content: block,
+                    };
+                    timeline.edit(&item_id(&item)?, edited).await?;
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::VotePoll {
+                room_id,
+                poll_event_id,
+                answers,
+            } => {
+                self.with_active_timeline(&room_id, "Could not vote", |timeline| async move {
+                    let poll_id = EventId::parse(&poll_event_id)
+                        .map_err(|_| anyhow!("invalid poll event id"))?;
+                    let content = matrix_sdk::ruma::events::poll::unstable_response::UnstablePollResponseEventContent::new(
+                        answers, poll_id,
+                    );
+                    timeline.send(content.into()).await?;
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::EndPoll {
+                room_id,
+                poll_event_id,
+            } => {
+                self.with_active_timeline(&room_id, "Could not end poll", |timeline| async move {
+                    let poll_id = EventId::parse(&poll_event_id)
+                        .map_err(|_| anyhow!("invalid poll event id"))?;
+                    let fallback = end_poll_fallback(&timeline, &poll_id).await;
+                    let content = matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
+                        fallback, poll_id,
+                    );
+                    timeline.send(content.into()).await?;
+                    Ok(())
+                })
+                .await;
+            }
+            _ => {}
         }
     }
 }
