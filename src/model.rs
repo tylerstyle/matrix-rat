@@ -429,7 +429,6 @@ impl ThreadSummary {
     }
 }
 
-/// Something that can be saved to disk: a file, or the original of a picture.
 /// What kind of attachment this is, for typed labels and playback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MediaKind {
@@ -441,6 +440,7 @@ pub enum MediaKind {
     Picture,
 }
 
+/// Something that can be saved to disk: a file, or the original of a picture.
 #[derive(Clone)]
 pub struct Attachment {
     /// The file's `mxc://` address.

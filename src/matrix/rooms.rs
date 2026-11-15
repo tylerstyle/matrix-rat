@@ -1259,6 +1259,7 @@ impl Timelines {
             | MatrixCmd::SearchDirectory { .. }
             | MatrixCmd::DirectoryNextPage { .. }
             | MatrixCmd::CancelDirectorySearch
+            | MatrixCmd::EnsureEmotePacks { .. }
             | MatrixCmd::FetchUserProfile { .. }
             | MatrixCmd::SetOwnDisplayName { .. }
             | MatrixCmd::SetOwnAvatar { .. }

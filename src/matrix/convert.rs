@@ -922,11 +922,11 @@ mod tests {
         assert!(waveform_bars(&[]).is_none());
         let short: Vec<UnstableAmplitude> = [0u16, 512, 1024]
             .into_iter()
-            .map(|n| UnstableAmplitude::new(n.into()))
+            .map(UnstableAmplitude::new)
             .collect();
         assert_eq!(waveform_bars(&short).as_deref(), Some("▁▄█"));
         let long: Vec<UnstableAmplitude> = (0u16..48)
-            .map(|n| UnstableAmplitude::new(((n * 21) % 1024).into()))
+            .map(|n| UnstableAmplitude::new((n * 21) % 1024))
             .collect();
         assert_eq!(waveform_bars(&long).unwrap().chars().count(), 24);
 

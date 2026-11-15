@@ -890,6 +890,10 @@ impl ReasonConfirmPopup {
 pub const MAX_POLL_ANSWERS: usize = 20;
 pub const MIN_POLL_ANSWERS: usize = 2;
 
+/// A poll form's question, answers, whether votes are shown while it is open, and
+/// how many answers each voter may pick.
+pub type ValidPoll = (String, Vec<String>, bool, u32);
+
 /// Logical slots inside [`PollFormPopup`], matching Tab order top-to-bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollFormSlot {
@@ -1061,7 +1065,7 @@ impl PollFormPopup {
         }
     }
 
-    pub fn validated(&self) -> Result<(String, Vec<String>, bool, u32), (usize, String)> {
+    pub fn validated(&self) -> Result<ValidPoll, (usize, String)> {
         let question = crate::text::sanitize_line(self.question.trim());
         if question.is_empty() {
             return Err((0, "Enter a poll question".to_owned()));

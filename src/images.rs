@@ -27,6 +27,8 @@ use crate::termquery;
 /// The largest picture drawn between messages, in cells.
 pub const MAX_COLS: u16 = 40;
 pub const MAX_ROWS: u16 = 12;
+/// A sticker is a small picture: it gets less room than a photo.
+const STICKER_MAX_CELLS: (u16, u16) = (18, 7);
 /// Space kept for a picture whose size is not known yet.
 const UNKNOWN_CELLS: (u16, u16) = (24, 8);
 /// Pictures between messages are kept no larger than this, in pixels.
@@ -605,28 +607,8 @@ impl ImageStore {
         self.graphics.protocol.is_some()
     }
 
-    pub fn is_kitty(&self) -> bool {
+    fn is_kitty(&self) -> bool {
         matches!(self.graphics.protocol, Some(Protocol::Kitty { .. }))
-    }
-
-    pub fn avatar_ready(&self, url: &str) -> bool {
-        matches!(
-            self.avatars.get(url),
-            Some(Avatar {
-                state: AvatarState::Ready { .. },
-                ..
-            })
-        )
-    }
-
-    pub fn avatar_failed(&self, url: &str) -> bool {
-        matches!(
-            self.avatars.get(url),
-            Some(Avatar {
-                state: AvatarState::Failed,
-                ..
-            })
-        )
     }
 
     /// Viewer encodings are then done on a thread and delivered through `sender`.
@@ -666,7 +648,10 @@ impl ImageStore {
         }
         let mut limit = inline_limit(width);
         if info.sticker {
-            limit = (limit.0.min(18), limit.1.min(7));
+            limit = (
+                limit.0.min(STICKER_MAX_CELLS.0),
+                limit.1.min(STICKER_MAX_CELLS.1),
+            );
         }
         match info.dimensions.or(self.learned.get(&info.key).copied()) {
             Some(pixels) => {
@@ -914,7 +899,6 @@ impl ImageStore {
         if !matches!(avatar.state, AvatarState::Loading { .. }) {
             return;
         }
-        self.layout_rev += 1;
         avatar.state = match result {
             Ok(decoded) => AvatarState::Ready {
                 pixels: decoded.pixels,
