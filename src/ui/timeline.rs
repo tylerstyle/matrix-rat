@@ -638,8 +638,10 @@ pub fn build_layout(
             let mut hits = Vec::new();
             let mut spots = Vec::new();
             let mut col = INDENT.len();
+            // Reactions stay on a message that could not be decrypted (they are not
+            // encrypted), but like its text they show nothing of their pictures.
             let chip_pictures = images.emote_pictures()
-                && message.kind != MsgKind::Redacted
+                && !matches!(message.kind, MsgKind::Redacted | MsgKind::Undecryptable)
                 && !message
                     .sender_id
                     .as_deref()
@@ -650,13 +652,19 @@ pub fn build_layout(
                 if wanted {
                     emote_wants.push((i, key.to_owned()));
                 }
-                let picture = wanted && images.emote_ready(key);
-                let label = if picture {
-                    rich::EMOTE_BOX.to_owned()
+                // A chip too wide for the pane is cut short, and then has no room for
+                // the picture: it shows the name instead, as much of it as fits.
+                let pictured = format!(" {} {} ", rich::EMOTE_BOX, reaction.count);
+                let picture = wanted && images.emote_ready(key) && width(&pictured) <= body_width;
+                let whole = if picture {
+                    pictured
                 } else {
-                    reaction_label(&reaction.key, emotes.catalog)
+                    format!(
+                        " {} {} ",
+                        reaction_label(&reaction.key, emotes.catalog),
+                        reaction.count
+                    )
                 };
-                let whole = format!(" {label} {} ", reaction.count);
                 let chip = truncate(&whole, body_width);
                 let chip_width = width(&chip);
                 if col + chip_width > max_width && !hits.is_empty() {
@@ -670,8 +678,7 @@ pub fn build_layout(
                     });
                     col = INDENT.len();
                 }
-                // A chip cut short has no room left for the picture.
-                if picture && chip == whole {
+                if picture {
                     spots.push(EmoteSpot {
                         col: col as u16 + 1,
                         url: key.to_owned(),
@@ -1689,6 +1696,41 @@ mod tests {
     }
 
     #[test]
+    fn a_reaction_chip_too_wide_for_the_pane_shows_its_name_cut_short() {
+        use crate::images::testing::{decoded, kitty};
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let mut images = ImageStore::new(kitty());
+        images.begin_frame();
+        images.request_emotes([PARTY]);
+        images.on_emote(PARTY, Ok(decoded(64, 64)));
+        let mut room = demo_rooms().remove(0);
+        let mut message = emoji_message("@alice:example.org", ("", ""));
+        message.reactions[0].count = 1_234_567_890;
+        room.messages = vec![message];
+        let nobody = BTreeSet::new();
+        let view = EmoteView {
+            catalog: &EmoteCatalog::default(),
+            ignored: &nobody,
+        };
+        let chip = |layout: &Layout| -> (String, usize) {
+            let row = layout
+                .rows
+                .iter()
+                .find(|row| row.hits.iter().any(|hit| hit.2 == HitId::Reaction(0, 0)))
+                .expect("a chip");
+            (row.line.to_string(), row.emotes.len())
+        };
+        // Twelve columns for the chip; with the picture it would take fifteen.
+        let (text, pictures) = chip(&build_layout(&room, 14, &theme, None, &images, None, &view));
+        assert!(text.trim_start().starts_with(":?: 123"), "{text:?}");
+        assert_eq!(pictures, 0);
+        // With room enough, the picture.
+        let (text, pictures) = chip(&build_layout(&room, 17, &theme, None, &images, None, &view));
+        assert_eq!(text.trim(), "1234567890", "{text:?}");
+        assert_eq!(pictures, 1);
+    }
+
+    #[test]
     fn hidden_messages_and_ignored_people_fetch_no_emoji_pictures() {
         use crate::images::testing::kitty;
         let images = ImageStore::new(kitty());
@@ -1707,17 +1749,20 @@ mod tests {
             [(0, BLOB.to_owned()), (0, PARTY.to_owned())]
         );
 
-        // Deleted: nothing.
-        let deleted = Message {
-            kind: MsgKind::Redacted,
-            ..emoji_message(alice, ("", ""))
-        };
-        assert!(
-            emoji_layout(deleted, &images, &nobody, None)
-                .0
-                .emote_wants
-                .is_empty()
-        );
+        // Deleted, or not decrypted (its reactions are still there): nothing.
+        for kind in [MsgKind::Redacted, MsgKind::Undecryptable] {
+            let hidden = Message {
+                kind,
+                ..emoji_message(alice, ("", ""))
+            };
+            assert!(
+                emoji_layout(hidden, &images, &nobody, None)
+                    .0
+                    .emote_wants
+                    .is_empty(),
+                "{kind:?}"
+            );
+        }
 
         // From someone ignored: nothing either.
         let ignored = BTreeSet::from([alice.to_owned()]);
