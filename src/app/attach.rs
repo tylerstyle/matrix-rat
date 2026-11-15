@@ -15,9 +15,6 @@ use crate::model::RoomKind;
 use crate::model::{ItemRef, Message, OWN_NAME};
 use crate::upload::{self, Chosen};
 
-/// Completions named in the status line when Tab leaves a choice.
-const OPTIONS_SHOWN: usize = 6;
-
 /// Where files wait: a room, or one thread of it (room id and what names the thread).
 /// Like drafts, they belong to the conversation they were attached in.
 pub type Scope = (String, Option<String>);
@@ -275,15 +272,7 @@ impl App {
         }
         match upload::complete(argument) {
             Some(completion) => {
-                if !completion.options.is_empty() {
-                    let shown = completion.options.len().min(OPTIONS_SHOWN);
-                    let mut choices = completion.options[..shown].join("  ");
-                    if completion.options.len() > shown {
-                        choices.push_str(&format!(
-                            "  … and {} more",
-                            completion.options.len() - shown
-                        ));
-                    }
+                if let Some(choices) = super::format_completion_options(&completion.options) {
                     self.show_toast(choices);
                 }
                 self.composer

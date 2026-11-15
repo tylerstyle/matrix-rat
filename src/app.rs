@@ -3507,7 +3507,9 @@ impl App {
             }
             Some(Modal::Search(_)) => return self.search_paste(first_line),
             Some(Modal::GlobalSearch(_)) => return self.global_search_paste(first_line),
-            Some(Modal::New(_) | Modal::RoomInfo(_)) => return self.on_manage_paste(first_line),
+            Some(Modal::New(_) | Modal::RoomInfo(_)) => {
+                return self.on_manage_paste(&text, first_line);
+            }
             // A paste is not an answer to a menu.
             Some(Modal::Menu(_)) => return,
             Some(Modal::Keybinds(_)) => return,
@@ -4018,6 +4020,39 @@ impl App {
                     popup.avatar_path.place(rel_col, false);
                 }
             }
+            InputTarget::RoomSettingEncrypt => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && let Some(crate::manage::SettingSubview::EncryptConfirm {
+                        confirm,
+                        focus,
+                        ..
+                    }) = &mut info.setting_view
+                {
+                    *focus = 0;
+                    confirm.place(rel_col, false);
+                }
+            }
+            InputTarget::RoomSettingAvatar => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && let Some(crate::manage::SettingSubview::Picture { path, focus, .. }) =
+                        &mut info.setting_view
+                {
+                    *focus = 0;
+                    path.place(rel_col, false);
+                }
+            }
+            InputTarget::RoomSettingAlias => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && let Some(crate::manage::SettingSubview::Addresses { input, focus, .. }) =
+                        &mut info.setting_view
+                {
+                    *focus = 0;
+                    input.place(rel_col, false);
+                }
+            }
         }
     }
 
@@ -4041,6 +4076,87 @@ impl App {
             self.dirty = true;
         }
     }
+}
+
+const PATH_OPTIONS_SHOWN: usize = 6;
+
+/// Formats up to [`PATH_OPTIONS_SHOWN`] file completion candidates for a notice or toast.
+pub(super) fn format_completion_options(options: &[String]) -> Option<String> {
+    if options.is_empty() {
+        return None;
+    }
+    let shown = options.len().min(PATH_OPTIONS_SHOWN);
+    let mut choices = options[..shown].join("  ");
+    if options.len() > shown {
+        choices.push_str(&format!("  … and {} more", options.len() - shown));
+    }
+    Some(choices)
+}
+
+/// Outcome of Tab-completing a single-file [`LineEdit`] path field.
+pub(super) enum PathCompleteResult {
+    /// Empty input: caller falls through to normal Tab navigation.
+    Empty,
+    /// Matched one or more candidates (updates `field` when `changed` is true).
+    Handled {
+        notice: Option<String>,
+        changed: bool,
+        has_options: bool,
+    },
+    /// Nothing on disk matched.
+    NoMatch,
+}
+
+/// Tab-completes a single-file path input via [`crate::upload::complete`].
+pub(super) fn complete_path_field(field: &mut LineEdit) -> PathCompleteResult {
+    let current = field.as_str().to_owned();
+    if current.is_empty() {
+        return PathCompleteResult::Empty;
+    }
+    match crate::upload::complete(&current) {
+        Some(completion) => {
+            let changed = completion.text != current;
+            let has_options = !completion.options.is_empty();
+            if changed {
+                field.set(&completion.text);
+            }
+            PathCompleteResult::Handled {
+                notice: format_completion_options(&completion.options),
+                changed,
+                has_options,
+            }
+        }
+        None => PathCompleteResult::NoMatch,
+    }
+}
+
+/// Extracts a single dropped image file path from a terminal paste, if any.
+pub(super) fn dropped_single_image_path(full_text: &str) -> Result<Option<String>, &'static str> {
+    let Some(paths) = crate::upload::dropped_files(full_text) else {
+        return Ok(None);
+    };
+    if paths.len() > 1 {
+        return Err("Drop one image file.");
+    }
+    Ok(paths.into_iter().next().map(|p| p.display().to_string()))
+}
+
+/// Validates a typed or dropped path as a single supported image within the server limit.
+pub(super) fn validate_avatar_path(raw: &str, limit: Option<u64>) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("Enter an image file path first.".to_owned());
+    }
+    let files = crate::upload::command_files(raw)?;
+    if files.len() != 1 {
+        return Err("Choose a single image file.".to_owned());
+    }
+    let path = &files[0].path;
+    let prepared = crate::upload::prepare(path, limit)?;
+    if prepared.picture.is_none() || !prepared.mime.starts_with("image/") {
+        return Err(format!("{} is not a supported image", prepared.name));
+    }
+    Ok(path.clone())
 }
 
 /// Best effort; the login form also shows the address to open by hand.

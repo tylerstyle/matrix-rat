@@ -121,8 +121,8 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
-| `Ctrl-N` | join a room, start a chat (search people by name or ID), create a room (`info` or `Enter` for User info) |
-| `F4` | room details and members (pinned messages, invite, rename, name in room, notifications, favourite, low priority, roles, ban/unban, ignore, leave; `Enter` on a member for User info) |
+| `Ctrl-N` | join a room, browse public rooms, start a chat (search people by name or ID), create a room (`info` or `Enter` for User info) |
+| `F4` | room details, Room settings (join rule, history, encryption, picture, addresses, direct chat, permissions), join requests, members (`Enter` on a member for User info) |
 | `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
@@ -150,6 +150,12 @@ them, or change their role / remove / ban them in the current room. Open **Setti
 (`F2`, `Ctrl-P`, or click your name badge on the message box's top border) to update your
 display name or avatar picture (`Tab` completes file paths, or drop an image file onto the
 window), and use **Name in room…** in Room info (`F4`) to set or clear a per-room display name.
+In `Ctrl-N`, **Browse public rooms** searches your homeserver's (or another server's) directory
+and previews rooms before joining or knocking; opening an unjoined room link uses the same
+preview. In Room info (`F4`), moderators can accept, decline, or ban incoming join requests, and
+expand **Room settings** above Members to inspect or (where allowed) change who can join, read
+future history, turn encryption on, set the room picture, manage main/alternate/local
+addresses, mark direct chats, or adjust action permissions.
 
 **Sessions and keys** live in the settings (`F2`) and the command palette (`Ctrl-P`):
 

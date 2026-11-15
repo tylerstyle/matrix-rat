@@ -8,15 +8,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::hit::{HitId, InputTarget};
-use super::image::avatar_tile;
+use super::image::{avatar_tile, draw_avatar};
 use super::modal::{button, centered, field, popup, row};
 use crate::action::Action;
 use crate::app::App;
 use crate::manage::{
-    BanPrompt, Click, Confirm, InfoPopup, InfoRow, NewPopup, RoleChooser, Stage, confirm_keys,
-    notify_label,
+    BanPrompt, Click, Confirm, InfoPopup, InfoRow, NewPopup, PermAction, RoleChooser, RoomSetting,
+    SettingSubview, Stage, address_entries, confirm_keys, notify_label, validate_permissions_draft,
 };
-use crate::matrix::{PreviewMembership, RoomKnockRequest, RoomMember};
+use crate::matrix::{PreviewMembership, RoomHistory, RoomJoinRule, RoomKnockRequest, RoomMember};
 use crate::text::{sanitize_line, truncate, width, wrap};
 use crate::theme::{Role, Theme};
 
@@ -1068,6 +1068,9 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
                 theme.style(Role::SidebarSection),
             ))));
         }
+        if matches!(row, InfoRow::SettingsToggle) {
+            entries.push(Entry::Text(Line::default()));
+        }
         if matches!(row, InfoRow::Member(_)) {
             if !heading_done {
                 heading_done = true;
@@ -1258,7 +1261,9 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
             rect,
         );
     }
-    if let Some(cursor) = cursor {
+    if info.setting_view.is_some() {
+        draw_setting_subview(frame, app, area, info);
+    } else if let Some(cursor) = cursor {
         frame.set_cursor_position(cursor);
     }
 }
@@ -1323,6 +1328,9 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
     if let Some(error) = &info.error {
         return (crate::text::sanitize_line(error), Role::Error);
     }
+    if let Some(notice) = &info.notice {
+        return (crate::text::sanitize_line(notice), Role::StatusOk);
+    }
     let members_error = info.details.as_ref().and_then(|d| d.members_error.as_ref());
     if let (Some(error), Some(InfoRow::Member(_))) = (members_error, current) {
         return (crate::text::sanitize_line(error), Role::Error);
@@ -1349,6 +1357,72 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
         Some(InfoRow::OwnName) => "Set a display name just for this room (clear for default).",
         Some(InfoRow::Leave) if info.pending() => "",
         Some(InfoRow::Leave) => "Leaving also removes the room and its history from this device.",
+        Some(InfoRow::SettingsToggle) => {
+            if info.settings_open {
+                "Enter or ← to collapse room settings."
+            } else {
+                "Enter or → to expand room settings."
+            }
+        }
+        Some(InfoRow::Setting(setting)) => {
+            let editable = info.setting_editable(setting);
+            match setting {
+                RoomSetting::JoinRule => {
+                    let restricted = info
+                        .details
+                        .as_ref()
+                        .and_then(|d| d.join_rule)
+                        .is_some_and(|r| r.to_ruma().is_none());
+                    if restricted {
+                        "This room uses a restricted or custom join rule (read-only here)."
+                    } else if editable {
+                        "Enter to choose who can join (invite, knock, or public)."
+                    } else {
+                        "Read-only: you do not have permission to change who can join."
+                    }
+                }
+                RoomSetting::History => {
+                    if editable {
+                        "Enter to choose who can read future message history."
+                    } else {
+                        "Read-only: you do not have permission to change history visibility."
+                    }
+                }
+                RoomSetting::Encryption => {
+                    if info.details.as_ref().and_then(|d| d.encrypted) == Some(true) {
+                        "End-to-end encryption is on and cannot be turned off."
+                    } else if editable {
+                        "Enter to turn encryption on permanently (requires typing ENCRYPT)."
+                    } else {
+                        "Read-only: you do not have permission to enable encryption."
+                    }
+                }
+                RoomSetting::Picture => {
+                    if editable {
+                        "Enter to set or remove the room picture."
+                    } else {
+                        "Read-only: you do not have permission to change the room picture."
+                    }
+                }
+                RoomSetting::Addresses => {
+                    if editable {
+                        "Enter to manage main, alternate, and local room addresses."
+                    } else {
+                        "Enter to view addresses (read-only: you cannot edit room addresses)."
+                    }
+                }
+                RoomSetting::Direct => {
+                    "Enter or Space to mark or unmark this room as a direct chat."
+                }
+                RoomSetting::Permissions => {
+                    if editable {
+                        "Enter to change who can send, invite, kick, ban, redact, and edit."
+                    } else {
+                        "Enter to view who can send, invite, kick, ban, redact, and edit."
+                    }
+                }
+            }
+        }
         Some(row @ InfoRow::KnockRequest(_)) => match info.knock_request(row) {
             Some(req) => return (knock_hint(req), Role::Muted),
             None => "",
@@ -1509,6 +1583,23 @@ fn info_row(
         return Some(Position::new(x, rect.y));
     }
 
+    if row == InfoRow::SettingsToggle {
+        let arrow = if info.settings_open { "▾" } else { "▸" };
+        let style = if selected {
+            theme.style(Role::TitleFocused).add_modifier(Modifier::BOLD)
+        } else {
+            theme.style(Role::SidebarSection)
+        };
+        let label = format!("{arrow} Room settings");
+        let space = (rect.width as usize).saturating_sub(2);
+        finish(
+            frame,
+            vec![marker, Span::styled(truncate(&label, space), style)],
+        );
+        app.hits.add(rect, hit(Click::Row(index)));
+        return None;
+    }
+
     let (label, label_style) = match row {
         InfoRow::Favourite => ("Favourite", label_style),
         InfoRow::LowPriority => ("Low priority", label_style),
@@ -1519,7 +1610,21 @@ fn info_row(
         InfoRow::Invite => ("Invite someone…", label_style),
         InfoRow::OwnName => ("Name in room…", label_style),
         InfoRow::Leave => (info.leave_label(), theme.style(Role::Error)),
-        InfoRow::KnockRequest(_) | InfoRow::Member(_) => ("", label_style),
+        InfoRow::Setting(setting) => (
+            match setting {
+                RoomSetting::JoinRule => "  Who can join",
+                RoomSetting::History => "  History",
+                RoomSetting::Encryption => "  Encryption",
+                RoomSetting::Picture => "  Room picture",
+                RoomSetting::Addresses => "  Addresses",
+                RoomSetting::Direct => "  Direct chat",
+                RoomSetting::Permissions => "  Permissions",
+            },
+            label_style,
+        ),
+        InfoRow::SettingsToggle | InfoRow::KnockRequest(_) | InfoRow::Member(_) => {
+            ("", label_style)
+        }
     };
     let mut spans = vec![
         marker,
@@ -1527,6 +1632,7 @@ fn info_row(
     ];
     app.hits.add(rect, hit(Click::Row(index)));
     let value_x = rect.x + 2 + ACTION_LABEL as u16;
+    let space = (rect.width as usize).saturating_sub(2 + ACTION_LABEL);
     match row {
         InfoRow::OwnName => {
             let name = info
@@ -1535,7 +1641,6 @@ fn info_row(
                 .and_then(|d| d.own_display_name.as_deref())
                 .map(sanitize_line)
                 .filter(|s| !s.is_empty());
-            let space = (rect.width as usize).saturating_sub(2 + ACTION_LABEL);
             match name {
                 Some(name) => spans.push(Span::styled(
                     truncate(&name, space),
@@ -1545,6 +1650,89 @@ fn info_row(
                     truncate("default", space),
                     theme.style(Role::Muted),
                 )),
+            }
+        }
+        InfoRow::Setting(setting) => {
+            if let Some(details) = &info.details {
+                let editable = info.setting_editable(setting);
+                let (value, role) = match setting {
+                    RoomSetting::JoinRule => {
+                        let base = details.join_rule.map_or("unknown", |r| r.label());
+                        if editable {
+                            (base.to_owned(), Role::Text)
+                        } else {
+                            (format!("{base} (read-only)"), Role::Muted)
+                        }
+                    }
+                    RoomSetting::History => {
+                        let base = details.history_visibility.map_or("unknown", |h| h.label());
+                        if editable {
+                            (base.to_owned(), Role::Text)
+                        } else {
+                            (format!("{base} (read-only)"), Role::Muted)
+                        }
+                    }
+                    RoomSetting::Encryption => match details.encrypted {
+                        Some(true) => ("on · cannot be turned off".to_owned(), Role::StatusOk),
+                        Some(false) if editable => ("off · turn on…".to_owned(), Role::Text),
+                        Some(false) => ("off (read-only)".to_owned(), Role::Muted),
+                        None => ("unknown (read-only)".to_owned(), Role::Muted),
+                    },
+                    RoomSetting::Picture => {
+                        let base = if details.avatar_url.is_some() {
+                            "set"
+                        } else {
+                            "none"
+                        };
+                        if editable {
+                            let role = if details.avatar_url.is_some() {
+                                Role::Text
+                            } else {
+                                Role::Muted
+                            };
+                            (format!("{base}…"), role)
+                        } else {
+                            (format!("{base} (read-only)"), Role::Muted)
+                        }
+                    }
+                    RoomSetting::Addresses => {
+                        let entries = address_entries(details);
+                        let base = if let Some(main) = &details.canonical_alias {
+                            let extra = entries.len().saturating_sub(1);
+                            if extra > 0 {
+                                format!("{main} (+{extra})")
+                            } else {
+                                main.clone()
+                            }
+                        } else if !entries.is_empty() {
+                            format!("{} unpublished", entries.len())
+                        } else {
+                            "none".to_owned()
+                        };
+                        if !editable {
+                            (format!("{base} (read-only)"), Role::Muted)
+                        } else if entries.is_empty() {
+                            (base, Role::Muted)
+                        } else {
+                            (base, Role::Text)
+                        }
+                    }
+                    RoomSetting::Direct => {
+                        if details.direct {
+                            ("● yes".to_owned(), Role::StatusOk)
+                        } else {
+                            ("○ no".to_owned(), Role::Muted)
+                        }
+                    }
+                    RoomSetting::Permissions => {
+                        if editable {
+                            ("edit…".to_owned(), Role::Text)
+                        } else {
+                            ("view (read-only)".to_owned(), Role::Muted)
+                        }
+                    }
+                };
+                spans.push(Span::styled(truncate(&value, space), theme.style(role)));
             }
         }
         InfoRow::Favourite | InfoRow::LowPriority => {
@@ -1944,4 +2132,797 @@ pub(super) fn draw_role_chooser(
             Rect::new(inner.x, y, inner.width, 1),
         );
     }
+}
+
+fn draw_setting_subview(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPopup) {
+    let Some(mut subview) = info.setting_view.take() else {
+        return;
+    };
+    let theme = app.theme.clone();
+    match &mut subview {
+        SettingSubview::JoinRule { selected } => {
+            let current = info.details.as_ref().and_then(|d| d.join_rule);
+            draw_setting_picker(
+                frame,
+                app,
+                &theme,
+                area,
+                info,
+                "Who can join",
+                "↑↓ choose · Enter apply · Esc back",
+                &RoomJoinRule::EDITABLE,
+                *selected,
+                |r| Some(*r) == current,
+                |r| r.label(),
+                "Anyone can join a Public room; Knock lets people ask to join.",
+                false,
+            );
+        }
+        SettingSubview::History { selected } => {
+            let current = info.details.as_ref().and_then(|d| d.history_visibility);
+            draw_setting_picker(
+                frame,
+                app,
+                &theme,
+                area,
+                info,
+                "Who can read history",
+                "↑↓ choose · Enter apply · Esc back",
+                &RoomHistory::ALL,
+                *selected,
+                |h| Some(*h) == current,
+                |h| h.label(),
+                "WARNING: Changing history visibility only affects future messages.",
+                true,
+            );
+        }
+        SettingSubview::EncryptConfirm {
+            confirm,
+            focus,
+            error,
+        } => {
+            draw_encrypt_subview(
+                frame,
+                app,
+                &theme,
+                area,
+                info,
+                confirm,
+                *focus,
+                error.as_deref(),
+            );
+        }
+        SettingSubview::Picture {
+            path,
+            focus,
+            error,
+            notice,
+        } => {
+            draw_picture_subview(
+                frame,
+                app,
+                &theme,
+                area,
+                info,
+                path,
+                *focus,
+                error.as_deref(),
+                notice.as_deref(),
+            );
+        }
+        SettingSubview::Addresses {
+            input,
+            focus,
+            selected,
+            confirm_delete,
+            error,
+            notice,
+        } => {
+            draw_addresses_subview(
+                frame,
+                app,
+                &theme,
+                area,
+                info,
+                input,
+                *focus,
+                selected,
+                confirm_delete.as_deref(),
+                error.as_deref(),
+                notice.as_deref(),
+            );
+        }
+        SettingSubview::Permissions {
+            draft,
+            selected,
+            error,
+        } => {
+            draw_permissions_subview(
+                frame,
+                app,
+                &theme,
+                area,
+                info,
+                draft,
+                *selected,
+                error.as_deref(),
+            );
+        }
+    }
+    info.setting_view = Some(subview);
+}
+
+#[expect(clippy::too_many_arguments)]
+fn draw_setting_picker<T>(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    area: Rect,
+    info: &InfoPopup,
+    title: &str,
+    footer: &str,
+    options: &[T],
+    selected: usize,
+    is_current: impl Fn(&T) -> bool,
+    label_of: impl Fn(&T) -> &'static str,
+    note: &str,
+    warning_bold: bool,
+) {
+    let Some(rect) = centered(area, 66, 13) else {
+        return;
+    };
+    let inner = popup(frame, app, area, rect, title, footer);
+    let room = inner.width as usize;
+    if room < 10 || inner.height < 4 {
+        return;
+    }
+    let note_style = if warning_bold {
+        theme.style(Role::Error).add_modifier(Modifier::BOLD)
+    } else {
+        theme.style(Role::Muted)
+    };
+    let mut y = 0u16;
+    for line in wrap(note, room).into_iter().take(2) {
+        if y + 2 >= inner.height {
+            break;
+        }
+        frame.render_widget(Line::from(Span::styled(line, note_style)), row(inner, y));
+        y += 1;
+    }
+    y += 1;
+    let busy = info.busy.is_some();
+    let status_row = inner.height - 1;
+    for (idx, opt) in options.iter().enumerate() {
+        if y >= status_row {
+            break;
+        }
+        let r = row(inner, y);
+        let active = idx == selected;
+        let hit_id = hit(Click::SettingChoice(idx));
+        let hovered = app.hover == Some(hit_id);
+        let style = if active {
+            theme.style(Role::Pill)
+        } else if hovered {
+            theme.style(Role::Hover)
+        } else {
+            theme.style(Role::Text)
+        };
+        let prefix = if active { "▸ " } else { "  " };
+        let cur = if is_current(opt) { " (current)" } else { "" };
+        let text = format!("{prefix}{}{cur}", label_of(opt));
+        frame.buffer_mut().set_style(r, style);
+        frame.render_widget(Line::from(Span::styled(fit(&text, room), style)), r);
+        if !busy {
+            app.hits.add(r, hit_id);
+        }
+        y += 1;
+    }
+    draw_subview_status(
+        frame,
+        theme,
+        row(inner, status_row),
+        info.busy,
+        info.error.as_deref(),
+        info.notice.as_deref(),
+        "",
+    );
+}
+
+#[expect(clippy::too_many_arguments)]
+fn draw_encrypt_subview(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    area: Rect,
+    info: &InfoPopup,
+    confirm: &mut crate::lineedit::LineEdit,
+    focus: usize,
+    error: Option<&str>,
+) {
+    let Some(rect) = centered(area, 66, 12) else {
+        return;
+    };
+    let inner = popup(
+        frame,
+        app,
+        area,
+        rect,
+        "Turn encryption ON",
+        "Tab switch · Enter confirm · Esc cancel",
+    );
+    if inner.width < 12 || inner.height < 6 {
+        return;
+    }
+    let room = inner.width as usize;
+    let busy = info.busy.is_some();
+    frame.render_widget(
+        Line::from(Span::styled(
+            fit("Turning on encryption cannot be undone.", room),
+            theme.style(Role::Error).add_modifier(Modifier::BOLD),
+        )),
+        row(inner, 0),
+    );
+    frame.render_widget(
+        Line::from(Span::styled(
+            fit("You will not be able to turn encryption off later.", room),
+            theme.style(Role::Text),
+        )),
+        row(inner, 1),
+    );
+    let (cursor, input_rect) = field(
+        frame,
+        theme,
+        row(inner, 3),
+        "Type ENCRYPT",
+        confirm,
+        false,
+        !busy && focus == 0,
+    );
+    if !busy {
+        app.hits
+            .add(input_rect, HitId::Input(InputTarget::RoomSettingEncrypt));
+    }
+    draw_slot_buttons(
+        frame,
+        app,
+        theme,
+        row(inner, 5),
+        focus,
+        busy,
+        &[(1, "[Turn encryption on]"), (2, "[Cancel]")],
+    );
+    draw_subview_status(
+        frame,
+        theme,
+        row(inner, inner.height - 1),
+        info.busy,
+        error.or(info.error.as_deref()),
+        None,
+        "Type ENCRYPT in capitals, then press Enter.",
+    );
+    if let Some(at) = cursor {
+        frame.set_cursor_position(at);
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
+fn draw_picture_subview(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    area: Rect,
+    info: &InfoPopup,
+    path: &mut crate::lineedit::LineEdit,
+    focus: usize,
+    error: Option<&str>,
+    notice: Option<&str>,
+) {
+    let Some(rect) = centered(area, 68, 13) else {
+        return;
+    };
+    let inner = popup(
+        frame,
+        app,
+        area,
+        rect,
+        "Room picture",
+        "Tab path/focus · Enter apply · Esc back",
+    );
+    if inner.width < 14 || inner.height < 7 {
+        return;
+    }
+    let room = inner.width as usize;
+    let busy = info.busy.is_some();
+    let avatar_url = info.details.as_ref().and_then(|d| d.avatar_url.clone());
+    let has_avatar = avatar_url.is_some();
+
+    let header_rect = row(inner, 0);
+    let tile_rect = Rect::new(header_rect.x, header_rect.y, 2.min(header_rect.width), 1);
+    let label = if has_avatar {
+        format!("{} · Picture set", sanitize_line(&info.name))
+    } else {
+        format!("{} · No picture set", sanitize_line(&info.name))
+    };
+    frame.render_widget(
+        Line::from(vec![
+            avatar_tile(theme, &info.room_id, &info.name),
+            Span::raw(" "),
+            Span::styled(
+                truncate(&label, room.saturating_sub(3)),
+                theme.style(Role::Text),
+            ),
+        ]),
+        header_rect,
+    );
+    if let Some(url) = avatar_url.as_deref()
+        && tile_rect.width >= 2
+    {
+        draw_avatar(frame, &mut app.images, theme, url, tile_rect, 0, false);
+    }
+
+    let (cursor, input_rect) = field(
+        frame,
+        theme,
+        row(inner, 2),
+        "Image path",
+        path,
+        false,
+        !busy && focus == 0,
+    );
+    if !busy {
+        app.hits
+            .add(input_rect, HitId::Input(InputTarget::RoomSettingAvatar));
+    }
+    frame.render_widget(
+        Line::from(Span::styled(
+            fit(
+                "Drop an image file or press Tab inside Image path to complete.",
+                room,
+            ),
+            theme.style(Role::Muted),
+        )),
+        row(inner, 3),
+    );
+    let mut buttons = vec![(1, "[Set picture]")];
+    if has_avatar {
+        buttons.push((2, "[Remove picture]"));
+    }
+    buttons.push((3, "[Back]"));
+    draw_slot_buttons(frame, app, theme, row(inner, 5), focus, busy, &buttons);
+    draw_subview_status(
+        frame,
+        theme,
+        row(inner, inner.height - 1),
+        info.busy,
+        error.or(info.error.as_deref()),
+        notice.or(info.notice.as_deref()),
+        "Enter submits · Esc goes back",
+    );
+    if let Some(at) = cursor {
+        frame.set_cursor_position(at);
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
+fn draw_addresses_subview(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    area: Rect,
+    info: &InfoPopup,
+    input: &mut crate::lineedit::LineEdit,
+    focus: usize,
+    selected: &mut usize,
+    confirm_delete: Option<&str>,
+    error: Option<&str>,
+    notice: Option<&str>,
+) {
+    let height = area.height.saturating_sub(2).clamp(12, 24);
+    let Some(rect) = centered(area, 74, height) else {
+        return;
+    };
+    let can_edit = info.setting_editable(RoomSetting::Addresses);
+    let footer = if can_edit {
+        "↑↓ list · Tab focus · m main · u unpublish · Del delete local · Esc back"
+    } else {
+        "↑↓ list · Read-only · Esc back"
+    };
+    let inner = popup(frame, app, area, rect, "Room addresses", footer);
+    if inner.width < 18 || inner.height < 7 {
+        return;
+    }
+    let room = inner.width as usize;
+    let busy = info.busy.is_some();
+    let Some(details) = &info.details else {
+        return;
+    };
+    let main_text = details
+        .canonical_alias
+        .as_deref()
+        .map_or_else(|| "none".to_owned(), sanitize_line);
+    frame.render_widget(
+        Line::from(vec![
+            Span::styled("Main address: ", theme.style(Role::Muted)),
+            Span::styled(
+                truncate(&main_text, room.saturating_sub(14)),
+                theme.style(if details.canonical_alias.is_some() {
+                    Role::Text
+                } else {
+                    Role::Muted
+                }),
+            ),
+        ]),
+        row(inner, 0),
+    );
+    let mut y = 1u16;
+    if let Some(err) = &details.local_aliases_error {
+        frame.render_widget(
+            Line::from(Span::styled(truncate(err, room), theme.style(Role::Error))),
+            row(inner, y),
+        );
+        y += 1;
+    }
+    let mut cursor = None;
+    if can_edit {
+        let (at, input_rect) = field(
+            frame,
+            theme,
+            row(inner, y),
+            "Address",
+            input,
+            false,
+            !busy && focus == 0,
+        );
+        cursor = at;
+        if !busy {
+            app.hits
+                .add(input_rect, HitId::Input(InputTarget::RoomSettingAlias));
+        }
+        y += 1;
+        let mut buttons = vec![(1, "[Create local]"), (2, "[Publish alt]")];
+        if details.canonical_alias.is_some() {
+            buttons.push((3, "[Clear main]"));
+        }
+        draw_slot_buttons(frame, app, theme, row(inner, y), focus, busy, &buttons);
+        y += 1;
+        if let Some(target) = confirm_delete {
+            frame.render_widget(
+                Line::from(Span::styled(
+                    truncate(
+                        &format!("Delete local {target}? Press Del or click again to confirm."),
+                        room,
+                    ),
+                    theme.style(Role::Error).add_modifier(Modifier::BOLD),
+                )),
+                row(inner, y),
+            );
+            y += 1;
+        }
+    }
+    y += 1;
+    let status_row = inner.height - 1;
+    if y < status_row {
+        frame.render_widget(
+            Line::from(Span::styled(
+                "Published & local addresses",
+                theme.style(Role::SidebarSection),
+            )),
+            row(inner, y),
+        );
+        y += 1;
+    }
+
+    let entries = address_entries(details);
+    *selected = (*selected).min(entries.len().saturating_sub(1));
+    let avail = status_row.saturating_sub(y) as usize;
+    if entries.is_empty() && avail > 0 {
+        frame.render_widget(
+            Line::from(Span::styled(
+                "  No published or local addresses yet.",
+                theme.style(Role::Muted),
+            )),
+            row(inner, y),
+        );
+    } else if avail > 0 {
+        let skip = if *selected >= avail {
+            *selected + 1 - avail
+        } else {
+            0
+        };
+        let own_hs = details.own_homeserver.as_deref();
+        for (idx, entry) in entries.iter().enumerate().skip(skip).take(avail) {
+            let r = row(inner, y);
+            let is_sel = idx == *selected;
+            let row_hit = hit(Click::AddressRow(idx));
+            let hovered = app.hover == Some(row_hit);
+            let mut tags = Vec::new();
+            if entry.is_canonical {
+                tags.push("main");
+            }
+            if entry.is_alt {
+                tags.push("alt");
+            }
+            if entry.is_local {
+                tags.push("local");
+            }
+            let tag_text = if tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", tags.join("·"))
+            };
+            let local_on_own_hs =
+                entry.is_local && own_hs.is_none_or(|hs| entry.alias.ends_with(&format!(":{hs}")));
+            let mut pills = Vec::new();
+            if can_edit && is_sel && !busy {
+                if !entry.is_canonical {
+                    pills.push(("[Make main]", Click::AddressMakeMain(idx)));
+                    if !entry.is_alt {
+                        pills.push(("[Publish alt]", Click::AddressPublishAlt(idx)));
+                    }
+                }
+                if entry.is_canonical || entry.is_alt {
+                    pills.push(("[Unpublish]", Click::AddressUnpublish(idx)));
+                }
+                if local_on_own_hs {
+                    pills.push(("[Delete local]", Click::AddressDeleteLocal(idx)));
+                }
+            }
+            let pills_w: usize = if pills.is_empty() {
+                0
+            } else {
+                pills.iter().map(|(l, _)| width(l) + 1).sum()
+            };
+            let alias_room = (r.width as usize).saturating_sub(2 + width(&tag_text) + pills_w);
+            let line_style = if is_sel {
+                theme.style(Role::TitleFocused)
+            } else {
+                theme.style(Role::Text)
+            };
+            let marker = if is_sel { "› " } else { "  " };
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(marker, theme.style(Role::TitleFocused)),
+                    Span::styled(truncate(&entry.alias, alias_room), line_style),
+                    Span::styled(tag_text, theme.style(Role::Muted)),
+                ]),
+                r,
+            );
+            if hovered && !is_sel {
+                frame.buffer_mut().set_style(r, theme.style(Role::Hover));
+            }
+            if !busy {
+                app.hits.add(r, row_hit);
+                if !pills.is_empty() {
+                    draw_pill_buttons(frame, app, theme, r, pills_w, &pills);
+                }
+            }
+            y += 1;
+        }
+    }
+
+    draw_subview_status(
+        frame,
+        theme,
+        row(inner, status_row),
+        info.busy,
+        error.or(info.error.as_deref()),
+        notice.or(info.notice.as_deref()),
+        if can_edit {
+            "Use #name (your homeserver) or #name:server."
+        } else {
+            "Read-only: you do not have permission to edit room addresses."
+        },
+    );
+    if let Some(at) = cursor {
+        frame.set_cursor_position(at);
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
+fn draw_permissions_subview(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    area: Rect,
+    info: &InfoPopup,
+    draft: &crate::matrix::RoomPermissions,
+    selected: usize,
+    error: Option<&str>,
+) {
+    let Some(rect) = centered(area, 74, 15) else {
+        return;
+    };
+    let editable = info.setting_editable(RoomSetting::Permissions);
+    let footer = if editable {
+        "↑↓ row · ←→ level (0 / 50 / 100) · Enter save · Esc back"
+    } else {
+        "Read-only · Esc back"
+    };
+    let inner = popup(frame, app, area, rect, "Room permissions", footer);
+    if inner.width < 20 || inner.height < 10 {
+        return;
+    }
+    let room = inner.width as usize;
+    let busy = info.busy.is_some();
+    let Some(details) = &info.details else {
+        return;
+    };
+    let live_err = if editable {
+        validate_permissions_draft(details, draft).err()
+    } else {
+        None
+    };
+
+    let (banner, banner_role) = if !editable {
+        (
+            "Read-only: you do not have permission to edit room permissions.".to_owned(),
+            Role::Muted,
+        )
+    } else if details.own_is_creator {
+        (
+            "You hold creator infinite power in this room.".to_owned(),
+            Role::StatusOk,
+        )
+    } else {
+        (
+            format!(
+                "Your power level: {} · edits cannot exceed it or lock you out.",
+                details.own_power_level
+            ),
+            Role::Muted,
+        )
+    };
+    frame.render_widget(
+        Line::from(Span::styled(fit(&banner, room), theme.style(banner_role))),
+        row(inner, 0),
+    );
+
+    for (row_idx, action) in PermAction::ALL.iter().enumerate() {
+        let r = row(inner, 2 + row_idx as u16);
+        let is_sel = selected == row_idx;
+        let val = action.get(draft);
+        let mut x = r.x;
+        let marker = if is_sel { "› " } else { "  " };
+        let label = format!("{:<17}", action.label());
+        frame.render_widget(
+            Line::from(vec![
+                Span::styled(marker, theme.style(Role::TitleFocused)),
+                Span::styled(
+                    label,
+                    theme.style(if is_sel {
+                        Role::TitleFocused
+                    } else {
+                        Role::Text
+                    }),
+                ),
+            ]),
+            Rect::new(x, r.y, r.width.min(19), 1),
+        );
+        x += 19;
+        for &(level, level_label) in &PermAction::LEVELS {
+            let pill = format!("[{level_label}]");
+            let pw = width(&pill) as u16;
+            if x + pw > r.right() {
+                break;
+            }
+            let pr = Rect::new(x, r.y, pw, 1);
+            let hit_id = hit(Click::PermSet(row_idx, level));
+            let active = val == level;
+            let hovered = editable && app.hover == Some(hit_id);
+            let role = if active && editable {
+                Role::Pill
+            } else if active {
+                Role::TitleFocused
+            } else if hovered {
+                Role::Hover
+            } else if editable {
+                Role::StatusKey
+            } else {
+                Role::Muted
+            };
+            frame.render_widget(Line::from(Span::styled(pill, theme.style(role))), pr);
+            if editable && !busy {
+                app.hits.add(pr, hit_id);
+            }
+            x += pw + 1;
+        }
+        if !PermAction::LEVELS.iter().any(|(l, _)| *l == val) && x + 6 <= r.right() {
+            let custom = format!("({val})");
+            let cw = width(&custom) as u16;
+            frame.render_widget(
+                Line::from(Span::styled(custom, theme.style(Role::Muted))),
+                Rect::new(x, r.y, cw.min(r.right() - x), 1),
+            );
+        }
+    }
+
+    let action_y = 2 + PermAction::ALL.len() as u16 + 1;
+    let btn_row = row(inner, action_y);
+    let mut buttons = Vec::new();
+    let btn_focus = if selected >= PermAction::ALL.len() {
+        selected - PermAction::ALL.len()
+    } else {
+        usize::MAX
+    };
+    if editable {
+        buttons.push((0, "[Save]"));
+        buttons.push((1, "[Back]"));
+    } else {
+        buttons.push((1, "[Back]"));
+    }
+    draw_slot_buttons(frame, app, theme, btn_row, btn_focus, busy, &buttons);
+
+    draw_subview_status(
+        frame,
+        theme,
+        row(inner, inner.height - 1),
+        info.busy,
+        error.or(live_err.as_deref()).or(info.error.as_deref()),
+        info.notice.as_deref(),
+        if editable {
+            "Pick Default (0), Moderator (50), or Admin (100), then Save."
+        } else {
+            "Read-only view of the room's action power levels."
+        },
+    );
+}
+
+fn draw_slot_buttons(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    rect: Rect,
+    focus: usize,
+    busy: bool,
+    buttons: &[(usize, &str)],
+) {
+    let mut x = rect.x;
+    for &(slot, label) in buttons {
+        let w = width(label) as u16;
+        if x + w > rect.right() {
+            break;
+        }
+        let r = Rect::new(x, rect.y, w, 1);
+        let id = hit(Click::SettingSlot(slot));
+        let focused = focus == slot;
+        if !focused && app.hover == Some(id) {
+            frame.render_widget(
+                Line::from(Span::styled(label.to_owned(), theme.style(Role::Hover))),
+                r,
+            );
+        } else {
+            button(frame, theme, r, label, focused);
+        }
+        if !busy {
+            app.hits.add(r, id);
+        }
+        x += w + 2;
+    }
+}
+
+fn draw_subview_status(
+    frame: &mut Frame,
+    theme: &Theme,
+    rect: Rect,
+    busy: Option<&str>,
+    error: Option<&str>,
+    notice: Option<&str>,
+    default_hint: &str,
+) {
+    let (text, role) = if let Some(busy) = busy {
+        (busy.to_owned(), Role::Muted)
+    } else if let Some(err) = error {
+        (sanitize_line(err), Role::Error)
+    } else if let Some(ok) = notice {
+        (sanitize_line(ok), Role::StatusOk)
+    } else {
+        (default_hint.to_owned(), Role::Muted)
+    };
+    frame.render_widget(
+        Line::from(Span::styled(
+            fit(&text, rect.width as usize),
+            theme.style(role),
+        )),
+        rect,
+    );
 }

@@ -1,6 +1,7 @@
 //! Room management: joining, creating, leaving, inviting, and the details of a room
 //! (members, roles, what we may do there).
 
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,17 +10,22 @@ use futures::{Stream, StreamExt};
 use matrix_sdk::notification_settings::RoomNotificationMode;
 use matrix_sdk::room::knock_requests::KnockRequest;
 use matrix_sdk::ruma::api::client::membership::get_member_events;
+use matrix_sdk::ruma::api::client::room::aliases::v3::Request as AliasesRequest;
 use matrix_sdk::ruma::api::client::room::create_room::v3::{Request as CreateRequest, RoomPreset};
 use matrix_sdk::ruma::api::error::{ErrorBody, ErrorKind};
 use matrix_sdk::ruma::events::InitialStateEvent;
-use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::events::direct::DirectUserIdentifier;
 use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
+use matrix_sdk::ruma::events::room::history_visibility::HistoryVisibility;
+use matrix_sdk::ruma::events::room::join_rules::JoinRule;
 use matrix_sdk::ruma::events::room::member::MembershipState;
-use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, UserPowerLevel};
+use matrix_sdk::ruma::events::room::power_levels::{
+    RoomPowerLevels, RoomPowerLevelsEventContent, UserPowerLevel,
+};
+use matrix_sdk::ruma::events::{MessageLikeEventType, StateEventType, TimelineEventType};
 use matrix_sdk::ruma::{
-    Int, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId, ServerName, UInt,
-    UserId,
+    Int, OwnedRoomAliasId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomAliasId, RoomId,
+    RoomOrAliasId, ServerName, UInt, UserId,
 };
 use matrix_sdk::{Client, NotificationSettingsError, Room, RoomMemberships, RoomState};
 use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
@@ -159,6 +165,55 @@ pub enum ManageCmd {
         user_id: String,
         reason: Option<String>,
     },
+    /// Change `m.room.join_rules`.
+    SetJoinRule {
+        room_id: String,
+        rule: RoomJoinRule,
+    },
+    /// Change `m.room.history_visibility`.
+    SetHistoryVisibility {
+        room_id: String,
+        visibility: RoomHistory,
+    },
+    /// Turn room encryption on permanently (`m.room.encryption`).
+    EnableEncryption {
+        room_id: String,
+    },
+    /// Upload and set the room's avatar picture (`m.room.avatar`).
+    SetRoomAvatar {
+        room_id: String,
+        path: PathBuf,
+    },
+    /// Remove the room's avatar picture.
+    RemoveRoomAvatar {
+        room_id: String,
+    },
+    /// Update `m.room.canonical_alias` (`alias` + `alt_aliases`).
+    SetAddresses {
+        room_id: String,
+        canonical: Option<String>,
+        alt_aliases: Vec<String>,
+    },
+    /// Create a local directory alias (`#name:our-homeserver`) pointing to this room.
+    CreateLocalAlias {
+        room_id: String,
+        alias: String,
+    },
+    /// Delete a local directory alias from our homeserver.
+    DeleteLocalAlias {
+        room_id: String,
+        alias: String,
+    },
+    /// Mark or unmark the room as a direct chat in `m.direct`.
+    SetDirect {
+        room_id: String,
+        direct: bool,
+    },
+    /// Update `m.room.power_levels` thresholds while protecting creator / self-lockout rules.
+    SetPermissions {
+        room_id: String,
+        permissions: RoomPermissions,
+    },
 }
 
 /// Prints which room, never names, topics or who is being written to.
@@ -203,6 +258,28 @@ impl std::fmt::Debug for ManageCmd {
             Self::BanKnock {
                 room_id, reason, ..
             } => write!(f, "BanKnock({room_id}, reason: {})", reason.is_some()),
+            Self::SetJoinRule { room_id, rule } => write!(f, "SetJoinRule({room_id}, {rule:?})"),
+            Self::SetHistoryVisibility {
+                room_id,
+                visibility,
+            } => write!(f, "SetHistoryVisibility({room_id}, {visibility:?})"),
+            Self::EnableEncryption { room_id } => write!(f, "EnableEncryption({room_id})"),
+            Self::SetRoomAvatar { room_id, .. } => write!(f, "SetRoomAvatar({room_id})"),
+            Self::RemoveRoomAvatar { room_id } => write!(f, "RemoveRoomAvatar({room_id})"),
+            Self::SetAddresses {
+                room_id,
+                canonical,
+                alt_aliases,
+            } => write!(
+                f,
+                "SetAddresses({room_id}, main: {}, alt: {})",
+                canonical.is_some(),
+                alt_aliases.len()
+            ),
+            Self::CreateLocalAlias { room_id, .. } => write!(f, "CreateLocalAlias({room_id})"),
+            Self::DeleteLocalAlias { room_id, .. } => write!(f, "DeleteLocalAlias({room_id})"),
+            Self::SetDirect { room_id, direct } => write!(f, "SetDirect({room_id}, {direct})"),
+            Self::SetPermissions { room_id, .. } => write!(f, "SetPermissions({room_id})"),
         }
     }
 }
@@ -224,6 +301,16 @@ pub enum Change {
     Favourite(bool),
     LowPriority(bool),
     Notify,
+    JoinRule,
+    HistoryVisibility,
+    EnableEncryption,
+    RoomAvatar,
+    RemoveRoomAvatar,
+    Addresses,
+    CreateLocalAlias,
+    DeleteLocalAlias,
+    Direct(bool),
+    Permissions,
 }
 
 pub enum ManageEvent {
@@ -357,12 +444,190 @@ impl std::fmt::Debug for RoomKnockRequest {
     }
 }
 
+/// Who can join the room, normalized from `m.room.join_rules`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RoomJoinRule {
+    #[default]
+    Invite,
+    Knock,
+    Public,
+    Restricted,
+    KnockRestricted,
+    Private,
+    Custom,
+}
+
+impl RoomJoinRule {
+    pub const EDITABLE: [Self; 3] = [Self::Invite, Self::Knock, Self::Public];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Invite => "Invite only",
+            Self::Knock => "Knock to join",
+            Self::Public => "Anyone (public)",
+            Self::Restricted => "Restricted",
+            Self::KnockRestricted => "Knock (restricted)",
+            Self::Private => "Private",
+            Self::Custom => "Custom",
+        }
+    }
+
+    pub fn to_ruma(self) -> Option<JoinRule> {
+        match self {
+            Self::Invite => Some(JoinRule::Invite),
+            Self::Knock => Some(JoinRule::Knock),
+            Self::Public => Some(JoinRule::Public),
+            Self::Restricted | Self::KnockRestricted | Self::Private | Self::Custom => None,
+        }
+    }
+}
+
+impl From<JoinRule> for RoomJoinRule {
+    fn from(rule: JoinRule) -> Self {
+        match rule {
+            JoinRule::Invite => Self::Invite,
+            JoinRule::Knock => Self::Knock,
+            JoinRule::Public => Self::Public,
+            JoinRule::Restricted(_) => Self::Restricted,
+            JoinRule::KnockRestricted(_) => Self::KnockRestricted,
+            JoinRule::Private => Self::Private,
+            _ => Self::Custom,
+        }
+    }
+}
+
+/// Who can read message history (`m.room.history_visibility`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RoomHistory {
+    #[default]
+    Shared,
+    Invited,
+    Joined,
+    WorldReadable,
+    Custom,
+}
+
+impl RoomHistory {
+    pub const ALL: [Self; 4] = [
+        Self::Shared,
+        Self::Invited,
+        Self::Joined,
+        Self::WorldReadable,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "Shared (all history)",
+            Self::Invited => "From invite",
+            Self::Joined => "From join",
+            Self::WorldReadable => "World readable",
+            Self::Custom => "Custom",
+        }
+    }
+
+    pub fn to_ruma(self) -> Option<HistoryVisibility> {
+        match self {
+            Self::Shared => Some(HistoryVisibility::Shared),
+            Self::Invited => Some(HistoryVisibility::Invited),
+            Self::Joined => Some(HistoryVisibility::Joined),
+            Self::WorldReadable => Some(HistoryVisibility::WorldReadable),
+            Self::Custom => None,
+        }
+    }
+}
+
+impl From<HistoryVisibility> for RoomHistory {
+    fn from(vis: HistoryVisibility) -> Self {
+        match vis {
+            HistoryVisibility::Shared => Self::Shared,
+            HistoryVisibility::Invited => Self::Invited,
+            HistoryVisibility::Joined => Self::Joined,
+            HistoryVisibility::WorldReadable => Self::WorldReadable,
+            _ => Self::Custom,
+        }
+    }
+}
+
+/// Power-level gates for the Room Settings panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoomSettingsPower {
+    pub can_join_rule: bool,
+    pub can_history: bool,
+    pub can_encrypt: bool,
+    pub can_avatar: bool,
+    pub can_aliases: bool,
+    pub can_permissions: bool,
+}
+
+impl RoomSettingsPower {
+    fn from_levels(levels: Option<&RoomPowerLevels>, own: &UserId) -> Self {
+        let can = |ev: StateEventType| levels.is_some_and(|l| l.user_can_send_state(own, ev));
+        Self {
+            can_join_rule: can(StateEventType::RoomJoinRules),
+            can_history: can(StateEventType::RoomHistoryVisibility),
+            can_encrypt: can(StateEventType::RoomEncryption),
+            can_avatar: can(StateEventType::RoomAvatar),
+            can_aliases: can(StateEventType::RoomCanonicalAlias),
+            can_permissions: can(StateEventType::RoomPowerLevels),
+        }
+    }
+}
+
+/// Room-wide action power-level thresholds exposed in the Permissions subview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomPermissions {
+    pub send_messages: i64,
+    pub invite: i64,
+    pub kick: i64,
+    pub ban: i64,
+    pub redact: i64,
+    pub change_settings: i64,
+    /// Effective level required to edit `m.room.power_levels` (`state_default` unless overridden).
+    pub power_levels_event_level: i64,
+    /// Whether `m.room.power_levels` has an explicit override in `events`.
+    pub explicit_power_levels_rule: bool,
+}
+
+impl Default for RoomPermissions {
+    fn default() -> Self {
+        Self {
+            send_messages: 0,
+            invite: 0,
+            kick: 50,
+            ban: 50,
+            redact: 50,
+            change_settings: 50,
+            power_levels_event_level: 50,
+            explicit_power_levels_rule: false,
+        }
+    }
+}
+
+impl RoomPermissions {
+    pub fn from_levels(levels: &RoomPowerLevels) -> Self {
+        Self {
+            send_messages: i64::from(levels.for_message(MessageLikeEventType::RoomMessage)),
+            invite: i64::from(levels.invite),
+            kick: i64::from(levels.kick),
+            ban: i64::from(levels.ban),
+            redact: i64::from(levels.redact),
+            change_settings: i64::from(levels.state_default),
+            power_levels_event_level: i64::from(levels.for_state(StateEventType::RoomPowerLevels)),
+            explicit_power_levels_rule: levels
+                .events
+                .contains_key(&TimelineEventType::RoomPowerLevels),
+        }
+    }
+}
+
 /// Everything the room info view shows. All text is safe to put on the screen.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RoomDetails {
     pub name: String,
     pub topic: String,
     pub alias: Option<String>,
+    /// Safe `mxc://` room avatar URL if set.
+    pub avatar_url: Option<String>,
     /// Own display name overridden/synced in this room, if set.
     pub own_display_name: Option<String>,
     /// `None`: not known (yet).
@@ -374,6 +639,15 @@ pub struct RoomDetails {
     pub low_priority: bool,
     /// `None` for rooms we are not in.
     pub notify: Option<NotifyLevel>,
+    pub join_rule: Option<RoomJoinRule>,
+    pub history_visibility: Option<RoomHistory>,
+    pub canonical_alias: Option<String>,
+    pub alt_aliases: Vec<String>,
+    pub local_aliases: Vec<String>,
+    pub local_aliases_error: Option<String>,
+    pub own_homeserver: Option<String>,
+    pub settings_power: RoomSettingsPower,
+    pub permissions: RoomPermissions,
     pub can_rename: bool,
     pub can_set_topic: bool,
     pub can_invite: bool,
@@ -399,9 +673,11 @@ impl std::fmt::Debug for RoomDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "RoomDetails({} members, {} knocks, loading: {})",
+            "RoomDetails({} members, {} knocks, {} local_aliases, avatar: {}, loading: {})",
             self.members.len(),
             self.knock_requests.len(),
+            self.local_aliases.len(),
+            self.avatar_url.is_some(),
             self.members_loading
         )
     }
@@ -787,7 +1063,186 @@ impl Manager {
                     });
                 });
             }
+            ManageCmd::SetJoinRule { room_id, rule } => {
+                self.spawn_setting(room_id, Change::JoinRule, move |_, room| async move {
+                    let target = rule
+                        .to_ruma()
+                        .ok_or_else(|| "That join rule cannot be edited here.".to_owned())?;
+                    room.privacy_settings()
+                        .update_join_rule(target)
+                        .await
+                        .map_err(|err| failed("update who can join", &err))
+                });
+            }
+            ManageCmd::SetHistoryVisibility {
+                room_id,
+                visibility,
+            } => {
+                self.spawn_setting(
+                    room_id,
+                    Change::HistoryVisibility,
+                    move |_, room| async move {
+                        let target = visibility.to_ruma().ok_or_else(|| {
+                            "That history visibility cannot be selected.".to_owned()
+                        })?;
+                        room.privacy_settings()
+                            .update_room_history_visibility(target)
+                            .await
+                            .map_err(|err| failed("update history visibility", &err))
+                    },
+                );
+            }
+            ManageCmd::EnableEncryption { room_id } => {
+                self.spawn_setting(
+                    room_id,
+                    Change::EnableEncryption,
+                    move |_, room| async move {
+                        if room
+                            .latest_encryption_state()
+                            .await
+                            .is_ok_and(|s| s.is_encrypted())
+                        {
+                            return Err("Encryption is already enabled in this room.".to_owned());
+                        }
+                        room.enable_encryption()
+                            .await
+                            .map_err(|err| failed("enable encryption", &err))
+                    },
+                );
+            }
+            ManageCmd::SetRoomAvatar { room_id, path } => {
+                self.spawn_setting(
+                    room_id,
+                    Change::RoomAvatar,
+                    move |client, room| async move {
+                        let (mime, bytes) =
+                            super::people::prepare_avatar_upload(&client, &path).await?;
+                        tokio::time::timeout(
+                            Duration::from_secs(60),
+                            room.upload_avatar(&mime, bytes, None),
+                        )
+                        .await
+                        .map_err(|_| "Uploading the room picture took too long.".to_owned())?
+                        .map(|_| ())
+                        .map_err(|err| failed("update the room picture", &err))
+                    },
+                );
+            }
+            ManageCmd::RemoveRoomAvatar { room_id } => {
+                self.spawn_setting(
+                    room_id,
+                    Change::RemoveRoomAvatar,
+                    move |_, room| async move {
+                        room.remove_avatar()
+                            .await
+                            .map(|_| ())
+                            .map_err(|err| failed("remove the room picture", &err))
+                    },
+                );
+            }
+            ManageCmd::SetAddresses {
+                room_id,
+                canonical,
+                alt_aliases,
+            } => {
+                self.spawn_setting(room_id, Change::Addresses, move |_, room| async move {
+                    let (main, alts) = parse_room_aliases(canonical, alt_aliases)?;
+                    room.privacy_settings()
+                        .update_canonical_alias(main, alts)
+                        .await
+                        .map_err(|err| failed("update the room addresses", &err))
+                });
+            }
+            ManageCmd::CreateLocalAlias { room_id, alias } => {
+                self.spawn_setting(
+                    room_id,
+                    Change::CreateLocalAlias,
+                    move |client, room| async move {
+                        let own = client
+                            .user_id()
+                            .ok_or_else(|| "Not signed in.".to_owned())?;
+                        let alias_id = parse_local_alias(&alias, own.server_name())?;
+                        client
+                            .create_room_alias(&alias_id, room.room_id())
+                            .await
+                            .map_err(|err| failed("create that local address", &err.into()))
+                    },
+                );
+            }
+            ManageCmd::DeleteLocalAlias { room_id, alias } => {
+                self.spawn_setting(
+                    room_id,
+                    Change::DeleteLocalAlias,
+                    move |client, _| async move {
+                        let own = client
+                            .user_id()
+                            .ok_or_else(|| "Not signed in.".to_owned())?;
+                        let alias_id = parse_local_alias(&alias, own.server_name())?;
+                        client
+                            .remove_room_alias(&alias_id)
+                            .await
+                            .map_err(|err| failed("delete that local address", &err.into()))
+                    },
+                );
+            }
+            ManageCmd::SetDirect { room_id, direct } => {
+                self.spawn_setting(room_id, Change::Direct(direct), move |_, room| async move {
+                    room.set_is_direct(direct)
+                        .await
+                        .map_err(|err| failed("update the direct-chat setting", &err))
+                });
+            }
+            ManageCmd::SetPermissions {
+                room_id,
+                permissions,
+            } => {
+                let events = self.events.clone();
+                let refresh = self.refresh.clone();
+                let client = self.client.clone();
+                tokio::spawn(async move {
+                    let result = match room(&client, &room_id) {
+                        Ok(room) => {
+                            let res = set_room_permissions(&room, &permissions).await;
+                            if res.is_ok() {
+                                emit_room_power(&events, &room).await;
+                                bump_refresh(&refresh, &room_id);
+                            }
+                            res
+                        }
+                        Err(err) => Err(err),
+                    };
+                    let _ = events.send(MatrixEvent::Manage(ManageEvent::Done {
+                        room_id,
+                        change: Change::Permissions,
+                        result,
+                    }));
+                });
+            }
         }
+    }
+
+    fn spawn_setting<F, Fut>(&self, room_id: String, change: Change, work: F)
+    where
+        F: FnOnce(Client, Room) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + Send,
+    {
+        let client = self.client.clone();
+        let events = self.events.clone();
+        let refresh = self.refresh.clone();
+        tokio::spawn(async move {
+            let result = match room(&client, &room_id) {
+                Ok(room) => work(client, room).await,
+                Err(err) => Err(err),
+            };
+            if result.is_ok() {
+                bump_refresh(&refresh, &room_id);
+            }
+            let _ = events.send(MatrixEvent::Manage(ManageEvent::Done {
+                room_id,
+                change,
+                result,
+            }));
+        });
     }
 
     fn spawn_tag<F, Fut>(&self, room_id: String, what: &'static str, change: Change, work: F)
@@ -1563,13 +2018,19 @@ async fn head(
     } else {
         None
     };
+    let canonical_alias = room.canonical_alias().map(|a| sanitize_line(a.as_str()));
+    let alt_aliases: Vec<String> = room
+        .alt_aliases()
+        .into_iter()
+        .map(|a| sanitize_line(a.as_str()))
+        .collect();
     RoomDetails {
         name: sanitize_line(&name),
         topic: sanitize(room.topic().unwrap_or_default().trim()),
-        alias: room
-            .canonical_alias()
-            .or_else(|| room.alt_aliases().into_iter().next())
-            .map(|alias| sanitize_line(alias.as_str())),
+        alias: canonical_alias
+            .clone()
+            .or_else(|| alt_aliases.first().cloned()),
+        avatar_url: room.avatar_url().and_then(|u| super::safety::safe_mxc(&u)),
         own_display_name,
         encrypted,
         direct: room.is_direct().await.unwrap_or(false),
@@ -1578,6 +2039,13 @@ async fn head(
         favourite: room.is_favourite(),
         low_priority: room.is_low_priority(),
         notify,
+        join_rule: room.join_rule().map(RoomJoinRule::from),
+        history_visibility: joined.then(|| RoomHistory::from(room.history_visibility_or_default())),
+        canonical_alias,
+        alt_aliases,
+        own_homeserver: Some(own.server_name().to_string()),
+        settings_power: RoomSettingsPower::from_levels(levels, own),
+        permissions: levels.map(RoomPermissions::from_levels).unwrap_or_default(),
         can_rename: can(&|levels| levels.user_can_send_state(own, StateEventType::RoomName)),
         can_set_topic: can(&|levels| levels.user_can_send_state(own, StateEventType::RoomTopic)),
         can_invite: can(&|levels| levels.user_can_invite(own)),
@@ -1590,6 +2058,125 @@ async fn head(
         },
         ..RoomDetails::default()
     }
+}
+
+fn parse_local_alias(raw: &str, own_server: &ServerName) -> Result<OwnedRoomAliasId, String> {
+    let cleaned = sanitize_line(raw).trim().to_owned();
+    let alias = RoomAliasId::parse(&cleaned)
+        .map_err(|_| "Enter a room address like #name:server.".to_owned())?;
+    if alias.server_name() != own_server {
+        return Err(format!(
+            "Local addresses must use your homeserver (:{own_server})."
+        ));
+    }
+    Ok(alias)
+}
+
+fn parse_room_aliases(
+    canonical: Option<String>,
+    alt_aliases: Vec<String>,
+) -> Result<(Option<OwnedRoomAliasId>, Vec<OwnedRoomAliasId>), String> {
+    let main = match canonical.map(|s| sanitize_line(&s).trim().to_owned()) {
+        Some(s) if !s.is_empty() => Some(
+            RoomAliasId::parse(&s)
+                .map_err(|_| "That main address is not a valid room address.".to_owned())?,
+        ),
+        _ => None,
+    };
+    let mut alts = Vec::new();
+    for raw in alt_aliases {
+        let cleaned = sanitize_line(&raw).trim().to_owned();
+        if cleaned.is_empty() {
+            continue;
+        }
+        let parsed = RoomAliasId::parse(&cleaned)
+            .map_err(|_| "An alternate address is not a valid room address.".to_owned())?;
+        if main.as_ref() != Some(&parsed) && !alts.contains(&parsed) {
+            alts.push(parsed);
+        }
+    }
+    Ok((main, alts))
+}
+
+async fn fetch_local_aliases(client: &Client, room: &Room) -> Result<Vec<String>, String> {
+    let req = AliasesRequest::new(room.room_id().to_owned());
+    let resp = tokio::time::timeout(Duration::from_secs(5), client.send(req))
+        .await
+        .map_err(|_| "Asking for local room addresses took too long.".to_owned())?
+        .map_err(|err| failed("list local addresses", &err.into()))?;
+    let mut aliases: Vec<String> = resp
+        .aliases
+        .into_iter()
+        .map(|a| sanitize_line(a.as_str()))
+        .collect();
+    aliases.sort();
+    aliases.dedup();
+    Ok(aliases)
+}
+
+pub(super) fn prepare_permissions_update(
+    pl: &RoomPowerLevels,
+    own: &UserId,
+    next: &RoomPermissions,
+) -> Result<RoomPowerLevelsEventContent, String> {
+    if !pl.user_can_send_state(own, StateEventType::RoomPowerLevels) {
+        return Err("You do not have permission to change room permissions.".to_owned());
+    }
+    let current = RoomPermissions::from_levels(pl);
+    let own_pl = pl.for_user(own);
+    let own_is_creator = matches!(own_pl, UserPowerLevel::Infinite);
+    let own_level = numeric_level(own_pl);
+    let mut updated = pl.clone();
+    // Room v12+ forbids listing privileged creators in `m.room.power_levels`'s `users` map.
+    if let Some(creators) = &updated.rules.privileged_creators {
+        for creator in creators {
+            updated.users.remove(creator);
+        }
+    }
+    let convert = |value: i64| -> Result<Int, String> {
+        if !own_is_creator && value > own_level {
+            return Err(format!(
+                "You cannot set a permission above your own level ({own_level})."
+            ));
+        }
+        Int::try_from(value).map_err(|_| "That permission level is out of range.".to_owned())
+    };
+    if next.send_messages != current.send_messages {
+        updated.events_default = convert(next.send_messages)?;
+        updated.events.remove(&TimelineEventType::RoomMessage);
+    }
+    if next.invite != current.invite {
+        updated.invite = convert(next.invite)?;
+    }
+    if next.kick != current.kick {
+        updated.kick = convert(next.kick)?;
+    }
+    if next.ban != current.ban {
+        updated.ban = convert(next.ban)?;
+    }
+    if next.redact != current.redact {
+        updated.redact = convert(next.redact)?;
+    }
+    if next.change_settings != current.change_settings {
+        updated.state_default = convert(next.change_settings)?;
+    }
+    if !own_is_creator && !updated.user_can_send_state(own, StateEventType::RoomPowerLevels) {
+        return Err("That change would lock you out of editing room permissions.".to_owned());
+    }
+    RoomPowerLevelsEventContent::try_from(updated)
+        .map_err(|err| format!("Could not build room permissions: {err}"))
+}
+
+async fn set_room_permissions(room: &Room, next: &RoomPermissions) -> Result<(), String> {
+    let pl = room
+        .power_levels()
+        .await
+        .map_err(|err| failed("read room permissions", &err.into()))?;
+    let content = prepare_permissions_update(&pl, room.own_user_id(), next)?;
+    room.send_state_event(content)
+        .await
+        .map(|_| ())
+        .map_err(|err| failed("update room permissions", &err))
 }
 
 /// What to do about the member list, given the room's counts.
@@ -1663,9 +2250,14 @@ async fn watch(
     let mut raw_knocks: Vec<RawKnock> = Vec::new();
     let mut sent: Option<RoomDetails> = None;
     let mut force_refresh = false;
+    let mut local_aliases: Vec<String> = Vec::new();
+    let mut local_aliases_error: Option<String> = None;
+    let mut local_aliases_loaded = false;
+    let mut force_aliases = false;
     loop {
         if refresh.has_changed().unwrap_or(false) {
             force_refresh = true;
+            force_aliases = true;
         }
         refresh.borrow_and_update();
         // Looked at afresh every time: an invitation may have been accepted meanwhile.
@@ -1688,8 +2280,14 @@ async fn watch(
             knock_sub = None;
             knock_tried = false;
             raw_knocks.clear();
+            local_aliases.clear();
+            local_aliases_error = None;
+            local_aliases_loaded = false;
+            force_aliases = false;
         }
         let mut current = head(&room, levels.as_ref(), &own_room_names, &raw_knocks).await;
+        current.local_aliases = local_aliases.clone();
+        current.local_aliases_error = local_aliases_error.clone();
         let counts = (current.joined, current.invited);
         let mut wait = None;
         if joined {
@@ -1750,37 +2348,55 @@ async fn watch(
             own_room_names.get(&room_id),
         );
         let ask = current.members_loading;
+        let ask_aliases = joined && (!local_aliases_loaded || force_aliases);
+        force_aliases = false;
         if sent.as_ref() != Some(&current) {
             if !emit(Ok(current.clone())) {
                 return;
             }
             sent = Some(current.clone());
         }
-        if ask {
-            list.asked = Some(Instant::now());
-            match server_members(&client, &room).await {
-                Ok(entries) => {
-                    list.entries = entries;
-                    list.error = None;
-                    list.complete = true;
-                    if !list.agrees(counts) {
+        if ask || ask_aliases {
+            if ask {
+                list.asked = Some(Instant::now());
+                match server_members(&client, &room).await {
+                    Ok(entries) => {
+                        list.entries = entries;
+                        list.error = None;
+                        list.complete = true;
+                        if !list.agrees(counts) {
+                            list.gave_up = Some(counts);
+                        }
+                    }
+                    // What is shown stays; the reason goes next to it.
+                    Err(error) => {
+                        list.error = Some(error);
+                        list.complete = false;
                         list.gave_up = Some(counts);
                     }
                 }
-                // What is shown stays; the reason goes next to it.
-                Err(error) => {
-                    list.error = Some(error);
-                    list.complete = false;
-                    list.gave_up = Some(counts);
-                }
+                current.members_loading = false;
+                list.apply(
+                    &mut current,
+                    levels.as_ref(),
+                    &own,
+                    own_room_names.get(&room_id),
+                );
             }
-            current.members_loading = false;
-            list.apply(
-                &mut current,
-                levels.as_ref(),
-                &own,
-                own_room_names.get(&room_id),
-            );
+            if ask_aliases {
+                local_aliases_loaded = true;
+                match fetch_local_aliases(&client, &room).await {
+                    Ok(aliases) => {
+                        local_aliases = aliases;
+                        local_aliases_error = None;
+                    }
+                    Err(err) => {
+                        local_aliases_error = Some(err);
+                    }
+                }
+                current.local_aliases = local_aliases.clone();
+                current.local_aliases_error = local_aliases_error.clone();
+            }
             if !emit(Ok(current.clone())) {
                 return;
             }
@@ -2749,5 +3365,247 @@ mod tests {
 
         // Plain member with PL 0 below invite(50)/kick(50)/ban(75) sees no actionable requests.
         assert!(build_knock_requests(&raw, Some(&levels), &regular).is_empty());
+    }
+
+    #[test]
+    fn permissions_update_guards_v12_creators_lockout_and_level_cap() {
+        use matrix_sdk::ruma::events::room::power_levels::{
+            RoomPowerLevelsEventContent, RoomPowerLevelsSource,
+        };
+        use matrix_sdk::ruma::room_version_rules::AuthorizationRules;
+        use std::collections::BTreeMap;
+
+        let creator = UserId::parse("@creator:example.org").unwrap();
+        let admin = UserId::parse("@admin:example.org").unwrap();
+        let mod_user = UserId::parse("@mod:example.org").unwrap();
+
+        let mut content = RoomPowerLevelsEventContent::new(&AuthorizationRules::V11);
+        content.state_default = Int::from(50);
+        content.events = BTreeMap::from([
+            (TimelineEventType::RoomMessage, Int::from(25)),
+            (StateEventType::RoomTombstone.into(), Int::from(100)),
+        ]);
+        content.users = BTreeMap::from([
+            (admin.clone(), Int::from(100)),
+            (mod_user.clone(), Int::from(50)),
+        ]);
+        let v11_levels = RoomPowerLevels::new(
+            RoomPowerLevelsSource::Original(content.clone()),
+            &AuthorizationRules::V11,
+            [],
+        );
+
+        let cur = RoomPermissions::from_levels(&v11_levels);
+        assert_eq!(cur.send_messages, 25);
+        assert_eq!(cur.change_settings, 50);
+
+        // Moderator (50) cannot raise a permission above 50.
+        let mut too_high = cur;
+        too_high.ban = 100;
+        let err = prepare_permissions_update(&v11_levels, &mod_user, &too_high).unwrap_err();
+        assert!(err.contains("above your own level (50)"), "{err}");
+
+        // Moderator (50) raising change_settings (`state_default`) to 100 would lock themselves out.
+        let mut lockout_content = content.clone();
+        lockout_content.state_default = Int::from(0);
+        let mod_pl = RoomPowerLevels::new(
+            RoomPowerLevelsSource::Original(lockout_content),
+            &AuthorizationRules::V11,
+            [],
+        );
+        let mut lockout = RoomPermissions::from_levels(&mod_pl);
+        lockout.change_settings = 50;
+        let _ = prepare_permissions_update(&mod_pl, &mod_user, &lockout).unwrap();
+        let mut mod_drop = mod_pl.clone();
+        mod_drop.users.insert(mod_user.clone(), Int::from(40));
+        mod_drop.state_default = Int::from(40);
+        let mut mod_lock = RoomPermissions::from_levels(&mod_drop);
+        mod_lock.change_settings = 50;
+        // Trying to set 50 as 40 fails both cap and lockout; lowering events_default only clears override.
+        assert!(prepare_permissions_update(&mod_drop, &mod_user, &mod_lock).is_err());
+
+        // Admin updates send_messages -> clears explicit RoomMessage override and preserves RoomTombstone.
+        let mut lowered = cur;
+        lowered.send_messages = 0;
+        let out = prepare_permissions_update(&v11_levels, &admin, &lowered).unwrap();
+        assert_eq!(out.events_default, Int::from(0));
+        assert!(!out.events.contains_key(&TimelineEventType::RoomMessage));
+        assert_eq!(
+            out.events.get(&StateEventType::RoomTombstone.into()),
+            Some(&Int::from(100))
+        );
+
+        // Self-lockout when explicit admin sets state_default > own level? Allowed up to 100, fails > 100 if capped, or
+        // explicitly: non-creator user with explicit override cannot raise power_levels req above own level; wait:
+        // test non-creator with state_default == 50 and own == 50 cannot raise power_levels without self-lockout
+        // if explicit rule isn't lower (here own == 50 raising to 60 is capped; simulate own == 50 with state_default 50).
+        // Simulate admin (PL 100) where `events[RoomPowerLevels]` wasn't set and own level is artificially 50 via users check:
+        // Instead verify when `events` doesn't allow after state_default change:
+        let mut strict_v11 = content;
+        strict_v11.state_default = Int::from(50);
+        let strict_pl = RoomPowerLevels::new(
+            RoomPowerLevelsSource::Original(strict_v11),
+            &AuthorizationRules::V11,
+            [],
+        );
+        let mut raise_default = RoomPermissions::from_levels(&strict_pl);
+        raise_default.change_settings = 100;
+        assert!(prepare_permissions_update(&strict_pl, &mod_user, &raise_default).is_err());
+
+        // Room v12+: creator has infinite power, can set 100, never placed in `users`.
+        let mut v12_content = RoomPowerLevelsEventContent::new(&AuthorizationRules::V12);
+        v12_content
+            .events
+            .insert(StateEventType::RoomTombstone.into(), Int::from(100));
+        let mut v12_levels = RoomPowerLevels::new(
+            RoomPowerLevelsSource::Original(v12_content),
+            &AuthorizationRules::V12,
+            [creator.clone()],
+        );
+        v12_levels.users.insert(creator.clone(), Int::from(100));
+        let mut v12_next = RoomPermissions::from_levels(&v12_levels);
+        v12_next.change_settings = 100;
+        let v12_out = prepare_permissions_update(&v12_levels, &creator, &v12_next).unwrap();
+        assert_eq!(v12_out.state_default, Int::from(100));
+        assert!(!v12_out.users.contains_key(&creator));
+        assert_eq!(
+            v12_out.events.get(&StateEventType::RoomTombstone.into()),
+            Some(&Int::from(100))
+        );
+    }
+
+    #[test]
+    fn room_join_rule_history_and_alias_parsers() {
+        use matrix_sdk::ruma::ServerName;
+        use matrix_sdk::ruma::events::room::join_rules::AllowRule;
+
+        assert_eq!(RoomJoinRule::from(JoinRule::Invite), RoomJoinRule::Invite);
+        assert_eq!(RoomJoinRule::from(JoinRule::Knock), RoomJoinRule::Knock);
+        assert_eq!(RoomJoinRule::from(JoinRule::Public), RoomJoinRule::Public);
+        assert!(RoomJoinRule::Restricted.to_ruma().is_none());
+        assert!(RoomJoinRule::KnockRestricted.to_ruma().is_none());
+        assert!(RoomJoinRule::Private.to_ruma().is_none());
+        let restricted =
+            JoinRule::Restricted(matrix_sdk::ruma::events::room::join_rules::Restricted::new(
+                vec![AllowRule::room_membership(
+                    matrix_sdk::ruma::RoomId::parse("!space:example.org").unwrap(),
+                )],
+            ));
+        assert_eq!(RoomJoinRule::from(restricted), RoomJoinRule::Restricted);
+
+        assert_eq!(
+            RoomHistory::from(HistoryVisibility::WorldReadable).to_ruma(),
+            Some(HistoryVisibility::WorldReadable)
+        );
+        assert_eq!(
+            RoomHistory::from(HistoryVisibility::Joined),
+            RoomHistory::Joined
+        );
+
+        let hs = ServerName::parse("example.org").unwrap();
+        assert_eq!(
+            parse_local_alias("#chat:example.org", &hs)
+                .unwrap()
+                .as_str(),
+            "#chat:example.org"
+        );
+        let wrong_hs = parse_local_alias("#chat:other.org", &hs).unwrap_err();
+        assert!(wrong_hs.contains("homeserver"), "{wrong_hs}");
+        assert!(parse_local_alias("bad alias", &hs).is_err());
+
+        let (main, alts) = parse_room_aliases(
+            Some("#main:example.org".to_owned()),
+            vec![
+                "#alt1:example.org".to_owned(),
+                "#main:example.org".to_owned(),
+                "#alt1:example.org".to_owned(),
+                "#alt2:other.org".to_owned(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(main.as_ref().map(|a| a.as_str()), Some("#main:example.org"));
+        assert_eq!(
+            alts.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
+            ["#alt1:example.org", "#alt2:other.org"]
+        );
+    }
+
+    #[test]
+    fn room_settings_debug_redacts_private_fields() {
+        let cmds = [
+            ManageCmd::SetJoinRule {
+                room_id: "!secret_r:example.org".into(),
+                rule: RoomJoinRule::Knock,
+            },
+            ManageCmd::SetHistoryVisibility {
+                room_id: "!secret_r:example.org".into(),
+                visibility: RoomHistory::Joined,
+            },
+            ManageCmd::EnableEncryption {
+                room_id: "!secret_r:example.org".into(),
+            },
+            ManageCmd::SetRoomAvatar {
+                room_id: "!secret_r:example.org".into(),
+                path: PathBuf::from("/tmp/secret-room-avatar.png"),
+            },
+            ManageCmd::RemoveRoomAvatar {
+                room_id: "!secret_r:example.org".into(),
+            },
+            ManageCmd::SetAddresses {
+                room_id: "!secret_r:example.org".into(),
+                canonical: Some("#secret-main:example.org".into()),
+                alt_aliases: vec!["#secret-alt:example.org".into()],
+            },
+            ManageCmd::CreateLocalAlias {
+                room_id: "!secret_r:example.org".into(),
+                alias: "#secret-local:example.org".into(),
+            },
+            ManageCmd::DeleteLocalAlias {
+                room_id: "!secret_r:example.org".into(),
+                alias: "#secret-local:example.org".into(),
+            },
+            ManageCmd::SetDirect {
+                room_id: "!secret_r:example.org".into(),
+                direct: true,
+            },
+            ManageCmd::SetPermissions {
+                room_id: "!secret_r:example.org".into(),
+                permissions: RoomPermissions::default(),
+            },
+        ];
+        let details = RoomDetails {
+            name: "SecretRoom".into(),
+            topic: "SecretTopic".into(),
+            avatar_url: Some("mxc://example.org/secret-mxc".into()),
+            canonical_alias: Some("#secret-main:example.org".into()),
+            alt_aliases: vec!["#secret-alt:example.org".into()],
+            local_aliases: vec!["#secret-local:example.org".into()],
+            own_homeserver: Some("secret-hs.org".into()),
+            ..RoomDetails::default()
+        };
+        let cmds_dbg = format!("{cmds:?}");
+        for secret in [
+            "secret-room-avatar",
+            "secret-main",
+            "secret-alt",
+            "secret-local",
+        ] {
+            assert!(!cmds_dbg.contains(secret), "{secret} leaked in {cmds_dbg}");
+        }
+        let details_dbg = format!("{details:?}");
+        for secret in [
+            "secret-main",
+            "secret-alt",
+            "secret-local",
+            "SecretRoom",
+            "SecretTopic",
+            "secret-mxc",
+            "secret-hs",
+        ] {
+            assert!(
+                !details_dbg.contains(secret),
+                "{secret} leaked in {details_dbg}"
+            );
+        }
     }
 }

@@ -29,9 +29,11 @@ pub use devices::{
 pub use directory::PreviewJoinRule;
 pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
 pub use keyring::SecretStoreMode;
+#[cfg(test)]
+pub use manage::RoomSettingsPower;
 pub use manage::{
-    Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomKnockRequest,
-    RoomMember,
+    Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomHistory,
+    RoomJoinRule, RoomKnockRequest, RoomMember, RoomPermissions,
 };
 pub use notify::Notice;
 pub use people::{
@@ -1437,6 +1439,34 @@ impl Worker {
                 }
             },
         );
+        let room_state_handlers = [
+            watch_room_state::<matrix_sdk::ruma::events::room::join_rules::SyncRoomJoinRulesEvent>(
+                client,
+                &manager.refresh_signal(),
+            ),
+            watch_room_state::<
+                matrix_sdk::ruma::events::room::history_visibility::SyncRoomHistoryVisibilityEvent,
+            >(client, &manager.refresh_signal()),
+            watch_room_state::<matrix_sdk::ruma::events::room::encryption::SyncRoomEncryptionEvent>(
+                client,
+                &manager.refresh_signal(),
+            ),
+            watch_room_state::<matrix_sdk::ruma::events::room::avatar::SyncRoomAvatarEvent>(
+                client,
+                &manager.refresh_signal(),
+            ),
+            watch_room_state::<
+                matrix_sdk::ruma::events::room::canonical_alias::SyncRoomCanonicalAliasEvent,
+            >(client, &manager.refresh_signal()),
+            watch_room_state::<matrix_sdk::ruma::events::room::name::SyncRoomNameEvent>(
+                client,
+                &manager.refresh_signal(),
+            ),
+            watch_room_state::<matrix_sdk::ruma::events::room::topic::SyncRoomTopicEvent>(
+                client,
+                &manager.refresh_signal(),
+            ),
+        ];
         let end = loop {
             tokio::select! {
                 Some(diffs) = space_changes.next() => {
@@ -1589,6 +1619,9 @@ impl Worker {
         };
         client.remove_event_handler(power_handler);
         client.remove_event_handler(member_handler);
+        for handler in room_state_handlers {
+            client.remove_event_handler(handler);
+        }
         verifier.stop().await;
         people_mgr.stop();
         manager.stop();
@@ -1648,6 +1681,23 @@ async fn latest_message(
         text
     } else {
         format!("{}: {text}", convert::display_name(&profile, &sender))
+    })
+}
+
+/// Registers a sync event handler that marks `room_id` dirty in [`manage::Manager`] on arrival.
+fn watch_room_state<Ev>(
+    client: &Client,
+    refresh: &std::sync::Arc<manage::Refresh>,
+) -> matrix_sdk::event_handler::EventHandlerHandle
+where
+    Ev: matrix_sdk::event_handler::SyncEvent + serde::de::DeserializeOwned + Send + Sync + 'static,
+{
+    let refresh = refresh.clone();
+    client.add_event_handler(move |_ev: Ev, room: matrix_sdk::Room| {
+        let refresh = refresh.clone();
+        async move {
+            manage::bump_refresh(&refresh, room.room_id().as_str());
+        }
     })
 }
 

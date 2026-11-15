@@ -5,16 +5,21 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use super::{App, bump_search_gen, search_debounce_deadline, take_due_search_debounce};
+use super::{
+    App, PathCompleteResult, bump_search_gen, complete_path_field, dropped_single_image_path,
+    search_debounce_deadline, take_due_search_debounce, validate_avatar_path,
+};
 use crate::action::{Action, Pane};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::manage::{
     Address, BanPrompt, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NewPopup, Pending,
-    PreviewButton, RoleChooser, Stage, clean_input, parse_address, parse_alias_local, parse_user,
+    PermAction, PreviewButton, RoleChooser, RoomSetting, SettingSubview, Stage, address_entries,
+    clean_input, normalize_alias_input, parse_address, parse_alias_local, parse_user,
+    validate_permissions_draft,
 };
 use crate::matrix::{
     Change, DirectoryPage, ManageCmd, ManageEvent, MatrixCmd, MemberRole, NotifyLevel,
-    PreviewMembership, RoomDetails, RoomMember,
+    PreviewMembership, RoomDetails, RoomHistory, RoomJoinRule, RoomMember,
 };
 use crate::modal::Modal;
 use crate::model::{MsgKind, RoomKind};
@@ -926,12 +931,19 @@ impl App {
         match &mut self.modal {
             Some(Modal::New(_)) => self.close_manage(),
             Some(Modal::RoomInfo(info)) => {
+                if let Some(SettingSubview::Addresses { confirm_delete, .. }) =
+                    &mut info.setting_view
+                    && confirm_delete.take().is_some()
+                {
+                    return;
+                }
                 if info.ban_prompt.take().is_some()
                     || info.role_chooser.take().is_some()
                     || info.editing.take().is_some()
+                    || info.setting_view.take().is_some()
                     || info.confirm.take().is_some()
                 {
-                    // Stepped back from typing, choosing a role, or the question.
+                    // Stepped back from typing, choosing a role, room setting, or the question.
                 } else if !info.filter.is_empty() {
                     info.set_filter(String::new());
                 } else {
@@ -942,7 +954,7 @@ impl App {
         }
     }
 
-    pub(super) fn on_manage_paste(&mut self, first_line: &str) {
+    pub(super) fn on_manage_paste(&mut self, full_text: &str, first_line: &str) {
         match &mut self.modal {
             Some(Modal::New(popup)) if popup.busy.is_none() => {
                 let search_stage = matches!(popup.stage, Stage::Direct | Stage::Invite);
@@ -959,7 +971,63 @@ impl App {
                 }
             }
             Some(Modal::RoomInfo(info)) => {
-                if let Some(prompt) = &mut info.ban_prompt {
+                if let Some(subview) = &mut info.setting_view {
+                    if info.busy.is_some() {
+                        return;
+                    }
+                    match subview {
+                        SettingSubview::EncryptConfirm {
+                            confirm,
+                            focus,
+                            error,
+                        } => {
+                            if *focus == 0 && confirm.paste(first_line).changed() {
+                                *error = None;
+                            }
+                        }
+                        SettingSubview::Picture {
+                            path,
+                            focus,
+                            error,
+                            notice,
+                        } => match dropped_single_image_path(full_text) {
+                            Ok(Some(dropped)) => {
+                                path.set(dropped);
+                                *focus = 0;
+                                *error = None;
+                                *notice =
+                                    Some("Image file ready — press Enter to upload.".to_owned());
+                            }
+                            Ok(None) => {
+                                if *focus == 0 && path.paste(first_line).changed() {
+                                    *error = None;
+                                    *notice = None;
+                                }
+                            }
+                            Err(msg) => {
+                                *error = Some(msg.to_owned());
+                                *notice = None;
+                            }
+                        },
+                        SettingSubview::Addresses {
+                            input,
+                            focus,
+                            confirm_delete,
+                            error,
+                            notice,
+                            ..
+                        } => {
+                            if *focus == 0 && input.paste(first_line).changed() {
+                                *confirm_delete = None;
+                                *error = None;
+                                *notice = None;
+                            }
+                        }
+                        SettingSubview::JoinRule { .. }
+                        | SettingSubview::History { .. }
+                        | SettingSubview::Permissions { .. } => {}
+                    }
+                } else if let Some(prompt) = &mut info.ban_prompt {
                     prompt.reason.paste(first_line);
                 } else if let Some((_, edit)) = &mut info.editing {
                     edit.paste(first_line);
@@ -988,6 +1056,9 @@ impl App {
         };
         if code == KeyCode::Esc {
             return self.manage_escape();
+        }
+        if info.setting_view.is_some() {
+            return self.on_setting_view_key(code, mods);
         }
         if let Some(prompt) = &mut info.ban_prompt {
             if code == KeyCode::Enter && plain {
@@ -1034,6 +1105,32 @@ impl App {
             KeyCode::Left | KeyCode::Right if row == Some(InfoRow::Notify) && plain => {
                 self.info_activate(InfoRow::Notify, if code == KeyCode::Left { -1 } else { 1 });
             }
+            KeyCode::Left if row == Some(InfoRow::SettingsToggle) && plain => {
+                if info.settings_open {
+                    info.settings_open = false;
+                    info.error = None;
+                    info.notice = None;
+                    info.reveal = true;
+                }
+            }
+            KeyCode::Right if row == Some(InfoRow::SettingsToggle) && plain => {
+                if !info.settings_open {
+                    info.settings_open = true;
+                    info.error = None;
+                    info.notice = None;
+                    info.reveal = true;
+                }
+            }
+            KeyCode::Char(' ')
+                if matches!(
+                    row,
+                    Some(InfoRow::SettingsToggle | InfoRow::Setting(RoomSetting::Direct))
+                ) && plain =>
+            {
+                if let Some(row) = row {
+                    self.info_activate(row, 0);
+                }
+            }
             KeyCode::Enter => {
                 if let Some(row) = row {
                     self.info_activate(row, 0);
@@ -1063,7 +1160,7 @@ impl App {
             }
             _ => {
                 let keys = EditKeys {
-                    arrows: row != Some(InfoRow::Notify),
+                    arrows: row != Some(InfoRow::Notify) && row != Some(InfoRow::SettingsToggle),
                     home_end: false,
                     delete: !matches!(row, Some(InfoRow::Member(_) | InfoRow::KnockRequest(_))),
                     kill_to_end: true,
@@ -1177,6 +1274,45 @@ impl App {
                 let open = (self.active < self.rooms.len()).then_some(self.active);
                 self.open_info(open, None);
             }
+            Click::SettingChoice(idx) => self.on_setting_choice(idx),
+            Click::SettingSlot(slot) => self.on_setting_slot(slot),
+            Click::AddressRow(idx) => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && let Some(SettingSubview::Addresses {
+                        selected,
+                        confirm_delete,
+                        error,
+                        notice,
+                        ..
+                    }) = &mut info.setting_view
+                {
+                    *selected = idx;
+                    *confirm_delete = None;
+                    *error = None;
+                    *notice = None;
+                }
+            }
+            Click::AddressMakeMain(idx) => self.make_main_alias_at(idx),
+            Click::AddressPublishAlt(idx) => self.publish_alt_alias_at(idx),
+            Click::AddressUnpublish(idx) => self.unpublish_alias_at(idx),
+            Click::AddressDeleteLocal(idx) => self.delete_local_alias_at(idx),
+            Click::PermSet(row_idx, level) => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && info.setting_editable(RoomSetting::Permissions)
+                    && let Some(action) = PermAction::ALL.get(row_idx).copied()
+                    && let Some(SettingSubview::Permissions {
+                        draft,
+                        selected,
+                        error,
+                    }) = &mut info.setting_view
+                {
+                    *selected = row_idx;
+                    action.set(draft, level);
+                    *error = None;
+                }
+            }
         }
     }
 
@@ -1217,6 +1353,7 @@ impl App {
             return;
         }
         info.error = None;
+        info.notice = None;
         let room_id = info.room_id.clone();
         let confirmed = std::mem::take(&mut info.confirm);
         // Nothing is changed, shown as changed or asked about where there is no
@@ -1228,8 +1365,9 @@ impl App {
                 | InfoRow::Topic
                 | InfoRow::Invite
                 | InfoRow::Pinned
+                | InfoRow::SettingsToggle
                 | InfoRow::Member(_)
-        );
+        ) && !matches!(row, InfoRow::Setting(s) if s != RoomSetting::Direct);
         if sends && !connected {
             info.error = Some(NO_ACCOUNT.to_owned());
             return;
@@ -1318,6 +1456,27 @@ impl App {
                 (ManageCmd::Leave { room_id }, Pending::Leave, "Leaving…")
             }
             InfoRow::KnockRequest(_) => return self.accept_knock(),
+            InfoRow::SettingsToggle => {
+                info.settings_open = !info.settings_open;
+                info.reveal = true;
+                return;
+            }
+            InfoRow::Setting(RoomSetting::Direct) => {
+                let Some(details) = &mut info.details else {
+                    return;
+                };
+                let next = !details.direct;
+                details.direct = next;
+                (
+                    ManageCmd::SetDirect {
+                        room_id,
+                        direct: next,
+                    },
+                    Pending::Change(Change::Direct(next)),
+                    "Saving…",
+                )
+            }
+            InfoRow::Setting(setting) => return self.activate_room_setting(setting),
             InfoRow::Member(_) => {
                 return self.open_user_info_from_room_member(row);
             }
@@ -1972,6 +2131,17 @@ impl App {
             Change::LowPriority(true) => "Marked low priority",
             Change::LowPriority(false) => "Removed from low priority",
             Change::Notify => "",
+            Change::JoinRule => "Who can join updated",
+            Change::HistoryVisibility => "History visibility updated",
+            Change::EnableEncryption => "Encryption turned on",
+            Change::RoomAvatar => "Room picture updated",
+            Change::RemoveRoomAvatar => "Room picture removed",
+            Change::Addresses => "Room addresses updated",
+            Change::CreateLocalAlias => "Local address created",
+            Change::DeleteLocalAlias => "Local address deleted",
+            Change::Direct(true) => "Marked as a direct chat",
+            Change::Direct(false) => "Unmarked as a direct chat",
+            Change::Permissions => "Permissions updated",
         };
         if self.on_user_info_manage_done(room_id, change, done, &result) {
             return;
@@ -2001,12 +2171,48 @@ impl App {
                 info.answered(Pending::Change(change));
                 match result {
                     Ok(()) => {
+                        match change {
+                            Change::Addresses
+                            | Change::CreateLocalAlias
+                            | Change::DeleteLocalAlias => {
+                                if let Some(SettingSubview::Addresses {
+                                    input,
+                                    confirm_delete,
+                                    error,
+                                    notice,
+                                    ..
+                                }) = &mut info.setting_view
+                                {
+                                    if change != Change::DeleteLocalAlias {
+                                        input.clear();
+                                    }
+                                    *confirm_delete = None;
+                                    *error = None;
+                                    *notice = (!done.is_empty()).then(|| done.to_owned());
+                                }
+                            }
+                            Change::JoinRule
+                            | Change::HistoryVisibility
+                            | Change::EnableEncryption
+                            | Change::RoomAvatar
+                            | Change::RemoveRoomAvatar
+                            | Change::Permissions => {
+                                info.setting_view = None;
+                                if !done.is_empty() {
+                                    info.notice = Some(done.to_owned());
+                                }
+                            }
+                            Change::Direct(_) if !done.is_empty() => {
+                                info.notice = Some(done.to_owned());
+                            }
+                            _ => {}
+                        }
                         if !done.is_empty() {
                             self.show_toast(done);
                         }
                     }
                     Err(error) => {
-                        info.error = Some(error);
+                        self.setting_view_error(error);
                         // What was shown ahead of the answer is not true; look again.
                         let room_id = room_id.to_owned();
                         self.manage(ManageCmd::Info { room_id });
@@ -2079,6 +2285,898 @@ impl App {
             self.sidebar.reveal_cursor = true;
         }
     }
+
+    fn send_room_setting(&mut self, change: Change, cmd: ManageCmd, busy: &'static str) -> bool {
+        if self.matrix.is_none() {
+            self.setting_view_error(NO_ACCOUNT);
+            return false;
+        }
+        if let Some(Modal::RoomInfo(info)) = &mut self.modal {
+            info.error = None;
+            info.notice = None;
+            info.wait_for(Pending::Change(change), busy);
+        }
+        self.manage(cmd)
+    }
+
+    fn setting_view_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        match &mut info.setting_view {
+            Some(SettingSubview::EncryptConfirm { error, .. }) => *error = Some(message),
+            Some(SettingSubview::Picture { error, notice, .. }) => {
+                *error = Some(message);
+                *notice = None;
+            }
+            Some(SettingSubview::Addresses { error, notice, .. }) => {
+                *error = Some(message);
+                *notice = None;
+            }
+            Some(SettingSubview::Permissions { error, .. }) => *error = Some(message),
+            _ => info.error = Some(message),
+        }
+    }
+
+    fn activate_room_setting(&mut self, setting: RoomSetting) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        let Some(details) = &info.details else {
+            return;
+        };
+        let editable = info.setting_editable(setting);
+        match setting {
+            RoomSetting::JoinRule => {
+                if !editable {
+                    info.error = Some(
+                        if details.join_rule.is_some_and(|r| r.to_ruma().is_none()) {
+                            "This room uses a restricted or custom join rule that cannot be edited here.".to_owned()
+                        } else {
+                            "You do not have permission to change who can join.".to_owned()
+                        },
+                    );
+                    return;
+                }
+                let selected = details
+                    .join_rule
+                    .and_then(|cur| RoomJoinRule::EDITABLE.iter().position(|r| *r == cur))
+                    .unwrap_or(0);
+                info.setting_view = Some(SettingSubview::JoinRule { selected });
+            }
+            RoomSetting::History => {
+                if !editable {
+                    info.error =
+                        Some("You do not have permission to change history visibility.".to_owned());
+                    return;
+                }
+                let selected = details
+                    .history_visibility
+                    .and_then(|cur| RoomHistory::ALL.iter().position(|h| *h == cur))
+                    .unwrap_or(0);
+                info.setting_view = Some(SettingSubview::History { selected });
+            }
+            RoomSetting::Encryption => {
+                if details.encrypted == Some(true) {
+                    info.error =
+                        Some("End-to-end encryption cannot be turned off once enabled.".to_owned());
+                    return;
+                }
+                if details.encrypted.is_none() {
+                    info.error = Some("Encryption status is not known yet.".to_owned());
+                    return;
+                }
+                if !editable {
+                    info.error =
+                        Some("You do not have permission to turn on encryption.".to_owned());
+                    return;
+                }
+                info.setting_view = Some(SettingSubview::EncryptConfirm {
+                    confirm: LineEdit::new().with_max_bytes(16),
+                    focus: 0,
+                    error: None,
+                });
+            }
+            RoomSetting::Picture => {
+                if !editable {
+                    info.error =
+                        Some("You do not have permission to change the room picture.".to_owned());
+                    return;
+                }
+                info.setting_view = Some(SettingSubview::Picture {
+                    path: LineEdit::new().with_max_bytes(FIELD_MAX),
+                    focus: 0,
+                    error: None,
+                    notice: None,
+                });
+            }
+            RoomSetting::Addresses => {
+                info.setting_view = Some(SettingSubview::Addresses {
+                    input: LineEdit::new().with_max_bytes(FIELD_MAX),
+                    focus: 0,
+                    selected: 0,
+                    confirm_delete: None,
+                    error: None,
+                    notice: None,
+                });
+            }
+            RoomSetting::Permissions => {
+                info.setting_view = Some(SettingSubview::Permissions {
+                    draft: details.permissions,
+                    selected: 0,
+                    error: None,
+                });
+            }
+            RoomSetting::Direct => {}
+        }
+    }
+
+    fn on_setting_view_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() {
+            return;
+        }
+        let can_edit_addresses = info.setting_editable(RoomSetting::Addresses);
+        let can_edit_permissions = info.setting_editable(RoomSetting::Permissions);
+        let has_avatar = info
+            .details
+            .as_ref()
+            .is_some_and(|d| d.avatar_url.is_some());
+        let has_canonical = info
+            .details
+            .as_ref()
+            .is_some_and(|d| d.canonical_alias.is_some());
+        let entry_count = info
+            .details
+            .as_ref()
+            .map_or(0, |d| address_entries(d).len());
+        match &mut info.setting_view {
+            Some(SettingSubview::JoinRule { selected }) => {
+                let len = RoomJoinRule::EDITABLE.len() as isize;
+                match code {
+                    KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
+                        *selected = (*selected as isize - 1).rem_euclid(len) as usize;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if code == KeyCode::Down || plain => {
+                        *selected = (*selected as isize + 1).rem_euclid(len) as usize;
+                    }
+                    KeyCode::Enter if plain => {
+                        let choice = *selected;
+                        self.on_setting_choice(choice);
+                    }
+                    _ => {}
+                }
+            }
+            Some(SettingSubview::History { selected }) => {
+                let len = RoomHistory::ALL.len() as isize;
+                match code {
+                    KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
+                        *selected = (*selected as isize - 1).rem_euclid(len) as usize;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if code == KeyCode::Down || plain => {
+                        *selected = (*selected as isize + 1).rem_euclid(len) as usize;
+                    }
+                    KeyCode::Enter if plain => {
+                        let choice = *selected;
+                        self.on_setting_choice(choice);
+                    }
+                    _ => {}
+                }
+            }
+            Some(SettingSubview::EncryptConfirm {
+                confirm,
+                focus,
+                error,
+            }) => match code {
+                KeyCode::Tab if mods.is_empty() => {
+                    *focus = step_focus(*focus, &[0, 1, 2], 1);
+                }
+                KeyCode::BackTab => {
+                    *focus = step_focus(*focus, &[0, 1, 2], -1);
+                }
+                KeyCode::Left | KeyCode::Right if *focus >= 1 && plain => {
+                    let step = if code == KeyCode::Left { -1 } else { 1 };
+                    *focus = step_focus(*focus, &[1, 2], step);
+                }
+                KeyCode::Enter if plain => {
+                    if *focus == 2 {
+                        info.setting_view = None;
+                    } else {
+                        self.submit_enable_encryption();
+                    }
+                }
+                _ if *focus == 0 && confirm.handle_key(code, mods, EditKeys::FULL).changed() => {
+                    *error = None;
+                }
+                _ => {}
+            },
+            Some(SettingSubview::Picture {
+                path,
+                focus,
+                error,
+                notice,
+            }) => {
+                let stops: &[usize] = if has_avatar {
+                    &[0, 1, 2, 3]
+                } else {
+                    &[0, 1, 3]
+                };
+                let btn_stops: &[usize] = if has_avatar { &[1, 2, 3] } else { &[1, 3] };
+                match code {
+                    KeyCode::Tab if mods.is_empty() && *focus == 0 && !path.is_empty() => {
+                        self.complete_room_avatar_path();
+                    }
+                    KeyCode::Tab if mods.is_empty() => {
+                        *focus = step_focus(*focus, stops, 1);
+                    }
+                    KeyCode::BackTab => {
+                        *focus = step_focus(*focus, stops, -1);
+                    }
+                    KeyCode::Left | KeyCode::Right if *focus >= 1 && plain => {
+                        let step = if code == KeyCode::Left { -1 } else { 1 };
+                        *focus = step_focus(*focus, btn_stops, step);
+                    }
+                    KeyCode::Enter if plain => {
+                        let slot = if *focus == 0 { 1 } else { *focus };
+                        self.on_setting_slot(slot);
+                    }
+                    _ if *focus == 0 && path.handle_key(code, mods, EditKeys::FULL).changed() => {
+                        *error = None;
+                        *notice = None;
+                    }
+                    _ => {}
+                }
+            }
+            Some(SettingSubview::Addresses {
+                input,
+                focus,
+                selected,
+                confirm_delete,
+                error,
+                notice,
+            }) => {
+                if !can_edit_addresses {
+                    match code {
+                        KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
+                            *selected = selected.saturating_sub(1);
+                        }
+                        KeyCode::Down | KeyCode::Char('j')
+                            if (code == KeyCode::Down || plain) && *selected + 1 < entry_count =>
+                        {
+                            *selected += 1;
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                let stops: &[usize] = if has_canonical {
+                    &[0, 1, 2, 3]
+                } else {
+                    &[0, 1, 2]
+                };
+                let btn_stops: &[usize] = if has_canonical { &[1, 2, 3] } else { &[1, 2] };
+                match code {
+                    KeyCode::Tab if mods.is_empty() => {
+                        *focus = step_focus(*focus, stops, 1);
+                    }
+                    KeyCode::BackTab => {
+                        *focus = step_focus(*focus, stops, -1);
+                    }
+                    KeyCode::Up => {
+                        *selected = selected.saturating_sub(1);
+                        *confirm_delete = None;
+                    }
+                    KeyCode::Down => {
+                        if *selected + 1 < entry_count {
+                            *selected += 1;
+                        }
+                        *confirm_delete = None;
+                    }
+                    KeyCode::Left | KeyCode::Right if *focus >= 1 && plain => {
+                        let step = if code == KeyCode::Left { -1 } else { 1 };
+                        *focus = step_focus(*focus, btn_stops, step);
+                    }
+                    KeyCode::Enter if plain => {
+                        let slot = if *focus == 0 { 1 } else { *focus };
+                        self.on_setting_slot(slot);
+                    }
+                    KeyCode::Char('k') if *focus != 0 && plain => {
+                        *selected = selected.saturating_sub(1);
+                        *confirm_delete = None;
+                    }
+                    KeyCode::Char('j') if *focus != 0 && plain => {
+                        if *selected + 1 < entry_count {
+                            *selected += 1;
+                        }
+                        *confirm_delete = None;
+                    }
+                    KeyCode::Char('m') if *focus != 0 && plain => {
+                        let idx = *selected;
+                        self.make_main_alias_at(idx);
+                    }
+                    KeyCode::Char('u') if *focus != 0 && plain => {
+                        let idx = *selected;
+                        self.unpublish_alias_at(idx);
+                    }
+                    KeyCode::Delete if *focus != 0 && plain => {
+                        let idx = *selected;
+                        self.delete_local_alias_at(idx);
+                    }
+                    _ if *focus == 0 && input.handle_key(code, mods, EditKeys::FULL).changed() => {
+                        *confirm_delete = None;
+                        *error = None;
+                        *notice = None;
+                    }
+                    _ => {}
+                }
+            }
+            Some(SettingSubview::Permissions {
+                draft,
+                selected,
+                error,
+            }) => {
+                if !can_edit_permissions {
+                    if code == KeyCode::Enter && plain {
+                        info.setting_view = None;
+                    }
+                    return;
+                }
+                let rows = PermAction::ALL.len();
+                let max_sel = rows + 1;
+                match code {
+                    KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
+                        *selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if code == KeyCode::Down || plain => {
+                        if *selected < max_sel {
+                            *selected += 1;
+                        }
+                    }
+                    KeyCode::Tab if mods.is_empty() => {
+                        *selected = if *selected < rows {
+                            rows
+                        } else if *selected == rows {
+                            rows + 1
+                        } else {
+                            0
+                        };
+                    }
+                    KeyCode::BackTab => {
+                        *selected = if *selected == rows + 1 {
+                            rows
+                        } else if *selected == rows {
+                            rows.saturating_sub(1)
+                        } else if *selected == 0 {
+                            rows + 1
+                        } else {
+                            *selected - 1
+                        };
+                    }
+                    KeyCode::Left | KeyCode::Right if plain => {
+                        let step = if code == KeyCode::Left { -1 } else { 1 };
+                        if let Some(action) = PermAction::ALL.get(*selected).copied() {
+                            let next = step_perm_level(action.get(draft), step);
+                            action.set(draft, next);
+                            *error = None;
+                        } else if *selected >= rows {
+                            *selected = if *selected == rows { rows + 1 } else { rows };
+                        }
+                    }
+                    KeyCode::Enter if plain => {
+                        if *selected == max_sel {
+                            info.setting_view = None;
+                        } else {
+                            self.submit_permissions();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn on_setting_choice(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() {
+            return;
+        }
+        let room_id = info.room_id.clone();
+        match &mut info.setting_view {
+            Some(SettingSubview::JoinRule { selected }) => {
+                let Some(&rule) = RoomJoinRule::EDITABLE.get(idx) else {
+                    return;
+                };
+                *selected = idx;
+                if info.details.as_ref().and_then(|d| d.join_rule) == Some(rule) {
+                    info.setting_view = None;
+                    return;
+                }
+                self.send_room_setting(
+                    Change::JoinRule,
+                    ManageCmd::SetJoinRule { room_id, rule },
+                    "Saving…",
+                );
+            }
+            Some(SettingSubview::History { selected }) => {
+                let Some(&visibility) = RoomHistory::ALL.get(idx) else {
+                    return;
+                };
+                *selected = idx;
+                if info.details.as_ref().and_then(|d| d.history_visibility) == Some(visibility) {
+                    info.setting_view = None;
+                    return;
+                }
+                self.send_room_setting(
+                    Change::HistoryVisibility,
+                    ManageCmd::SetHistoryVisibility {
+                        room_id,
+                        visibility,
+                    },
+                    "Saving…",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn on_setting_slot(&mut self, slot: usize) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() {
+            return;
+        }
+        match &info.setting_view {
+            Some(SettingSubview::EncryptConfirm { .. }) => match slot {
+                1 => self.submit_enable_encryption(),
+                2 => info.setting_view = None,
+                _ => {}
+            },
+            Some(SettingSubview::Picture { .. }) => match slot {
+                1 => self.submit_room_avatar(),
+                2 => self.submit_remove_room_avatar(),
+                3 => info.setting_view = None,
+                _ => {}
+            },
+            Some(SettingSubview::Addresses { .. }) => match slot {
+                1 => self.create_local_alias(),
+                2 => self.publish_input_alt_alias(),
+                3 => self.clear_main_alias(),
+                _ => {}
+            },
+            Some(SettingSubview::Permissions { .. }) => match slot {
+                0 => self.submit_permissions(),
+                1 => info.setting_view = None,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn submit_enable_encryption(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Encryption) {
+            self.setting_view_error("Encryption cannot be turned on in this room.");
+            return;
+        }
+        let room_id = info.room_id.clone();
+        let typed = match &info.setting_view {
+            Some(SettingSubview::EncryptConfirm { confirm, .. }) => {
+                confirm.as_str().trim().to_owned()
+            }
+            _ => return,
+        };
+        if typed != "ENCRYPT" {
+            self.setting_view_error("Type ENCRYPT in capitals to turn encryption on.");
+            return;
+        }
+        self.send_room_setting(
+            Change::EnableEncryption,
+            ManageCmd::EnableEncryption { room_id },
+            "Turning encryption on…",
+        );
+    }
+
+    fn complete_room_avatar_path(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        let Some(SettingSubview::Picture {
+            path,
+            error,
+            notice,
+            ..
+        }) = &mut info.setting_view
+        else {
+            return;
+        };
+        match complete_path_field(path) {
+            PathCompleteResult::Empty => {
+                *error = Some("Type the beginning of a file path first.".to_owned());
+                *notice = None;
+            }
+            PathCompleteResult::Handled {
+                notice: msg,
+                changed,
+                has_options,
+            } => {
+                if changed || has_options {
+                    *error = None;
+                    *notice = msg;
+                } else {
+                    *error = Some("No file or folder starts with that path.".to_owned());
+                    *notice = None;
+                }
+            }
+            PathCompleteResult::NoMatch => {
+                *error = Some("No file or folder starts with that path.".to_owned());
+                *notice = None;
+            }
+        }
+    }
+
+    fn submit_room_avatar(&mut self) {
+        let limit = self.attach.limit;
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Picture) {
+            self.setting_view_error("You do not have permission to change the room picture.");
+            return;
+        }
+        let room_id = info.room_id.clone();
+        let raw = match &info.setting_view {
+            Some(SettingSubview::Picture { path, .. }) => path.as_str().to_owned(),
+            _ => return,
+        };
+        let path = match validate_avatar_path(&raw, limit) {
+            Ok(path) => path,
+            Err(err) => {
+                self.setting_view_error(err);
+                return;
+            }
+        };
+        self.send_room_setting(
+            Change::RoomAvatar,
+            ManageCmd::SetRoomAvatar { room_id, path },
+            "Uploading picture…",
+        );
+    }
+
+    fn submit_remove_room_avatar(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Picture) {
+            self.setting_view_error("You do not have permission to change the room picture.");
+            return;
+        }
+        if info.details.as_ref().is_none_or(|d| d.avatar_url.is_none()) {
+            self.setting_view_error("This room has no picture to remove.");
+            return;
+        }
+        let room_id = info.room_id.clone();
+        self.send_room_setting(
+            Change::RemoveRoomAvatar,
+            ManageCmd::RemoveRoomAvatar { room_id },
+            "Removing picture…",
+        );
+    }
+
+    fn normalized_address_input(&mut self) -> Option<NormalizedAddressInput> {
+        let (room_id, raw, own_hs, canonical, alts) = {
+            let Some(Modal::RoomInfo(info)) = &self.modal else {
+                return None;
+            };
+            let Some(details) = &info.details else {
+                return None;
+            };
+            let Some(SettingSubview::Addresses { input, .. }) = &info.setting_view else {
+                return None;
+            };
+            (
+                info.room_id.clone(),
+                input.as_str().to_owned(),
+                details.own_homeserver.clone(),
+                details.canonical_alias.clone(),
+                details.alt_aliases.clone(),
+            )
+        };
+        match normalize_alias_input(&raw, own_hs.as_deref()) {
+            Ok(alias) => Some(NormalizedAddressInput {
+                room_id,
+                alias,
+                canonical,
+                alts,
+                own_hs,
+            }),
+            Err(err) => {
+                self.setting_view_error(err);
+                None
+            }
+        }
+    }
+
+    fn submit_addresses_update(&mut self, canonical: Option<String>, alt_aliases: Vec<String>) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Addresses) {
+            self.setting_view_error("You do not have permission to edit room addresses.");
+            return;
+        }
+        let room_id = info.room_id.clone();
+        self.send_room_setting(
+            Change::Addresses,
+            ManageCmd::SetAddresses {
+                room_id,
+                canonical,
+                alt_aliases,
+            },
+            "Saving addresses…",
+        );
+    }
+
+    fn create_local_alias(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Addresses) {
+            self.setting_view_error("You do not have permission to edit room addresses.");
+            return;
+        }
+        let Some(parsed) = self.normalized_address_input() else {
+            return;
+        };
+        if let Some(hs) = parsed.own_hs.as_deref()
+            && !parsed.alias.ends_with(&format!(":{hs}"))
+        {
+            self.setting_view_error(format!(
+                "Local addresses must be on your homeserver (:{hs})."
+            ));
+            return;
+        }
+        self.send_room_setting(
+            Change::CreateLocalAlias,
+            ManageCmd::CreateLocalAlias {
+                room_id: parsed.room_id,
+                alias: parsed.alias,
+            },
+            "Creating local address…",
+        );
+    }
+
+    fn publish_input_alt_alias(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Addresses) {
+            self.setting_view_error("You do not have permission to edit room addresses.");
+            return;
+        }
+        let Some(mut parsed) = self.normalized_address_input() else {
+            return;
+        };
+        if parsed.canonical.as_deref() == Some(parsed.alias.as_str()) {
+            self.setting_view_error("That address is already the main address.");
+            return;
+        }
+        if parsed.alts.contains(&parsed.alias) {
+            self.setting_view_error("That address is already published as an alternate.");
+            return;
+        }
+        parsed.alts.push(parsed.alias);
+        self.submit_addresses_update(parsed.canonical, parsed.alts);
+    }
+
+    fn clear_main_alias(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Addresses) {
+            self.setting_view_error("You do not have permission to edit room addresses.");
+            return;
+        }
+        let Some(details) = &info.details else {
+            return;
+        };
+        if details.canonical_alias.is_none() {
+            return;
+        }
+        let alts = details.alt_aliases.clone();
+        self.submit_addresses_update(None, alts);
+    }
+
+    fn make_main_alias_at(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if info.busy.is_some() || !info.setting_editable(RoomSetting::Addresses) {
+            return;
+        }
+        let Some(details) = &info.details else {
+            return;
+        };
+        let entries = address_entries(details);
+        let Some(entry) = entries.get(idx) else {
+            return;
+        };
+        if entry.is_canonical {
+            return;
+        }
+        let next_main = entry.alias.clone();
+        let mut alts: Vec<String> = details
+            .alt_aliases
+            .iter()
+            .filter(|a| *a != &next_main)
+            .cloned()
+            .collect();
+        if let Some(prev) = &details.canonical_alias
+            && prev != &next_main
+            && !alts.contains(prev)
+        {
+            alts.push(prev.clone());
+        }
+        self.submit_addresses_update(Some(next_main), alts);
+    }
+
+    fn publish_alt_alias_at(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if info.busy.is_some() || !info.setting_editable(RoomSetting::Addresses) {
+            return;
+        }
+        let Some(details) = &info.details else {
+            return;
+        };
+        let entries = address_entries(details);
+        let Some(entry) = entries.get(idx) else {
+            return;
+        };
+        if entry.is_canonical || entry.is_alt {
+            return;
+        }
+        let canonical = details.canonical_alias.clone();
+        let mut alts = details.alt_aliases.clone();
+        alts.push(entry.alias.clone());
+        self.submit_addresses_update(canonical, alts);
+    }
+
+    fn unpublish_alias_at(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if info.busy.is_some() || !info.setting_editable(RoomSetting::Addresses) {
+            return;
+        }
+        let Some(details) = &info.details else {
+            return;
+        };
+        let entries = address_entries(details);
+        let Some(entry) = entries.get(idx) else {
+            return;
+        };
+        if !entry.is_canonical && !entry.is_alt {
+            return;
+        }
+        let canonical = details
+            .canonical_alias
+            .clone()
+            .filter(|a| a != &entry.alias);
+        let alts = details
+            .alt_aliases
+            .iter()
+            .filter(|a| *a != &entry.alias)
+            .cloned()
+            .collect();
+        self.submit_addresses_update(canonical, alts);
+    }
+
+    fn delete_local_alias_at(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || !info.setting_editable(RoomSetting::Addresses) {
+            return;
+        }
+        let room_id = info.room_id.clone();
+        let Some(details) = &info.details else {
+            return;
+        };
+        let entries = address_entries(details);
+        let Some(entry) = entries.get(idx) else {
+            return;
+        };
+        let own_hs = details.own_homeserver.as_deref();
+        let local_on_own_hs =
+            entry.is_local && own_hs.is_none_or(|hs| entry.alias.ends_with(&format!(":{hs}")));
+        if !local_on_own_hs {
+            self.setting_view_error("Only local addresses on your homeserver can be deleted here.");
+            return;
+        }
+        let alias = entry.alias.clone();
+        if let Some(SettingSubview::Addresses {
+            confirm_delete,
+            error,
+            notice,
+            ..
+        }) = &mut info.setting_view
+        {
+            if confirm_delete.as_deref() != Some(alias.as_str()) {
+                *confirm_delete = Some(alias);
+                *error = None;
+                *notice = None;
+                return;
+            }
+            *confirm_delete = None;
+        } else {
+            return;
+        }
+        self.send_room_setting(
+            Change::DeleteLocalAlias,
+            ManageCmd::DeleteLocalAlias { room_id, alias },
+            "Deleting local address…",
+        );
+    }
+
+    fn submit_permissions(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        let Some(details) = &info.details else {
+            return;
+        };
+        let Some(SettingSubview::Permissions { draft, .. }) = &info.setting_view else {
+            return;
+        };
+        if let Err(err) = validate_permissions_draft(details, draft) {
+            self.setting_view_error(err);
+            return;
+        }
+        let room_id = info.room_id.clone();
+        let permissions = *draft;
+        self.send_room_setting(
+            Change::Permissions,
+            ManageCmd::SetPermissions {
+                room_id,
+                permissions,
+            },
+            "Saving permissions…",
+        );
+    }
+}
+
+struct NormalizedAddressInput {
+    room_id: String,
+    alias: String,
+    canonical: Option<String>,
+    alts: Vec<String>,
+    own_hs: Option<String>,
+}
+
+fn step_focus(current: usize, stops: &[usize], step: isize) -> usize {
+    let idx = stops.iter().position(|&s| s == current).unwrap_or(0) as isize;
+    stops[(idx + step).rem_euclid(stops.len() as isize) as usize]
+}
+
+fn step_perm_level(current: i64, step: isize) -> i64 {
+    let levels = PermAction::LEVELS;
+    let idx = levels
+        .iter()
+        .position(|(level, _)| *level >= current)
+        .unwrap_or(levels.len() - 1) as isize;
+    let next_idx = (idx + step).clamp(0, levels.len() as isize - 1) as usize;
+    levels[next_idx].0
 }
 
 /// The demo's rooms have no server to ask: everyone who wrote is a member.
@@ -4764,5 +5862,457 @@ mod tests {
             [ManageCmd::AcceptKnock { room_id, user_id }]
                 if room_id == ROOM && user_id == dave
         ));
+    }
+
+    #[test]
+    fn room_settings_toggle_all_views_and_guards() {
+        use crate::matrix::{RoomPermissions, RoomSettingsPower};
+
+        let (mut app, mut terminal, mut commands) = connected();
+        app.open_room(0);
+        app.on_event(key(KeyCode::F(4)));
+        all_commands(&mut commands);
+
+        let full_power = RoomSettingsPower {
+            can_join_rule: true,
+            can_history: true,
+            can_encrypt: true,
+            can_avatar: true,
+            can_aliases: true,
+            can_permissions: true,
+        };
+        let base_details = || RoomDetails {
+            name: "Rats".into(),
+            joined: 2,
+            encrypted: Some(false),
+            direct: false,
+            join_rule: Some(RoomJoinRule::Invite),
+            history_visibility: Some(RoomHistory::Invited),
+            canonical_alias: Some("#main:example.org".into()),
+            alt_aliases: vec!["#alt:example.org".into()],
+            local_aliases: vec!["#main:example.org".into(), "#local:example.org".into()],
+            own_homeserver: Some("example.org".into()),
+            own_power_level: 100,
+            settings_power: full_power,
+            permissions: RoomPermissions {
+                send_messages: 0,
+                invite: 0,
+                kick: 50,
+                ban: 50,
+                redact: 50,
+                change_settings: 50,
+                power_levels_event_level: 50,
+                explicit_power_levels_rule: false,
+            },
+            members: vec![member("me", MemberRole::Admin, false)],
+            ..RoomDetails::default()
+        };
+
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(base_details())),
+        }));
+
+        // Collapsed by default right above Members.
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "▸ Room settings");
+        assert!(!info(&app).settings_open);
+
+        // Expand with Enter / Space / Right, collapse with Left.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::SettingsToggle);
+        }
+        app.on_event(key(KeyCode::Right));
+        assert!(info(&app).settings_open);
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "▾ Room settings");
+        find(&text, "Who can join");
+        find(&text, "Permissions");
+        insta::assert_snapshot!("room_info_settings_expanded", text);
+
+        app.on_event(key(KeyCode::Left));
+        assert!(!info(&app).settings_open);
+        app.on_event(key(KeyCode::Char(' ')));
+        assert!(info(&app).settings_open);
+
+        // 1. Join rule picker.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::JoinRule));
+        }
+        app.on_event(key(KeyCode::Enter));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Who can join");
+        find(&text, "Invite only (current)");
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetJoinRule {
+                room_id,
+                rule: RoomJoinRule::Knock
+            }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::JoinRule,
+            result: Ok(()),
+        }));
+        assert!(info(&app).setting_view.is_none());
+
+        // Restricted join rule is clearly read-only and refuses editing.
+        let mut restricted = base_details();
+        restricted.join_rule = Some(RoomJoinRule::Restricted);
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(restricted)),
+        }));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Restricted (read-only)");
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::JoinRule));
+        }
+        app.on_event(key(KeyCode::Enter));
+        assert!(info(&app).setting_view.is_none());
+        assert!(info(&app).error.is_some());
+
+        // Restore editable details.
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(base_details())),
+        }));
+
+        // 2. History visibility shows prominent warning about future messages.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::History));
+        }
+        app.on_event(key(KeyCode::Enter));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "WARNING:");
+        find(&text, "only affects future");
+        find(&text, "messages.");
+        insta::assert_snapshot!("room_settings_history_warning", text);
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetHistoryVisibility {
+                room_id,
+                visibility: RoomHistory::Joined
+            }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::HistoryVisibility,
+            result: Ok(()),
+        }));
+
+        // 3. Encryption requires exact ENCRYPT confirmation and cannot be turned off once on.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Encryption));
+        }
+        app.on_event(key(KeyCode::Enter));
+        type_text(&mut app, "encrypt");
+        app.on_event(key(KeyCode::Enter));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Type ENCRYPT in capitals");
+        for _ in 0..7 {
+            app.on_event(key(KeyCode::Backspace));
+        }
+        type_text(&mut app, "ENCRYPT");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::EnableEncryption { room_id }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::EnableEncryption,
+            result: Ok(()),
+        }));
+        let mut enc_on = base_details();
+        enc_on.encrypted = Some(true);
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(enc_on)),
+        }));
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Encryption));
+        }
+        app.on_event(key(KeyCode::Enter));
+        assert!(info(&app).setting_view.is_none());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "on · cannot be turned off");
+
+        // 4. Room picture: shared Tab completion + dropped file paste + upload + remove.
+        let pic_dir =
+            std::env::temp_dir().join(format!("matrix-rat-room-pic-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&pic_dir);
+        std::fs::create_dir_all(&pic_dir).unwrap();
+        let pic_file = pic_dir.join("room-crest.png");
+        let mut png_bytes = Vec::new();
+        crate::images::demo_picture(32, 20)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        std::fs::write(&pic_file, &png_bytes).unwrap();
+
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Picture));
+        }
+        app.on_event(key(KeyCode::Enter));
+        let prefix = pic_dir.join("room-cr").display().to_string();
+        type_text(&mut app, &prefix);
+        app.on_event(key(KeyCode::Tab));
+        if let Some(SettingSubview::Picture { path, .. }) = &info(&app).setting_view {
+            assert_eq!(path.as_str(), pic_file.display().to_string());
+        } else {
+            panic!("expected Picture subview");
+        }
+        app.on_event(key(KeyCode::Esc));
+
+        // Drag-and-drop paste fills path and sets ready notice even if non-empty.
+        app.on_event(key(KeyCode::Enter));
+        let pasted = format!("'{}'\n", pic_file.display());
+        app.on_event(Event::Paste(pasted));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Image file ready");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetRoomAvatar { room_id, path }]
+                if room_id == ROOM && path == &pic_file
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::RoomAvatar,
+            result: Ok(()),
+        }));
+
+        // Mid-edit permission withdrawal closes Picture subview.
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            info(&app).setting_view,
+            Some(SettingSubview::Picture { .. })
+        ));
+        let mut no_pic = base_details();
+        no_pic.settings_power.can_avatar = false;
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(no_pic)),
+        }));
+        assert!(info(&app).setting_view.is_none());
+        assert!(info(&app).error.is_some());
+
+        // Remove existing picture.
+        let mut has_pic = base_details();
+        has_pic.avatar_url = Some("mxc://example.org/pic".into());
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(has_pic)),
+        }));
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Picture));
+        }
+        app.on_event(key(KeyCode::Enter));
+        let text = screen(&mut app, &mut terminal);
+        let rem_btn = find(&text, "[Remove picture]");
+        app.on_event(click(rem_btn.0 + 1, rem_btn.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::RemoveRoomAvatar { room_id }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::RemoveRoomAvatar,
+            result: Ok(()),
+        }));
+        let _ = std::fs::remove_dir_all(&pic_dir);
+
+        // 5. Addresses subview: create local, publish alt, make main, unpublish, delete confirm.
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(base_details())),
+        }));
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Addresses));
+        }
+        app.on_event(key(KeyCode::Enter));
+        type_text(&mut app, "extra");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::CreateLocalAlias { room_id, alias }]
+                if room_id == ROOM && alias == "#extra:example.org"
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::CreateLocalAlias,
+            result: Ok(()),
+        }));
+        // Stays open on Addresses and clears input.
+        assert!(matches!(
+            info(&app).setting_view,
+            Some(SettingSubview::Addresses { .. })
+        ));
+
+        // Publish input as alt.
+        type_text(&mut app, "fresh-alt");
+        let text = screen(&mut app, &mut terminal);
+        let pub_btn = find(&text, "[Publish alt]");
+        app.on_event(click(pub_btn.0 + 1, pub_btn.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetAddresses {
+                room_id,
+                canonical: Some(main),
+                alt_aliases
+            }] if room_id == ROOM
+                && main == "#main:example.org"
+                && *alt_aliases == ["#alt:example.org", "#fresh-alt:example.org"]
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::Addresses,
+            result: Ok(()),
+        }));
+
+        // Select row 2 (`#local:example.org`) and promote via Make main; then Unpublish row 1.
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        let text = screen(&mut app, &mut terminal);
+        let mk = find(&text, "[Make main]");
+        app.on_event(click(mk.0 + 1, mk.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetAddresses {
+                room_id,
+                canonical: Some(main),
+                alt_aliases
+            }] if room_id == ROOM
+                && main == "#local:example.org"
+                && *alt_aliases == ["#alt:example.org", "#main:example.org"]
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::Addresses,
+            result: Ok(()),
+        }));
+
+        // Two-step delete confirmation for local alias, Esc cancels only confirm first.
+        let text = screen(&mut app, &mut terminal);
+        let del = find(&text, "[Delete local]");
+        app.on_event(click(del.0 + 1, del.1));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Delete local #local:example.org?");
+        app.on_event(key(KeyCode::Esc));
+        assert!(matches!(
+            info(&app).setting_view,
+            Some(SettingSubview::Addresses {
+                confirm_delete: None,
+                ..
+            })
+        ));
+        let text = screen(&mut app, &mut terminal);
+        let del = find(&text, "[Delete local]");
+        app.on_event(click(del.0 + 1, del.1));
+        let text = screen(&mut app, &mut terminal);
+        let del2 = find(&text, "[Delete local]");
+        app.on_event(click(del2.0 + 1, del2.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::DeleteLocalAlias { room_id, alias }]
+                if room_id == ROOM && alias == "#local:example.org"
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::DeleteLocalAlias,
+            result: Ok(()),
+        }));
+        app.on_event(key(KeyCode::Esc));
+        assert!(info(&app).setting_view.is_none());
+
+        // 6. Direct chat toggle via Space.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Direct));
+        }
+        app.on_event(key(KeyCode::Char(' ')));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetDirect {
+                room_id,
+                direct: true
+            }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::Direct(true),
+            result: Ok(()),
+        }));
+
+        // 7. Permissions subview: level cap guard for moderator (50) and save for admin (100).
+        let mut mod_details = base_details();
+        mod_details.own_power_level = 50;
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(mod_details)),
+        }));
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Permissions));
+        }
+        app.on_event(key(KeyCode::Enter));
+        // Move to Invite -> Moderator (50), then Ban (row 3) -> Right tries 100 -> live error & blocked save.
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Right));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "above your own level (50)");
+        app.on_event(key(KeyCode::Enter));
+        assert!(sent(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Esc));
+
+        // Admin (100) changes Invite to Moderator (50), snapshots, and saves.
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(base_details())),
+        }));
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Right));
+        let text = screen(&mut app, &mut terminal);
+        insta::assert_snapshot!("room_settings_permissions", text);
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetPermissions {
+                room_id,
+                permissions
+            }] if room_id == ROOM && permissions.invite == 50
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::Permissions,
+            result: Ok(()),
+        }));
+        assert!(info(&app).setting_view.is_none());
+
+        // Read-only permissions view when can_permissions is false.
+        let mut plain_member = base_details();
+        plain_member.settings_power = RoomSettingsPower::default();
+        plain_member.own_power_level = 0;
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(plain_member)),
+        }));
+        app.on_event(key(KeyCode::Enter));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Read-only: you do not have permission");
+        app.on_event(key(KeyCode::Enter));
+        assert!(info(&app).setting_view.is_none());
+        assert!(sent(&mut commands).is_empty());
     }
 }

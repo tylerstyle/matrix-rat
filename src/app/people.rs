@@ -18,12 +18,9 @@ use crate::people::{
     OwnProfilePopup, UserAction, UserInfoCtx, UserInfoPopup, UserInfoRow, UserPending,
 };
 use crate::text::{is_blank, sanitize_line};
-use crate::upload;
 
 /// Maximum length of a Matrix display name.
 const PROFILE_NAME_MAX: usize = 255;
-/// Maximum candidate file names shown after a multi-match Tab completion.
-const OPTIONS_SHOWN: usize = 6;
 
 impl App {
     fn next_user_info_request(&mut self) -> u64 {
@@ -954,16 +951,17 @@ impl App {
         }
         form.error = None;
         form.notice = None;
-        if let Some(paths) = upload::dropped_files(full_text) {
-            if paths.len() > 1 {
-                form.error = Some("Drop one image file for your avatar.".to_owned());
+        match super::dropped_single_image_path(full_text) {
+            Ok(Some(path)) => {
+                form.avatar_path.set(&path);
+                form.set_focus(OwnProfilePopup::SET_AVATAR);
                 return;
             }
-            if let Some(path) = paths.into_iter().next() {
-                form.avatar_path.set(path.display().to_string());
-                form.set_focus(OwnProfilePopup::SET_AVATAR);
+            Ok(None) => {}
+            Err(err) => {
+                form.error = Some(err.to_owned());
+                return;
             }
-            return;
         }
         match form.focus {
             OwnProfilePopup::NAME_INPUT => {
@@ -1089,43 +1087,23 @@ impl App {
     }
 
     fn complete_own_avatar_path(&mut self) -> bool {
-        let current = match &self.modal {
-            Some(Modal::OwnProfile(form)) => form.avatar_path.as_str().to_owned(),
-            _ => return false,
-        };
-        if current.is_empty() {
+        let Some(Modal::OwnProfile(form)) = &mut self.modal else {
             return false;
-        }
-        match upload::complete(&current) {
-            Some(completion) => {
-                let changed = completion.text != current;
-                let has_options = !completion.options.is_empty();
-                if let Some(Modal::OwnProfile(form)) = &mut self.modal {
-                    form.error = None;
-                    if changed {
-                        form.avatar_path.set(&completion.text);
-                    }
-                    if has_options {
-                        let shown = completion.options.len().min(OPTIONS_SHOWN);
-                        let mut choices = completion.options[..shown].join("  ");
-                        if completion.options.len() > shown {
-                            choices.push_str(&format!(
-                                "  … and {} more",
-                                completion.options.len() - shown
-                            ));
-                        }
-                        form.notice = Some(choices);
-                    } else {
-                        form.notice = None;
-                    }
-                }
+        };
+        match super::complete_path_field(&mut form.avatar_path) {
+            super::PathCompleteResult::Empty => false,
+            super::PathCompleteResult::Handled {
+                notice,
+                changed,
+                has_options,
+            } => {
+                form.error = None;
+                form.notice = notice;
                 changed || has_options
             }
-            None => {
-                if let Some(Modal::OwnProfile(form)) = &mut self.modal {
-                    form.notice = None;
-                    form.error = Some("No file or folder matches.".to_owned());
-                }
+            super::PathCompleteResult::NoMatch => {
+                form.notice = None;
+                form.error = Some("No file or folder matches.".to_owned());
                 true
             }
         }
@@ -1174,14 +1152,8 @@ impl App {
             }
             _ => return,
         };
-        if raw.is_empty() {
-            if let Some(Modal::OwnProfile(form)) = &mut self.modal {
-                form.error = Some("Enter an image file path first.".to_owned());
-            }
-            return;
-        }
-        let files = match upload::command_files(&raw) {
-            Ok(files) => files,
+        let path = match super::validate_avatar_path(&raw, limit) {
+            Ok(path) => path,
             Err(err) => {
                 if let Some(Modal::OwnProfile(form)) = &mut self.modal {
                     form.error = Some(err);
@@ -1189,28 +1161,6 @@ impl App {
                 return;
             }
         };
-        if files.len() != 1 {
-            if let Some(Modal::OwnProfile(form)) = &mut self.modal {
-                form.error = Some("Choose a single image file for your avatar.".to_owned());
-            }
-            return;
-        }
-        let chosen = &files[0];
-        let prepared = match upload::prepare(&chosen.path, limit) {
-            Ok(prepared) => prepared,
-            Err(err) => {
-                if let Some(Modal::OwnProfile(form)) = &mut self.modal {
-                    form.error = Some(err);
-                }
-                return;
-            }
-        };
-        if prepared.picture.is_none() || !prepared.mime.starts_with("image/") {
-            if let Some(Modal::OwnProfile(form)) = &mut self.modal {
-                form.error = Some(format!("{} is not a supported image", prepared.name));
-            }
-            return;
-        }
         if !connected || !signed_in {
             if let Some(Modal::OwnProfile(form)) = &mut self.modal {
                 form.error = Some(if !signed_in {
@@ -1225,9 +1175,7 @@ impl App {
             form.busy = Some("Uploading avatar…");
             form.pending = Some(OwnProfileAction::Avatar);
         }
-        self.send_matrix(MatrixCmd::SetOwnAvatar {
-            path: chosen.path.clone(),
-        });
+        self.send_matrix(MatrixCmd::SetOwnAvatar { path });
     }
 
     fn submit_remove_avatar(&mut self) {

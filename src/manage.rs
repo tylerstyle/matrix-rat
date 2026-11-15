@@ -5,7 +5,9 @@ use matrix_sdk::ruma::matrix_uri::MatrixId;
 use matrix_sdk::ruma::{EventId, MatrixToUri, MatrixUri, RoomAliasId, RoomId, ServerName, UserId};
 
 use crate::lineedit::{EditOutcome, LineEdit};
-use crate::matrix::{MemberRole, NotifyLevel, RoomDetails, RoomKnockRequest, RoomMember};
+use crate::matrix::{
+    MemberRole, NotifyLevel, RoomDetails, RoomKnockRequest, RoomMember, RoomPermissions,
+};
 use crate::model::RoomKind;
 
 // ----- addresses ---------------------------------------------------------------------
@@ -439,6 +441,22 @@ pub enum Click {
     PreviewBtn(usize),
     /// Open the room info for the open room, whatever has the focus (its name was clicked).
     OpenInfo,
+    /// Pick an option inside a setting choice subview (JoinRule or History).
+    SettingChoice(usize),
+    /// Focus or activate a slot/button inside a Room Settings subview.
+    SettingSlot(usize),
+    /// Highlight an address entry inside the Addresses subview.
+    AddressRow(usize),
+    /// Promote an address entry to main canonical alias.
+    AddressMakeMain(usize),
+    /// Publish a local-only address as an alternate address.
+    AddressPublishAlt(usize),
+    /// Unpublish a canonical or alternate address.
+    AddressUnpublish(usize),
+    /// Delete a local address on our own homeserver.
+    AddressDeleteLocal(usize),
+    /// Set a permission threshold `(action_index, power_level)`.
+    PermSet(usize, i64),
 }
 
 /// The form behind Ctrl-N. One popup for all stages, so going back keeps what was typed.
@@ -763,7 +781,31 @@ impl NewPopup {
 
 // ----- "Room info" -------------------------------------------------------------------
 
-/// A row of the room info view that can be selected.
+/// Admin-editable or inspectable room settings inside the collapsible Room settings section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomSetting {
+    JoinRule,
+    History,
+    Encryption,
+    Picture,
+    Addresses,
+    Direct,
+    Permissions,
+}
+
+impl RoomSetting {
+    pub const ALL: [Self; 7] = [
+        Self::JoinRule,
+        Self::History,
+        Self::Encryption,
+        Self::Picture,
+        Self::Addresses,
+        Self::Direct,
+        Self::Permissions,
+    ];
+}
+
+/// A selectable row of the room info view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfoRow {
     Favourite,
@@ -777,8 +819,228 @@ pub enum InfoRow {
     Leave,
     /// Index into the details' incoming knock request list.
     KnockRequest(usize),
+    /// Collapsible `▸ Room settings` / `▾ Room settings` row right above `Members`.
+    SettingsToggle,
+    /// One setting row inside the expanded Room settings section.
+    Setting(RoomSetting),
     /// Index into the details' member list.
     Member(usize),
+}
+
+/// One combined row in the Room Addresses subview.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AddressEntry {
+    pub alias: String,
+    pub is_canonical: bool,
+    pub is_alt: bool,
+    pub is_local: bool,
+}
+
+impl std::fmt::Debug for AddressEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddressEntry")
+            .field("is_canonical", &self.is_canonical)
+            .field("is_alt", &self.is_alt)
+            .field("is_local", &self.is_local)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Combines canonical, alternate, and local homeserver aliases into a stable list.
+pub fn address_entries(details: &RoomDetails) -> Vec<AddressEntry> {
+    let mut entries = Vec::<AddressEntry>::new();
+    let push =
+        |entries: &mut Vec<AddressEntry>, alias: &str, canonical: bool, alt: bool, local: bool| {
+            if let Some(existing) = entries.iter_mut().find(|e| e.alias == alias) {
+                existing.is_canonical |= canonical;
+                existing.is_alt |= alt;
+                existing.is_local |= local;
+            } else {
+                entries.push(AddressEntry {
+                    alias: alias.to_owned(),
+                    is_canonical: canonical,
+                    is_alt: alt,
+                    is_local: local,
+                });
+            }
+        };
+    if let Some(main) = &details.canonical_alias {
+        push(&mut entries, main, true, false, false);
+    }
+    for alt in &details.alt_aliases {
+        push(&mut entries, alt, false, true, false);
+    }
+    for local in &details.local_aliases {
+        push(&mut entries, local, false, false, true);
+    }
+    entries
+}
+
+/// Validates and expands `#name` or `#name:server` typed in the Addresses subview.
+pub fn normalize_alias_input(raw: &str, own_homeserver: Option<&str>) -> Result<String, String> {
+    let mut text = crate::text::sanitize_line(raw).trim().to_owned();
+    if text.starts_with('<') && text.ends_with('>') && text.len() > 2 {
+        text = text[1..text.len() - 1].trim().to_owned();
+    }
+    if text.is_empty() {
+        return Err("Enter a room address like #name:server.".to_owned());
+    }
+    if text.chars().any(char::is_whitespace) {
+        return Err("A room address cannot contain spaces.".to_owned());
+    }
+    if !text.starts_with('#') {
+        text.insert(0, '#');
+    }
+    if !text.contains(':') {
+        let Some(hs) = own_homeserver.filter(|s| !s.is_empty()) else {
+            return Err("Include the homeserver, like #name:example.org.".to_owned());
+        };
+        text.push(':');
+        text.push_str(hs);
+    }
+    RoomAliasId::parse(&text)
+        .map(|a| a.to_string())
+        .map_err(|_| "That is not a valid room address (use #name:server).".to_owned())
+}
+
+/// Actions exposed in the Room Permissions subview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermAction {
+    SendMessages,
+    Invite,
+    Kick,
+    Ban,
+    Redact,
+    ChangeSettings,
+}
+
+impl PermAction {
+    pub const ALL: [Self; 6] = [
+        Self::SendMessages,
+        Self::Invite,
+        Self::Kick,
+        Self::Ban,
+        Self::Redact,
+        Self::ChangeSettings,
+    ];
+
+    pub const LEVELS: [(i64, &'static str); 3] = [
+        (0, "Default (0)"),
+        (50, "Moderator (50)"),
+        (100, "Admin (100)"),
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SendMessages => "Send messages",
+            Self::Invite => "Invite members",
+            Self::Kick => "Kick members",
+            Self::Ban => "Ban members",
+            Self::Redact => "Delete messages",
+            Self::ChangeSettings => "Change settings",
+        }
+    }
+
+    pub fn get(self, p: &RoomPermissions) -> i64 {
+        match self {
+            Self::SendMessages => p.send_messages,
+            Self::Invite => p.invite,
+            Self::Kick => p.kick,
+            Self::Ban => p.ban,
+            Self::Redact => p.redact,
+            Self::ChangeSettings => p.change_settings,
+        }
+    }
+
+    pub fn set(self, p: &mut RoomPermissions, value: i64) {
+        match self {
+            Self::SendMessages => p.send_messages = value,
+            Self::Invite => p.invite = value,
+            Self::Kick => p.kick = value,
+            Self::Ban => p.ban = value,
+            Self::Redact => p.redact = value,
+            Self::ChangeSettings => p.change_settings = value,
+        }
+    }
+}
+
+/// Checks power-level cap and non-creator self-lockout before sending permission updates.
+pub fn validate_permissions_draft(
+    details: &RoomDetails,
+    draft: &RoomPermissions,
+) -> Result<(), String> {
+    if !details.settings_power.can_permissions {
+        return Err("You do not have permission to edit room permissions.".to_owned());
+    }
+    for action in PermAction::ALL {
+        let value = action.get(draft);
+        if value != action.get(&details.permissions)
+            && !details.own_is_creator
+            && value > details.own_power_level
+        {
+            return Err(format!(
+                "You cannot set a permission above your own level ({}).",
+                details.own_power_level
+            ));
+        }
+    }
+    let effective_pl_req = if details.permissions.explicit_power_levels_rule {
+        details.permissions.power_levels_event_level
+    } else {
+        draft.change_settings
+    };
+    if !details.own_is_creator && effective_pl_req > details.own_power_level {
+        return Err("That change would lock you out of editing room permissions.".to_owned());
+    }
+    Ok(())
+}
+
+/// Interactive Room Settings subview opened from an [`InfoRow::Setting`].
+#[derive(Clone)]
+pub enum SettingSubview {
+    JoinRule {
+        selected: usize,
+    },
+    History {
+        selected: usize,
+    },
+    EncryptConfirm {
+        confirm: LineEdit,
+        focus: usize,
+        error: Option<String>,
+    },
+    Picture {
+        path: LineEdit,
+        focus: usize,
+        error: Option<String>,
+        notice: Option<String>,
+    },
+    Addresses {
+        input: LineEdit,
+        focus: usize,
+        selected: usize,
+        confirm_delete: Option<String>,
+        error: Option<String>,
+        notice: Option<String>,
+    },
+    Permissions {
+        draft: RoomPermissions,
+        selected: usize,
+        error: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for SettingSubview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::JoinRule { .. } => "SettingSubview::JoinRule",
+            Self::History { .. } => "SettingSubview::History",
+            Self::EncryptConfirm { .. } => "SettingSubview::EncryptConfirm",
+            Self::Picture { .. } => "SettingSubview::Picture",
+            Self::Addresses { .. } => "SettingSubview::Addresses",
+            Self::Permissions { .. } => "SettingSubview::Permissions",
+        })
+    }
 }
 
 /// What the user was asked to confirm by doing it a second time.
@@ -942,6 +1204,7 @@ pub struct InfoPopup {
     pub kind: RoomKind,
     pub details: Option<RoomDetails>,
     pub error: Option<String>,
+    pub notice: Option<String>,
     /// Narrows the member list.
     pub filter: LineEdit,
     /// Index into `Self::rows`.
@@ -951,6 +1214,10 @@ pub struct InfoPopup {
     pub page: usize,
     /// Ask the next draw to bring the selected row into view.
     pub reveal: bool,
+    /// Whether the collapsible Room settings section above Members is expanded.
+    pub settings_open: bool,
+    /// Active Room Settings sub-dialog (JoinRule / History / EncryptConfirm / Picture / Addresses / Permissions).
+    pub setting_view: Option<SettingSubview>,
     /// The name or topic while it is being typed.
     pub editing: Option<(InfoRow, LineEdit)>,
     /// Inline reason prompt for banning a member.
@@ -984,11 +1251,14 @@ impl InfoPopup {
             kind,
             details: None,
             error: None,
+            notice: None,
             filter: LineEdit::new().with_max_bytes(FIELD_MAX),
             selected: 0,
             scroll: 0,
             page: 10,
             reveal: true,
+            settings_open: false,
+            setting_view: None,
             editing: None,
             ban_prompt: None,
             role_chooser: None,
@@ -1062,6 +1332,10 @@ impl InfoPopup {
             && let Some(details) = &self.details
         {
             rows.extend((0..details.knock_requests.len()).map(InfoRow::KnockRequest));
+            rows.push(InfoRow::SettingsToggle);
+            if self.settings_open {
+                rows.extend(RoomSetting::ALL.into_iter().map(InfoRow::Setting));
+            }
         }
         if let Some(details) = &self.details {
             let needle = self.filter.to_lowercase();
@@ -1126,6 +1400,7 @@ impl InfoPopup {
 
     pub fn step(&mut self, delta: isize) {
         self.confirm = None;
+        self.notice = None;
         self.ban_prompt = None;
         self.role_chooser = None;
         // The user has chosen for themselves.
@@ -1261,6 +1536,49 @@ impl InfoPopup {
             self.editing = None;
             self.error = Some("You are no longer allowed to change this.".to_owned());
         }
+        match &mut self.setting_view {
+            Some(SettingSubview::JoinRule { .. }) if !details.settings_power.can_join_rule => {
+                self.setting_view = None;
+                self.error = Some("You are no longer allowed to change who can join.".to_owned());
+            }
+            Some(SettingSubview::History { .. }) if !details.settings_power.can_history => {
+                self.setting_view = None;
+                self.error =
+                    Some("You are no longer allowed to change history visibility.".to_owned());
+            }
+            Some(SettingSubview::EncryptConfirm { .. }) if details.encrypted == Some(true) => {
+                self.setting_view = None;
+                self.notice = Some("Encryption is already enabled in this room.".to_owned());
+            }
+            Some(SettingSubview::EncryptConfirm { .. }) if !details.settings_power.can_encrypt => {
+                self.setting_view = None;
+                self.error = Some("You are no longer allowed to turn on encryption.".to_owned());
+            }
+            Some(SettingSubview::Picture { .. }) if !details.settings_power.can_avatar => {
+                self.setting_view = None;
+                self.error =
+                    Some("You are no longer allowed to change the room picture.".to_owned());
+            }
+            Some(SettingSubview::Addresses {
+                selected,
+                confirm_delete,
+                ..
+            }) => {
+                let entries = address_entries(details);
+                *selected = (*selected).min(entries.len().saturating_sub(1));
+                if let Some(target) = confirm_delete.as_ref()
+                    && !entries.iter().any(|e| e.alias == *target && e.is_local)
+                {
+                    *confirm_delete = None;
+                }
+            }
+            Some(SettingSubview::Permissions { draft, .. })
+                if !details.settings_power.can_permissions =>
+            {
+                *draft = details.permissions;
+            }
+            _ => {}
+        }
         let rows = self.rows();
         let same = match (&member, &knock, row) {
             (Some(user_id), _, _) => rows.iter().position(
@@ -1318,11 +1636,37 @@ impl InfoPopup {
             self.editing = None;
             self.ban_prompt = None;
             self.role_chooser = None;
+            self.setting_view = None;
+            self.settings_open = false;
+            self.notice = None;
             self.selected = 0;
             self.reveal = true;
             return true;
         }
         false
+    }
+
+    /// Whether the viewer can edit `setting` given cached details and power levels.
+    pub fn setting_editable(&self, setting: RoomSetting) -> bool {
+        let Some(details) = &self.details else {
+            return false;
+        };
+        match setting {
+            RoomSetting::JoinRule => {
+                details.settings_power.can_join_rule
+                    && details
+                        .join_rule
+                        .is_none_or(|rule| rule.to_ruma().is_some())
+            }
+            RoomSetting::History => details.settings_power.can_history,
+            RoomSetting::Encryption => {
+                details.encrypted == Some(false) && details.settings_power.can_encrypt
+            }
+            RoomSetting::Picture => details.settings_power.can_avatar,
+            RoomSetting::Addresses => details.settings_power.can_aliases,
+            RoomSetting::Direct => true,
+            RoomSetting::Permissions => details.settings_power.can_permissions,
+        }
     }
 }
 
@@ -1540,15 +1884,15 @@ mod tests {
             ("bob", false),
             ("carol", true),
         ]));
-        assert_eq!(popup.rows().len(), 9 + 3);
+        assert_eq!(popup.rows().len(), 10 + 3);
         popup.set_filter("BO".into());
-        assert_eq!(popup.rows().len(), 9 + 1);
+        assert_eq!(popup.rows().len(), 10 + 1);
         assert_eq!(popup.selected_member().unwrap().name, "bob");
         // Emptying the filter keeps the member selected, wherever it is now.
         popup.set_filter(String::new());
         assert_eq!(popup.selected_member().unwrap().name, "bob");
         popup.set_filter("zzz".into());
-        assert_eq!(popup.current(), Some(InfoRow::Leave));
+        assert_eq!(popup.current(), Some(InfoRow::SettingsToggle));
         // The selection stays with the member when the list changes under it.
         popup.set_filter(String::new());
         popup.select(InfoRow::Member(1));
@@ -1569,6 +1913,7 @@ mod tests {
                 InfoRow::Notify,
                 InfoRow::OwnName,
                 InfoRow::Leave,
+                InfoRow::SettingsToggle,
                 InfoRow::Member(0)
             ]
         );
@@ -2079,5 +2424,190 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("no longer allowed to ban"))
         );
+    }
+
+    #[test]
+    fn address_entries_normalize_and_permissions_validation() {
+        let mut d = details(&[("admin", false)]);
+        d.canonical_alias = Some("#main:example.org".into());
+        d.alt_aliases = vec!["#alt:example.org".into(), "#main:example.org".into()];
+        d.local_aliases = vec!["#main:example.org".into(), "#local-only:example.org".into()];
+        let entries = address_entries(&d);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].alias, "#main:example.org");
+        assert!(entries[0].is_canonical && entries[0].is_alt && entries[0].is_local);
+        assert_eq!(entries[1].alias, "#alt:example.org");
+        assert!(!entries[1].is_canonical && entries[1].is_alt && !entries[1].is_local);
+        assert_eq!(entries[2].alias, "#local-only:example.org");
+        assert!(!entries[2].is_canonical && !entries[2].is_alt && entries[2].is_local);
+
+        assert_eq!(
+            normalize_alias_input("chat", Some("example.org")).as_deref(),
+            Ok("#chat:example.org")
+        );
+        assert_eq!(
+            normalize_alias_input(" #other:matrix.org ", Some("example.org")).as_deref(),
+            Ok("#other:matrix.org")
+        );
+        assert!(normalize_alias_input("chat", None).is_err());
+        assert!(normalize_alias_input("   ", Some("example.org")).is_err());
+        assert!(normalize_alias_input("bad alias", Some("example.org")).is_err());
+
+        // Permissions draft validation: non-creator level cap & self-lockout guard.
+        let mut perm_details = details(&[("mod", false)]);
+        perm_details.own_power_level = 50;
+        perm_details.settings_power.can_permissions = true;
+        perm_details.permissions = RoomPermissions {
+            change_settings: 50,
+            power_levels_event_level: 50,
+            explicit_power_levels_rule: false,
+            ..RoomPermissions::default()
+        };
+        let mut too_high = perm_details.permissions;
+        too_high.ban = 100;
+        assert!(validate_permissions_draft(&perm_details, &too_high).is_err());
+
+        // Without permission, validation refuses.
+        perm_details.settings_power.can_permissions = false;
+        assert!(validate_permissions_draft(&perm_details, &perm_details.permissions).is_err());
+
+        // Self-lockout when raising `change_settings` above own level even with lower PL cap check.
+        perm_details.settings_power.can_permissions = true;
+        perm_details.own_power_level = 75;
+        let mut ok_mod = perm_details.permissions;
+        ok_mod.ban = 50;
+        assert!(validate_permissions_draft(&perm_details, &ok_mod).is_ok());
+
+        // Creator bypasses numeric limits.
+        perm_details.own_is_creator = true;
+        perm_details.own_power_level = i64::MAX;
+        assert!(validate_permissions_draft(&perm_details, &too_high).is_ok());
+    }
+
+    #[test]
+    fn room_settings_rows_debug_redaction_and_permission_withdrawal() {
+        use crate::matrix::{RoomJoinRule, RoomSettingsPower};
+
+        let mut popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Room);
+        let mut d = details(&[("admin", false)]);
+        d.encrypted = Some(false);
+        d.join_rule = Some(RoomJoinRule::Invite);
+        d.settings_power = RoomSettingsPower {
+            can_join_rule: true,
+            can_history: true,
+            can_encrypt: true,
+            can_avatar: true,
+            can_aliases: true,
+            can_permissions: true,
+        };
+        d.local_aliases = vec!["#secret-alias:example.org".into()];
+        popup.set_details(d.clone());
+
+        let collapsed = popup.rows();
+        let st_idx = collapsed
+            .iter()
+            .position(|r| *r == InfoRow::SettingsToggle)
+            .unwrap();
+        let mem_idx = collapsed
+            .iter()
+            .position(|r| *r == InfoRow::Member(0))
+            .unwrap();
+        assert_eq!(st_idx + 1, mem_idx);
+        assert!(!collapsed.iter().any(|r| matches!(r, InfoRow::Setting(_))));
+
+        popup.settings_open = true;
+        let expanded = popup.rows();
+        let exp_st = expanded
+            .iter()
+            .position(|r| *r == InfoRow::SettingsToggle)
+            .unwrap();
+        for (i, s) in RoomSetting::ALL.iter().enumerate() {
+            assert_eq!(expanded[exp_st + 1 + i], InfoRow::Setting(*s));
+        }
+        assert_eq!(
+            expanded[exp_st + 1 + RoomSetting::ALL.len()],
+            InfoRow::Member(0)
+        );
+
+        assert!(popup.setting_editable(RoomSetting::JoinRule));
+        assert!(popup.setting_editable(RoomSetting::Encryption));
+        assert!(popup.setting_editable(RoomSetting::Direct));
+
+        // Restricted join rule is clearly marked non-editable even if power permits state events.
+        let mut restricted = d.clone();
+        restricted.join_rule = Some(RoomJoinRule::Restricted);
+        restricted.encrypted = Some(true);
+        popup.set_details(restricted);
+        assert!(!popup.setting_editable(RoomSetting::JoinRule));
+        assert!(!popup.setting_editable(RoomSetting::Encryption));
+        assert!(popup.setting_editable(RoomSetting::Direct));
+
+        // Debug redaction across all SettingSubview variants.
+        let views = [
+            SettingSubview::JoinRule { selected: 0 },
+            SettingSubview::History { selected: 1 },
+            SettingSubview::EncryptConfirm {
+                confirm: LineEdit::with_text("SECRET_CONFIRM"),
+                focus: 0,
+                error: Some("SECRET_ERR".into()),
+            },
+            SettingSubview::Picture {
+                path: LineEdit::with_text("/tmp/secret-pic.png"),
+                focus: 0,
+                error: Some("SECRET_ERR".into()),
+                notice: Some("SECRET_NOTE".into()),
+            },
+            SettingSubview::Addresses {
+                input: LineEdit::with_text("#secret-typed:example.org"),
+                focus: 0,
+                selected: 0,
+                confirm_delete: Some("#secret-del:example.org".into()),
+                error: Some("SECRET_ERR".into()),
+                notice: Some("SECRET_NOTE".into()),
+            },
+            SettingSubview::Permissions {
+                draft: RoomPermissions::default(),
+                selected: 0,
+                error: Some("SECRET_ERR".into()),
+            },
+        ];
+        let dbg = format!("{views:?}");
+        for secret in [
+            "SECRET_CONFIRM",
+            "SECRET_ERR",
+            "SECRET_NOTE",
+            "secret-pic",
+            "secret-typed",
+            "secret-del",
+        ] {
+            assert!(!dbg.contains(secret), "{secret} leaked in {dbg}");
+        }
+
+        // Permission loss withdraws active editing subviews in set_details.
+        popup.set_details(d.clone());
+        popup.setting_view = Some(SettingSubview::Picture {
+            path: LineEdit::new(),
+            focus: 0,
+            error: None,
+            notice: None,
+        });
+        let mut revoked = d.clone();
+        revoked.settings_power.can_avatar = false;
+        popup.set_details(revoked);
+        assert!(popup.setting_view.is_none());
+        assert!(popup.error.is_some());
+
+        // Encryption becoming true withdraws EncryptConfirm with notice.
+        popup.set_details(d.clone());
+        popup.setting_view = Some(SettingSubview::EncryptConfirm {
+            confirm: LineEdit::new(),
+            focus: 0,
+            error: None,
+        });
+        let mut now_enc = d;
+        now_enc.encrypted = Some(true);
+        popup.set_details(now_enc);
+        assert!(popup.setting_view.is_none());
+        assert!(popup.notice.is_some());
     }
 }
