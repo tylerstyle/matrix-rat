@@ -2,13 +2,10 @@
 //! (members, roles, what we may do there).
 
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures::{Stream, StreamExt};
 use matrix_sdk::notification_settings::RoomNotificationMode;
-use matrix_sdk::room::knock_requests::KnockRequest;
 use matrix_sdk::ruma::api::client::membership::get_member_events;
 use matrix_sdk::ruma::api::client::room::aliases::v3::Request as AliasesRequest;
 use matrix_sdk::ruma::api::client::room::create_room::v3::{Request as CreateRequest, RoomPreset};
@@ -18,11 +15,12 @@ use matrix_sdk::ruma::events::direct::DirectUserIdentifier;
 use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
 use matrix_sdk::ruma::events::room::history_visibility::HistoryVisibility;
 use matrix_sdk::ruma::events::room::join_rules::JoinRule;
-use matrix_sdk::ruma::events::room::member::MembershipState;
+use matrix_sdk::ruma::events::room::member::{MembershipState, RoomMemberEvent};
 use matrix_sdk::ruma::events::room::power_levels::{
     RoomPowerLevels, RoomPowerLevelsEventContent, UserPowerLevel,
 };
 use matrix_sdk::ruma::events::{MessageLikeEventType, StateEventType, TimelineEventType};
+use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{
     Int, OwnedRoomAliasId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomAliasId, RoomId,
     RoomOrAliasId, ServerName, UInt, UserId,
@@ -1837,25 +1835,38 @@ async fn stored_members(room: &Room) -> Result<Vec<Entry>, String> {
 /// The member list as the server has it now. Asked for directly and kept out of the
 /// SDK's store on purpose: a full reload there makes the SDK throw away the room's
 /// outgoing encryption session, which is too high a price for looking at a list.
-async fn server_members(client: &Client, room: &Room) -> Result<Vec<Entry>, String> {
-    let request = get_member_events::v3::Request::new(room.room_id().to_owned());
-    let response = tokio::time::timeout(MEMBERS_TIMEOUT, client.send(request))
-        .await
-        .map_err(|_| "The member list took too long to arrive.".to_owned())?
-        .map_err(|err| failed("load the member list", &err.into()))?;
+struct ServerMembers {
+    entries: Vec<Entry>,
+    knocks: Vec<RawKnock>,
+}
+
+fn parse_member_events(chunk: &[Raw<RoomMemberEvent>]) -> ServerMembers {
     let mut entries = Vec::new();
-    for raw in response.chunk {
+    let mut knocks = Vec::new();
+    for raw in chunk {
         // One event the server got wrong does not cost the rest of the list.
         let Ok(event) = raw.deserialize() else {
             continue;
         };
+        let user = event.state_key().to_owned();
         let status = match event.membership() {
             MembershipState::Join => EntryStatus::Joined,
             MembershipState::Invite => EntryStatus::Invited,
             MembershipState::Ban => EntryStatus::Banned,
+            MembershipState::Knock => {
+                let (ts, display_name, reason) = match event.as_original() {
+                    Some(orig) => (
+                        Some(orig.origin_server_ts.get()),
+                        orig.content.displayname.as_deref(),
+                        orig.content.reason.as_deref(),
+                    ),
+                    None => (None, None, None),
+                };
+                knocks.push(raw_knock(ts, user, display_name, reason));
+                continue;
+            }
             _ => continue,
         };
-        let user = event.state_key().to_owned();
         let name = event
             .as_original()
             .and_then(|event| event.content.displayname.clone())
@@ -1863,16 +1874,32 @@ async fn server_members(client: &Client, room: &Room) -> Result<Vec<Entry>, Stri
             .unwrap_or_else(|| user.localpart().to_owned());
         entries.push(Entry { user, name, status });
     }
-    Ok(entries)
+    sort_raw_knocks(&mut knocks);
+    ServerMembers { entries, knocks }
 }
 
-/// Everything about the room but its members.
-struct AbortOnDrop(JoinHandle<()>);
+async fn fetch_member_events(
+    client: &Client,
+    room: &Room,
+    membership: Option<MembershipState>,
+) -> Result<ServerMembers, String> {
+    let mut request = get_member_events::v3::Request::new(room.room_id().to_owned());
+    request.membership = membership;
+    let response = tokio::time::timeout(MEMBERS_TIMEOUT, client.send(request))
+        .await
+        .map_err(|_| "The member list took too long to arrive.".to_owned())?
+        .map_err(|err| failed("load the member list", &err.into()))?;
+    Ok(parse_member_events(&response.chunk))
+}
 
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
+async fn server_members(client: &Client, room: &Room) -> Result<ServerMembers, String> {
+    fetch_member_events(client, room, None).await
+}
+
+async fn server_knocks(client: &Client, room: &Room) -> Result<Vec<RawKnock>, String> {
+    fetch_member_events(client, room, Some(MembershipState::Knock))
+        .await
+        .map(|s| s.knocks)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1912,22 +1939,7 @@ fn sort_raw_knocks(knocks: &mut [RawKnock]) {
     });
 }
 
-fn convert_knocks(knocks: Vec<KnockRequest>) -> Vec<RawKnock> {
-    let mut out: Vec<RawKnock> = knocks
-        .into_iter()
-        .map(|k| {
-            raw_knock(
-                k.timestamp,
-                k.member_info.user_id,
-                k.member_info.display_name.as_deref(),
-                k.member_info.reason.as_deref(),
-            )
-        })
-        .collect();
-    sort_raw_knocks(&mut out);
-    out
-}
-
+/// Everything about the room but its members.
 async fn stored_knocks(room: &Room) -> Vec<RawKnock> {
     let Ok(members) = room.members_no_sync(RoomMemberships::KNOCK).await else {
         return Vec::new();
@@ -2241,12 +2253,11 @@ async fn watch(
             return;
         }
     };
-    type KnockStream = Pin<Box<dyn Stream<Item = Vec<KnockRequest>> + Send>>;
     let own = room.own_user_id().to_owned();
     let mut changes = room.subscribe_info();
     let mut list = MemberList::default();
-    let mut knock_sub: Option<(KnockStream, AbortOnDrop)> = None;
-    let mut knock_tried = false;
+    let mut knocks_loaded = false;
+    let mut force_knocks = false;
     let mut raw_knocks: Vec<RawKnock> = Vec::new();
     let mut sent: Option<RoomDetails> = None;
     let mut force_refresh = false;
@@ -2258,6 +2269,7 @@ async fn watch(
         if refresh.has_changed().unwrap_or(false) {
             force_refresh = true;
             force_aliases = true;
+            force_knocks = true;
         }
         refresh.borrow_and_update();
         // Looked at afresh every time: an invitation may have been accepted meanwhile.
@@ -2270,15 +2282,11 @@ async fn watch(
         } else {
             None
         };
-        if joined && !knock_tried {
-            knock_tried = true;
+        if joined && !knocks_loaded && raw_knocks.is_empty() {
             raw_knocks = stored_knocks(&room).await;
-            if let Ok((stream, handle)) = room.subscribe_to_knock_requests().await {
-                knock_sub = Some((Box::pin(stream), AbortOnDrop(handle)));
-            }
         } else if !joined {
-            knock_sub = None;
-            knock_tried = false;
+            knocks_loaded = false;
+            force_knocks = false;
             raw_knocks.clear();
             local_aliases.clear();
             local_aliases_error = None;
@@ -2348,7 +2356,9 @@ async fn watch(
             own_room_names.get(&room_id),
         );
         let ask = current.members_loading;
+        let ask_knocks = joined && !ask && (!knocks_loaded || force_knocks);
         let ask_aliases = joined && (!local_aliases_loaded || force_aliases);
+        force_knocks = false;
         force_aliases = false;
         if sent.as_ref() != Some(&current) {
             if !emit(Ok(current.clone())) {
@@ -2356,12 +2366,14 @@ async fn watch(
             }
             sent = Some(current.clone());
         }
-        if ask || ask_aliases {
+        if ask || ask_knocks || ask_aliases {
             if ask {
                 list.asked = Some(Instant::now());
                 match server_members(&client, &room).await {
-                    Ok(entries) => {
-                        list.entries = entries;
+                    Ok(server) => {
+                        list.entries = server.entries;
+                        raw_knocks = server.knocks;
+                        knocks_loaded = true;
                         list.error = None;
                         list.complete = true;
                         if !list.agrees(counts) {
@@ -2382,6 +2394,14 @@ async fn watch(
                     &own,
                     own_room_names.get(&room_id),
                 );
+            } else if ask_knocks {
+                knocks_loaded = true;
+                if let Ok(knocks) = server_knocks(&client, &room).await {
+                    raw_knocks = knocks;
+                }
+            }
+            if joined {
+                current.knock_requests = build_knock_requests(&raw_knocks, levels.as_ref(), &own);
             }
             if ask_aliases {
                 local_aliases_loaded = true;
@@ -2404,47 +2424,28 @@ async fn watch(
         }
         // Until the room changes, a moderation event or knock arrives, or a postponed fetch is due.
         let deadline = wait.map(|time| tokio::time::Instant::now() + time);
-        let burst = loop {
-            tokio::select! {
-                change = changes.next() => {
-                    if change.is_none() {
-                        return;
-                    }
-                    break true;
+        let burst = tokio::select! {
+            change = changes.next() => {
+                if change.is_none() {
+                    return;
                 }
-                changed = refresh.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                    force_refresh = true;
-                    break false;
-                }
-                knocks = async {
-                    match knock_sub.as_mut() {
-                        Some((stream, _)) => stream.next().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    match knocks {
-                        Some(knocks) => {
-                            let next = convert_knocks(knocks);
-                            if next != raw_knocks {
-                                raw_knocks = next;
-                                break false;
-                            }
-                        }
-                        None => {
-                            knock_sub = None;
-                        }
-                    }
-                }
-                () = async {
-                    match deadline {
-                        Some(at) => tokio::time::sleep_until(at).await,
-                        None => std::future::pending().await,
-                    }
-                } => break false,
+                true
             }
+            changed = refresh.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                force_refresh = true;
+                force_aliases = true;
+                force_knocks = true;
+                false
+            }
+            () = async {
+                match deadline {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => false,
         };
         if burst {
             // Changes come in bursts (a sync brings several); one look afterwards is enough.
@@ -3606,6 +3607,396 @@ mod tests {
                 !details_dbg.contains(secret),
                 "{secret} leaked in {details_dbg}"
             );
+        }
+    }
+
+    #[test]
+    fn parse_member_events_separates_members_and_knocks() {
+        let raw_events: Vec<Raw<RoomMemberEvent>> = [
+            r#"{"type":"m.room.member","state_key":"@alice:example.org","sender":"@alice:example.org","event_id":"$e1","origin_server_ts":100,"room_id":"!r:example.org","content":{"membership":"join","displayname":"Alice"}}"#,
+            r#"{"type":"m.room.member","state_key":"@bob:example.org","sender":"@bob:example.org","event_id":"$e2","origin_server_ts":250,"room_id":"!r:example.org","content":{"membership":"knock","displayname":"Bob\u0007","reason":"  let me in  "}}"#,
+            r#"{"type":"m.room.member","state_key":"@carol:example.org","sender":"@carol:example.org","event_id":"$e3","origin_server_ts":150,"room_id":"!r:example.org","content":{"membership":"knock"}}"#,
+            r#"{"type":"m.room.member","state_key":"@dave:example.org","sender":"@alice:example.org","event_id":"$e4","origin_server_ts":300,"room_id":"!r:example.org","content":{"membership":"ban"}}"#,
+            r#"{"type":"m.room.member","state_key":"@eve:example.org","sender":"@eve:example.org","event_id":"$e5","origin_server_ts":350,"room_id":"!r:example.org","content":{"membership":"leave"}}"#,
+            r#"{"not":"a valid member event"}"#,
+        ]
+        .into_iter()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+
+        let parsed = parse_member_events(&raw_events);
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.entries[0].user, "@alice:example.org");
+        assert!(matches!(parsed.entries[0].status, EntryStatus::Joined));
+        assert_eq!(parsed.entries[1].user, "@dave:example.org");
+        assert!(matches!(parsed.entries[1].status, EntryStatus::Banned));
+
+        assert_eq!(parsed.knocks.len(), 2);
+        // Sorted oldest timestamp first (@carol at 150, then @bob at 250).
+        assert_eq!(parsed.knocks[0].user, "@carol:example.org");
+        assert_eq!(parsed.knocks[0].name, "carol");
+        assert_eq!(parsed.knocks[0].reason, None);
+        assert_eq!(parsed.knocks[1].user, "@bob:example.org");
+        assert_eq!(parsed.knocks[1].name, "Bob");
+        assert_eq!(parsed.knocks[1].reason.as_deref(), Some("let me in"));
+    }
+
+    struct ServerWorker {
+        root: std::path::PathBuf,
+        handle: crate::matrix::MatrixHandle,
+        events: UnboundedReceiver<MatrixEvent>,
+        user_id: String,
+    }
+
+    impl ServerWorker {
+        async fn login(tag: &str, homeserver: &str, username: &str, password: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("matrix-rat-srv-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let paths = Paths {
+                config_dir: root.join("config"),
+                data_dir: root.join("data"),
+                log_dir: root.join("log"),
+                runtime_dir: root.join("run"),
+                profile: "it".into(),
+            };
+            paths.create_dirs().unwrap();
+            let (handle, mut events) = spawn(paths);
+            handle.send(MatrixCmd::LoginPassword {
+                homeserver: homeserver.to_owned(),
+                username: username.to_owned(),
+                password: password.to_owned().into(),
+            });
+            let user_id = loop {
+                match tokio::time::timeout(Duration::from_secs(60), events.recv())
+                    .await
+                    .expect("timed out logging in")
+                    .expect("worker stopped")
+                {
+                    MatrixEvent::LoggedIn { user_id } => break user_id,
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            };
+            Self {
+                root,
+                handle,
+                events,
+                user_id,
+            }
+        }
+
+        fn manage(&self, cmd: ManageCmd) {
+            self.handle.send(MatrixCmd::Manage(cmd));
+        }
+
+        async fn cleanup(mut self, room_ids: &[String]) {
+            self.manage(ManageCmd::StopInfo);
+            for room_id in room_ids {
+                self.manage(ManageCmd::Leave {
+                    room_id: room_id.clone(),
+                });
+                let _ = tokio::time::timeout(Duration::from_secs(15), async {
+                    while let Some(ev) = self.events.recv().await {
+                        if matches!(
+                            ev,
+                            MatrixEvent::Manage(ManageEvent::Left { room_id: id, .. })
+                                if id == *room_id
+                        ) {
+                            break;
+                        }
+                    }
+                })
+                .await;
+            }
+            self.handle.send(MatrixCmd::Logout);
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Some(ev) = self.events.recv().await {
+                    if matches!(ev, MatrixEvent::NeedLogin { .. }) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            self.handle.send(MatrixCmd::Shutdown);
+            while self.events.recv().await.is_some() {}
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn test_server_and_accounts() -> (String, String, String, String, String) {
+        let hs = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let alice_user = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let alice_pass =
+            std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let bob_user = std::env::var("MATRIX_RAT_TEST_USER2").unwrap_or_else(|_| "bob".to_owned());
+        let bob_pass =
+            std::env::var("MATRIX_RAT_TEST_PASSWORD2").unwrap_or_else(|_| "bobpass".to_owned());
+        (hs, alice_user, alice_pass, bob_user, bob_pass)
+    }
+
+    async fn wait_knocked(events: &mut UnboundedReceiver<MatrixEvent>, wanted_req: u64) {
+        loop {
+            if let ManageEvent::Knocked { request, result } = next_manage(events).await
+                && request == wanted_req
+            {
+                result.expect("knock failed");
+                return;
+            }
+        }
+    }
+
+    /// End-to-end check against a local homeserver (`MATRIX_RAT_TEST_USER` +
+    /// `MATRIX_RAT_TEST_PASSWORD`): Alice sets knock join rule, Bob previews
+    /// and knocks with a reason, Alice sees the request and accepts it, and
+    /// Bob joins the room.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn knock_room_bob_knocks_alice_sees_and_accepts() {
+        use std::panic::AssertUnwindSafe;
+
+        use futures::FutureExt;
+
+        let (hs, alice_user, alice_pass, bob_user, bob_pass) = test_server_and_accounts();
+        let mut alice = ServerWorker::login("knock-alice", &hs, &alice_user, &alice_pass).await;
+        let mut bob = ServerWorker::login("knock-bob", &hs, &bob_user, &bob_pass).await;
+        let mut cleanup_rooms = Vec::new();
+        let bob_id = bob.user_id.clone();
+
+        let outcome = AssertUnwindSafe(async {
+            let tag = std::process::id();
+            alice.manage(ManageCmd::Create {
+                request: 1,
+                name: format!("matrix-rat knock {tag}"),
+                topic: None,
+                alias: None,
+                encrypted: false,
+            });
+            let room_id = opened(&mut alice.events).await.unwrap();
+            cleanup_rooms.push(room_id.clone());
+
+            alice.manage(ManageCmd::SetJoinRule {
+                room_id: room_id.clone(),
+                rule: RoomJoinRule::Knock,
+            });
+            done(&mut alice.events, Change::JoinRule).await;
+
+            alice.manage(ManageCmd::Info {
+                room_id: room_id.clone(),
+            });
+            info(&mut alice.events, &room_id, |d| {
+                d.join_rule == Some(RoomJoinRule::Knock)
+            })
+            .await;
+
+            let server = alice
+                .user_id
+                .split_once(':')
+                .map(|(_, s)| s.to_owned())
+                .unwrap();
+            bob.manage(ManageCmd::Preview {
+                request: 10,
+                target: room_id.clone(),
+                via: vec![server.clone()],
+            });
+            let preview = loop {
+                if let ManageEvent::Preview {
+                    request: 10,
+                    result,
+                } = next_manage(&mut bob.events).await
+                {
+                    break result.expect("preview knock room");
+                }
+            };
+            assert_eq!(
+                preview.join_rule,
+                super::super::directory::PreviewJoinRule::Knock
+            );
+
+            bob.manage(ManageCmd::Knock {
+                request: 11,
+                target: room_id.clone(),
+                via: vec![server.clone()],
+                reason: Some("let me in please".into()),
+            });
+            wait_knocked(&mut bob.events, 11).await;
+
+            let details = info(&mut alice.events, &room_id, |d| {
+                d.knock_requests.iter().any(|k| k.user_id == bob_id)
+            })
+            .await;
+            let knock = details
+                .knock_requests
+                .iter()
+                .find(|k| k.user_id == bob_id)
+                .unwrap();
+            assert_eq!(knock.reason.as_deref(), Some("let me in please"));
+
+            alice.manage(ManageCmd::AcceptKnock {
+                room_id: room_id.clone(),
+                user_id: bob_id.clone(),
+            });
+            done(&mut alice.events, Change::AcceptKnock).await;
+
+            bob.manage(ManageCmd::Join {
+                request: 12,
+                target: room_id.clone(),
+                via: vec![server],
+            });
+            let joined = opened(&mut bob.events).await.unwrap();
+            assert_eq!(joined, room_id);
+
+            info(&mut alice.events, &room_id, |d| {
+                d.joined == 2 && d.knock_requests.is_empty()
+            })
+            .await;
+        })
+        .catch_unwind()
+        .await;
+
+        bob.cleanup(&cleanup_rooms).await;
+        alice.cleanup(&cleanup_rooms).await;
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// End-to-end check against a local homeserver (`MATRIX_RAT_TEST_USER` +
+    /// `MATRIX_RAT_TEST_PASSWORD`): join-rule and history-visibility changes
+    /// push live `ManageEvent::Info` updates to another joined member.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn room_settings_join_rule_and_history_sync_to_member() {
+        use std::panic::AssertUnwindSafe;
+
+        use futures::FutureExt;
+
+        let (hs, alice_user, alice_pass, bob_user, bob_pass) = test_server_and_accounts();
+        let mut alice = ServerWorker::login("sync-alice", &hs, &alice_user, &alice_pass).await;
+        let mut bob = ServerWorker::login("sync-bob", &hs, &bob_user, &bob_pass).await;
+        let mut cleanup_rooms = Vec::new();
+        let bob_id = bob.user_id.clone();
+
+        let outcome = AssertUnwindSafe(async {
+            let tag = std::process::id();
+            alice.manage(ManageCmd::Create {
+                request: 1,
+                name: format!("matrix-rat settings sync {tag}"),
+                topic: None,
+                alias: None,
+                encrypted: false,
+            });
+            let room_id = opened(&mut alice.events).await.unwrap();
+            cleanup_rooms.push(room_id.clone());
+
+            alice.manage(ManageCmd::Invite {
+                room_id: room_id.clone(),
+                user_id: bob_id,
+            });
+            done(&mut alice.events, Change::Invite).await;
+
+            bob.manage(ManageCmd::Join {
+                request: 2,
+                target: room_id.clone(),
+                via: Vec::new(),
+            });
+            assert_eq!(opened(&mut bob.events).await.unwrap(), room_id);
+
+            bob.manage(ManageCmd::Info {
+                room_id: room_id.clone(),
+            });
+            info(&mut bob.events, &room_id, |d| d.joined == 2).await;
+
+            alice.manage(ManageCmd::SetJoinRule {
+                room_id: room_id.clone(),
+                rule: RoomJoinRule::Knock,
+            });
+            done(&mut alice.events, Change::JoinRule).await;
+            info(&mut bob.events, &room_id, |d| {
+                d.join_rule == Some(RoomJoinRule::Knock)
+            })
+            .await;
+
+            alice.manage(ManageCmd::SetJoinRule {
+                room_id: room_id.clone(),
+                rule: RoomJoinRule::Public,
+            });
+            done(&mut alice.events, Change::JoinRule).await;
+            info(&mut bob.events, &room_id, |d| {
+                d.join_rule == Some(RoomJoinRule::Public)
+            })
+            .await;
+
+            alice.manage(ManageCmd::SetHistoryVisibility {
+                room_id: room_id.clone(),
+                visibility: RoomHistory::Invited,
+            });
+            done(&mut alice.events, Change::HistoryVisibility).await;
+            info(&mut bob.events, &room_id, |d| {
+                d.history_visibility == Some(RoomHistory::Invited)
+            })
+            .await;
+        })
+        .catch_unwind()
+        .await;
+
+        bob.cleanup(&cleanup_rooms).await;
+        alice.cleanup(&cleanup_rooms).await;
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// End-to-end check against a local homeserver (`MATRIX_RAT_TEST_USER` +
+    /// `MATRIX_RAT_TEST_PASSWORD`): enabling encryption on a fresh unencrypted
+    /// room succeeds and updates `RoomDetails.encrypted` to `Some(true)`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn enabling_encryption_in_fresh_room() {
+        use std::panic::AssertUnwindSafe;
+
+        use futures::FutureExt;
+
+        let (hs, alice_user, alice_pass, _, _) = test_server_and_accounts();
+        let mut alice = ServerWorker::login("enc-alice", &hs, &alice_user, &alice_pass).await;
+        let mut cleanup_rooms = Vec::new();
+
+        let outcome = AssertUnwindSafe(async {
+            let tag = std::process::id();
+            alice.manage(ManageCmd::Create {
+                request: 1,
+                name: format!("matrix-rat enc {tag}"),
+                topic: None,
+                alias: None,
+                encrypted: false,
+            });
+            let room_id = opened(&mut alice.events).await.unwrap();
+            cleanup_rooms.push(room_id.clone());
+
+            alice.manage(ManageCmd::Info {
+                room_id: room_id.clone(),
+            });
+            let before = info(&mut alice.events, &room_id, |d| {
+                d.encrypted == Some(false) && d.settings_power.can_encrypt
+            })
+            .await;
+            assert_eq!(before.encrypted, Some(false));
+
+            alice.manage(ManageCmd::EnableEncryption {
+                room_id: room_id.clone(),
+            });
+            done(&mut alice.events, Change::EnableEncryption).await;
+
+            let after = info(&mut alice.events, &room_id, |d| d.encrypted == Some(true)).await;
+            assert_eq!(after.encrypted, Some(true));
+        })
+        .catch_unwind()
+        .await;
+
+        alice.cleanup(&cleanup_rooms).await;
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
         }
     }
 }

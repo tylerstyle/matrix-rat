@@ -619,4 +619,253 @@ mod tests {
         assert!(!prev_dbg.contains(secret_mxc));
         assert!(!prev_dbg.contains(secret_via));
     }
+
+    /// End-to-end check against a local homeserver (`MATRIX_RAT_TEST_USER` +
+    /// `MATRIX_RAT_TEST_PASSWORD`, plus optional `MATRIX_RAT_TEST_USER2` / `bob`):
+    /// searches the public directory, previews an unjoined room, joins it,
+    /// confirms the directory marks it as joined, and leaves/cleans up afterwards.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn public_room_directory_search_preview_and_join() {
+        use std::panic::AssertUnwindSafe;
+
+        use futures::FutureExt;
+        use matrix_sdk::ruma::api::client::directory::set_room_visibility::v3::Request as SetRoomVisibility;
+        use matrix_sdk::ruma::api::client::room::{
+            Visibility,
+            create_room::v3::{Request as CreateRequest, RoomPreset},
+        };
+
+        use super::super::{ManageCmd, ManageEvent, MatrixCmd, spawn};
+        use crate::paths::Paths;
+
+        let hs = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let alice_user = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let alice_pass =
+            std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let bob_user = std::env::var("MATRIX_RAT_TEST_USER2").unwrap_or_else(|_| "bob".to_owned());
+        let bob_pass =
+            std::env::var("MATRIX_RAT_TEST_PASSWORD2").unwrap_or_else(|_| "bobpass".to_owned());
+
+        let alice = Client::builder().homeserver_url(&hs).build().await.unwrap();
+        alice
+            .matrix_auth()
+            .login_username(&alice_user, &alice_pass)
+            .initial_device_display_name("matrix-rat directory test")
+            .send()
+            .await
+            .unwrap();
+
+        let tag = format!("{}-dir", std::process::id());
+        let room_name = format!("matrix-rat public dir {tag}");
+        let topic = "public directory integration test".to_owned();
+        let mut req = CreateRequest::new();
+        req.visibility = Visibility::Public;
+        req.preset = Some(RoomPreset::PublicChat);
+        req.name = Some(room_name.clone());
+        req.topic = Some(topic.clone());
+        let alice_room = alice.create_room(req).await.unwrap();
+        let room_id = alice_room.room_id().to_string();
+        let _ = alice
+            .send(SetRoomVisibility::new(
+                alice_room.room_id().to_owned(),
+                Visibility::Public,
+            ))
+            .await;
+
+        let bob_root = std::env::temp_dir().join(format!("matrix-rat-dir-{tag}"));
+        let _ = std::fs::remove_dir_all(&bob_root);
+        let paths = Paths {
+            config_dir: bob_root.join("config"),
+            data_dir: bob_root.join("data"),
+            log_dir: bob_root.join("log"),
+            runtime_dir: bob_root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (bob_handle, mut bob_events) = spawn(paths);
+        bob_handle.send(MatrixCmd::LoginPassword {
+            homeserver: hs.clone(),
+            username: bob_user,
+            password: bob_pass.into(),
+        });
+        loop {
+            match tokio::time::timeout(Duration::from_secs(60), bob_events.recv())
+                .await
+                .expect("timed out logging in bob")
+                .expect("bob worker stopped")
+            {
+                MatrixEvent::LoggedIn { .. } => break,
+                MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                _ => {}
+            }
+        }
+
+        let outcome = AssertUnwindSafe(async {
+            // 1. Search the public directory for the newly published room (`!joined`).
+            let mut generation = 1_u64;
+            let found = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    bob_handle.send(MatrixCmd::SearchDirectory {
+                        generation,
+                        query: room_name.clone(),
+                        server: None,
+                    });
+                    let page = loop {
+                        match bob_events.recv().await.expect("worker stopped") {
+                            MatrixEvent::DirectoryResults(page)
+                                if page.generation == generation =>
+                            {
+                                break Ok(page);
+                            }
+                            MatrixEvent::DirectoryError {
+                                generation: g,
+                                message,
+                            } if g == generation => break Err(message),
+                            MatrixEvent::Error(err) => panic!("{err}"),
+                            _ => {}
+                        }
+                    };
+                    if let Ok(page) = page
+                        && let Some(room) = page.rooms.into_iter().find(|r| r.room_id == room_id)
+                    {
+                        return room;
+                    }
+                    generation += 1;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            })
+            .await
+            .expect("public room did not appear in directory");
+            assert_eq!(found.name.as_deref(), Some(room_name.as_str()));
+            assert_eq!(found.topic.as_deref(), Some(topic.as_str()));
+            assert!(!found.joined);
+            assert!(!found.knock);
+
+            // 2. Preview it before joining.
+            bob_handle.send(MatrixCmd::Manage(ManageCmd::Preview {
+                request: 1,
+                target: room_id.clone(),
+                via: Vec::new(),
+            }));
+            let preview = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    match bob_events.recv().await.expect("worker stopped") {
+                        MatrixEvent::Manage(ManageEvent::Preview { request: 1, result }) => {
+                            return result.expect("preview failed");
+                        }
+                        MatrixEvent::Error(err) => panic!("{err}"),
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("timed out waiting for preview");
+            assert_eq!(preview.room_id, room_id);
+            assert_eq!(preview.name.as_deref(), Some(room_name.as_str()));
+            assert_eq!(preview.topic.as_deref(), Some(topic.as_str()));
+            assert_eq!(preview.join_rule, PreviewJoinRule::Public);
+            assert_eq!(preview.membership, PreviewMembership::None);
+
+            // 3. Join the room, then search again and verify `joined` flips to true.
+            bob_handle.send(MatrixCmd::Manage(ManageCmd::Join {
+                request: 2,
+                target: room_id.clone(),
+                via: Vec::new(),
+            }));
+            let joined_id = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    match bob_events.recv().await.expect("worker stopped") {
+                        MatrixEvent::Manage(ManageEvent::Opened { request: 2, result }) => {
+                            return result.expect("join failed");
+                        }
+                        MatrixEvent::Error(err) => panic!("{err}"),
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("timed out waiting for join");
+            assert_eq!(joined_id, room_id);
+
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    generation += 1;
+                    bob_handle.send(MatrixCmd::SearchDirectory {
+                        generation,
+                        query: room_name.clone(),
+                        server: None,
+                    });
+                    let page = loop {
+                        match bob_events.recv().await.expect("worker stopped") {
+                            MatrixEvent::DirectoryResults(page)
+                                if page.generation == generation =>
+                            {
+                                break Some(page);
+                            }
+                            MatrixEvent::DirectoryError { generation: g, .. }
+                                if g == generation =>
+                            {
+                                break None;
+                            }
+                            MatrixEvent::Error(err) => panic!("{err}"),
+                            _ => {}
+                        }
+                    };
+                    if let Some(page) = page
+                        && page.rooms.iter().any(|r| r.room_id == room_id && r.joined)
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+            })
+            .await
+            .expect("directory search did not mark newly joined room as joined");
+        })
+        .catch_unwind()
+        .await;
+
+        bob_handle.send(MatrixCmd::Manage(ManageCmd::Leave {
+            room_id: room_id.clone(),
+        }));
+        let _ = tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(ev) = bob_events.recv().await {
+                if matches!(
+                    ev,
+                    MatrixEvent::Manage(ManageEvent::Left { room_id: id, .. }) if id == room_id
+                ) {
+                    break;
+                }
+            }
+        })
+        .await;
+        bob_handle.send(MatrixCmd::Logout);
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(ev) = bob_events.recv().await {
+                if matches!(ev, MatrixEvent::NeedLogin { .. }) {
+                    break;
+                }
+            }
+        })
+        .await;
+        bob_handle.send(MatrixCmd::Shutdown);
+        while bob_events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(&bob_root);
+
+        let _ = alice
+            .send(SetRoomVisibility::new(
+                alice_room.room_id().to_owned(),
+                Visibility::Private,
+            ))
+            .await;
+        let _ = alice_room.leave().await;
+        let _ = alice_room.forget().await;
+        let _ = alice.matrix_auth().logout().await;
+
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
 }
