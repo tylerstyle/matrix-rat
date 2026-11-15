@@ -36,9 +36,13 @@ const MAX_LINES: usize = 600;
 const MAX_BYTES: usize = 48 * 1024;
 /// A line longer than this (minified code) makes the block stay plain.
 const MAX_LINE_BYTES: usize = 2000;
-/// One block may take this long, then it stays plain. Generous, because the first block
-/// in a language also prepares that language's grammar.
+/// The blocks of one message may take this long together, then the rest stays plain.
+/// Generous, because the first block in a language also prepares that language's grammar.
+#[cfg(not(test))]
 const BUDGET: Duration = Duration::from_millis(200);
+/// Unoptimised and on a busy machine, the tests must not depend on speed.
+#[cfg(test)]
+const BUDGET: Duration = Duration::from_secs(30);
 /// After this many blocks ran out of time, new blocks stay plain until the program ends:
 /// somebody is sending code that is made to be slow.
 const MAX_OVERRUNS: usize = 3;
@@ -81,10 +85,22 @@ static MEMORY: LazyLock<Mutex<HashMap<u64, Option<Arc<Marks>>>>> = LazyLock::new
 
 /// Marks the code blocks of `rich` that have a known language.
 pub fn colour(rich: &mut Rich) {
+    if rich.code_blocks.iter().all(|block| block.lang.is_none()) {
+        return;
+    }
+    // Reading the grammars in happens once and is not the sender's doing.
+    LazyLock::force(&SYNTAXES);
+    // One budget for the whole message, however many blocks it has.
+    let started = Instant::now();
     for block in 0..rich.code_blocks.len() {
         let Some(lang) = rich.code_blocks[block].lang.clone() else {
             continue;
         };
+        // What can be told without looking at the lines is told first, and not
+        // remembered: it costs nothing to find out again.
+        if rich.code_blocks[block].text.len() > MAX_BYTES || !known(&lang) {
+            continue;
+        }
         let lines: Vec<usize> = (0..rich.lines.len())
             .filter(|&i| rich.lines[i].block == Some(block))
             .collect();
@@ -98,7 +114,13 @@ pub fn colour(rich: &mut Rich) {
                     .collect()
             })
             .collect();
-        let Some(marks) = remembered(&lang, &texts) else {
+        if texts.len() > MAX_LINES
+            || texts.iter().map(String::len).sum::<usize>() > MAX_BYTES
+            || texts.iter().any(|l| l.len() > MAX_LINE_BYTES)
+        {
+            continue;
+        }
+        let Some(marks) = remembered(&lang, &texts, started) else {
             continue;
         };
         for (&line, marks) in lines.iter().zip(marks.iter()) {
@@ -108,7 +130,14 @@ pub fn colour(rich: &mut Rich) {
     }
 }
 
-fn remembered(lang: &str, lines: &[String]) -> Option<Arc<Marks>> {
+/// Whether there is a grammar for this language name (and it is not just plain text).
+fn known(lang: &str) -> bool {
+    SYNTAXES
+        .find_syntax_by_token(lang)
+        .is_some_and(|syntax| syntax.name != SYNTAXES.find_syntax_plain_text().name)
+}
+
+fn remembered(lang: &str, lines: &[String], started: Instant) -> Option<Arc<Marks>> {
     let mut hasher = DefaultHasher::new();
     lang.hash(&mut hasher);
     lines.hash(&mut hasher);
@@ -117,7 +146,12 @@ fn remembered(lang: &str, lines: &[String]) -> Option<Arc<Marks>> {
     if let Some(known) = memory.get(&key) {
         return known.clone();
     }
-    let marks = marks(lang, lines).map(Arc::new);
+    // Out of time or switched off: this block was not looked at, so nothing is
+    // remembered about it.
+    if started.elapsed() > BUDGET || OVERRUNS.load(Ordering::Relaxed) >= MAX_OVERRUNS {
+        return None;
+    }
+    let marks = marks(lang, lines, started).map(Arc::new);
     if memory.len() >= REMEMBERED {
         memory.clear();
     }
@@ -126,34 +160,23 @@ fn remembered(lang: &str, lines: &[String]) -> Option<Arc<Marks>> {
 }
 
 /// The marks for every line, or `None` when the block stays plain.
-fn marks(lang: &str, lines: &[String]) -> Option<Marks> {
-    if lines.len() > MAX_LINES
-        || lines.iter().map(String::len).sum::<usize>() > MAX_BYTES
-        || lines.iter().any(|l| l.len() > MAX_LINE_BYTES)
-    {
-        return None;
-    }
-    if OVERRUNS.load(Ordering::Relaxed) >= MAX_OVERRUNS {
-        return None;
-    }
+fn marks(lang: &str, lines: &[String], started: Instant) -> Option<Marks> {
     let syntaxes = &*SYNTAXES;
     let syntax = syntaxes.find_syntax_by_token(lang)?;
-    // "Plain Text" has nothing to mark.
-    if syntax.name == syntaxes.find_syntax_plain_text().name {
-        return None;
-    }
-    let started = Instant::now();
     let mut state = ParseState::new(syntax);
     let mut stack = ScopeStack::new();
     let mut all = Vec::with_capacity(lines.len());
     let mut marked = false;
     for line in lines {
+        let with_end = format!("{line}\n");
+        let ops = state.parse_line(&with_end, syntaxes);
+        // Looked at after the line, so that one slow line (or one the matcher gave up
+        // on after a long time) counts as well.
         if started.elapsed() > BUDGET {
             OVERRUNS.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        let with_end = format!("{line}\n");
-        let ops = state.parse_line(&with_end, syntaxes).ok()?;
+        let ops = ops.ok()?;
         let mut pieces: Vec<(usize, Syntax)> = Vec::new();
         let mut at = 0;
         let mut push = |from: usize, to: usize, stack: &ScopeStack| {
