@@ -1458,6 +1458,57 @@ mod tests {
     }
 
     #[test]
+    fn the_info_of_a_space_we_are_no_longer_in_closes_however_deep_it_is() {
+        const INNER: &str = "!inner:example.org";
+        let (mut app, _terminal, mut commands) = connected();
+        // Inner is deeper than the list goes, and Work still names it after we left.
+        let spaces = || {
+            vec![
+                space(SPACE, "Work", &[RATS, INNER], true),
+                space(FUN, "Fun", &[], false),
+            ]
+        };
+        app.on_matrix(MatrixEvent::Spaces(spaces()));
+        app.open_space_info(INNER, "Inner", None);
+        app.on_matrix(MatrixEvent::Spaces(spaces()));
+        assert_eq!(info(&app).room_id, INNER);
+        // Another room's news is not this view's; nor is our own leaving, which its
+        // answer ends.
+        answer(
+            &mut app,
+            ManageEvent::Gone {
+                room_id: RATS.into(),
+            },
+        );
+        if let Some(Modal::RoomInfo(info)) = &mut app.modal {
+            info.wait_for(Pending::Leave, "Leaving…");
+        }
+        answer(
+            &mut app,
+            ManageEvent::Gone {
+                room_id: INNER.into(),
+            },
+        );
+        assert_eq!(info(&app).room_id, INNER);
+        if let Some(Modal::RoomInfo(info)) = &mut app.modal {
+            info.answered(Pending::Leave);
+        }
+        sent(&mut commands);
+        answer(
+            &mut app,
+            ManageEvent::Gone {
+                room_id: INNER.into(),
+            },
+        );
+        assert!(app.modal.is_none());
+        assert_eq!(described(&mut commands), ["StopInfo"]);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("You are no longer in that space")
+        );
+    }
+
+    #[test]
     fn a_room_goes_into_a_space_and_out_again_from_its_own_side() {
         let (mut app, mut terminal, mut commands) = connected();
         // The room's menu offers the spaces it could go into: only those we may

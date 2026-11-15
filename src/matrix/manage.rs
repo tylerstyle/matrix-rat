@@ -428,6 +428,8 @@ pub enum ManageEvent {
         room_id: String,
         result: Result<Box<RoomDetails>, String>,
     },
+    /// The room whose info is watched is one we are no longer in: left, or removed.
+    Gone { room_id: String },
     Preview {
         request: u64,
         result: Result<Box<super::directory::RoomPreview>, String>,
@@ -466,6 +468,7 @@ impl std::fmt::Debug for ManageEvent {
                 Ok(details) => write!(f, "Info({details:?})"),
                 Err(_) => f.write_str("Info(failed)"),
             },
+            Self::Gone { .. } => f.write_str("Gone"),
             Self::Preview { request, result } => {
                 write!(f, "Preview(request {request}, ok: {})", result.is_ok())
             }
@@ -2458,7 +2461,14 @@ async fn watch(
         refresh.borrow_and_update();
         // Looked at afresh every time: an invitation may have been accepted meanwhile.
         let joined = match room.state() {
-            RoomState::Left | RoomState::Banned => return,
+            // The room list tells of a room that is gone, but not of a space deeper
+            // than the list of spaces goes: the view is told here.
+            RoomState::Left | RoomState::Banned => {
+                let _ = events.send(MatrixEvent::Manage(ManageEvent::Gone {
+                    room_id: room_id.clone(),
+                }));
+                return;
+            }
             state => state == RoomState::Joined,
         };
         let levels = if joined {
@@ -2679,6 +2689,34 @@ mod tests {
     use crate::paths::Paths;
     use matrix_sdk::config::SyncSettings;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_info_of_a_room_we_are_no_longer_in_is_told_so() {
+        use super::super::spaces::fake;
+        let server = fake::Server::start(serde_json::json!({ "leave": {
+            "!gone:localhost": fake::left(true),
+        } }))
+        .await;
+        let client = fake::client(&server).await;
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (_refresh, changes) = watch::channel(0u64);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            watch(
+                client,
+                "!gone:localhost".into(),
+                events,
+                changes,
+                Default::default(),
+            ),
+        )
+        .await
+        .expect("the watch went on");
+        assert!(matches!(
+            received.try_recv(),
+            Ok(MatrixEvent::Manage(ManageEvent::Gone { room_id })) if room_id == "!gone:localhost"
+        ));
+    }
 
     #[test]
     fn roles_come_from_power_levels() {

@@ -2226,6 +2226,7 @@ impl App {
                 edit,
                 result,
             } => self.on_space_edited(request, &space_id, &child_id, edit, result),
+            ManageEvent::Gone { room_id } => self.info_gone(&room_id),
             ManageEvent::Info { room_id, result } => {
                 if let Some(Modal::RoomInfo(info)) = &mut self.modal
                     && info.room_id == room_id
@@ -2396,6 +2397,21 @@ impl App {
                 self.show_toast("You are no longer in that room");
             }
         }
+    }
+
+    /// The worker says that we are no longer in the room whose info is open: the info
+    /// closes, as when the room leaves the room list. Our own leaving closes it when
+    /// its answer is there.
+    fn info_gone(&mut self, room_id: &str) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if info.room_id != room_id || info.pending == Some(Pending::Leave) {
+            return;
+        }
+        let what = if info.space { "space" } else { "room" };
+        self.close_manage();
+        self.show_toast(format!("You are no longer in that {what}"));
     }
 
     /// Opens the room that was just joined or created, once the room list has it.

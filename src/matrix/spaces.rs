@@ -690,6 +690,9 @@ mod tests {
                 edit: SpaceEdit::Remove,
                 result: Err("Could not remove !hidden:example.org".into()),
             },
+            ManageEvent::Gone {
+                room_id: "!secret:example.org".into(),
+            },
         ];
         let text = format!("{commands:?} {events:?}");
         for secret in ["ecret", "heist", "hidden"] {
@@ -1249,6 +1252,17 @@ pub(super) mod fake {
             content["type"] = json!("m.space");
         }
         content
+    }
+
+    /// A room (or space) we were in and are no longer.
+    pub fn left(space: bool) -> Value {
+        json!({
+            "state": { "events": [
+                state("m.room.create", "", create(space, ME)),
+                state("m.room.member", ME, json!({ "membership": "leave" })),
+            ] },
+            "timeline": { "events": [], "limited": false },
+        })
     }
 
     /// A room (or space) we made and are in, with `more` of its state.
