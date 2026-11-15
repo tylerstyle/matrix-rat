@@ -412,143 +412,197 @@ pub enum MatrixCmd {
     },
 }
 
-/// Never prints the password or the recovery key, so commands are safe to log.
+/// Never prints the password or the recovery key, nor a message, a path or an id of a
+/// room, an event or a user, so commands are safe to log.
 impl std::fmt::Debug for MatrixCmd {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
+        f.write_str(&self.shown(false))
+    }
+}
+
+impl MatrixCmd {
+    /// Like `Debug`, with the ids of rooms, events and users (and the address and name
+    /// a login is for), for tests to tell commands apart.
+    #[cfg(test)]
+    pub fn describe(&self) -> String {
+        self.shown(true)
+    }
+
+    /// `ids`: with ids, which only tests may ask for.
+    fn shown(&self, ids: bool) -> String {
+        let id = |id: &str| ids.then(|| id.to_owned());
+        let (name, parts): (&str, Vec<Option<String>>) = match self {
             Self::LoginPassword {
                 homeserver,
                 username,
                 ..
-            } => write!(f, "LoginPassword({username} at {homeserver})"),
-            Self::LoginBrowser { homeserver } => write!(f, "LoginBrowser({homeserver})"),
-            Self::CancelLogin => f.write_str("CancelLogin"),
-            Self::Recover { .. } => f.write_str("Recover"),
-            Self::OpenRoom { room_id, .. } => write!(f, "OpenRoom({room_id})"),
+            } => (
+                "LoginPassword",
+                vec![ids.then(|| format!("{username} at {homeserver}"))],
+            ),
+            Self::LoginBrowser { homeserver } => ("LoginBrowser", vec![id(homeserver)]),
+            Self::CancelLogin => ("CancelLogin", vec![]),
+            Self::Recover { .. } => ("Recover", vec![]),
+            Self::OpenRoom { room_id, .. } => ("OpenRoom", vec![id(room_id)]),
             Self::OpenEvent {
                 room_id,
                 generation,
                 ..
-            } => write!(f, "OpenEvent({room_id}, generation {generation})"),
-            Self::CancelOpenEvent { generation } => {
-                write!(f, "CancelOpenEvent(generation {generation})")
-            }
-            Self::Paginate { room_id, .. } => write!(f, "Paginate({room_id})"),
-            Self::PaginateForwards { room_id, .. } => write!(f, "PaginateForwards({room_id})"),
+            } => (
+                "OpenEvent",
+                vec![id(room_id), Some(format!("generation {generation}"))],
+            ),
+            Self::CancelOpenEvent { generation } => (
+                "CancelOpenEvent",
+                vec![Some(format!("generation {generation}"))],
+            ),
+            Self::Paginate { room_id, .. } => ("Paginate", vec![id(room_id)]),
+            Self::PaginateForwards { room_id, .. } => ("PaginateForwards", vec![id(room_id)]),
             // Message text is private too.
-            Self::Send { room_id, .. } => write!(f, "Send({room_id})"),
-            Self::Edit { room_id, .. } => write!(f, "Edit({room_id})"),
-            Self::SendPoll { room_id, .. } => write!(f, "SendPoll({room_id})"),
-            Self::EditPoll { room_id, .. } => write!(f, "EditPoll({room_id})"),
-            Self::VotePoll { room_id, .. } => write!(f, "VotePoll({room_id})"),
-            Self::EndPoll { room_id, .. } => write!(f, "EndPoll({room_id})"),
-            Self::EnsureEmotePacks { room_id } => {
-                write!(f, "EnsureEmotePacks(has_room: {})", room_id.is_some())
-            }
-            Self::SendSticker { dimensions, .. } => {
-                write!(f, "SendSticker(has_dims: {})", dimensions.is_some())
-            }
-            Self::ToggleReaction { room_id, .. } => write!(f, "ToggleReaction({room_id})"),
-            Self::Redact { room_id, .. } => write!(f, "Redact({room_id})"),
+            Self::Send { room_id, .. } => ("Send", vec![id(room_id)]),
+            Self::Edit { room_id, .. } => ("Edit", vec![id(room_id)]),
+            Self::SendPoll { room_id, .. } => ("SendPoll", vec![id(room_id)]),
+            Self::EditPoll { room_id, .. } => ("EditPoll", vec![id(room_id)]),
+            Self::VotePoll { room_id, .. } => ("VotePoll", vec![id(room_id)]),
+            Self::EndPoll { room_id, .. } => ("EndPoll", vec![id(room_id)]),
+            Self::EnsureEmotePacks { room_id } => (
+                "EnsureEmotePacks",
+                vec![Some(format!("has_room: {}", room_id.is_some()))],
+            ),
+            Self::SendSticker { dimensions, .. } => (
+                "SendSticker",
+                vec![Some(format!("has_dims: {}", dimensions.is_some()))],
+            ),
+            Self::ToggleReaction { room_id, .. } => ("ToggleReaction", vec![id(room_id)]),
+            Self::Redact { room_id, .. } => ("Redact", vec![id(room_id)]),
             Self::Pin {
                 room_id, pinned, ..
-            } => write!(f, "Pin({room_id}, {pinned})"),
-            Self::FetchPinned { room_id } => write!(f, "FetchPinned({room_id})"),
+            } => ("Pin", vec![id(room_id), Some(pinned.to_string())]),
+            Self::FetchPinned { room_id } => ("FetchPinned", vec![id(room_id)]),
             Self::Forward {
                 from_room_id,
                 to_room_id,
                 ..
-            } => write!(f, "Forward({from_room_id} -> {to_room_id})"),
-            Self::Retry { room_id, .. } => write!(f, "Retry({room_id})"),
-            Self::Typing { room_id, typing } => write!(f, "Typing({room_id}, {typing})"),
-            Self::MarkRead { room_id, .. } => write!(f, "MarkRead({room_id})"),
-            Self::SetUnread { room_id, unread } => write!(f, "SetUnread({room_id}, {unread})"),
-            Self::MarkRoomsRead { room_ids, .. } => {
-                write!(f, "MarkRoomsRead({} rooms)", room_ids.len())
+            } => (
+                "Forward",
+                vec![ids.then(|| format!("{from_room_id} -> {to_room_id}"))],
+            ),
+            Self::Retry { room_id, .. } => ("Retry", vec![id(room_id)]),
+            Self::Typing { room_id, typing } => {
+                ("Typing", vec![id(room_id), Some(typing.to_string())])
             }
-            Self::Join { room_id } => write!(f, "Join({room_id})"),
-            Self::Leave { room_id } => write!(f, "Leave({room_id})"),
-            Self::Logout => f.write_str("Logout"),
-            Self::Previews(wanted) => write!(f, "Previews({wanted})"),
-            Self::Shutdown => f.write_str("Shutdown"),
+            Self::MarkRead { room_id, .. } => ("MarkRead", vec![id(room_id)]),
+            Self::SetUnread { room_id, unread } => {
+                ("SetUnread", vec![id(room_id), Some(unread.to_string())])
+            }
+            Self::MarkRoomsRead { room_ids, .. } => (
+                "MarkRoomsRead",
+                vec![Some(format!("{} rooms", room_ids.len()))],
+            ),
+            Self::Join { room_id } => ("Join", vec![id(room_id)]),
+            Self::Leave { room_id } => ("Leave", vec![id(room_id)]),
+            Self::Logout => ("Logout", vec![]),
+            Self::Previews(wanted) => ("Previews", vec![Some(wanted.to_string())]),
+            Self::Shutdown => ("Shutdown", vec![]),
             // The source of an encrypted file carries its key.
-            Self::FetchImage { full, .. } => write!(f, "FetchImage(full: {full})"),
-            Self::FetchAvatar { .. } => f.write_str("FetchAvatar"),
+            Self::FetchImage { full, .. } => ("FetchImage", vec![Some(format!("full: {full}"))]),
+            Self::FetchAvatar { .. } => ("FetchAvatar", vec![]),
             // The address is from a message.
-            Self::LinkPreview { .. } => f.write_str("LinkPreview"),
-            Self::Verification(command) => write!(f, "Verification({command:?})"),
-            Self::SaveFile { open, .. } => write!(f, "SaveFile(open: {open})"),
-            Self::OpenThread { room_id, root, .. } => write!(f, "OpenThread({room_id}, {root})"),
-            // The inner command prints no content either.
-            Self::InThread { root, command } => write!(f, "InThread({root}, {command:?})"),
+            Self::LinkPreview { .. } => ("LinkPreview", vec![]),
+            Self::Verification(command) => ("Verification", vec![Some(format!("{command:?}"))]),
+            Self::SaveFile { open, .. } => ("SaveFile", vec![Some(format!("open: {open}"))]),
+            Self::OpenThread { room_id, root, .. } => ("OpenThread", vec![id(room_id), id(root)]),
+            Self::InThread { root, command } => {
+                ("InThread", vec![id(root), Some(command.shown(ids))])
+            }
             // Paths can say a lot about the user; the caption is message text.
-            Self::SendFiles { room_id, files, .. } => {
-                write!(f, "SendFiles({room_id}, {} files)", files.len())
-            }
-            Self::FetchMembers { room_id } => write!(f, "FetchMembers({room_id})"),
-            Self::Manage(command) => write!(f, "Manage({command:?})"),
-            Self::ReauthPassword { .. } => f.write_str("ReauthPassword"),
-            Self::ReauthBrowser => f.write_str("ReauthBrowser"),
+            Self::SendFiles { room_id, files, .. } => (
+                "SendFiles",
+                vec![id(room_id), Some(format!("{} files", files.len()))],
+            ),
+            Self::FetchMembers { room_id } => ("FetchMembers", vec![id(room_id)]),
+            Self::Manage(command) => ("Manage", vec![Some(command.shown(ids))]),
+            Self::ReauthPassword { .. } => ("ReauthPassword", vec![]),
+            Self::ReauthBrowser => ("ReauthBrowser", vec![]),
             // Query text is private too.
-            Self::SearchMessages { generation, .. } => {
-                write!(f, "SearchMessages(generation {generation})")
-            }
-            Self::CancelSearch => f.write_str("CancelSearch"),
+            Self::SearchMessages { generation, .. } => (
+                "SearchMessages",
+                vec![Some(format!("generation {generation}"))],
+            ),
+            Self::CancelSearch => ("CancelSearch", vec![]),
             // A draft is message text.
-            Self::SaveDraft { room_id, text } => {
-                write!(f, "SaveDraft({room_id}, {} bytes)", text.len())
-            }
-            Self::ForgetDrafts { room_id, threads } => {
-                write!(f, "ForgetDrafts({room_id}, {} threads)", threads.len())
-            }
-            Self::IgnoreUser { .. } => f.write_str("IgnoreUser"),
-            Self::UnignoreUser { .. } => f.write_str("UnignoreUser"),
-            Self::ReportContent { room_id, .. } => write!(f, "ReportContent({room_id})"),
-            Self::SearchUsers { generation, .. } => {
-                write!(f, "SearchUsers(generation {generation})")
-            }
-            Self::CancelUserSearch => f.write_str("CancelUserSearch"),
-            Self::Devices(command) => write!(f, "Devices({command:?})"),
+            Self::SaveDraft { room_id, text } => (
+                "SaveDraft",
+                vec![id(room_id), Some(format!("{} bytes", text.len()))],
+            ),
+            Self::ForgetDrafts { room_id, threads } => (
+                "ForgetDrafts",
+                vec![id(room_id), Some(format!("{} threads", threads.len()))],
+            ),
+            Self::IgnoreUser { .. } => ("IgnoreUser", vec![]),
+            Self::UnignoreUser { .. } => ("UnignoreUser", vec![]),
+            Self::ReportContent { room_id, .. } => ("ReportContent", vec![id(room_id)]),
+            Self::SearchUsers { generation, .. } => (
+                "SearchUsers",
+                vec![Some(format!("generation {generation}"))],
+            ),
+            Self::CancelUserSearch => ("CancelUserSearch", vec![]),
+            Self::Devices(command) => ("Devices", vec![Some(format!("{command:?}"))]),
             // The inner command prints no keyword.
-            Self::Keywords(command) => write!(f, "Keywords({command:?})"),
-            Self::RetryDecryption { room_id, .. } => write!(f, "RetryDecryption({room_id})"),
+            Self::Keywords(command) => ("Keywords", vec![Some(format!("{command:?}"))]),
+            Self::RetryDecryption { room_id, .. } => ("RetryDecryption", vec![id(room_id)]),
             // Which message is private too.
-            Self::FetchSource { request, .. } => write!(f, "FetchSource(request {request})"),
+            Self::FetchSource { request, .. } => {
+                ("FetchSource", vec![Some(format!("request {request}"))])
+            }
             Self::FetchUserProfile {
                 request, room_id, ..
-            } => write!(
-                f,
-                "FetchUserProfile(request {request}, has_room: {})",
-                room_id.is_some()
+            } => (
+                "FetchUserProfile",
+                vec![
+                    Some(format!("request {request}")),
+                    Some(format!("has_room: {}", room_id.is_some())),
+                ],
             ),
-            Self::SetOwnDisplayName { name } => {
-                write!(f, "SetOwnDisplayName(clear: {})", name.is_none())
-            }
-            Self::SetOwnAvatar { .. } => f.write_str("SetOwnAvatar"),
-            Self::RemoveOwnAvatar => f.write_str("RemoveOwnAvatar"),
+            Self::SetOwnDisplayName { name } => (
+                "SetOwnDisplayName",
+                vec![Some(format!("clear: {}", name.is_none()))],
+            ),
+            Self::SetOwnAvatar { .. } => ("SetOwnAvatar", vec![]),
+            Self::RemoveOwnAvatar => ("RemoveOwnAvatar", vec![]),
             Self::SearchDirectory {
                 generation, server, ..
-            } => write!(
-                f,
-                "SearchDirectory(generation {generation}, federated: {})",
-                server.as_deref().is_some_and(|s| !s.trim().is_empty())
+            } => (
+                "SearchDirectory",
+                vec![
+                    Some(format!("generation {generation}")),
+                    Some(format!(
+                        "federated: {}",
+                        server.as_deref().is_some_and(|s| !s.trim().is_empty())
+                    )),
+                ],
             ),
-            Self::DirectoryNextPage { generation } => {
-                write!(f, "DirectoryNextPage(generation {generation})")
-            }
-            Self::CancelDirectorySearch => f.write_str("CancelDirectorySearch"),
+            Self::DirectoryNextPage { generation } => (
+                "DirectoryNextPage",
+                vec![Some(format!("generation {generation}"))],
+            ),
+            Self::CancelDirectorySearch => ("CancelDirectorySearch", vec![]),
             // Which room is not said; the token is the server's.
             Self::ListThreads {
                 from,
                 mine,
                 generation,
                 ..
-            } => write!(
-                f,
-                "ListThreads(generation {generation}, more: {}, mine: {mine})",
-                from.is_some()
+            } => (
+                "ListThreads",
+                vec![
+                    Some(format!("generation {generation}")),
+                    Some(format!("more: {}", from.is_some())),
+                    Some(format!("mine: {mine}")),
+                ],
             ),
-        }
+        };
+        crate::logsafe::shape(name, parts)
     }
 }
 
@@ -564,13 +618,26 @@ pub enum Retried {
     Gone,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SyncStatus {
     Connecting,
     Synced,
     Offline,
     Error(String),
     Stopped,
+}
+
+/// Hand-written: an error is the SDK's own text.
+impl std::fmt::Debug for SyncStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Connecting => "Connecting",
+            Self::Synced => "Synced",
+            Self::Offline => "Offline",
+            Self::Error(_) => "Error",
+            Self::Stopped => "Stopped",
+        })
+    }
 }
 
 /// Whether this device can read encrypted history.
@@ -897,178 +964,238 @@ pub enum MatrixEvent {
     },
 }
 
-/// Hand-written so that message text never ends up in a log.
+/// Hand-written so that no message text, no error text (it can name rooms, people
+/// and servers) and no id of a room, an event or a user ends up in a log.
 impl std::fmt::Debug for MatrixEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NeedLogin { reason } => write!(f, "NeedLogin({reason:?})"),
-            Self::LoginFailed(error) => write!(f, "LoginFailed({error})"),
-            Self::BrowserLoginUrl(_) => f.write_str("BrowserLoginUrl"),
-            Self::LoggedIn { user_id } => write!(f, "LoggedIn({user_id})"),
-            Self::Sync(status) => write!(f, "Sync({status:?})"),
-            Self::CaughtUp => f.write_str("CaughtUp"),
-            Self::Rooms(rooms) => write!(f, "Rooms({})", rooms.len()),
-            Self::Recovery(status) => write!(f, "Recovery({status:?})"),
-            Self::RecoverResult(result) => write!(f, "RecoverResult(ok: {})", result.is_ok()),
+        f.write_str(&self.shown(false))
+    }
+}
+
+impl MatrixEvent {
+    /// Like `Debug`, with the ids of rooms, events and users and the texts of errors,
+    /// for tests to tell events apart.
+    #[cfg(test)]
+    pub fn describe(&self) -> String {
+        self.shown(true)
+    }
+
+    /// `full`: with ids and error texts, which only tests may ask for.
+    fn shown(&self, full: bool) -> String {
+        let id = |id: &str| full.then(|| id.to_owned());
+        let text = |text: &str| full.then(|| text.to_owned());
+        let ok = |ok: bool| Some(format!("ok: {ok}"));
+        let generation = |generation: &u64| Some(format!("generation {generation}"));
+        let (name, parts): (&str, Vec<Option<String>>) = match self {
+            Self::NeedLogin { reason } => (
+                "NeedLogin",
+                vec![Some(if full {
+                    format!("{reason:?}")
+                } else {
+                    format!("reason: {}", reason.is_some())
+                })],
+            ),
+            Self::LoginFailed(error) => ("LoginFailed", vec![text(error)]),
+            Self::BrowserLoginUrl(_) => ("BrowserLoginUrl", vec![]),
+            Self::LoggedIn { user_id } => ("LoggedIn", vec![id(user_id)]),
+            Self::Sync(status) => ("Sync", vec![Some(format!("{status:?}"))]),
+            Self::CaughtUp => ("CaughtUp", vec![]),
+            Self::Rooms(rooms) => ("Rooms", vec![Some(rooms.len().to_string())]),
+            Self::Recovery(status) => ("Recovery", vec![Some(format!("{status:?}"))]),
+            Self::RecoverResult(result) => ("RecoverResult", vec![ok(result.is_ok())]),
             Self::Timeline {
                 room_id,
-                generation,
+                generation: g,
                 messages,
                 reached_start,
                 detached,
-            } => write!(
-                f,
-                "Timeline({room_id}, generation {generation}, {} messages, start: {reached_start}, detached: {})",
-                messages.len(),
-                detached.is_some()
+            } => (
+                "Timeline",
+                vec![
+                    id(room_id),
+                    generation(g),
+                    Some(format!("{} messages", messages.len())),
+                    Some(format!("start: {reached_start}")),
+                    Some(format!("detached: {}", detached.is_some())),
+                ],
             ),
             Self::Paginated {
-                generation,
+                generation: g,
                 reached_start,
-            } => write!(
-                f,
-                "Paginated(generation {generation}, start: {reached_start})"
+            } => (
+                "Paginated",
+                vec![generation(g), Some(format!("start: {reached_start}"))],
             ),
             Self::PaginatedForwards {
-                generation,
+                generation: g,
                 reached_end,
-            } => write!(
-                f,
-                "PaginatedForwards(generation {generation}, end: {reached_end})"
+            } => (
+                "PaginatedForwards",
+                vec![generation(g), Some(format!("end: {reached_end}"))],
             ),
-            Self::DetachedNew { generation, count } => {
-                write!(f, "DetachedNew(generation {generation}, count: {count})")
-            }
-            Self::JumpFailed { generation, reason } => {
-                write!(f, "JumpFailed(generation {generation}, {reason})")
-            }
-            Self::Typing { generation, names } => {
-                write!(f, "Typing(generation {generation}, {})", names.len())
-            }
-            Self::ActionFailed(error) => write!(f, "ActionFailed({error})"),
-            Self::Error(error) => write!(f, "Error({error})"),
-            Self::Image { full, result, .. } => {
-                write!(f, "Image(full: {full}, ok: {})", result.is_ok())
-            }
-            Self::Avatar { result, .. } => write!(f, "Avatar(ok: {})", result.is_ok()),
-            Self::LinkPreview { result, .. } => {
-                write!(f, "LinkPreview(found: {})", result.is_some())
-            }
-            Self::Security(security) => write!(f, "Security({security:?})"),
-            Self::Verification(update) => {
-                write!(f, "Verification({}, {:?})", update.flow, update.stage)
-            }
+            Self::DetachedNew {
+                generation: g,
+                count,
+            } => (
+                "DetachedNew",
+                vec![generation(g), Some(format!("count: {count}"))],
+            ),
+            Self::JumpFailed {
+                generation: g,
+                reason,
+            } => ("JumpFailed", vec![generation(g), text(reason)]),
+            Self::Typing {
+                generation: g,
+                names,
+            } => ("Typing", vec![generation(g), Some(names.len().to_string())]),
+            Self::ActionFailed(error) => ("ActionFailed", vec![text(error)]),
+            Self::Error(error) => ("Error", vec![text(error)]),
+            Self::Image {
+                full: whole,
+                result,
+                ..
+            } => (
+                "Image",
+                vec![Some(format!("full: {whole}")), ok(result.is_ok())],
+            ),
+            Self::Avatar { result, .. } => ("Avatar", vec![ok(result.is_ok())]),
+            Self::LinkPreview { result, .. } => (
+                "LinkPreview",
+                vec![Some(format!("found: {}", result.is_some()))],
+            ),
+            Self::Security(security) => ("Security", vec![Some(format!("{security:?}"))]),
+            Self::Verification(update) => (
+                "Verification",
+                vec![
+                    Some(update.flow.to_string()),
+                    Some(format!("{:?}", update.stage)),
+                ],
+            ),
             Self::CrossSigningSetUp(result) => {
-                write!(f, "CrossSigningSetUp({result:?})")
+                ("CrossSigningSetUp", vec![Some(format!("{result:?}"))])
             }
-            Self::Spaces(spaces) => write!(f, "Spaces({})", spaces.len()),
-            Self::Notice(notice) => write!(f, "{notice:?}"),
-            Self::SuppressedNotice { room_id } => write!(f, "SuppressedNotice({room_id})"),
-            Self::NoticeClicked { room_id } => write!(f, "NoticeClicked({room_id})"),
-            Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
-            Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
+            Self::Spaces(spaces) => ("Spaces", vec![Some(spaces.len().to_string())]),
+            Self::Notice(notice) => return format!("{notice:?}"),
+            Self::SuppressedNotice { room_id } => ("SuppressedNotice", vec![id(room_id)]),
+            Self::NoticeClicked { room_id } => ("NoticeClicked", vec![id(room_id)]),
+            Self::FileSaved { result, .. } => ("FileSaved", vec![ok(result.is_ok())]),
+            Self::UploadLimit(bytes) => ("UploadLimit", vec![Some(bytes.to_string())]),
             // The reason names a file.
-            Self::FilesNotSent { .. } => f.write_str("FilesNotSent"),
-            Self::FilesSent(_) => f.write_str("FilesSent"),
+            Self::FilesNotSent { .. } => ("FilesNotSent", vec![]),
+            Self::FilesSent(_) => ("FilesSent", vec![]),
             // Member display names and user ids are omitted from the log.
             Self::RoomMembers {
                 room_id,
                 members,
                 can_mention_room,
-            } => write!(
-                f,
-                "RoomMembers({room_id}, {} members, room_mention: {can_mention_room})",
-                members.len()
+            } => (
+                "RoomMembers",
+                vec![
+                    id(room_id),
+                    Some(format!("{} members", members.len())),
+                    Some(format!("room_mention: {can_mention_room}")),
+                ],
             ),
-            Self::Manage(event) => write!(f, "Manage({event:?})"),
-            Self::NeedReauth { target, .. } => {
-                write!(f, "NeedReauth({} dev={})", target.user_id, target.device_id)
-            }
+            Self::Manage(event) => ("Manage", vec![Some(format!("{event:?}"))]),
+            Self::NeedReauth { target, .. } => (
+                "NeedReauth",
+                vec![full.then(|| format!("{} dev={}", target.user_id, target.device_id))],
+            ),
             Self::SearchResults {
-                generation,
+                generation: g,
                 hits,
                 done,
                 note,
-            } => write!(
-                f,
-                "SearchResults(generation {generation}, {} hits, done: {done}, note: {})",
-                hits.len(),
-                note.is_some()
+            } => (
+                "SearchResults",
+                vec![
+                    generation(g),
+                    Some(format!("{} hits", hits.len())),
+                    Some(format!("done: {done}")),
+                    Some(format!("note: {}", note.is_some())),
+                ],
             ),
             // A draft is message text.
             Self::Draft {
                 room_id,
                 thread,
                 text,
-            } => match thread {
-                Some(root) => write!(f, "Draft({room_id}, {root}, {} bytes)", text.len()),
-                None => write!(f, "Draft({room_id}, {} bytes)", text.len()),
-            },
-            Self::IgnoredUsers(users) => write!(f, "IgnoredUsers({})", users.len()),
+            } => (
+                "Draft",
+                vec![
+                    id(room_id),
+                    match thread {
+                        Some(root) => id(root).or_else(|| Some("in a thread".to_owned())),
+                        None => None,
+                    },
+                    Some(format!("{} bytes", text.len())),
+                ],
+            ),
+            Self::IgnoredUsers(users) => ("IgnoredUsers", vec![Some(users.len().to_string())]),
             Self::IgnoreResult {
                 ignored, result, ..
-            } => write!(
-                f,
-                "IgnoreResult(ignored: {ignored}, ok: {})",
-                result.is_ok()
+            } => (
+                "IgnoreResult",
+                vec![Some(format!("ignored: {ignored}")), ok(result.is_ok())],
             ),
-            Self::ReportResult(result) => write!(f, "ReportResult(ok: {})", result.is_ok()),
+            Self::ReportResult(result) => ("ReportResult", vec![ok(result.is_ok())]),
             Self::UserSearchResults {
-                generation,
+                generation: g,
                 results,
-            } => write!(
-                f,
-                "UserSearchResults(generation {generation}, {} results)",
-                results.len()
+            } => (
+                "UserSearchResults",
+                vec![generation(g), Some(format!("{} results", results.len()))],
             ),
-            Self::RoomPower { room_id, power } => write!(f, "RoomPower({room_id}, {power:?})"),
-            Self::PinnedEvents { room_id, ids } => {
-                write!(f, "PinnedEvents({room_id}, {} pinned)", ids.len())
+            Self::RoomPower { room_id, power } => {
+                ("RoomPower", vec![id(room_id), Some(format!("{power:?}"))])
             }
+            Self::PinnedEvents { room_id, ids } => (
+                "PinnedEvents",
+                vec![id(room_id), Some(format!("{} pinned", ids.len()))],
+            ),
             Self::PinnedList {
                 room_id,
                 items,
                 error,
-            } => write!(
-                f,
-                "PinnedList({room_id}, {} items, err: {})",
-                items.len(),
-                error.is_some()
+            } => (
+                "PinnedList",
+                vec![
+                    id(room_id),
+                    Some(format!("{} items", items.len())),
+                    Some(format!("err: {}", error.is_some())),
+                ],
             ),
             Self::ForwardResult {
                 to_room_id, result, ..
-            } => write!(f, "ForwardResult({to_room_id}, ok: {})", result.is_ok()),
-            Self::Devices(event) => write!(f, "Devices({event:?})"),
-            Self::Keywords(event) => write!(f, "Keywords({event:?})"),
+            } => ("ForwardResult", vec![id(to_room_id), ok(result.is_ok())]),
+            Self::Devices(event) => ("Devices", vec![Some(format!("{event:?}"))]),
+            Self::Keywords(event) => ("Keywords", vec![Some(format!("{event:?}"))]),
             Self::DecryptionRetried {
                 room_id, result, ..
-            } => {
-                write!(
-                    f,
-                    "DecryptionRetried({room_id}, {:?})",
-                    result.as_ref().ok()
-                )
-            }
-            Self::OwnProfile(profile) => write!(f, "OwnProfile({profile:?})"),
-            Self::OwnProfileResult { what, result } => {
-                write!(f, "OwnProfileResult({what:?}, ok: {})", result.is_ok())
-            }
-            Self::Source { request, result } => {
-                write!(f, "Source(request {request}, ok: {})", result.is_ok())
-            }
-            Self::UserProfile { request, result } => {
-                write!(f, "UserProfile(request {request}, ok: {})", result.is_ok())
-            }
-            Self::DirectoryResults(page) => write!(f, "DirectoryResults({page:?})"),
-            Self::DirectoryError { generation, .. } => {
-                write!(f, "DirectoryError(generation {generation})")
-            }
-            Self::EmotePacks(catalog) => write!(f, "EmotePacks({catalog:?})"),
-            Self::Threads(page) => write!(f, "Threads({page:?})"),
-            Self::ThreadsFailed { generation, .. } => {
-                write!(f, "ThreadsFailed(generation {generation})")
-            }
-        }
+            } => (
+                "DecryptionRetried",
+                vec![id(room_id), Some(format!("{:?}", result.as_ref().ok()))],
+            ),
+            Self::OwnProfile(profile) => ("OwnProfile", vec![Some(format!("{profile:?}"))]),
+            Self::OwnProfileResult { what, result } => (
+                "OwnProfileResult",
+                vec![Some(format!("{what:?}")), ok(result.is_ok())],
+            ),
+            Self::Source { request, result } => (
+                "Source",
+                vec![Some(format!("request {request}")), ok(result.is_ok())],
+            ),
+            Self::UserProfile { request, result } => (
+                "UserProfile",
+                vec![Some(format!("request {request}")), ok(result.is_ok())],
+            ),
+            Self::DirectoryResults(page) => ("DirectoryResults", vec![Some(format!("{page:?}"))]),
+            Self::DirectoryError { generation: g, .. } => ("DirectoryError", vec![generation(g)]),
+            Self::EmotePacks(catalog) => ("EmotePacks", vec![Some(format!("{catalog:?}"))]),
+            Self::Threads(page) => ("Threads", vec![Some(format!("{page:?}"))]),
+            Self::ThreadsFailed { generation: g, .. } => ("ThreadsFailed", vec![generation(g)]),
+        };
+        crate::logsafe::shape(name, parts)
     }
 }
 
@@ -2068,6 +2195,54 @@ async fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_and_events_print_no_ids_and_no_error_text() {
+        let command = MatrixCmd::InThread {
+            root: "$root:example.org".into(),
+            command: Box::new(MatrixCmd::Typing {
+                room_id: "!room:example.org".into(),
+                typing: true,
+            }),
+        };
+        assert_eq!(format!("{command:?}"), "InThread(Typing(true))");
+        assert_eq!(
+            command.describe(),
+            "InThread($root:example.org, Typing(!room:example.org, true))"
+        );
+        let command = MatrixCmd::Manage(ManageCmd::Leave {
+            room_id: "!room:example.org".into(),
+        });
+        assert_eq!(format!("{command:?}"), "Manage(Leave)");
+        let event = MatrixEvent::Timeline {
+            room_id: "!room:example.org".into(),
+            generation: 3,
+            messages: Vec::new(),
+            reached_start: true,
+            detached: None,
+        };
+        assert_eq!(
+            format!("{event:?}"),
+            "Timeline(generation 3, 0 messages, start: true, detached: false)"
+        );
+        let failed = "Could not join #secret:example.org: not allowed";
+        for event in [
+            MatrixEvent::ActionFailed(failed.into()),
+            MatrixEvent::Error(failed.into()),
+            MatrixEvent::LoginFailed(failed.into()),
+            MatrixEvent::Sync(SyncStatus::Error(failed.into())),
+            MatrixEvent::LoggedIn {
+                user_id: "@alice:example.org".into(),
+            },
+        ] {
+            let text = format!("{event:?}");
+            assert!(!text.contains("example.org"), "{text}");
+        }
+        assert_eq!(
+            MatrixEvent::ActionFailed(failed.into()).describe(),
+            format!("ActionFailed({failed})")
+        );
+    }
 
     /// The room list reports each room's latest message.
     /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=... cargo test -- --ignored`

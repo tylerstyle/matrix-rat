@@ -5488,7 +5488,7 @@ mod tests {
     fn drain(commands: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>) -> Vec<String> {
         let mut seen = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            seen.push(format!("{command:?}"));
+            seen.push(command.describe());
         }
         seen
     }
@@ -7180,7 +7180,7 @@ mod tests {
     ) -> Vec<String> {
         let mut seen = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            seen.push(format!("{command:?}"));
+            seen.push(command.describe());
         }
         seen
     }
@@ -7194,7 +7194,7 @@ mod tests {
     #[test]
     fn a_clicked_notification_opens_its_room_like_the_room_list_does() {
         let (mut app, mut commands) = with_worker();
-        assert_eq!(format!("{:?}", clicked("!b")), "NoticeClicked(!b)");
+        assert_eq!(clicked("!b").describe(), "NoticeClicked(!b)");
         // Something half written, and a message selected, in the open room.
         type_text(&mut app, "half a thought");
         app.on_matrix(clicked("!b"));

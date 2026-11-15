@@ -736,7 +736,7 @@ mod tests {
     fn sent(commands: &mut UnboundedReceiver<MatrixCmd>) -> Vec<String> {
         let mut seen = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            seen.push(format!("{command:?}"));
+            seen.push(command.describe());
         }
         seen
     }

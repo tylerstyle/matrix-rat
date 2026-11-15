@@ -300,6 +300,17 @@ fn dbus(err: &zbus::Error) -> Why {
     }
 }
 
+/// `name(part, part)`, for a hand-written `Debug`: leaves out the parts that are `None`
+/// (ids, which only tests ask for), and the parentheses when no part is left.
+pub fn shape(name: &str, parts: impl IntoIterator<Item = Option<String>>) -> String {
+    let parts: Vec<String> = parts.into_iter().flatten().collect();
+    if parts.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}({})", parts.join(", "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
