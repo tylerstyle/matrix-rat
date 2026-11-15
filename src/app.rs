@@ -5,6 +5,7 @@ mod code;
 mod complete;
 mod devices;
 mod drafts;
+mod external_editor;
 mod files;
 pub mod global_search;
 mod keybinds;
@@ -287,6 +288,8 @@ pub struct App {
     pub screen: Rect,
     pub should_quit: bool,
     pub suspend_requested: bool,
+    /// Set by `Action::ComposeInEditor`: the run loop hands the terminal to the editor.
+    pub editor_request: Option<crate::editor::Request>,
     pub dirty: bool,
     /// Pictures: the cache and the viewer.
     pub images: crate::images::ImageStore,
@@ -512,6 +515,7 @@ impl App {
             screen: Rect::default(),
             should_quit: false,
             suspend_requested: false,
+            editor_request: None,
             dirty: true,
             images: crate::images::ImageStore::new(crate::images::Graphics::halfblocks()),
             threads: Default::default(),
@@ -2442,6 +2446,7 @@ impl App {
                 }
             }
             Action::CopyCode => self.copy_code_of_selected(),
+            Action::ComposeInEditor => self.request_editor(),
             Action::Open => {
                 self.cancel_pending_jump();
                 let opened = match self.timeline.selected {
@@ -4253,6 +4258,30 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             app.flush_images(true);
             terminal::suspend(&mut terminal)?;
             app.dirty = true;
+        }
+        if let Some(request) = app.take_editor_request() {
+            // As for Ctrl-Z: the terminal frees its copies of the pictures now.
+            app.flush_images(true);
+            // Its reader thread would take the keys meant for the editor: the stream
+            // is dropped, and a new one is read from once we are back.
+            drop(std::mem::replace(&mut events, EventStream::new()));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            terminal::release();
+            let dir = paths.runtime_dir.clone();
+            // A blocking child: the worker, a task of its own, goes on syncing and its
+            // events wait in their channel.
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::editor::edit(&request, &dir, crate::editor::run_command)
+            })
+            .await
+            .unwrap_or(crate::editor::Outcome::Failed(
+                crate::editor::Failure::Launch,
+            ));
+            let resumed = terminal::resume(&mut terminal);
+            // The screen was cleared: pictures are sent again when drawn.
+            app.images.forget_encoded();
+            app.finish_editor(outcome);
+            resumed?;
         }
         terminal::set_mouse(app.mouse)?;
         if std::mem::take(&mut app.repaint) {

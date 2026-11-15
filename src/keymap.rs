@@ -204,6 +204,7 @@ action_table! {
     Action::Send => ("send", Context::Composer, "Send"),
     Action::Newline => ("newline", Context::Composer, "Line break"),
     Action::CancelCompose => ("cancel_compose", Context::Composer, "Cancel reply or edit"),
+    Action::ComposeInEditor => ("compose_in_editor", Context::Composer, "Write in $EDITOR"),
     Action::EditLast => ("edit_last", Context::Composer, "Edit your last message"),
 }
 
@@ -692,6 +693,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::Newline,
         "Alt-Enter",
         "Line break (fallback)",
+    ),
+    bind(
+        Composer,
+        Char('v'),
+        ALT,
+        Action::ComposeInEditor,
+        "Alt-V",
+        "Write in $EDITOR",
     ),
     // From the first line of the composer, up is into the messages: to look at a
     // picture, open a spoiler, answer. (Editing one's last message from here, as

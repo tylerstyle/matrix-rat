@@ -689,6 +689,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Attach => {
             ctx.has_room && !in_pending && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
+        Action::ComposeInEditor => ctx.has_room && !in_pending,
         Action::JumpToNewest | Action::JumpToOldest | Action::JumpToUnread => {
             ctx.has_room && ctx.has_messages
         }
@@ -804,7 +805,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
         ),
         Pane::Composer => matches!(
             action,
-            Action::OpenEmoji | Action::Attach | Action::FocusRoomFilter
+            Action::OpenEmoji | Action::Attach | Action::ComposeInEditor | Action::FocusRoomFilter
         ),
     }
 }

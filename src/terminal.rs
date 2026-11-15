@@ -141,6 +141,19 @@ fn base64(bytes: &[u8]) -> String {
 pub fn suspend(terminal: &mut Tui) -> Result<()> {
     restore();
     signal_hook::low_level::emulate_default_handler(signal_hook::consts::SIGTSTP)?;
+    resume(terminal)
+}
+
+/// Hands the terminal back as it was before the TUI (cooked mode, main screen, no mouse
+/// or paste reports, no keyboard protocol), for a child process that wants it. Undo
+/// with [`resume`].
+pub fn release() {
+    restore();
+}
+
+/// Takes the terminal again after [`release`] (or a stop): raw mode, alternate screen,
+/// mouse, paste, focus reports and the keyboard protocol, on a cleared screen.
+pub fn resume(terminal: &mut Tui) -> Result<()> {
     enable_raw_mode()?;
     RAW.store(true, Ordering::SeqCst);
     write_activation()?;

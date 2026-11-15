@@ -126,6 +126,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
+| `Alt-V` | write the message in your editor (`$VISUAL`, else `$EDITOR`); what you save comes back into the composer, unsent |
 | `F2` / `F3` | settings / next theme |
 | `Ctrl-Q` | quit |
 
@@ -234,7 +235,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
-- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
+- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**
 
@@ -275,6 +276,22 @@ Setting `preset = "vim"` keeps the default keys and adds:
   `notification_click_command` in the config file to the command your desktop offers
   for that, for example `hyprctl dispatch focuswindow class:kitty` on Hyprland or
   `swaymsg '[app_id="kitty"] focus'` on sway.
+- **Writing in your editor** (`Alt-V`, or "Write in $EDITOR" in the command palette): the
+  composer's text goes into a temporary file, matrix-rat gives the terminal to the
+  editor (`$VISUAL`, else `$EDITOR`, split into words like a shell does, so `code --wait`
+  and `emacsclient -t` work; with neither set you get a hint and no guess is made), and
+  when the editor ends the file's text is put into the composer, not sent. The editor
+  must stay until you are done (`code` needs `--wait`; one that returns at once gives
+  back what you had). The file is named `….md`, readable by you only, kept in
+  `$XDG_RUNTIME_DIR/matrix-rat/` (else under your state folder, and in the system's
+  temporary folder if neither can be used), and removed
+  afterwards, also when the editor fails; if the editor fails, or leaves something that
+  is not text, the composer stays as it was. Saving an empty file empties the composer.
+  Names you completed with `@` become plain text (they are sent as such unless completed
+  again); a reply or an edit stays one. Messages that arrive meanwhile wait and appear
+  when the editor closes; matrix-rat keeps syncing in the background. It works the same
+  over SSH and in tmux and in the demo. If you kill matrix-rat while the editor is open,
+  the temporary file stays behind (in that private folder).
 - **Copying code**: a message with fenced code blocks shows a small `copy` at the right
   end of each block's first line (where the line leaves room for it), and `C` (or "Copy
   code block" in the message menu and the command palette) copies one block: at once

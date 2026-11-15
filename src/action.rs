@@ -57,6 +57,9 @@ pub enum Action {
     /// In an empty composer: edit the user's own latest message. With text in it (or
     /// no such message) it does what `SelectOlder` does, so both can share a key.
     EditLast,
+    /// Write the draft in `$VISUAL` / `$EDITOR`, and take the result back into the
+    /// composer (it is not sent).
+    ComposeInEditor,
 
     OpenEmoji,
     AcceptInvite,

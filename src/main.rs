@@ -7,6 +7,7 @@ mod complete;
 mod composer;
 mod config;
 mod devices;
+mod editor;
 mod emoji;
 mod files;
 mod focus;
