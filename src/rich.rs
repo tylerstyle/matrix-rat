@@ -623,7 +623,9 @@ impl Builder {
                     let url = attribute(attributes, "src")
                         .map(|src| decode_entities(src).trim().to_owned())
                         .filter(|src| crate::matrix::is_valid_mxc(src));
-                    if let Some(url) = url.filter(|_| !self.pre) {
+                    // In code, inline or a block, it stays its name: what is written
+                    // there is shown as written.
+                    if let Some(url) = url.filter(|_| !self.pre && !format.code) {
                         format.emote = Some(self.rich.emotes.len());
                         self.rich.emotes.push(Emote {
                             url,
@@ -1333,13 +1335,18 @@ mod tests {
             "a <img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blob:\"> b \
              <img src=\"https://example.org/x.png\" alt=\":web:\"> \
              <img src=\"mxc://example.org/a&quot;b\" alt=\":quote:\"> \
+             <code><img data-mx-emoticon src=\"mxc://example.org/inline\" alt=\":inline:\"></code> \
+             <tt><img data-mx-emoticon src=\"mxc://example.org/tt\" alt=\":tt:\"></tt> \
              <pre><img src=\"mxc://example.org/code\" alt=\":code:\"></pre>",
         );
         // Only a plain `mxc://` address outside code counts; the others are names.
         assert_eq!(rich.emotes.len(), 1);
         assert_eq!(rich.emotes[0].url, "mxc://example.org/blob");
         assert!(!rich.emotes[0].picture);
-        assert_eq!(texts(&rich), ["a :blob: b :web: :quote:", ":code:"]);
+        assert_eq!(
+            texts(&rich),
+            ["a :blob: b :web: :quote: :inline: :tt:", ":code:"]
+        );
         let emotes: Vec<(&str, Option<usize>)> = rich
             .lines
             .iter()
