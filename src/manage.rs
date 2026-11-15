@@ -1283,6 +1283,10 @@ pub struct InfoPopup {
     pub notice: Option<String>,
     /// Narrows the member list.
     pub filter: LineEdit,
+    /// The filter was typed last and matches nobody, so the selection is just where
+    /// it was left: until a row is chosen, the filter's line is what is in view and
+    /// the keys for a row go to the filter.
+    pub blind: bool,
     /// Index into `Self::rows`.
     pub selected: usize,
     /// First line shown, and how many fit (as of the last draw).
@@ -1331,6 +1335,7 @@ impl InfoPopup {
             error: None,
             notice: None,
             filter: LineEdit::new().with_max_bytes(FIELD_MAX),
+            blind: false,
             selected: 0,
             scroll: 0,
             page: 10,
@@ -1557,6 +1562,7 @@ impl InfoPopup {
                 self.role_chooser = None;
             }
             self.selected = at;
+            self.blind = false;
             self.reveal = true;
         } else if self.details.is_none() {
             self.wanted = Some(row);
@@ -1570,6 +1576,7 @@ impl InfoPopup {
         self.role_chooser = None;
         // The user has chosen for themselves.
         self.wanted = None;
+        self.blind = false;
         // Up from the first row: what stands above it (name, topic, facts) comes
         // back into view; in a low window the rows alone can fill it.
         if delta < 0 && self.selected == 0 {
@@ -1603,8 +1610,17 @@ impl InfoPopup {
         } else {
             rows.iter().position(|r| matches!(r, InfoRow::Member(_)))
         };
+        self.blind = !self.filter.is_empty() && wanted.is_none();
         self.selected = wanted.unwrap_or(self.selected.min(rows.len().saturating_sub(1)));
         self.reveal = true;
+    }
+
+    /// Whether the filter's line is in view rather than the selected row: see `blind`.
+    pub fn typing_blind(&self) -> bool {
+        self.blind
+            && !self.filter.is_empty()
+            && self.editing.is_none()
+            && !matches!(self.current(), Some(InfoRow::Member(_)))
     }
 
     /// Changes the member filter; the first match gets the selection.

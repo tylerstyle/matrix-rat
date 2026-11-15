@@ -1161,10 +1161,8 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
     info.reveal |= info.page != page;
     info.page = page;
     // What has to be in view: the selected row, or, while a filter is typed that
-    // nobody matches, the line it is typed on.
-    let typing_blind = !info.filter.is_empty()
-        && info.editing.is_none()
-        && !matches!(current, Some(InfoRow::Member(_)));
+    // nobody matches, the line it is typed on. A row chosen since is shown.
+    let typing_blind = info.typing_blind();
     let selected_line = entries.iter().position(|entry| match entry {
         Entry::Members => typing_blind,
         Entry::Row(index, _) => !typing_blind && *index == info.selected,

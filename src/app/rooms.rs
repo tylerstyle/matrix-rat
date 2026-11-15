@@ -1140,6 +1140,9 @@ impl App {
         }
         let page = info.page.saturating_sub(1).max(1) as isize;
         let row = info.current();
+        // While the selected row is out of view for a filter that nobody matches,
+        // the keys that would act on it edit the filter.
+        let blind = info.typing_blind();
         match code {
             KeyCode::F(4) if mods.is_empty() => self.close_manage(),
             KeyCode::Up | KeyCode::BackTab => info.step(-1),
@@ -1153,10 +1156,10 @@ impl App {
                 info.reveal = false;
             }
             KeyCode::End => info.step(isize::MAX / 2),
-            KeyCode::Left | KeyCode::Right if row == Some(InfoRow::Notify) && plain => {
+            KeyCode::Left | KeyCode::Right if row == Some(InfoRow::Notify) && plain && !blind => {
                 self.info_activate(InfoRow::Notify, if code == KeyCode::Left { -1 } else { 1 });
             }
-            KeyCode::Left if row == Some(InfoRow::SettingsToggle) && plain => {
+            KeyCode::Left if row == Some(InfoRow::SettingsToggle) && plain && !blind => {
                 if info.settings_open {
                     info.settings_open = false;
                     info.error = None;
@@ -1164,7 +1167,7 @@ impl App {
                     info.reveal = true;
                 }
             }
-            KeyCode::Right if row == Some(InfoRow::SettingsToggle) && plain => {
+            KeyCode::Right if row == Some(InfoRow::SettingsToggle) && plain && !blind => {
                 if !info.settings_open {
                     info.settings_open = true;
                     info.error = None;
@@ -1172,11 +1175,13 @@ impl App {
                     info.reveal = true;
                 }
             }
+            // While a member filter is typed, a space belongs to it.
             KeyCode::Char(' ')
                 if matches!(
                     row,
                     Some(InfoRow::SettingsToggle | InfoRow::Setting(RoomSetting::Direct))
-                ) && plain =>
+                ) && plain
+                    && info.filter.is_empty() =>
             {
                 if let Some(row) = row {
                     self.info_activate(row, 0);
@@ -1187,17 +1192,18 @@ impl App {
                     self.info_activate(row, 0);
                 }
             }
-            KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) => {
+            KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) && plain && !blind => {
                 self.remove_or_unban_member()
             }
-            KeyCode::Delete if matches!(row, Some(InfoRow::Child(_))) => self.remove_child(),
-            // While a member filter is typed, a space belongs to it.
+            KeyCode::Delete if matches!(row, Some(InfoRow::Child(_))) && plain && !blind => {
+                self.remove_child()
+            }
             KeyCode::Char(' ')
                 if matches!(row, Some(InfoRow::Child(_))) && plain && info.filter.is_empty() =>
             {
                 self.toggle_child_suggested();
             }
-            KeyCode::Delete if matches!(row, Some(InfoRow::KnockRequest(_))) => {
+            KeyCode::Delete if matches!(row, Some(InfoRow::KnockRequest(_))) && plain && !blind => {
                 self.decline_knock()
             }
             KeyCode::Char('i')
@@ -1218,12 +1224,14 @@ impl App {
             }
             _ => {
                 let keys = EditKeys {
-                    arrows: row != Some(InfoRow::Notify) && row != Some(InfoRow::SettingsToggle),
+                    arrows: blind
+                        || (row != Some(InfoRow::Notify) && row != Some(InfoRow::SettingsToggle)),
                     home_end: false,
-                    delete: !matches!(
-                        row,
-                        Some(InfoRow::Member(_) | InfoRow::KnockRequest(_) | InfoRow::Child(_))
-                    ),
+                    delete: blind
+                        || !matches!(
+                            row,
+                            Some(InfoRow::Member(_) | InfoRow::KnockRequest(_) | InfoRow::Child(_))
+                        ),
                     kill_to_end: true,
                 };
                 info.apply_filter(|f| f.handle_key(code, mods, keys));
@@ -1306,6 +1314,7 @@ impl App {
                     info.selected = index;
                     info.confirm = None;
                 }
+                info.blind = false;
                 match click {
                     Click::Row(_) => self.info_activate(row, 0),
                     Click::Step(_, step) => self.info_activate(row, step),
@@ -3547,6 +3556,64 @@ mod tests {
                 result: Ok(Box::new(details())),
             },
         );
+    }
+
+    #[test]
+    fn keys_typed_into_a_member_filter_that_nobody_matches_never_change_the_room() {
+        let (mut app, _terminal, mut commands) = connected();
+        with_info(&mut app, &mut commands);
+        let select = |app: &mut App, row: InfoRow| {
+            if let Some(Modal::RoomInfo(info)) = &mut app.modal {
+                info.settings_open = true;
+                info.select(row);
+            }
+            assert_eq!(info(app).current(), Some(row));
+        };
+        let direct = InfoRow::Setting(RoomSetting::Direct);
+        // Nobody is called "zed": the selection stays on the setting, and the space
+        // is part of the filter.
+        select(&mut app, direct);
+        type_text(&mut app, "zed q");
+        assert_eq!(info(&app).filter.as_str(), "zed q");
+        assert_eq!(info(&app).current(), Some(direct));
+        assert!(sent(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Esc));
+        assert!(info(&app).filter.is_empty());
+        // So on the line of the settings, where the arrows move in the filter too, as
+        // they do on the notification level.
+        for row in [InfoRow::SettingsToggle, InfoRow::Notify] {
+            select(&mut app, row);
+            type_text(&mut app, "zz z");
+            app.on_event(key(KeyCode::Left));
+            app.on_event(key(KeyCode::Right));
+            assert_eq!(info(&app).filter.as_str(), "zz z");
+            assert!(info(&app).settings_open);
+            assert!(sent(&mut commands).is_empty(), "{row:?}");
+            app.on_event(key(KeyCode::Esc));
+        }
+        // A member's row takes Del only without Ctrl or Alt.
+        select(&mut app, InfoRow::Member(2));
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::CONTROL,
+        )));
+        assert!(info(&app).confirm.is_none());
+        assert!(sent(&mut commands).is_empty());
+
+        // Chosen with the arrows, a row is in view again, however low the window.
+        let mut short = Terminal::new(TestBackend::new(100, 18)).unwrap();
+        select(&mut app, direct);
+        type_text(&mut app, "zed");
+        assert!(info(&app).typing_blind());
+        find(&screen(&mut app, &mut short), "⌕ zed");
+        for _ in 0..20 {
+            if info(&app).current() == Some(InfoRow::Leave) {
+                break;
+            }
+            app.on_event(key(KeyCode::Up));
+        }
+        assert!(!info(&app).typing_blind());
+        find(&screen(&mut app, &mut short), "Leave room");
     }
 
     #[test]

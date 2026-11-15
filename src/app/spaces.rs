@@ -1231,6 +1231,33 @@ mod tests {
     }
 
     #[test]
+    fn del_takes_a_room_out_only_while_the_room_is_in_view() {
+        let (mut app, _terminal, mut commands) = connected();
+        with_space_info(&mut app, &mut commands, true);
+        select(&mut app, InfoRow::Child(0));
+        // Nobody is called "zz": the filter's line is in view, and Del edits it.
+        type_text(&mut app, "zz");
+        assert!(info(&app).typing_blind());
+        app.on_event(key(KeyCode::Left));
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(info(&app).filter.as_str(), "z");
+        assert!(info(&app).confirm.is_none());
+        // Chosen with the arrows, the room is in view, and Del asks; not with Ctrl.
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Up));
+        assert_eq!(info(&app).current(), Some(InfoRow::Child(0)));
+        assert!(!info(&app).typing_blind());
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::CONTROL,
+        )));
+        assert!(info(&app).confirm.is_none());
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(info(&app).confirm, Some(Confirm::RemoveChild(RATS.into())));
+        assert!(sent(&mut commands).is_empty());
+    }
+
+    #[test]
     fn a_room_of_a_space_opens_or_is_previewed() {
         let (mut app, _terminal, mut commands) = connected();
         app.open_room(1);
