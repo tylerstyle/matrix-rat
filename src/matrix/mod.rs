@@ -2025,15 +2025,7 @@ impl Worker {
                     }
                     Some(MatrixCmd::CancelDirectorySearch) => dir_searcher.cancel(),
                     Some(MatrixCmd::EnsureEmotePacks { room_id }) => emote_mgr.ensure(room_id),
-                    Some(command) => {
-                        // Accepting an invitation: no longer a room that was left.
-                        if let MatrixCmd::Join { room_id } = &command
-                            && let Ok(room_id) = <&matrix_sdk::ruma::RoomId>::try_from(room_id.as_str())
-                        {
-                            left.clear(room_id);
-                        }
-                        timelines.handle(command).await;
-                    }
+                    Some(command) => timelines.handle(command).await,
                 },
             }
         };

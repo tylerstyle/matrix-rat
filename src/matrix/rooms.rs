@@ -1110,11 +1110,18 @@ impl Timelines {
                     Ok(())
                 });
             }
+            // Accepting an invitation.
             MatrixCmd::Join { room_id } => match self.room(&room_id) {
-                Ok(room) => self.spawn("Could not join", async move {
-                    room.join().await?;
-                    Ok(())
-                }),
+                Ok(room) => {
+                    let left = self.left.clone();
+                    self.spawn("Could not join", async move {
+                        room.join().await?;
+                        // In it: no longer a room that was left. Only now: until the join
+                        // went through, one left here stays as gone as it was.
+                        left.clear(room.room_id());
+                        Ok(())
+                    });
+                }
                 Err(err) => self.fail("Could not join", err),
             },
             // Declining an invitation, or taking a knock back.
@@ -2325,6 +2332,83 @@ mod tests {
         .expect("the declined invitation is remembered");
         // (The SDK forgets it. Brought back looking joined by a late answer, it now stays
         // hidden, while a new invitation shows: see the tests of `left`.)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accepting_an_invitation_to_a_room_left_before_brings_it_back_only_when_it_works() {
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+        use matrix_sdk::ruma::room_id;
+
+        let (asked, refused, gone) = (
+            room_id!("!asked:localhost"),
+            room_id!("!refused:localhost"),
+            room_id!("!gone:localhost"),
+        );
+        // Only the one invitation can be accepted: any other join gets no room back.
+        let server = fake::Server::answering(
+            serde_json::json!({
+                "join": { "!gone:localhost": fake::joined(false, vec![]) },
+                "invite": {
+                    "!asked:localhost": fake::invited(false),
+                    "!refused:localhost": fake::invited(false),
+                },
+            }),
+            Box::new(|request| {
+                (request.path == "/_matrix/client/v3/rooms/!asked:localhost/join")
+                    .then(|| fake::Reply::Json(r#"{"room_id":"!asked:localhost"}"#.to_owned()))
+            }),
+        )
+        .await;
+        let client = fake::client(&server).await;
+        let left = LeftRooms::default();
+        for room in [asked, refused, gone] {
+            left.mark(room);
+        }
+        let (mut timelines, mut events) = timelines_of(client, &left);
+        let mut failure = async || {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    match events.recv().await {
+                        Some(MatrixEvent::ActionFailed(text)) => return text,
+                        Some(_) => {}
+                        None => panic!("the worker stopped"),
+                    }
+                }
+            })
+            .await
+            .expect("expected the join to fail")
+        };
+        // Accepting fails: still a room that was left.
+        timelines
+            .handle(MatrixCmd::Join {
+                room_id: refused.to_string(),
+            })
+            .await;
+        assert!(failure().await.starts_with("Could not join"));
+        assert!(left.is_left(refused));
+        // A room left here that looks joined has no invitation to accept: it stays gone.
+        timelines
+            .handle(MatrixCmd::Join {
+                room_id: gone.to_string(),
+            })
+            .await;
+        assert!(failure().await.contains("not in this room"));
+        assert!(left.is_left(gone));
+        // Accepted: a room like any other.
+        timelines
+            .handle(MatrixCmd::Join {
+                room_id: asked.to_string(),
+            })
+            .await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while left.is_left(asked) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the room is back once joined");
     }
 
     #[test]
