@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1f1f28"/>
+      <stop offset="100%" stop-color="#16161d"/>
+    </linearGradient>
+    <linearGradient id="termGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2a2a37"/>
+      <stop offset="100%" stop-color="#1f1f28"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="#16161d"/>
+  <g transform="translate(96 96) scale(0.875)">
+  <rect x="16" y="16" width="480" height="480" rx="104" fill="url(#bg3)" stroke="#2a2a37" stroke-width="8"/>
+
+  <!-- Ratatui Homage: Tall Chef's Hat (Toque Blanche) at the top -->
+  <path d="M 188 184
+           C 156 172, 152 124, 184 108
+           C 188 74, 228 58, 256 76
+           C 284 58, 324 74, 328 108
+           C 360 124, 356 172, 324 184
+           Z"
+        fill="#dcd7ba"/>
+  <!-- Chef hat band with Matrix green stripe -->
+  <rect x="188" y="172" width="136" height="28" rx="8" fill="#98bb6c"/>
+
+  <!-- Symmetric Rat Head & Big Round Ears peeking over the Terminal -->
+  <!-- Left Ear -->
+  <circle cx="152" cy="226" r="44" fill="#dcd7ba"/>
+  <circle cx="152" cy="226" r="24" fill="#d27e99"/>
+  <!-- Right Ear -->
+  <circle cx="360" cy="226" r="44" fill="#dcd7ba"/>
+  <circle cx="360" cy="226" r="24" fill="#d27e99"/>
+
+  <!-- Rat Face Wedge -->
+  <path d="M 172 200 H 340 L 316 320 L 256 356 L 196 320 Z"
+        fill="#dcd7ba"/>
+
+  <!-- Eyes -->
+  <circle cx="220" cy="264" r="14" fill="#16161d"/>
+  <circle cx="292" cy="264" r="14" fill="#16161d"/>
+  <circle cx="223" cy="261" r="5" fill="#e6c384"/>
+  <circle cx="295" cy="261" r="5" fill="#e6c384"/>
+
+  <!-- Whiskers -->
+  <g stroke="#7fb4ca" stroke-width="8" stroke-linecap="round">
+    <line x1="124" y1="292" x2="196" y2="302"/>
+    <line x1="132" y1="318" x2="200" y2="318"/>
+    <line x1="388" y1="292" x2="316" y2="302"/>
+    <line x1="380" y1="318" x2="312" y2="318"/>
+  </g>
+
+  <!-- Terminal Window / Matrix Bar at Bottom -->
+  <rect x="84" y="336" width="344" height="116" rx="22" fill="url(#termGrad)" stroke="#7fb4ca" stroke-width="10"/>
+
+  <!-- Pink Nose resting right on the terminal border -->
+  <circle cx="256" cy="340" r="18" fill="#e46876"/>
+
+  <!-- '[m]' Matrix Brackets & Prompt inside the Terminal -->
+  <path d="M 148 368 H 126 V 420 H 148" fill="none" stroke="#98bb6c" stroke-width="12" stroke-linecap="square"/>
+  <path d="M 364 368 H 386 V 420 H 364" fill="none" stroke="#98bb6c" stroke-width="12" stroke-linecap="square"/>
+  <!-- Prompt '>' and block cursor '█' -->
+  <path d="M 188 376 L 216 394 L 188 412" fill="none" stroke="#e6c384" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="240" y="376" width="28" height="36" rx="4" fill="#98bb6c"/>
+  <rect x="284" y="376" width="52" height="36" rx="4" fill="#7fb4ca" opacity="0.5"/>
+  </g>
+  <text x="620" y="300" font-family="DejaVu Sans Mono, monospace" font-weight="bold" font-size="92" fill="#dcd7ba">matrix-rat</text>
+  <text x="624" y="372" font-family="DejaVu Sans Mono, monospace" font-size="33" fill="#7fb4ca">A Matrix client for the terminal</text>
+  <text x="624" y="420" font-family="DejaVu Sans Mono, monospace" font-size="33" fill="#727169">mouse and keyboard, both at home</text>
+</svg>

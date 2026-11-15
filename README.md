@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🐀 matrix-rat
+<img src="assets/icon.svg" alt="The matrix-rat icon: a rat in a chef's hat looking over a terminal window" width="112">
+
+# matrix-rat
 
 **A Matrix client for the terminal that is as comfortable with a rat, ehm, I mean mouse, as with a keyboard.**
 
@@ -85,6 +87,11 @@ Hype it, like it, use it and when traction hits critical, we'll go to nixpkgs.
 git clone https://github.com/tylerstyle/matrix-rat && cd matrix-rat
 cargo install --path .        # installs to ~/.cargo/bin
 ```
+
+The Nix package also installs a launcher entry and the icon, so matrix-rat shows up in
+application launchers (it opens in your terminal) and can be chosen as the program for
+`matrix:` links. With Cargo, copy them yourself if you want them: see
+[`assets/`](assets/README.md).
 
 **Just try it**, without an account and without installing:
 
