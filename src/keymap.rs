@@ -159,6 +159,7 @@ action_table! {
     Action::SearchEverywhere => ("search_all", Context::Global, "Search all rooms"),
     Action::SpaceNext => ("space_next", Context::Global, "Next space (then all rooms)"),
     Action::SpacePrev => ("space_prev", Context::Global, "Previous space"),
+    Action::SpaceInfo => ("space_info", Context::Global, "Space info and its rooms"),
     Action::FilterUnread => ("filter_unread", Context::Global, "Filter: Unread only"),
     Action::FilterPeople => ("filter_people", Context::Global, "Filter: People only"),
     Action::RoomPrev => ("room_prev", Context::Global, "Previous room"),

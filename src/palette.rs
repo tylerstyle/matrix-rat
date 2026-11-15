@@ -117,6 +117,137 @@ impl std::fmt::Debug for ForwardTarget {
     }
 }
 
+/// The room info a picker goes back to: a room's, or a space's.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InfoBack {
+    pub room_id: String,
+    pub space: bool,
+}
+
+/// What the palette picks a room for when it is used as a room picker.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Pick {
+    /// Forward a message there.
+    Forward(ForwardTarget),
+    /// Put the picked room (or space) into this space.
+    IntoSpace {
+        space_id: String,
+        space_name: String,
+        /// The room info to go back to afterwards.
+        back: Option<InfoBack>,
+    },
+    /// Put this room into the picked space.
+    ToSpace {
+        room_id: String,
+        room_name: String,
+        back: Option<InfoBack>,
+    },
+}
+
+/// Hand-written: which rooms, and what they are called, stay out of logs.
+impl std::fmt::Debug for Pick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Forward(target) => write!(f, "Pick::Forward({target:?})"),
+            Self::IntoSpace { back, .. } => write!(f, "Pick::IntoSpace(back: {})", back.is_some()),
+            Self::ToSpace { back, .. } => write!(f, "Pick::ToSpace(back: {})", back.is_some()),
+        }
+    }
+}
+
+impl Pick {
+    /// Title, footer and the placeholder of the search line.
+    pub fn texts(&self) -> (&'static str, &'static str, &'static str) {
+        let footer = |back: &Option<InfoBack>| {
+            if back.is_some() {
+                "↑↓ move · Enter add · Esc back"
+            } else {
+                "↑↓ move · Enter add · Esc cancel"
+            }
+        };
+        match self {
+            Self::Forward(_) => (
+                "Forward to room",
+                "↑↓ move · Enter forward · Esc cancel",
+                "type a room name…",
+            ),
+            Self::IntoSpace { back, .. } => {
+                ("Add a room to the space", footer(back), "type a room name…")
+            }
+            Self::ToSpace { back, .. } => ("Add to a space", footer(back), "type a space name…"),
+        }
+    }
+
+    /// What the pick is about, for the line under the search: a label and a name,
+    /// safe to show.
+    pub fn about(&self) -> (&'static str, String) {
+        let (label, about) = match self {
+            Self::Forward(target) => ("Message: ", &target.preview),
+            Self::IntoSpace { space_name, .. } => ("Space: ", space_name),
+            Self::ToSpace { room_name, .. } => ("Room: ", room_name),
+        };
+        (label, crate::text::sanitize_line(about))
+    }
+
+    /// What the list says when nothing matches the search.
+    pub fn nothing(&self) -> &'static str {
+        match self {
+            Self::Forward(_) | Self::IntoSpace { .. } => "no matching rooms",
+            Self::ToSpace { .. } => "no matching spaces",
+        }
+    }
+
+    /// The room info to show again when the pick is over.
+    pub fn back(&self) -> Option<&InfoBack> {
+        match self {
+            Self::Forward(_) => None,
+            Self::IntoSpace { back, .. } | Self::ToSpace { back, .. } => back.as_ref(),
+        }
+    }
+}
+
+/// One room (or space) a picker offers.
+#[derive(Clone)]
+pub struct PickItem {
+    pub id: String,
+    pub name: String,
+    pub hint: Option<String>,
+    pub category: Category,
+}
+
+/// Hand-written: which room and its name stay out of logs.
+impl std::fmt::Debug for PickItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PickItem({:?})", self.category)
+    }
+}
+
+/// What can be done with spaces right now.
+#[derive(Clone, Default)]
+pub struct SpaceFacts {
+    /// The space the room list is narrowed to: its name, and whether we may put
+    /// rooms into it.
+    pub selected: Option<(String, bool)>,
+    /// The target room could be put into some space of ours.
+    pub can_add_room: bool,
+    /// The target room is directly in the selected space.
+    pub in_selected: bool,
+}
+
+/// Hand-written: the space's name stays out of logs.
+impl std::fmt::Debug for SpaceFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpaceFacts")
+            .field(
+                "selected",
+                &self.selected.as_ref().map(|(_, can_edit)| can_edit),
+            )
+            .field("can_add_room", &self.can_add_room)
+            .field("in_selected", &self.in_selected)
+            .finish()
+    }
+}
+
 /// Snapshot of application state used to construct palette entries and availability.
 #[derive(Debug, Clone)]
 pub struct PaletteContext {
@@ -156,6 +287,7 @@ pub struct PaletteContext {
     pub all_spaces_unread: SpaceUnread,
     pub all_spaces_active: bool,
     pub spaces: Vec<SpaceItem>,
+    pub space_facts: SpaceFacts,
     pub rooms: Vec<RoomItem>,
     pub selection: MessageCaps,
     /// The room that room-level commands (room info, invite, favourite, leave) would
@@ -180,8 +312,8 @@ pub struct Palette {
     pub rows: usize,
     /// Keeps keyboard selection in view on the next draw.
     pub reveal: bool,
-    /// When `Some`, the palette picks a target room to forward the message to.
-    pub forward: Option<ForwardTarget>,
+    /// When `Some`, the palette picks a room for this.
+    pub pick: Option<Pick>,
 }
 
 impl Palette {
@@ -203,7 +335,7 @@ impl Palette {
             scroll: 0,
             rows: 10,
             reveal: false,
-            forward: None,
+            pick: None,
         };
         palette.refilter();
         palette
@@ -211,21 +343,39 @@ impl Palette {
 
     /// Opens the palette as a room picker for forwarding `target`.
     pub fn open_forward(rooms: &[RoomItem], target: ForwardTarget) -> Self {
+        let items: Vec<PickItem> = rooms
+            .iter()
+            .map(|room| PickItem {
+                id: room.id.clone(),
+                name: room.name.clone(),
+                hint: (room.id == target.from_room_id).then(|| "current".to_owned()),
+                category: Category::Room,
+            })
+            .collect();
+        Self::open_pick(&items, Pick::Forward(target))
+    }
+
+    /// Opens the palette as a picker of `items` for `pick`. Entries with a hint (the
+    /// room a message comes from) go last.
+    pub fn open_pick(items: &[PickItem], pick: Pick) -> Self {
+        let verb = match &pick {
+            Pick::Forward(_) => "forward",
+            Pick::IntoSpace { .. } | Pick::ToSpace { .. } => "add",
+        };
         let mut entries = Vec::new();
-        for room in rooms {
-            let is_source = room.id == target.from_room_id;
-            let hint = is_source.then(|| "current".to_owned());
-            let alias = format!("forward {}", room.name);
+        for item in items {
+            let alias = format!("{verb} {}", item.name);
+            let last = matches!(pick, Pick::Forward(_)) && item.hint.is_some();
             push_entry(
                 &mut entries,
-                Target::Room(room.id.clone()),
-                Category::Room,
-                room.name.clone(),
-                hint,
-                room.name.clone(),
+                Target::Room(item.id.clone()),
+                item.category,
+                item.name.clone(),
+                item.hint.clone(),
+                item.name.clone(),
                 &[&alias],
                 true,
-                if is_source { 1 } else { 0 },
+                u8::from(last),
             );
         }
         let mut palette = Self {
@@ -236,7 +386,7 @@ impl Palette {
             scroll: 0,
             rows: 10,
             reveal: false,
-            forward: Some(target),
+            pick: Some(pick),
         };
         palette.refilter();
         palette
@@ -478,6 +628,8 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         Action::MessageDetails,
         Action::CreatePoll,
         Action::OpenStickers,
+        // Named after the space, with the spaces.
+        Action::SpaceInfo,
     ];
     for binding in active_bindings {
         if include_keymap_action(binding.action) == ActionInclusion::Skip {
@@ -891,6 +1043,33 @@ fn collect_spaces(ctx: &PaletteContext, out: &mut Vec<Entry>) {
     if ctx.spaces.is_empty() {
         return;
     }
+    if let Some((name, can_edit)) = &ctx.space_facts.selected {
+        let name = crate::text::truncate(name, 30);
+        let info_title = format!("Space info: {name}");
+        push_entry(
+            out,
+            Target::Action(Action::SpaceInfo),
+            Category::Space,
+            info_title.clone(),
+            ctx.keymap.label_for(Action::SpaceInfo).map(str::to_owned),
+            info_title,
+            &["space settings", "rooms of the space", "space members"],
+            true,
+            0,
+        );
+        let add_title = format!("Add a room to {name}…");
+        push_entry(
+            out,
+            Target::Action(Action::Manage(crate::manage::Click::AddRoomToSpace)),
+            Category::Space,
+            add_title.clone(),
+            None,
+            add_title,
+            &["put a room into the space", "space add room"],
+            *can_edit,
+            1,
+        );
+    }
     push_entry(
         out,
         Target::Space(None),
@@ -1025,6 +1204,43 @@ fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             Target::Action(action),
             Category::Action,
             title,
+            None,
+            title,
+            aliases,
+            enabled,
+            1,
+        );
+    }
+    let facts = &ctx.space_facts;
+    let add_title = format!("Add {name} to a space…");
+    let mut spaces: Vec<(Action, String, &[&str], bool)> = vec![
+        (
+            Action::Manage(Click::Stage(Stage::CreateSpace)),
+            "Create a space…".to_owned(),
+            &["new space", "make a space"],
+            true,
+        ),
+        (
+            Action::Manage(Click::AddToSpace),
+            add_title,
+            &["put in a space", "space"],
+            in_room && facts.can_add_room,
+        ),
+    ];
+    if let Some((space, can_edit)) = &facts.selected {
+        spaces.push((
+            Action::Manage(Click::RemoveFromSpace),
+            format!("Remove {name} from {}…", crate::text::truncate(space, 30)),
+            &["take out of the space", "space"],
+            in_room && facts.in_selected && *can_edit,
+        ));
+    }
+    for (action, title, aliases, enabled) in spaces {
+        push_entry(
+            out,
+            Target::Action(action),
+            Category::Action,
+            title.clone(),
             None,
             title,
             aliases,
@@ -1329,6 +1545,17 @@ mod tests {
     use super::*;
     use crate::action::Dir;
 
+    #[test]
+    fn what_a_pick_is_about_is_safe_to_show() {
+        let pick = Pick::ToSpace {
+            room_id: "!rats:example.org".into(),
+            room_name: "Ra\u{1b}[2Jts\u{202e}".into(),
+            back: None,
+        };
+        assert_eq!(pick.about(), ("Room: ", "Ra[2Jts".to_owned()));
+        assert_eq!(pick.nothing(), "no matching spaces");
+    }
+
     fn sample_context() -> PaletteContext {
         PaletteContext {
             focus: Pane::Composer,
@@ -1369,6 +1596,7 @@ mod tests {
             all_spaces_unread: SpaceUnread::default(),
             all_spaces_active: true,
             spaces: Vec::new(),
+            space_facts: SpaceFacts::default(),
             rooms: vec![
                 RoomItem {
                     id: "!rust:x".to_owned(),

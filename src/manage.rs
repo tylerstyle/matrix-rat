@@ -6,7 +6,7 @@ use matrix_sdk::ruma::{EventId, MatrixToUri, MatrixUri, RoomAliasId, RoomId, Ser
 
 use crate::lineedit::{EditOutcome, LineEdit};
 use crate::matrix::{
-    MemberRole, NotifyLevel, RoomDetails, RoomKnockRequest, RoomMember, RoomPermissions,
+    MemberRole, NotifyLevel, RoomDetails, RoomKnockRequest, RoomMember, RoomPermissions, SpaceChild,
 };
 use crate::model::RoomKind;
 
@@ -335,6 +335,8 @@ pub enum Stage {
     Join,
     Direct,
     Create,
+    /// A space: a room that gathers other rooms.
+    CreateSpace,
     /// Search the public room directory.
     Browse,
     /// Inspect an unjoined room's summary before joining or asking to join.
@@ -344,7 +346,13 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const CHOICES: [Stage; 4] = [Stage::Join, Stage::Direct, Stage::Create, Stage::Browse];
+    pub const CHOICES: [Stage; 5] = [
+        Stage::Join,
+        Stage::Direct,
+        Stage::Create,
+        Stage::CreateSpace,
+        Stage::Browse,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -352,6 +360,7 @@ impl Stage {
             Stage::Join => "Join a room",
             Stage::Direct => "Start a direct chat",
             Stage::Create => "Create a room",
+            Stage::CreateSpace => "Create a space",
             Stage::Browse => "Browse public rooms",
             Stage::Preview => "Room preview",
             Stage::Invite => "Invite to this room",
@@ -364,6 +373,7 @@ impl Stage {
             Stage::Join => "By its address or a matrix.to link",
             Stage::Direct => "With one person, by user ID",
             Stage::Create => "Private or public, with a name of your choice",
+            Stage::CreateSpace => "A place that gathers rooms, to share or to tidy up",
             Stage::Browse => "Discover rooms on this or another server",
             Stage::Choose | Stage::Preview | Stage::Invite => "",
         }
@@ -457,6 +467,19 @@ pub enum Click {
     AddressDeleteLocal(usize),
     /// Set a permission threshold `(action_index, power_level)`.
     PermSet(usize, i64),
+    /// Pick a space to put the room in question into.
+    AddToSpace,
+    /// Take the room in question out of the space the room list is narrowed to
+    /// (shown in its room info, which asks first).
+    RemoveFromSpace,
+    /// Pick a room to put into the space the room list is narrowed to.
+    AddRoomToSpace,
+    /// Open the selected room of a space, or preview it if we are not in it.
+    ChildOpen,
+    /// Suggested on or off for the selected room of a space.
+    ChildSuggest,
+    /// Take the selected room out of the space (asks first).
+    ChildRemove,
 }
 
 /// The form behind Ctrl-N. One popup for all stages, so going back keeps what was typed.
@@ -481,6 +504,8 @@ pub struct NewPopup {
     pub error: Option<String>,
     /// Id and name of the room to invite to.
     pub room: Option<(String, String)>,
+    /// That room is a space.
+    pub into_space: bool,
     /// Number of the request whose answer is awaited; answers to others are not ours.
     pub request: Option<u64>,
     /// Type-ahead user search matches shown under the user ID field.
@@ -570,6 +595,7 @@ impl NewPopup {
             busy: None,
             error: None,
             room: None,
+            into_space: false,
             request: None,
             user_results: Vec::new(),
             user_selected: None,
@@ -601,7 +627,7 @@ impl NewPopup {
     pub fn slots(&self) -> usize {
         match self.stage {
             Stage::Choose => Stage::CHOICES.len(),
-            Stage::Create => Self::BUTTON + 1,
+            Stage::Create | Stage::CreateSpace => Self::BUTTON + 1,
             Stage::Browse => 2,
             Stage::Preview => usize::from(self.preview_has_reason()) + self.preview_buttons().len(),
             Stage::Join | Stage::Direct | Stage::Invite => 1,
@@ -620,9 +646,11 @@ impl NewPopup {
             (Stage::Browse, Self::DIR_SEARCH) => Some(&mut self.dir_query),
             (Stage::Browse, Self::DIR_SERVER) => Some(&mut self.dir_server),
             (Stage::Preview, 0) if self.preview_has_reason() => Some(&mut self.preview_reason),
-            (Stage::Create, Self::NAME) => Some(&mut self.name),
-            (Stage::Create, Self::TOPIC) => Some(&mut self.topic),
-            (Stage::Create, Self::EXTRA) if self.public => Some(&mut self.alias),
+            (Stage::Create | Stage::CreateSpace, Self::NAME) => Some(&mut self.name),
+            (Stage::Create | Stage::CreateSpace, Self::TOPIC) => Some(&mut self.topic),
+            (Stage::Create | Stage::CreateSpace, Self::EXTRA) if self.public => {
+                Some(&mut self.alias)
+            }
             _ => None,
         }
     }
@@ -630,11 +658,17 @@ impl NewPopup {
     /// Flips the switch in `slot`; false if there is none.
     pub fn flip(&mut self, slot: usize) -> bool {
         match (self.stage, slot) {
-            (Stage::Create, Self::ACCESS) => self.public = !self.public,
+            (Stage::Create | Stage::CreateSpace, Self::ACCESS) => self.public = !self.public,
             (Stage::Create, Self::EXTRA) if !self.public => self.encrypted = !self.encrypted,
             _ => return false,
         }
         true
+    }
+
+    /// Whether the slot can take the cursor: a private space has nothing to say in
+    /// the slot where a room has its encryption switch (spaces are not encrypted).
+    pub fn live(&self, slot: usize) -> bool {
+        !(self.stage == Stage::CreateSpace && slot == Self::EXTRA && !self.public)
     }
 
     pub fn step(&mut self, delta: isize) {
@@ -643,6 +677,10 @@ impl NewPopup {
             self.choice = (self.choice as isize + delta).rem_euclid(count) as usize;
         } else {
             self.focus = (self.focus as isize + delta).rem_euclid(count) as usize;
+            if !self.live(self.focus) {
+                let past = if delta < 0 { -1 } else { 1 };
+                self.focus = (self.focus as isize + past).rem_euclid(count) as usize;
+            }
         }
     }
 
@@ -816,9 +854,17 @@ pub enum InfoRow {
     Topic,
     Invite,
     OwnName,
+    /// Pick a space to put this room into.
+    AddToSpace,
+    /// Take this room out of the space the room list is narrowed to.
+    RemoveFromSpace,
     Leave,
     /// Index into the details' incoming knock request list.
     KnockRequest(usize),
+    /// In a space: pick a room to put into it.
+    AddChild,
+    /// In a space: index into the details' list of its rooms.
+    Child(usize),
     /// Collapsible `▸ Room settings` / `▾ Room settings` row right above `Members`.
     SettingsToggle,
     /// One setting row inside the expanded Room settings section.
@@ -1059,6 +1105,10 @@ pub enum Confirm {
     Unignore(String),
     /// There is no direct chat with this user yet: create one and invite them.
     NewChat(String),
+    /// Take this room out of the space the room list is narrowed to.
+    RemoveFromSpace,
+    /// Take the room with this id out of this space.
+    RemoveChild(String),
 }
 
 /// Hand-written: who it is about stays out of logs.
@@ -1072,6 +1122,8 @@ impl std::fmt::Debug for Confirm {
             Self::Ignore(_) => "Confirm::Ignore",
             Self::Unignore(_) => "Confirm::Unignore",
             Self::NewChat(_) => "Confirm::NewChat",
+            Self::RemoveFromSpace => "Confirm::RemoveFromSpace",
+            Self::RemoveChild(_) => "Confirm::RemoveChild",
         })
     }
 }
@@ -1194,6 +1246,24 @@ pub enum Pending {
     Chat(u64),
     Change(crate::matrix::Change),
     Leave,
+    /// A change of a space, by the number of the request.
+    Space(u64),
+}
+
+/// A space as the room info of a room in it needs it: the one the room list is
+/// narrowed to.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SpaceRef {
+    pub id: String,
+    pub name: String,
+    /// We may take rooms out of it.
+    pub can_edit: bool,
+}
+
+impl std::fmt::Debug for SpaceRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SpaceRef(can_edit: {})", self.can_edit)
+    }
 }
 
 #[derive(Clone)]
@@ -1202,11 +1272,21 @@ pub struct InfoPopup {
     /// Name and kind as the room list has them, until the details arrive.
     pub name: String,
     pub kind: RoomKind,
+    /// The room is a space: its rooms are listed, and what only fits a chat is left out.
+    pub space: bool,
+    /// The space the room list is narrowed to, if this room is directly in it.
+    pub in_space: Option<SpaceRef>,
+    /// There is a space this room could be put into.
+    pub can_add_to_space: bool,
     pub details: Option<RoomDetails>,
     pub error: Option<String>,
     pub notice: Option<String>,
     /// Narrows the member list.
     pub filter: LineEdit,
+    /// The filter was typed last and matches nobody, so the selection is just where
+    /// it was left: until a row is chosen, the filter's line is what is in view and
+    /// the keys for a row go to the filter.
+    pub blind: bool,
     /// Index into `Self::rows`.
     pub selected: usize,
     /// First line shown, and how many fit (as of the last draw).
@@ -1248,10 +1328,14 @@ impl InfoPopup {
             room_id: room_id.to_owned(),
             name: name.to_owned(),
             kind,
+            space: false,
+            in_space: None,
+            can_add_to_space: false,
             details: None,
             error: None,
             notice: None,
             filter: LineEdit::new().with_max_bytes(FIELD_MAX),
+            blind: false,
             selected: 0,
             scroll: 0,
             page: 10,
@@ -1266,6 +1350,41 @@ impl InfoPopup {
             pending: None,
             wanted: None,
         }
+    }
+
+    /// The info of a space.
+    pub fn for_space(space_id: &str, name: &str) -> Self {
+        Self {
+            space: true,
+            ..Self::new(space_id, name, RoomKind::Room)
+        }
+    }
+
+    /// What the room list says about this room and the spaces. A question about a
+    /// space the room is no longer in, or that we may no longer change, is withdrawn;
+    /// the selection stays on its row, or goes to the one above where the row is gone.
+    pub fn set_space_context(&mut self, in_space: Option<SpaceRef>, can_add: bool) {
+        if self.in_space == in_space && self.can_add_to_space == can_add {
+            return;
+        }
+        let row = self.current();
+        let still_asked = matches!(
+            (&in_space, &self.in_space),
+            (Some(new), Some(old)) if new.id == old.id && new.can_edit
+        );
+        if !still_asked && self.confirm == Some(Confirm::RemoveFromSpace) {
+            self.confirm = None;
+        }
+        self.in_space = in_space;
+        self.can_add_to_space = can_add;
+        let rows = self.rows();
+        self.selected = match row.and_then(|row| rows.iter().position(|r| *r == row)) {
+            Some(at) => at,
+            None => self
+                .selected
+                .saturating_sub(1)
+                .min(rows.len().saturating_sub(1)),
+        };
     }
 
     /// Locks the view until the answer `pending` is there.
@@ -1297,9 +1416,48 @@ impl InfoPopup {
     }
 
     pub fn direct(&self) -> bool {
+        !self.space
+            && self
+                .details
+                .as_ref()
+                .map_or(self.kind == RoomKind::Person, |details| details.direct)
+    }
+
+    /// The settings that apply: a space has no messages to encrypt and is no chat.
+    pub fn settings(&self) -> Vec<RoomSetting> {
+        RoomSetting::ALL
+            .into_iter()
+            .filter(|setting| {
+                !self.space || !matches!(setting, RoomSetting::Encryption | RoomSetting::Direct)
+            })
+            .collect()
+    }
+
+    /// The rooms of the space, if this is one and they are known.
+    pub fn children(&self) -> &[SpaceChild] {
         self.details
             .as_ref()
-            .map_or(self.kind == RoomKind::Person, |details| details.direct)
+            .and_then(|details| details.space.as_ref())
+            .map_or(&[], |space| space.children.as_slice())
+    }
+
+    /// We may put rooms into this space and take them out.
+    pub fn can_edit_children(&self) -> bool {
+        self.details
+            .as_ref()
+            .and_then(|details| details.space.as_ref())
+            .is_some_and(|space| space.can_edit)
+    }
+
+    pub fn child(&self, row: InfoRow) -> Option<&SpaceChild> {
+        match row {
+            InfoRow::Child(index) => self.children().get(index),
+            _ => None,
+        }
+    }
+
+    pub fn selected_child(&self) -> Option<&SpaceChild> {
+        self.child(self.current()?)
     }
 
     /// The selectable rows, top to bottom: what can be done, then the members that
@@ -1307,11 +1465,14 @@ impl InfoPopup {
     pub fn rows(&self) -> Vec<InfoRow> {
         let mut rows = Vec::new();
         if !self.pending() {
-            rows.push(InfoRow::Favourite);
-            rows.push(InfoRow::LowPriority);
-            rows.push(InfoRow::Pinned);
+            // A space is not in the room list and has no messages of its own.
+            if !self.space {
+                rows.push(InfoRow::Favourite);
+                rows.push(InfoRow::LowPriority);
+                rows.push(InfoRow::Pinned);
+            }
             if let Some(details) = &self.details {
-                if details.notify.is_some() {
+                if details.notify.is_some() && !self.space {
                     rows.push(InfoRow::Notify);
                 }
                 if details.can_rename {
@@ -1323,7 +1484,15 @@ impl InfoPopup {
                 if details.can_invite {
                     rows.push(InfoRow::Invite);
                 }
-                rows.push(InfoRow::OwnName);
+                if !self.space {
+                    rows.push(InfoRow::OwnName);
+                }
+            }
+            if self.can_add_to_space {
+                rows.push(InfoRow::AddToSpace);
+            }
+            if self.in_space.is_some() {
+                rows.push(InfoRow::RemoveFromSpace);
             }
         }
         rows.push(InfoRow::Leave);
@@ -1331,9 +1500,13 @@ impl InfoPopup {
             && let Some(details) = &self.details
         {
             rows.extend((0..details.knock_requests.len()).map(InfoRow::KnockRequest));
+            if let Some(space) = &details.space {
+                rows.push(InfoRow::AddChild);
+                rows.extend((0..space.children.len()).map(InfoRow::Child));
+            }
             rows.push(InfoRow::SettingsToggle);
             if self.settings_open {
-                rows.extend(RoomSetting::ALL.into_iter().map(InfoRow::Setting));
+                rows.extend(self.settings().into_iter().map(InfoRow::Setting));
             }
         }
         if let Some(details) = &self.details {
@@ -1391,6 +1564,7 @@ impl InfoPopup {
                 self.role_chooser = None;
             }
             self.selected = at;
+            self.blind = false;
             self.reveal = true;
         } else if self.details.is_none() {
             self.wanted = Some(row);
@@ -1404,9 +1578,11 @@ impl InfoPopup {
         self.role_chooser = None;
         // The user has chosen for themselves.
         self.wanted = None;
+        let was_blind = std::mem::take(&mut self.blind);
         // Up from the first row: what stands above it (name, topic, facts) comes
-        // back into view; in a low window the rows alone can fill it.
-        if delta < 0 && self.selected == 0 {
+        // back into view; in a low window the rows alone can fill it. (Not while the
+        // row itself was out of view behind a filter: then it is shown first.)
+        if delta < 0 && self.selected == 0 && !was_blind {
             self.scroll = self.scroll.saturating_sub(delta.unsigned_abs());
             self.reveal = false;
             return;
@@ -1437,8 +1613,17 @@ impl InfoPopup {
         } else {
             rows.iter().position(|r| matches!(r, InfoRow::Member(_)))
         };
+        self.blind = !self.filter.is_empty() && wanted.is_none();
         self.selected = wanted.unwrap_or(self.selected.min(rows.len().saturating_sub(1)));
         self.reveal = true;
+    }
+
+    /// Whether the filter's line is in view rather than the selected row: see `blind`.
+    pub fn typing_blind(&self) -> bool {
+        self.blind
+            && !self.filter.is_empty()
+            && self.editing.is_none()
+            && !matches!(self.current(), Some(InfoRow::Member(_)))
     }
 
     /// Changes the member filter; the first match gets the selection.
@@ -1463,6 +1648,9 @@ impl InfoPopup {
         let knock = row
             .and_then(|row| self.knock_request(row))
             .map(|req| req.user_id.clone());
+        let child = row
+            .and_then(|row| self.child(row))
+            .map(|child| child.room_id.clone());
         self.name.clone_from(&details.name);
         self.details = Some(details);
         // A question about someone who is gone, or whom we may no longer remove, is
@@ -1487,7 +1675,11 @@ impl InfoPopup {
             Some(
                 Confirm::Ignore(user_id) | Confirm::Unignore(user_id) | Confirm::NewChat(user_id),
             ) => still(user_id, false),
-            Some(Confirm::Leave) | None => true,
+            // Only while it is in the space and we may still take it out.
+            Some(Confirm::RemoveChild(room_id)) => details.space.as_ref().is_some_and(|space| {
+                space.can_edit && space.children.iter().any(|c| c.room_id == *room_id)
+            }),
+            Some(Confirm::Leave | Confirm::RemoveFromSpace) | None => true,
         };
         if !keep {
             self.confirm = None;
@@ -1579,15 +1771,18 @@ impl InfoPopup {
             _ => {}
         }
         let rows = self.rows();
-        let same = match (&member, &knock, row) {
-            (Some(user_id), _, _) => rows.iter().position(
+        let same = match (&member, &knock, &child, row) {
+            (Some(user_id), _, _, _) => rows.iter().position(
                 |r| matches!(self.member(*r), Some(member) if member.user_id == *user_id),
             ),
-            (_, Some(user_id), _) => rows.iter().position(
+            (_, Some(user_id), _, _) => rows.iter().position(
                 |r| matches!(self.knock_request(*r), Some(req) if req.user_id == *user_id),
             ),
-            (None, None, Some(row)) => rows.iter().position(|r| *r == row),
-            (None, None, None) => None,
+            (_, _, Some(room_id), _) => rows
+                .iter()
+                .position(|r| matches!(self.child(*r), Some(child) if child.room_id == *room_id)),
+            (None, None, None, Some(row)) => rows.iter().position(|r| *r == row),
+            (None, None, None, None) => None,
         };
         self.selected = same.unwrap_or(self.selected.min(rows.len().saturating_sub(1)));
         if let Some(row) = self.wanted.take() {
@@ -1608,6 +1803,8 @@ impl InfoPopup {
             "Withdraw request"
         } else if self.direct() {
             "Leave this chat"
+        } else if self.space {
+            "Leave space"
         } else {
             "Leave room"
         }
@@ -1620,6 +1817,8 @@ impl InfoPopup {
             "Enter again to decline, Esc to keep it"
         } else if self.knocked() {
             "Enter again to withdraw, Esc to keep waiting"
+        } else if self.space {
+            "Enter again to leave, Esc to stay · the rooms in it are not left"
         } else {
             "Enter again to leave, Esc to stay · this device forgets the room"
         }
@@ -2168,6 +2367,98 @@ mod tests {
         );
     }
 
+    fn child(id: &str) -> SpaceChild {
+        SpaceChild {
+            room_id: id.to_owned(),
+            name: id.trim_start_matches('!').to_owned(),
+            joined: true,
+            ..SpaceChild::default()
+        }
+    }
+
+    fn space_details(children: &[&str], can_edit: bool) -> RoomDetails {
+        RoomDetails {
+            space: Some(crate::matrix::SpaceDetails {
+                children: children.iter().map(|id| child(id)).collect(),
+                more: false,
+                can_edit,
+            }),
+            ..details(&[("alice", false)])
+        }
+    }
+
+    #[test]
+    fn a_space_keeps_the_selection_on_its_room_and_drops_questions_that_no_longer_apply() {
+        let mut popup = InfoPopup::for_space("!s:example.org", "Space");
+        assert_eq!(popup.leave_label(), "Leave space");
+        popup.set_details(space_details(&["!a", "!b"], true));
+        popup.select(InfoRow::Child(1));
+        popup.confirm = Some(Confirm::RemoveChild("!b".into()));
+        // A room added in front: the selection and the question stay with "!b".
+        popup.set_details(space_details(&["!new", "!a", "!b"], true));
+        assert_eq!(popup.selected_child().unwrap().room_id, "!b");
+        assert_eq!(popup.confirm, Some(Confirm::RemoveChild("!b".into())));
+        // The right is gone: so is the question.
+        popup.set_details(space_details(&["!new", "!a", "!b"], false));
+        assert!(popup.confirm.is_none());
+        popup.confirm = Some(Confirm::RemoveChild("!b".into()));
+        popup.set_details(space_details(&["!new", "!a"], true));
+        assert!(popup.confirm.is_none());
+
+        // A room's info: the question about its space goes when the space does.
+        let mut room = InfoPopup::new("!r:example.org", "Rats", RoomKind::Room);
+        let work = SpaceRef {
+            id: "!work:example.org".into(),
+            name: "Work".into(),
+            can_edit: true,
+        };
+        room.set_space_context(Some(work.clone()), true);
+        room.select(InfoRow::RemoveFromSpace);
+        room.confirm = Some(Confirm::RemoveFromSpace);
+        room.set_space_context(Some(work.clone()), false);
+        assert_eq!(room.confirm, Some(Confirm::RemoveFromSpace));
+        assert_eq!(room.current(), Some(InfoRow::RemoveFromSpace));
+        // Nor while we may no longer change the space.
+        let read_only = SpaceRef {
+            can_edit: false,
+            ..work
+        };
+        room.set_space_context(Some(read_only), false);
+        assert!(room.confirm.is_none());
+        assert_eq!(room.current(), Some(InfoRow::RemoveFromSpace));
+        room.confirm = Some(Confirm::RemoveFromSpace);
+        room.set_space_context(None, false);
+        assert!(room.confirm.is_none());
+        // Its row is gone; the one above it is selected, not Leave.
+        assert_ne!(room.current(), Some(InfoRow::Leave));
+        assert!(
+            !format!(
+                "{:?}",
+                SpaceRef {
+                    id: "!secret:example.org".into(),
+                    name: "Secret".into(),
+                    can_edit: true
+                }
+            )
+            .contains("ecret")
+        );
+    }
+
+    #[test]
+    fn a_private_space_has_no_slot_for_encryption() {
+        let mut form = NewPopup::new(Stage::CreateSpace);
+        form.focus = NewPopup::ACCESS;
+        form.step(1);
+        assert_eq!(form.focus, NewPopup::BUTTON);
+        form.step(-1);
+        assert_eq!(form.focus, NewPopup::ACCESS);
+        assert!(!form.flip(NewPopup::EXTRA));
+        assert!(form.flip(NewPopup::ACCESS));
+        form.step(1);
+        assert_eq!(form.focus, NewPopup::EXTRA);
+        assert!(form.field_mut().is_some());
+    }
+
     #[test]
     fn form_state() {
         let mut form = NewPopup::new(Stage::Choose);
@@ -2175,7 +2466,7 @@ mod tests {
         form.step(-1);
         assert_eq!(form.choice, Stage::CHOICES.len() - 1);
         assert_eq!(Stage::CHOICES[form.choice], Stage::Browse);
-        form.step(-1);
+        form.step(-2);
         assert_eq!(form.choice, 2);
         form.go(Stage::CHOICES[form.choice]);
         assert_eq!(form.stage, Stage::Create);

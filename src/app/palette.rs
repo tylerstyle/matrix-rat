@@ -7,7 +7,7 @@ use crate::action::Action;
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::modal::{Modal, Setting, SettingsMenu};
 use crate::model::{MsgKind, RoomKind, SendState};
-use crate::palette::{MessageCaps, Palette, PaletteContext, RoomItem, SpaceItem, Target};
+use crate::palette::{MessageCaps, Palette, PaletteContext, Pick, RoomItem, SpaceItem, Target};
 use crate::theme::Theme;
 
 impl App {
@@ -120,10 +120,33 @@ impl App {
                     active: self.space_at == Some(index),
                 })
                 .collect(),
+            space_facts: self.space_facts(),
             rooms,
             selection,
             target: self.manage_target(),
             keymap: self.keymap.clone(),
+        }
+    }
+
+    /// What the palette offers about spaces, by the rules the actions follow.
+    fn space_facts(&self) -> crate::palette::SpaceFacts {
+        let target = self
+            .target_room()
+            .and_then(|index| self.rooms.get(index))
+            .map(|room| room.id.clone());
+        let (in_space, can_add) = match &target {
+            Some(room_id) => self.space_context(room_id),
+            None => (None, false),
+        };
+        crate::palette::SpaceFacts {
+            selected: self.selected_space().map(|space| {
+                (
+                    self.space_name().unwrap_or_else(|| space.name.clone()),
+                    space.can_edit,
+                )
+            }),
+            can_add_room: can_add,
+            in_selected: in_space.is_some(),
         }
     }
 
@@ -142,8 +165,8 @@ impl App {
         };
         let page = palette.rows.max(1) as isize;
         match (code, mods) {
-            (KeyCode::Esc, _) => self.modal = None,
-            (KeyCode::Char('p'), m) if m == KeyModifiers::CONTROL => self.modal = None,
+            (KeyCode::Esc, _) => self.close_palette(),
+            (KeyCode::Char('p'), m) if m == KeyModifiers::CONTROL => self.close_palette(),
             (KeyCode::Up, _) => palette.step(-1),
             (KeyCode::Down, _) => palette.step(1),
             (KeyCode::Char('p'), m) if m == KeyModifiers::ALT => palette.step(-1),
@@ -166,15 +189,33 @@ impl App {
         }
     }
 
+    /// Closes the palette; a picker opened from a room info goes back there.
+    pub(super) fn close_palette(&mut self) {
+        let Some(Modal::Palette(palette)) = self.modal.take() else {
+            return;
+        };
+        let Some(pick) = palette.pick else {
+            return;
+        };
+        if let Some(back) = pick.back() {
+            // On the row the picker was opened from.
+            let row = match pick {
+                Pick::IntoSpace { .. } => crate::manage::InfoRow::AddChild,
+                _ => crate::manage::InfoRow::AddToSpace,
+            };
+            self.reopen_info(back, Some(row));
+        }
+    }
+
     pub(super) fn run_palette_at(&mut self, filtered_index: usize) {
-        let (entry, forward) = match &mut self.modal {
+        let (entry, pick) = match &mut self.modal {
             Some(Modal::Palette(palette)) => {
                 let entry = palette.entry_at(filtered_index).cloned();
-                let forward = entry
+                let pick = entry
                     .as_ref()
                     .filter(|e| e.enabled && matches!(e.target, Target::Room(_)))
-                    .and_then(|_| palette.forward.take());
-                (entry, forward)
+                    .and_then(|_| palette.pick.take());
+                (entry, pick)
             }
             _ => (None, None),
         };
@@ -190,8 +231,8 @@ impl App {
         match entry.target {
             Target::Action(action) => self.perform(action),
             Target::Room(room_id) => {
-                if let Some(target) = forward {
-                    self.forward_to_room(target, room_id);
+                if let Some(pick) = pick {
+                    self.picked(pick, room_id);
                 } else if let Some(index) = self.rooms.iter().position(|r| r.id == room_id) {
                     self.perform(Action::OpenRoom(index));
                 } else {

@@ -34,6 +34,10 @@ pub enum Target {
     Composer {
         room_id: String,
     },
+    /// The space line of the room list, and the space it was narrowed to.
+    Space {
+        id: Option<String>,
+    },
 }
 
 /// A message of the open room or thread.
@@ -577,8 +581,18 @@ pub fn link_items() -> Vec<Item> {
     ]
 }
 
+/// What a room's menu offers about spaces.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct RoomSpaces {
+    /// Some space of ours could take the room.
+    pub can_add: bool,
+    /// The space the room list is narrowed to, by name, if the room is directly in it
+    /// and we may take rooms out of it.
+    pub remove_from: Option<String>,
+}
+
 /// The entries for a room in the room list.
-pub fn room_items(room: &Room, keys: &Keymap) -> Vec<Item> {
+pub fn room_items(room: &Room, spaces: &RoomSpaces, keys: &Keymap) -> Vec<Item> {
     use Context::Sidebar;
     let mut items = vec![
         Item::new(
@@ -632,8 +646,52 @@ pub fn room_items(room: &Room, keys: &Keymap) -> Vec<Item> {
         "",
         Run::Do(Action::Manage(Click::LowPriority)),
     ));
+    if spaces.can_add {
+        items.push(Item::new(
+            "Add to a space…",
+            "",
+            Run::Do(Action::Manage(Click::AddToSpace)),
+        ));
+    }
+    if let Some(space) = &spaces.remove_from {
+        // Asked in the room info, as leaving is.
+        items.push(Item::new(
+            &format!("Remove from {}…", truncate(space, 24)),
+            "",
+            Run::Do(Action::Manage(Click::RemoveFromSpace)),
+        ));
+    }
     items.push(Item::new("Notification mode…", "", Run::Notifications));
     items.push(Item::action(keys, "Leave…", Sidebar, Action::LeaveRoom));
+    items
+}
+
+/// The entries for the space line of the room list: about the space the list is
+/// narrowed to (`selected`: whether we may change its rooms), and making one.
+pub fn space_items(selected: Option<bool>, keys: &Keymap) -> Vec<Item> {
+    let mut items = Vec::new();
+    if let Some(can_edit) = selected {
+        items.push(Item::action(
+            keys,
+            "Space info",
+            Context::Sidebar,
+            Action::SpaceInfo,
+        ));
+        if can_edit {
+            items.push(Item::new(
+                "Add a room…",
+                "",
+                Run::Do(Action::Manage(Click::AddRoomToSpace)),
+            ));
+        }
+    }
+    items.push(Item::new(
+        "Create a space…",
+        "",
+        Run::Do(Action::Manage(Click::Stage(
+            crate::manage::Stage::CreateSpace,
+        ))),
+    ));
     items
 }
 
@@ -990,7 +1048,7 @@ mod tests {
     fn rooms_invitations_links_and_the_composer() {
         let mut room = Room::new("!a:example.org", "rust", RoomKind::Room);
         assert_eq!(
-            labels(&room_items(&room, &keys())),
+            labels(&room_items(&room, &RoomSpaces::default(), &keys())),
             [
                 "Open",
                 "Room info",
@@ -1004,7 +1062,7 @@ mod tests {
         );
         room.kind = RoomKind::Favourite;
         room.bold = true;
-        let items = room_items(&room, &keys());
+        let items = room_items(&room, &RoomSpaces::default(), &keys());
         assert_eq!(
             labels(&items),
             [
@@ -1024,7 +1082,7 @@ mod tests {
         assert_eq!(items[1].hint, "F4");
         room.kind = RoomKind::Invite;
         assert_eq!(
-            labels(&room_items(&room, &keys())),
+            labels(&room_items(&room, &RoomSpaces::default(), &keys())),
             ["Open", "Room info", "Decline invitation…"]
         );
 

@@ -52,7 +52,7 @@ pub use people::{
 pub use search::SearchHit;
 pub use session::{ReauthKind, ReauthTarget};
 pub use source::{EventSource, SOURCE_MAX, SourceKind};
-pub use spaces::SpaceSummary;
+pub use spaces::{SpaceChild, SpaceDetails, SpaceEdit, SpaceSummary};
 pub use threads::ThreadPage;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
@@ -1713,7 +1713,13 @@ impl Worker {
         let space_service = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
         let (mut space_filters, space_changes) = space_service.subscribe_to_space_filters().await;
         pin_mut!(space_changes);
-        self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
+        self.emit(MatrixEvent::Spaces(
+            spaces::summarize(client, &space_filters).await,
+        ));
+        // New rights in a space, or a change of its rooms that leaves the SDK's
+        // filters as they were, is not reported by the SDK: the handlers below ask
+        // for the spaces to be told again.
+        let spaces_poke = std::sync::Arc::new(tokio::sync::Notify::new());
 
         // One instance for the whole session: it hears of changes to the push rules
         // only while it lives (dropping it removes its listener, and `notify_changes`
@@ -1738,14 +1744,36 @@ impl Worker {
         let emote_handlers = emote_mgr.register_handlers(client);
         let power_events = self.events.clone();
         let manage_refresh = manager.refresh_signal();
+        let power_spaces_poke = spaces_poke.clone();
         let power_handler = client.add_event_handler(
             move |_ev: matrix_sdk::ruma::events::room::power_levels::SyncRoomPowerLevelsEvent,
                   room: matrix_sdk::Room| {
                 let events = power_events.clone();
                 let refresh = manage_refresh.clone();
+                let spaces_poke = power_spaces_poke.clone();
                 async move {
                     manage::emit_room_power(&events, &room).await;
                     manage::bump_refresh(&refresh, room.room_id().as_str());
+                    if room.is_space() {
+                        spaces_poke.notify_one();
+                    }
+                }
+            },
+        );
+        let child_refresh = manager.refresh_signal();
+        let child_spaces_poke = spaces_poke.clone();
+        // Raw: a room taken out of a space leaves an event with empty content, which
+        // the typed event cannot read, and the handler would not be called for it.
+        let space_child_handler = client.add_event_handler(
+            move |_ev: matrix_sdk::ruma::serde::Raw<
+                matrix_sdk::ruma::events::space::child::SyncSpaceChildEvent,
+            >,
+                  room: matrix_sdk::Room| {
+                let refresh = child_refresh.clone();
+                let spaces_poke = child_spaces_poke.clone();
+                async move {
+                    manage::bump_refresh(&refresh, room.room_id().as_str());
+                    spaces_poke.notify_one();
                 }
             },
         );
@@ -1813,7 +1841,14 @@ impl Worker {
                     for diff in diffs {
                         diff.apply(&mut space_filters);
                     }
-                    self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
+                    self.emit(MatrixEvent::Spaces(
+                        spaces::summarize(client, &space_filters).await,
+                    ));
+                }
+                () = spaces_poke.notified() => {
+                    self.emit(MatrixEvent::Spaces(
+                        spaces::summarize(client, &space_filters).await,
+                    ));
                 }
                 change = notify_changes.recv(), if notify_open => {
                     match change {
@@ -1960,6 +1995,7 @@ impl Worker {
             }
         };
         client.remove_event_handler(power_handler);
+        client.remove_event_handler(space_child_handler);
         client.remove_event_handler(member_handler);
         for handler in emote_handlers {
             client.remove_event_handler(handler);
@@ -2156,8 +2192,9 @@ async fn summarize(
 ) -> Vec<RoomSummary> {
     let mut summaries = Vec::with_capacity(rooms.len());
     for room in rooms {
-        // Spaces get their own navigation later; they are not chats.
-        if room.is_space() {
+        // Spaces we are in have their own navigation, they are not chats; an
+        // invitation to one, or our request to join one, is answered here.
+        if room.is_space() && !matches!(room.state(), RoomState::Invited | RoomState::Knocked) {
             continue;
         }
         let invited = room.state() == RoomState::Invited;
@@ -2303,6 +2340,42 @@ mod tests {
         assert_eq!(
             format!("{:?}", packs(None)),
             "EmotePacks(no room, EmoteCatalog { packs: 0 })"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invitation_to_a_space_is_listed_with_the_rooms_and_a_space_we_are_in_is_not() {
+        use super::spaces::fake;
+        let server = fake::Server::start(serde_json::json!({
+            "join": {
+                "!work:localhost": fake::joined(true, vec![]),
+                "!rats:localhost": fake::joined(false, vec![]),
+            },
+            "invite": { "!club:localhost": fake::invited(true) },
+            "knock": { "!guild:localhost": fake::knocked(true) },
+        }))
+        .await;
+        let client = fake::client(&server).await;
+        let rooms: Vector<RoomListItem> =
+            client.rooms().into_iter().map(RoomListItem::from).collect();
+        // All but one are spaces, as far as the store knows, whatever our membership.
+        let spaces = rooms.iter().filter(|room| room.is_space()).count();
+        assert_eq!((rooms.len(), spaces), (4, 3));
+        let (_ignore, ignored) = tokio::sync::watch::channel(safety::IgnoredSet::default());
+        let mut listed: Vec<(String, RoomCategory)> =
+            summarize(&rooms, &mut Previews::default(), &ignored)
+                .await
+                .into_iter()
+                .map(|room| (room.id, room.category))
+                .collect();
+        listed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            listed,
+            [
+                ("!club:localhost".to_owned(), RoomCategory::Invite),
+                ("!guild:localhost".to_owned(), RoomCategory::Knock),
+                ("!rats:localhost".to_owned(), RoomCategory::Room),
+            ]
         );
     }
 

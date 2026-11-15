@@ -30,6 +30,7 @@ use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
 use tokio::task::JoinHandle;
 
 use super::MatrixEvent;
+use super::spaces::{SpaceDetails, SpaceEdit};
 use crate::model::RoomPower;
 use crate::text::{sanitize, sanitize_line, truncate};
 
@@ -214,6 +215,22 @@ pub enum ManageCmd {
         room_id: String,
         permissions: RoomPermissions,
     },
+    /// Create a space. Answered with [`ManageEvent::SpaceCreated`].
+    CreateSpace {
+        request: u64,
+        name: String,
+        topic: Option<String>,
+        /// The part of the address before the colon; makes the space public.
+        alias: Option<String>,
+    },
+    /// Put a room into a space, take it out, or suggest it. Answered with
+    /// [`ManageEvent::SpaceEdited`].
+    EditSpace {
+        request: u64,
+        space_id: String,
+        child_id: String,
+        edit: SpaceEdit,
+    },
 }
 
 /// Prints what kind of command it is, never which room, names, topics or who is being
@@ -260,6 +277,8 @@ impl ManageCmd {
             Self::DeleteLocalAlias { .. } => "DeleteLocalAlias",
             Self::SetDirect { .. } => "SetDirect",
             Self::SetPermissions { .. } => "SetPermissions",
+            Self::CreateSpace { .. } => "CreateSpace",
+            Self::EditSpace { .. } => "EditSpace",
         }
     }
 
@@ -338,6 +357,21 @@ impl ManageCmd {
                 Some(format!("alt: {}", alt_aliases.len())),
             ],
             Self::SetDirect { room_id, direct } => vec![room(room_id), Some(direct.to_string())],
+            Self::CreateSpace { request, alias, .. } => vec![
+                Some(format!("request {request}")),
+                Some(format!("public: {}", alias.is_some())),
+            ],
+            Self::EditSpace {
+                request,
+                space_id,
+                child_id,
+                edit,
+            } => vec![
+                Some(format!("request {request}")),
+                room(space_id),
+                room(child_id),
+                Some(format!("{edit:?}")),
+            ],
         };
         crate::logsafe::shape(self.name(), parts)
     }
@@ -394,6 +428,8 @@ pub enum ManageEvent {
         room_id: String,
         result: Result<Box<RoomDetails>, String>,
     },
+    /// The room whose info is watched is one we are no longer in: left, or removed.
+    Gone { room_id: String },
     Preview {
         request: u64,
         result: Result<Box<super::directory::RoomPreview>, String>,
@@ -401,6 +437,18 @@ pub enum ManageEvent {
     Knocked {
         request: u64,
         result: Result<String, String>,
+    },
+    /// The id of the new space, or what went wrong.
+    SpaceCreated {
+        request: u64,
+        result: Result<String, String>,
+    },
+    SpaceEdited {
+        request: u64,
+        space_id: String,
+        child_id: String,
+        edit: SpaceEdit,
+        result: Result<(), String>,
     },
 }
 
@@ -420,12 +468,27 @@ impl std::fmt::Debug for ManageEvent {
                 Ok(details) => write!(f, "Info({details:?})"),
                 Err(_) => f.write_str("Info(failed)"),
             },
+            Self::Gone { .. } => f.write_str("Gone"),
             Self::Preview { request, result } => {
                 write!(f, "Preview(request {request}, ok: {})", result.is_ok())
             }
             Self::Knocked { request, result } => {
                 write!(f, "Knocked(request {request}, ok: {})", result.is_ok())
             }
+            Self::SpaceCreated { request, result } => {
+                write!(f, "SpaceCreated(request {request}, ok: {})", result.is_ok())
+            }
+            // Which space and which room stay out of logs.
+            Self::SpaceEdited {
+                request,
+                edit,
+                result,
+                ..
+            } => write!(
+                f,
+                "SpaceEdited(request {request}, {edit:?}, ok: {})",
+                result.is_ok()
+            ),
         }
     }
 }
@@ -724,6 +787,8 @@ pub struct RoomDetails {
     pub members_partial: bool,
     /// Why the list could not be brought up to date; what is shown is the last known.
     pub members_error: Option<String>,
+    /// For a space: the rooms in it. `None` for every other room.
+    pub space: Option<SpaceDetails>,
 }
 
 /// Counts only: names and topics do not belong in a log.
@@ -731,12 +796,13 @@ impl std::fmt::Debug for RoomDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "RoomDetails({} members, {} knocks, {} local_aliases, avatar: {}, loading: {})",
+            "RoomDetails({} members, {} knocks, {} local_aliases, avatar: {}, loading: {}, space: {:?})",
             self.members.len(),
             self.knock_requests.len(),
             self.local_aliases.len(),
             self.avatar_url.is_some(),
-            self.members_loading
+            self.members_loading,
+            self.space
         )
     }
 }
@@ -1285,6 +1351,36 @@ impl Manager {
                         result,
                     }));
                 });
+            }
+            ManageCmd::CreateSpace {
+                request,
+                name,
+                topic,
+                alias,
+            } => {
+                tokio::spawn(super::spaces::answer_create(
+                    self.client.clone(),
+                    self.events.clone(),
+                    request,
+                    name,
+                    topic,
+                    alias,
+                ));
+            }
+            ManageCmd::EditSpace {
+                request,
+                space_id,
+                child_id,
+                edit,
+            } => {
+                tokio::spawn(super::spaces::answer_edit(
+                    self.client.clone(),
+                    self.events.clone(),
+                    request,
+                    space_id,
+                    child_id,
+                    edit,
+                ));
             }
         }
     }
@@ -2351,16 +2447,28 @@ async fn watch(
     let mut local_aliases_error: Option<String> = None;
     let mut local_aliases_loaded = false;
     let mut force_aliases = false;
+    // For a space: the names the server gave for its rooms that this client is not in.
+    let mut space_names = super::spaces::Named::new();
+    let mut space_names_loaded = false;
+    let mut force_space_names = false;
     loop {
         if refresh.has_changed().unwrap_or(false) {
             force_refresh = true;
             force_aliases = true;
             force_knocks = true;
+            force_space_names = true;
         }
         refresh.borrow_and_update();
         // Looked at afresh every time: an invitation may have been accepted meanwhile.
         let joined = match room.state() {
-            RoomState::Left | RoomState::Banned => return,
+            // The room list tells of a room that is gone, but not of a space deeper
+            // than the list of spaces goes: the view is told here.
+            RoomState::Left | RoomState::Banned => {
+                let _ = events.send(MatrixEvent::Manage(ManageEvent::Gone {
+                    room_id: room_id.clone(),
+                }));
+                return;
+            }
             state => state == RoomState::Joined,
         };
         let levels = if joined {
@@ -2382,6 +2490,9 @@ async fn watch(
         let mut current = head(&room, levels.as_ref(), &own_room_names, &raw_knocks).await;
         current.local_aliases = local_aliases.clone();
         current.local_aliases_error = local_aliases_error.clone();
+        if joined && room.is_space() {
+            current.space = Some(super::spaces::space_details(&client, &room, &space_names).await);
+        }
         let counts = (current.joined, current.invited);
         let mut wait = None;
         if joined {
@@ -2444,15 +2555,22 @@ async fn watch(
         let ask = current.members_loading;
         let ask_knocks = joined && !ask && (!knocks_loaded || force_knocks);
         let ask_aliases = joined && (!local_aliases_loaded || force_aliases);
+        // Only when a room of the space has no name: asking costs a request.
+        let ask_space_names = (!space_names_loaded || force_space_names)
+            && current
+                .space
+                .as_ref()
+                .is_some_and(super::spaces::names_missing);
         force_knocks = false;
         force_aliases = false;
+        force_space_names = false;
         if sent.as_ref() != Some(&current) {
             if !emit(Ok(current.clone())) {
                 return;
             }
             sent = Some(current.clone());
         }
-        if ask || ask_knocks || ask_aliases {
+        if ask || ask_knocks || ask_aliases || ask_space_names {
             if ask {
                 list.asked = Some(Instant::now());
                 match server_members(&client, &room).await {
@@ -2503,6 +2621,12 @@ async fn watch(
                 current.local_aliases = local_aliases.clone();
                 current.local_aliases_error = local_aliases_error.clone();
             }
+            if ask_space_names {
+                space_names_loaded = true;
+                space_names = super::spaces::hierarchy_names(&client, &room).await;
+                current.space =
+                    Some(super::spaces::space_details(&client, &room, &space_names).await);
+            }
             if !emit(Ok(current.clone())) {
                 return;
             }
@@ -2524,6 +2648,7 @@ async fn watch(
                 force_refresh = true;
                 force_aliases = true;
                 force_knocks = true;
+                force_space_names = true;
                 false
             }
             change = async {
@@ -2564,6 +2689,34 @@ mod tests {
     use crate::paths::Paths;
     use matrix_sdk::config::SyncSettings;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_info_of_a_room_we_are_no_longer_in_is_told_so() {
+        use super::super::spaces::fake;
+        let server = fake::Server::start(serde_json::json!({ "leave": {
+            "!gone:localhost": fake::left(true),
+        } }))
+        .await;
+        let client = fake::client(&server).await;
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let (_refresh, changes) = watch::channel(0u64);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            watch(
+                client,
+                "!gone:localhost".into(),
+                events,
+                changes,
+                Default::default(),
+            ),
+        )
+        .await
+        .expect("the watch went on");
+        assert!(matches!(
+            received.try_recv(),
+            Ok(MatrixEvent::Manage(ManageEvent::Gone { room_id })) if room_id == "!gone:localhost"
+        ));
+    }
 
     #[test]
     fn roles_come_from_power_levels() {
