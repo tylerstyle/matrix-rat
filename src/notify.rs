@@ -1390,7 +1390,8 @@ mod tests {
             use std::io::BufRead;
             let dir = TempDir::new(name);
             let mut daemon = std::process::Command::new("dbus-daemon")
-                .arg("--session")
+                // Not `--session`: that could start the desktop's own services.
+                .arg(crate::testbus::config_arg())
                 .arg("--nofork")
                 .arg("--print-address")
                 .arg(format!(
