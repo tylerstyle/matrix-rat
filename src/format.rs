@@ -277,19 +277,34 @@ fn tidy_fences(text: &str) -> std::borrow::Cow<'_, str> {
     let mut changed = false;
     // The length of the run that opened the block we are in.
     let mut open: Option<usize> = None;
-    // Inside a block fenced with `~~~`, which is left alone as a whole.
-    let mut tildes = false;
+    // The length of the run of `~` that opened the block we are in; such a block is
+    // left alone as a whole.
+    let mut tildes: Option<usize> = None;
     for (n, line) in text.split('\n').enumerate() {
         if n > 0 {
             out.push('\n');
         }
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        if open.is_none() && indent <= 3 && line[indent..].starts_with("~~~") {
-            tildes = !tildes;
-        }
-        if tildes || (open.is_none() && line[indent.min(line.len())..].starts_with("~~~")) {
-            out.push_str(line);
-            continue;
+        if open.is_none() {
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            let after = &line[indent..];
+            let run = after.len() - after.trim_start_matches('~').len();
+            let fence = indent <= 3 && run >= 3;
+            match tildes {
+                // Ended only by a bare run that is long enough, as with backticks.
+                Some(opened) => {
+                    if fence && run >= opened && after[run..].trim().is_empty() {
+                        tildes = None;
+                    }
+                    out.push_str(line);
+                    continue;
+                }
+                None if fence => {
+                    tildes = Some(run);
+                    out.push_str(line);
+                    continue;
+                }
+                None => {}
+            }
         }
         let Some((ticks, rest)) = fence_start(line) else {
             out.push_str(line);
@@ -860,6 +875,12 @@ mod tests {
         // Nor inside a block fenced with tildes.
         let typed = "~~~\n```bash ls -la```\n~~~\nafter";
         assert!(matches!(tidy_fences(typed), std::borrow::Cow::Borrowed(_)));
+        // A longer run of tildes is not ended by a shorter one, nor by one with a label.
+        let typed = "~~~~\n~~~\n```bash ls -la```\n~~~ x\n```sh echo```\n~~~~";
+        assert!(matches!(tidy_fences(typed), std::borrow::Cow::Borrowed(_)));
+        // After the block has ended, the repair works again.
+        let typed = "~~~\ninside\n~~~\n```sh echo hi```";
+        assert_eq!(tidy_fences(typed), "~~~\ninside\n~~~\n```sh\necho hi\n```");
         // Inside a block nothing is touched, whatever it looks like.
         let typed = "```\n```bash ls```\n```";
         assert!(matches!(tidy_fences(typed), std::borrow::Cow::Borrowed(_)));
