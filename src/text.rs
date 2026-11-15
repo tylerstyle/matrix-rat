@@ -99,6 +99,18 @@ pub fn wrap(text: &str, max: usize) -> Vec<String> {
     lines
 }
 
+/// The first line of a message that has something on it and is not the quote of what
+/// it answers, made safe for the terminal and cut to `max` columns. Empty if there is
+/// no such line.
+pub fn first_line(text: &str, max: usize) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !is_blank(line) && !line.starts_with('>'))
+        .unwrap_or_default();
+    sanitize_line(&truncate(line, max)).trim().to_owned()
+}
+
 /// Cuts `s` to at most `max` columns, ending with `…` when something was removed.
 pub fn truncate(s: &str, max: usize) -> String {
     if width(s) <= max {
@@ -181,6 +193,18 @@ mod tests {
         );
         assert_eq!(sanitize("abc\u{202e}def\u{2066}"), "abcdef");
         assert_eq!(sanitize_line("a\nb\tc"), "a b    c");
+    }
+
+    #[test]
+    fn the_first_line_skips_quotes_and_blank_lines_and_is_made_safe() {
+        assert_eq!(
+            first_line("> what was said\n\n  the answer\nmore", 40),
+            "the answer"
+        );
+        assert_eq!(first_line("a\u{1b}[31mred", 40), "a[31mred");
+        assert_eq!(first_line("a long first line", 6), "a lon…");
+        assert_eq!(first_line("> only a quote", 40), "");
+        assert_eq!(first_line("", 40), "");
     }
 
     #[test]

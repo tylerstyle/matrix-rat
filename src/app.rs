@@ -23,6 +23,7 @@ mod rooms;
 mod safety;
 pub mod search;
 mod thread;
+mod thread_list;
 mod unread;
 mod verify;
 
@@ -289,6 +290,8 @@ pub struct App {
     theme_names: Vec<String>,
     themes_dir: PathBuf,
     truecolor: bool,
+    /// The user asked for no colours (`NO_COLOR`): every theme is shown without them.
+    no_color: bool,
     pub hits: HitMap,
     pub hover: Option<HitId>,
     dragging_splitter: bool,
@@ -322,6 +325,11 @@ pub struct App {
     pending_jump: Option<global_search::PendingJump>,
     /// Matrix link or address passed on the command line, opened once after login/rooms arrive.
     startup_target: Option<String>,
+    /// Since when the target's room has been missing from a list that counts as synced.
+    startup_missing_since: Option<Instant>,
+    /// How long such a room is waited for: right after a login the first lists are not
+    /// complete, and a room the account is in would be taken for one it is not in.
+    startup_room_wait: Duration,
     /// True once at least one `MatrixEvent::Rooms` list was received in this session.
     rooms_received: bool,
     /// Matrix user IDs currently ignored by this account (`m.ignored_user_list`).
@@ -396,6 +404,10 @@ impl App {
         }
         app.matrix = matrix;
         app.truecolor = truecolor;
+        app.no_color = crate::theme::no_color_wanted();
+        if app.no_color {
+            app.theme.strip_colors();
+        }
         app.theme_names = Theme::available(&themes_dir);
         app.themes_dir = themes_dir;
         app.sidebar.width = config.sidebar_width;
@@ -521,6 +533,7 @@ impl App {
             theme_names: Theme::builtin_names(),
             themes_dir: PathBuf::new(),
             truecolor: true,
+            no_color: false,
             hits: HitMap::default(),
             hover: None,
             dragging_splitter: false,
@@ -542,6 +555,12 @@ impl App {
             search_gen: 0,
             pending_jump: None,
             startup_target: None,
+            startup_missing_since: None,
+            startup_room_wait: if cfg!(test) {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(4)
+            },
             rooms_received: false,
             ignored_users: std::collections::BTreeSet::new(),
             user_search_gen: 0,
@@ -713,6 +732,9 @@ impl App {
                 }
                 if !self.truecolor {
                     theme.downgrade_to_256();
+                }
+                if self.no_color {
+                    theme.strip_colors();
                 }
                 self.theme = theme;
                 self.theme_rev += 1;
@@ -1254,6 +1276,7 @@ impl App {
                     | Modal::PollVote(_)
                     | Modal::Stickers(_)
                     | Modal::Details(_)
+                    | Modal::Threads(_)
             )
         ) {
             self.modal = None;
@@ -1841,6 +1864,21 @@ impl App {
         }
     }
 
+    /// Whether the room of the start-up target can be taken as one the account is not
+    /// in: at once without a server, else when it stayed missing for a while after the
+    /// lists counted as synced (the tick asks again).
+    fn startup_room_is_missing(&mut self) -> bool {
+        if self.matrix.is_none() {
+            return true;
+        }
+        if self.sync != Some(SyncStatus::Synced) {
+            self.startup_missing_since = None;
+            return false;
+        }
+        let since = *self.startup_missing_since.get_or_insert_with(Instant::now);
+        since.elapsed() >= self.startup_room_wait
+    }
+
     /// Opens `startup_target` once login/rooms/sync conditions allow it.
     pub(super) fn maybe_open_startup_target(&mut self) {
         let Some(raw) = self.startup_target.as_deref() else {
@@ -1852,6 +1890,9 @@ impl App {
                 || !self.rooms_received
                 || self.modal.is_some())
         {
+            // The wait for a missing room does not run behind a login or another
+            // popup: it starts again when the way is clear.
+            self.startup_missing_since = None;
             return;
         }
         let parsed = crate::manage::parse_address(raw);
@@ -1865,7 +1906,7 @@ impl App {
                     self.startup_target = None;
                     let room_id = self.rooms[index].id.clone();
                     self.jump_to_event(room_id, event, None);
-                } else if self.matrix.is_none() || self.sync == Some(SyncStatus::Synced) {
+                } else if self.startup_room_is_missing() {
                     self.startup_target = None;
                     self.show_toast("Join this room before jumping to a message in it");
                 }
@@ -1874,7 +1915,7 @@ impl App {
                 if let Some(index) = self.find_joined_room(&target) {
                     self.startup_target = None;
                     self.show_room(index);
-                } else if self.matrix.is_none() || self.sync == Some(SyncStatus::Synced) {
+                } else if self.startup_room_is_missing() {
                     self.startup_target = None;
                     self.open_room_preview(&target, via);
                 }
@@ -2610,6 +2651,7 @@ impl App {
             Action::MarkAllRead => self.mark_all_read(),
             Action::PinMessage => self.toggle_pin_message(None),
             Action::OpenPinned => self.open_pinned(),
+            Action::OpenThreads => self.open_threads(),
             Action::ForwardMessage => self.open_forward_picker(None),
             Action::RetryDecryption => self.retry_decryption(),
             Action::Devices(click) => match (&self.modal, click) {
@@ -2729,7 +2771,8 @@ impl App {
                 | Modal::ReasonConfirm(_)
                 | Modal::PollForm(_)
                 | Modal::PollVote(_)
-                | Modal::Stickers(_),
+                | Modal::Stickers(_)
+                | Modal::Threads(_),
             ) => {
                 self.modal = None;
             }
@@ -2878,6 +2921,7 @@ impl App {
             Some(Modal::PollVote(_)) => self.on_poll_vote_key(code, mods),
             Some(Modal::Stickers(_)) => self.on_stickers_key(code, mods),
             Some(Modal::Details(_)) => self.on_details_key(code, mods),
+            Some(Modal::Threads(_)) => self.on_threads_key(code, mods),
             None => {}
         }
     }
@@ -3105,6 +3149,11 @@ impl App {
             MatrixEvent::IgnoredUsers(users) => self.on_ignored_users_list(users),
             MatrixEvent::EmotePacks(_) if self.logged_out => {}
             MatrixEvent::EmotePacks(catalog) => self.on_emote_packs(catalog),
+            MatrixEvent::Threads(page) => self.on_threads(page),
+            MatrixEvent::ThreadsFailed {
+                room_id,
+                generation,
+            } => self.on_threads_failed(&room_id, generation),
             MatrixEvent::IgnoreResult {
                 user_id,
                 ignored,
@@ -3608,6 +3657,7 @@ impl App {
             Some(Modal::PollForm(_)) => return self.on_poll_form_paste(first_line),
             Some(Modal::PollVote(_)) => return,
             Some(Modal::Stickers(_)) => return self.on_stickers_paste(first_line),
+            Some(Modal::Threads(_)) => return self.on_threads_paste(first_line),
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
@@ -3676,6 +3726,7 @@ impl App {
                                     | Modal::PollVote(_)
                                     | Modal::Stickers(_)
                                     | Modal::Details(_)
+                                    | Modal::Threads(_)
                             )
                         ) || matches!(
                             &self.modal,
@@ -3879,6 +3930,9 @@ impl App {
                     Some(HitId::StickerRow(index)) => self.send_sticker_at(index),
                     Some(HitId::DetailsFlip) => self.flip_details(),
                     Some(HitId::DetailsCopy) => self.copy_details(),
+                    Some(HitId::ThreadRow(index)) => self.activate_thread_row(index),
+                    Some(HitId::ThreadsMore) => self.click_threads_more(),
+                    Some(HitId::ThreadsMine) => self.toggle_threads_mine(),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -3915,6 +3969,7 @@ impl App {
                             | Modal::PollVote(_)
                             | Modal::Stickers(_)
                             | Modal::Details(_)
+                            | Modal::Threads(_)
                     )
                 ) =>
             {
@@ -3942,6 +3997,7 @@ impl App {
                     }
                     Some(Modal::Stickers(_)) => self.scroll_stickers(delta),
                     Some(Modal::Details(_)) => self.scroll_details(delta),
+                    Some(Modal::Threads(_)) => self.scroll_threads(delta),
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.
                     Some(Modal::Settings(menu)) if menu.editing.is_none() => {
@@ -4126,6 +4182,7 @@ impl App {
                     picker.filter.place(rel_col, false);
                 }
             }
+            InputTarget::ThreadsFilter => self.click_threads_filter(rel_col),
             InputTarget::ReportReason => {
                 if let Some(Modal::Report(form)) = &mut self.modal {
                     form.focus = ReportForm::REASON;
@@ -4206,6 +4263,7 @@ impl App {
 
     fn on_tick(&mut self) {
         self.verify_tick();
+        self.maybe_open_startup_target();
         self.devices_watch();
         self.tick_global_search();
         self.release_count_notices(COUNT_NOTICE_WAIT);
@@ -7700,6 +7758,61 @@ mod tests {
         app.timeline.selected = Some(0);
         app.on_event(key(KeyCode::Char('p')));
         assert_eq!(toast_text(&app), Some("That message is not a reply"));
+    }
+
+    #[test]
+    fn a_start_link_to_a_room_that_arrives_late_opens_the_room_not_a_preview() {
+        let (mut app, _terminal) = drawn();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        app.user_id = Some("@me:example.org".into());
+        app.startup_room_wait = Duration::from_secs(3600);
+        app.startup_target = Some("!late:example.org".into());
+
+        // Synced, with a first list that does not have the room yet: nothing is decided.
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!a:example.org",
+            "Alpha",
+            RoomCategory::Room,
+            0,
+        )]));
+        app.on_matrix(MatrixEvent::Sync(SyncStatus::Synced));
+        app.on_tick();
+        assert!(app.startup_target.is_some());
+        assert!(app.modal.is_none());
+
+        // The room arrives: it is opened.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a:example.org", "Alpha", RoomCategory::Room, 0),
+            summary("!late:example.org", "Late", RoomCategory::Room, 0),
+        ]));
+        assert!(app.startup_target.is_none());
+        assert!(app.modal.is_none());
+        assert_eq!(app.room_id().as_deref(), Some("!late:example.org"));
+        drain(&mut commands);
+
+        // A popup in the way stops the wait; it starts again afterwards.
+        app.startup_target = Some("!behind:example.org".into());
+        app.startup_missing_since = None;
+        app.on_tick();
+        assert!(app.startup_missing_since.is_some());
+        app.perform(Action::OpenEmoji);
+        assert!(app.modal.is_some());
+        app.on_tick();
+        assert!(app.startup_missing_since.is_none());
+        app.modal = None;
+        app.startup_target = None;
+
+        // A room that never arrives is previewed once the wait is over.
+        app.startup_target = Some("!never:example.org".into());
+        app.startup_missing_since = None;
+        app.on_tick();
+        assert!(app.startup_target.is_some());
+        app.startup_room_wait = Duration::ZERO;
+        app.on_tick();
+        assert!(app.startup_target.is_none());
+        assert!(app.modal.is_some());
     }
 
     #[test]

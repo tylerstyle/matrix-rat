@@ -771,6 +771,37 @@ impl fmt::Debug for PinnedMessage {
     }
 }
 
+/// One thread of a room, as the threads popup lists it. All text is made safe for the
+/// terminal before it gets here.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ThreadInfo {
+    /// Event id of the message the thread starts at; in the demo `demo:` and its
+    /// position in the room.
+    pub root: String,
+    /// Who started the thread, and the first line of what they wrote.
+    pub sender: String,
+    pub text: String,
+    pub replies: u32,
+    /// Who wrote the newest reply, and when, as far as known.
+    pub latest_sender: Option<String>,
+    pub latest_when: Option<String>,
+    /// There are replies the user has not read.
+    pub unread: bool,
+    /// The user started the thread or answered in it, as far as known.
+    pub mine: bool,
+}
+
+/// Counts and flags only: names, text and ids stay out of logs.
+impl fmt::Debug for ThreadInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ThreadInfo({} replies, unread: {}, mine: {})",
+            self.replies, self.unread, self.mine
+        )
+    }
+}
+
 pub const OWN_NAME: &str = "you";
 /// Cache key of the picture in the demo data.
 pub const DEMO_IMAGE: &str = "demo:palette";

@@ -52,6 +52,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::PollVote(vote) => super::poll::draw_vote(frame, app, area, vote),
         Modal::Stickers(picker) => super::stickers::draw(frame, app, area, picker),
         Modal::Details(details) => super::details::draw(frame, app, area, details),
+        Modal::Threads(list) => super::threads::draw(frame, app, area, list),
     }
     app.modal = Some(modal);
 }

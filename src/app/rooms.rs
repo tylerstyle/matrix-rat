@@ -50,7 +50,7 @@ impl App {
     /// The room that room-level commands are about: the one under the cursor while
     /// the room list has the focus, otherwise the open one. The command palette
     /// describes its entries by the same rule.
-    fn target_room(&self) -> Option<usize> {
+    pub(super) fn target_room(&self) -> Option<usize> {
         if self.focus == Pane::Sidebar {
             self.cursor_room()
         } else {

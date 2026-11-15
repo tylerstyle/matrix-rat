@@ -433,8 +433,9 @@ mod tests {
         assert!(screen.contains("press Alt-C to write"), "{screen}");
 
         // Help overlay reflects overridden keys.
+        // (On a terminal tall enough to show every key without scrolling.)
         app.perform(Action::ToggleHelp);
-        let help = redraw(&mut app, &mut term);
+        let help = redraw(&mut app, &mut terminal(100, 50));
         assert!(help.contains("F5          Settings"), "{help}");
         assert!(help.contains("F10         Quit"), "{help}");
         assert!(help.contains("Alt-P       Command palette"), "{help}");

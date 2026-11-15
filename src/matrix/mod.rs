@@ -49,6 +49,7 @@ pub use search::SearchHit;
 pub use session::{ReauthKind, ReauthTarget};
 pub use source::{EventSource, SOURCE_MAX, SourceKind};
 pub use spaces::SpaceSummary;
+pub use threads::ThreadPage;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
     VerifyStage, VerifyUpdate,
@@ -389,6 +390,18 @@ pub enum MatrixCmd {
     },
     /// Aborts any in-flight public room directory search.
     CancelDirectorySearch,
+    /// Asks for a page of the room's threads, newest activity first (the homeserver's
+    /// thread list). Answered with [`MatrixEvent::Threads`] or
+    /// [`MatrixEvent::ThreadsFailed`] for `generation`; a newer request replaces one
+    /// that is still running.
+    ListThreads {
+        room_id: String,
+        /// Where the previous page ended; `None` for the first page.
+        from: Option<String>,
+        /// Only threads the user started or answered in.
+        mine: bool,
+        generation: u64,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -514,6 +527,17 @@ impl std::fmt::Debug for MatrixCmd {
                 write!(f, "DirectoryNextPage(generation {generation})")
             }
             Self::CancelDirectorySearch => f.write_str("CancelDirectorySearch"),
+            // Which room is not said; the token is the server's.
+            Self::ListThreads {
+                from,
+                mine,
+                generation,
+                ..
+            } => write!(
+                f,
+                "ListThreads(generation {generation}, more: {}, mine: {mine})",
+                from.is_some()
+            ),
         }
     }
 }
@@ -843,6 +867,14 @@ pub enum MatrixEvent {
     },
     /// Session-cached MSC2545 / Matrix 1.19 custom emoji and sticker packs.
     EmotePacks(EmoteCatalog),
+    /// A page of [`MatrixCmd::ListThreads`].
+    Threads(ThreadPage),
+    /// [`MatrixCmd::ListThreads`] got no answer: the server has no thread list, or
+    /// could not give it.
+    ThreadsFailed {
+        room_id: String,
+        generation: u64,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -1010,6 +1042,10 @@ impl std::fmt::Debug for MatrixEvent {
                 write!(f, "DirectoryError(generation {generation})")
             }
             Self::EmotePacks(catalog) => write!(f, "EmotePacks({catalog:?})"),
+            Self::Threads(page) => write!(f, "Threads({page:?})"),
+            Self::ThreadsFailed { generation, .. } => {
+                write!(f, "ThreadsFailed(generation {generation})")
+            }
         }
     }
 }
@@ -1729,7 +1765,7 @@ impl Worker {
         user_searcher.stop();
         dir_searcher.stop();
         ignore_tracker.stop();
-        timelines.close();
+        timelines.stop();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
         token_saver.abort();
@@ -2206,6 +2242,144 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(30), wait)
             .await
             .expect("timed out waiting for the sent message");
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A poll from start to end, and a sticker, against a real server: what the worker
+    /// sends must come back through the SDK's timeline as what the UI shows.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn a_poll_is_started_voted_in_and_ended_and_a_sticker_arrives() {
+        use crate::model::SendState;
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let username = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let root = std::env::temp_dir().join(format!("matrix-rat-poll-{}", std::process::id()));
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password: password.into(),
+        });
+
+        let question = format!("poll test {}?", std::process::id());
+        let sticker = format!("sticker test {}", std::process::id());
+        let wait = async {
+            let mut room_id: Option<String> = None;
+            // What was asked of the worker so far: voted, ended.
+            let (mut voted, mut ended) = (false, false);
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err)
+                    | MatrixEvent::Error(err)
+                    | MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) if room_id.is_none() => {
+                        if let Some(room) = rooms.iter().find(|r| !r.is_pending()) {
+                            room_id = Some(room.id.clone());
+                            handle.send(MatrixCmd::OpenRoom {
+                                room_id: room.id.clone(),
+                                generation: 1,
+                            });
+                            handle.send(MatrixCmd::SendPoll {
+                                room_id: room.id.clone(),
+                                question: question.clone(),
+                                answers: vec!["one".into(), "  ".into(), "two".into()],
+                                disclosed: true,
+                                max_selections: 1,
+                            });
+                            handle.send(MatrixCmd::SendSticker {
+                                room_id: room.id.clone(),
+                                name: sticker.clone(),
+                                url: format!("mxc://localhost/sticker{}", std::process::id()),
+                                dimensions: Some((64, 64)),
+                                size: Some(1234),
+                                mime: Some("image/png".into()),
+                            });
+                        }
+                    }
+                    MatrixEvent::Timeline {
+                        generation: 1,
+                        messages,
+                        ..
+                    } => {
+                        let room_id = room_id.clone().expect("a room is open");
+                        let sticker_seen = messages.iter().any(|m| {
+                            m.own
+                                && m.state == SendState::Sent
+                                && m.image
+                                    .as_ref()
+                                    .is_some_and(|image| image.sticker && image.name == sticker)
+                        });
+                        let Some(message) = messages.iter().find(|m| {
+                            m.state == SendState::Sent
+                                && m.poll.as_ref().is_some_and(|p| p.question == question)
+                        }) else {
+                            continue;
+                        };
+                        // Voting needs the event's id, which the server has to give first.
+                        let Some(ItemRef::Event(poll_event_id)) = message.item.clone() else {
+                            continue;
+                        };
+                        let poll = message.poll.as_ref().unwrap();
+                        // The blank answer was dropped on the way out.
+                        let texts: Vec<&str> =
+                            poll.answers.iter().map(|a| a.text.as_str()).collect();
+                        assert_eq!(texts, ["one", "two"]);
+                        assert!(poll.disclosed && !poll.is_multi());
+                        // The question is not in what a log line of this event would hold.
+                        let debug = format!(
+                            "{:?}",
+                            MatrixEvent::Timeline {
+                                room_id: String::new(),
+                                generation: 1,
+                                messages: messages.clone(),
+                                reached_start: false,
+                                detached: None,
+                            }
+                        );
+                        assert!(!debug.contains(&question));
+                        if !voted {
+                            assert!(message.editable(), "an unvoted own poll can be edited");
+                            voted = true;
+                            handle.send(MatrixCmd::VotePoll {
+                                room_id,
+                                poll_event_id: poll_event_id.clone(),
+                                answers: vec![poll.answers[1].id.clone()],
+                            });
+                        } else if !ended {
+                            if poll.answers[1].own && poll.answers[1].votes == 1 {
+                                assert_eq!(poll.total_voters, 1);
+                                assert!(!poll.answers[0].own);
+                                ended = true;
+                                handle.send(MatrixCmd::EndPoll {
+                                    room_id,
+                                    poll_event_id: poll_event_id.clone(),
+                                });
+                            }
+                        } else if poll.ended && sticker_seen {
+                            assert_eq!(poll.winner_max(), 1);
+                            assert!(!message.editable());
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(40), wait)
+            .await
+            .expect("timed out waiting for the poll and the sticker");
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);

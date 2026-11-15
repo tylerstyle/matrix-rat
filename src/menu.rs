@@ -597,6 +597,7 @@ pub fn room_items(room: &Room, keys: &Keymap) -> Vec<Item> {
         ));
         return items;
     }
+    items.push(Item::action(keys, "Threads", Sidebar, Action::OpenThreads));
     if room.shows_unread() {
         items.push(Item::new("Mark as read", "", Run::MarkRead));
     } else {
@@ -983,6 +984,7 @@ mod tests {
             [
                 "Open",
                 "Room info",
+                "Threads",
                 "Mark as unread",
                 "Add to favourites",
                 "Move to low priority",
@@ -998,6 +1000,7 @@ mod tests {
             [
                 "Open",
                 "Room info",
+                "Threads",
                 "Mark as read",
                 "Remove from favourites",
                 "Move to low priority",
@@ -1006,7 +1009,8 @@ mod tests {
             ]
         );
         // Leaving goes through the question in the room info.
-        assert_eq!(items[6].run, Some(Run::Do(Action::LeaveRoom)));
+        assert_eq!(items[7].run, Some(Run::Do(Action::LeaveRoom)));
+        assert_eq!(items[2].run, Some(Run::Do(Action::OpenThreads)));
         assert_eq!(items[1].hint, "F4");
         room.kind = RoomKind::Invite;
         assert_eq!(

@@ -1,0 +1,30 @@
+# Strong contrast for low vision and bright rooms: pure black and white, and a few
+# saturated colours that stay apart from each other.
+name = "high-contrast"
+
+[palette]
+bg = "#000000"
+surface = "#1c1c1c"
+surface_high = "#3a3a3a"
+fg = "#ffffff"
+muted = "#c8c8c8"
+outline = "#ffffff"
+primary = "#ffff00"
+on_primary = "#000000"
+secondary = "#00ffff"
+accent = "#ffaf00"
+error = "#ff6060"
+success = "#5fff5f"
+warning = "#ffaf00"
+
+[ui]
+room_cursor = { bg = "#3a3a3a", underline = true }
+hover = { underline = true }
+room_active = { fg = "#000000", bg = "#ffff00", bold = true }
+message_selected = { bg = "#3a3a3a", bold = true }
+link = { fg = "#00ffff", underline = true }
+border = { fg = "#c8c8c8" }
+border_focused = { fg = "#ffff00", bold = true }
+
+[users]
+colors = ["#ffff00", "#00ffff", "#5fff5f", "#ffaf00", "#ff87ff", "#87afff", "#ff6060", "#ffffff"]

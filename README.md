@@ -34,7 +34,7 @@ notifications and themes that follow your desktop are all there.
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
-| 🎨 **Yours to shape** | Eleven built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
+| 🎨 **Yours to shape** | Twelve built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
 | 🔔 **Notifications** | Desktop notifications with the chat's picture (click one to open its room), or plain ones through the terminal; none for what you are reading right now. |
 
 ## Install
@@ -123,7 +123,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
@@ -142,6 +142,11 @@ What you type is sent as Markdown: `**bold**`, `*italic*`, `` `code` ``, `||spoi
 the sent message). `/me`, `/spoiler`, `/plain`, `/shrug` and friends work as commands,
 `/poll` starts a poll and `/sticker` picks a sticker to send; `@`, `:`, `#` and `/` open
 completions (`:` offers your custom emoji too).
+
+`t` on a message opens its thread; `T` (or **Threads** in a room's menu, or `Ctrl-P`) lists
+all of the room's threads, newest activity first, also those whose first message is far
+up: type to filter by text or sender, `Tab` shows only the ones you started or answered
+in, `Enter` opens one.
 
 Commands for rooms and people do what the menus and popups do, and ask the same questions
 before anything changes:
@@ -225,8 +230,10 @@ exist only in that file (marked below).
 
 ### Themes
 
-Eleven themes are built in; `F3` cycles them. `theme = "terminal"` uses your terminal's own
-colours. Switch on **Follow dark/light** in the settings (`theme_dark` and `theme_light`
+Twelve themes are built in; `F3` cycles them. `theme = "terminal"` uses your terminal's own
+colours, and `theme = "high-contrast"` is black and white with a few strong colours. With
+the environment variable `NO_COLOR` set, every theme is shown without any colour: what is
+selected or a badge is reversed, the row under the mouse underlined. Switch on **Follow dark/light** in the settings (`theme_dark` and `theme_light`
 in the file) to use one theme by day and another by night, following your desktop.
 
 Theme files in `~/.config/matrix-rat/themes/` are reloaded the moment they change, so
@@ -273,7 +280,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**

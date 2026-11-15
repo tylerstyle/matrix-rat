@@ -20,6 +20,7 @@ mod search;
 mod sidebar;
 mod status;
 mod stickers;
+mod threads;
 mod timeline;
 mod verify;
 
@@ -936,6 +937,22 @@ mod tests {
                 );
                 Some(Modal::Pinned(pinned))
             },
+            Some(Modal::Threads(crate::modal::ThreadsPopup::new(
+                "rust".into(),
+                "rust".into(),
+                1,
+                vec![crate::model::ThreadInfo {
+                    root: "demo:0".into(),
+                    sender: "alice".into(),
+                    text: "A thread".into(),
+                    replies: 2,
+                    latest_sender: Some("bob".into()),
+                    latest_when: Some("10:32".into()),
+                    unread: true,
+                    mine: false,
+                }],
+                false,
+            ))),
             Some(Modal::ReasonConfirm(
                 crate::modal::ReasonConfirmPopup::redact(
                     "!r:example.org".into(),

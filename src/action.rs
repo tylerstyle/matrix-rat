@@ -137,6 +137,8 @@ pub enum Action {
     PinMessage,
     /// Open the room's pinned messages popup.
     OpenPinned,
+    /// List the threads of the room (in the room list: the one under the cursor).
+    OpenThreads,
     /// Forward the selected message to another room.
     ForwardMessage,
     /// A control of the sessions popup or the key backup popup. `Export` and

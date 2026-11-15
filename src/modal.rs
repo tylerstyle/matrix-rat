@@ -778,6 +778,234 @@ impl PinnedPopup {
     }
 }
 
+/// How far the server's list of a room's threads has come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadsLoad {
+    /// A page is on its way.
+    Loading,
+    /// There is more; `next` says where it continues.
+    More,
+    /// All of it is here.
+    Done,
+    /// The server has no such list or could not give it: only the threads in the
+    /// room's loaded messages are known.
+    Failed,
+}
+
+/// Pop-up listing the threads of a room, newest activity first.
+#[derive(Clone)]
+pub struct ThreadsPopup {
+    pub room_id: String,
+    pub room_name: String,
+    /// Tags the requests of this listing; answers to an earlier one are dropped.
+    pub generation: u64,
+    pub filter: LineEdit,
+    /// Only threads the user started or answered in.
+    pub mine: bool,
+    /// From the server, in its order, each thread once.
+    pub listed: Vec<crate::model::ThreadInfo>,
+    /// Known from the room's loaded messages, newest first.
+    pub local: Vec<crate::model::ThreadInfo>,
+    /// Where the server's list continues.
+    pub next: Option<String>,
+    /// Where the page on its way was asked from: a server that answers with the same
+    /// place again has no more.
+    pub asked: Option<String>,
+    pub load: ThreadsLoad,
+    /// What the list shows: what passes the filter.
+    pub shown: Vec<crate::model::ThreadInfo>,
+    /// The selected row; the row after the threads is the one that loads more.
+    pub selected: usize,
+    /// First thread on screen.
+    pub scroll: usize,
+    /// Threads that fit on screen as of the last draw; PageUp/PageDown move by it.
+    pub page: usize,
+    pub reveal: bool,
+}
+
+/// Hand-written: the room, names, text and the server's token stay out of logs.
+impl std::fmt::Debug for ThreadsPopup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadsPopup")
+            .field("generation", &self.generation)
+            .field("mine", &self.mine)
+            .field("listed", &self.listed.len())
+            .field("local", &self.local.len())
+            .field("shown", &self.shown.len())
+            .field("load", &self.load)
+            .field("selected", &self.selected)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ThreadsPopup {
+    /// The most threads one listing holds, however many pages the server offers.
+    pub const MAX_THREADS: usize = 500;
+    pub const FILTER_MAX_BYTES: usize = 256;
+
+    /// `loading`: the server's list is asked for; without, the threads of the
+    /// loaded messages are all there is (the demo).
+    pub fn new(
+        room_id: String,
+        room_name: String,
+        generation: u64,
+        local: Vec<crate::model::ThreadInfo>,
+        loading: bool,
+    ) -> Self {
+        let mut popup = Self {
+            room_id,
+            room_name,
+            generation,
+            filter: LineEdit::new().with_max_bytes(Self::FILTER_MAX_BYTES),
+            mine: false,
+            listed: Vec::new(),
+            local,
+            next: None,
+            asked: None,
+            load: if loading {
+                ThreadsLoad::Loading
+            } else {
+                ThreadsLoad::Done
+            },
+            shown: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            page: 0,
+            reveal: true,
+        };
+        popup.refresh();
+        popup
+    }
+
+    /// Starts the listing over (for "only mine" switched on or off), as `generation`.
+    pub fn restart(&mut self, generation: u64, loading: bool) {
+        self.generation = generation;
+        self.listed.clear();
+        self.next = None;
+        self.asked = None;
+        self.load = if loading {
+            ThreadsLoad::Loading
+        } else {
+            ThreadsLoad::Done
+        };
+        self.selected = 0;
+        self.scroll = 0;
+        self.refresh();
+    }
+
+    /// Whether a row after the threads loads more of them (or says that more is
+    /// on its way).
+    pub fn more_row(&self) -> bool {
+        match self.load {
+            ThreadsLoad::More => true,
+            ThreadsLoad::Loading => !self.listed.is_empty(),
+            ThreadsLoad::Done | ThreadsLoad::Failed => false,
+        }
+    }
+
+    pub fn rows(&self) -> usize {
+        self.shown.len() + usize::from(self.more_row())
+    }
+
+    pub fn thread_at(&self, row: usize) -> Option<&crate::model::ThreadInfo> {
+        self.shown.get(row)
+    }
+
+    /// Takes the next page of the server's list. Threads it has listed already are
+    /// not listed twice.
+    pub fn add_page(&mut self, threads: Vec<crate::model::ThreadInfo>, next: Option<String>) {
+        for mut thread in threads {
+            if self.listed.len() >= Self::MAX_THREADS {
+                break;
+            }
+            if self.listed.iter().any(|known| known.root == thread.root) {
+                continue;
+            }
+            // The room's loaded messages follow the thread as it changes.
+            if let Some(known) = self.local.iter().find(|known| known.root == thread.root) {
+                thread.unread = known.unread;
+            }
+            self.listed.push(thread);
+        }
+        let again = next.is_some() && next == self.asked;
+        self.next = next.filter(|_| !again && self.listed.len() < Self::MAX_THREADS);
+        self.asked = None;
+        self.load = if self.next.is_some() {
+            ThreadsLoad::More
+        } else {
+            ThreadsLoad::Done
+        };
+        self.refresh();
+    }
+
+    pub fn failed(&mut self) {
+        self.next = None;
+        self.asked = None;
+        self.load = ThreadsLoad::Failed;
+        self.refresh();
+    }
+
+    /// Works out what the list shows, keeping the selection on its thread. Threads
+    /// of the loaded messages that the server did not list are added once its list
+    /// is complete, or when it has none.
+    pub fn refresh(&mut self) {
+        let keep = self.thread_at(self.selected).map(|t| t.root.clone());
+        let words: Vec<String> = self
+            .filter
+            .as_str()
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let matches = |thread: &crate::model::ThreadInfo| {
+            let hay = format!("{} {}", thread.sender, thread.text).to_lowercase();
+            words.iter().all(|word| hay.contains(word.as_str()))
+        };
+        let complete = matches!(self.load, ThreadsLoad::Done | ThreadsLoad::Failed);
+        let extra = self.local.iter().filter(|thread| {
+            complete
+                && (!self.mine || thread.mine)
+                && !self.listed.iter().any(|known| known.root == thread.root)
+        });
+        self.shown = self
+            .listed
+            .iter()
+            .chain(extra)
+            .filter(|thread| matches(thread))
+            .cloned()
+            .collect();
+        // On the row that loads more, the selection lands on the first new thread.
+        self.selected = keep
+            .and_then(|root| self.shown.iter().position(|t| t.root == root))
+            .unwrap_or_else(|| self.selected.min(self.rows().saturating_sub(1)));
+        self.reveal = true;
+    }
+
+    pub fn step(&mut self, delta: isize) {
+        let rows = self.rows();
+        if rows == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = (self.selected as isize + delta).clamp(0, rows as isize - 1) as usize;
+        self.reveal = true;
+    }
+
+    pub fn scroll_by(&mut self, lines: isize) {
+        self.scroll = (self.scroll as isize + lines).max(0) as usize;
+        self.reveal = false;
+    }
+
+    /// The selection has come near the end of what is loaded, and the server has more.
+    pub fn wants_more(&self) -> bool {
+        self.load == ThreadsLoad::More && self.selected + 3 >= self.rows()
+    }
+
+    /// The end of what is loaded is on screen, and the server has more.
+    pub fn shows_end(&self) -> bool {
+        self.load == ThreadsLoad::More && self.scroll + self.page.max(1) >= self.shown.len()
+    }
+}
+
 /// Moderation confirmation prompt with an optional reason field.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ReasonConfirmKind {
@@ -1420,6 +1648,8 @@ pub enum Modal {
     /// Who sent a message and when, its event ID, encryption, delivery, readers and
     /// source.
     Details(Box<crate::details::DetailsPopup>),
+    /// The threads of a room.
+    Threads(ThreadsPopup),
 }
 
 #[cfg(test)]

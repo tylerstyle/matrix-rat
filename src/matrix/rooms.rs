@@ -102,6 +102,8 @@ pub struct Timelines {
     own_room_names: super::people::OwnRoomNames,
     unread_flags: UnreadFlags,
     pinned_cache: Arc<std::sync::Mutex<super::moderation::PinnedCache>>,
+    /// The running request for a page of a room's threads, if any.
+    thread_lister: Option<JoinHandle<()>>,
 }
 
 impl Timelines {
@@ -136,6 +138,7 @@ impl Timelines {
             own_room_names,
             unread_flags: UnreadFlags::start(events.clone()),
             pinned_cache: Arc::default(),
+            thread_lister: None,
             events,
         }
     }
@@ -170,6 +173,15 @@ impl Timelines {
             task.abort();
         }
         self.member_fetches.abort_all();
+    }
+
+    /// At the end of the session: closes the timelines, and stops a request for the
+    /// threads popup too (which, unlike them, is not bound to the open room).
+    pub fn stop(&mut self) {
+        self.close();
+        if let Some(task) = self.thread_lister.take() {
+            task.abort();
+        }
     }
 
     /// Message keys arrived from outside the usual ways (a key file): has every open
@@ -637,6 +649,12 @@ impl Timelines {
                 self.open_event(room_id, event_id, thread_root, generation)
                     .await;
             }
+            MatrixCmd::ListThreads {
+                room_id,
+                from,
+                mine,
+                generation,
+            } => self.list_threads(room_id, from, mine, generation),
             MatrixCmd::CancelOpenEvent { generation } => {
                 if self.pending_open_event_gen == Some(generation) {
                     self.cancel_open_event();
@@ -1191,6 +1209,42 @@ impl Timelines {
             | MatrixCmd::SetOwnAvatar { .. }
             | MatrixCmd::RemoveOwnAvatar => {}
         }
+    }
+
+    /// Asks for a page of the room's threads in the background, in place of a request
+    /// that may still be running (its answer would be dropped as stale anyway).
+    fn list_threads(&mut self, room_id: String, from: Option<String>, mine: bool, generation: u64) {
+        if let Some(task) = self.thread_lister.take() {
+            task.abort();
+        }
+        let events = self.events.clone();
+        let room = match self.room(&room_id) {
+            Ok(room) if room.state() == matrix_sdk::RoomState::Joined => room,
+            _ => {
+                let _ = events.send(MatrixEvent::ThreadsFailed {
+                    room_id,
+                    generation,
+                });
+                return;
+            }
+        };
+        let read = self.read_marks.clone();
+        let ignored = self.ignored.borrow().clone();
+        self.thread_lister = Some(tokio::spawn(async move {
+            let event = match threads::list(&room, from, mine, &read, &ignored).await {
+                Some((threads, next)) => MatrixEvent::Threads(threads::ThreadPage {
+                    room_id,
+                    generation,
+                    threads,
+                    next,
+                }),
+                None => MatrixEvent::ThreadsFailed {
+                    room_id,
+                    generation,
+                },
+            };
+            let _ = events.send(event);
+        }));
     }
 
     async fn handle_poll_or_sticker(&mut self, command: MatrixCmd) {
