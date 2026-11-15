@@ -25,6 +25,8 @@ pub struct Config {
     /// Let others see how far you have read. When off, the server still learns it
     /// (so unread counts clear on your other devices) but tells nobody.
     pub read_receipts: bool,
+    /// No notifications for now (the "Do not disturb" switch).
+    pub do_not_disturb: bool,
     /// Show under messages who has read up to there.
     pub read_markers: bool,
     /// Notifications for new messages: "auto", "desktop", "terminal" or "off".
@@ -158,6 +160,7 @@ impl Default for Config {
             mouse: true,
             typing_notices: true,
             read_receipts: true,
+            do_not_disturb: false,
             read_markers: true,
             notifications: crate::notify::NotifyMode::Auto,
             notification_icon: crate::notify::AppIcon::Color,

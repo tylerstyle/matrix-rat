@@ -206,6 +206,8 @@ pub struct App {
     typing_sent: Option<Instant>,
     pub typing_notices: bool,
     pub read_receipts: bool,
+    /// No notifications for now, whatever the mode says.
+    pub do_not_disturb: bool,
     /// Show who has read up to where (the `read_markers` setting).
     pub read_markers: bool,
     /// Whether clicks go to the app; the event loop applies changes to the terminal.
@@ -410,6 +412,7 @@ impl App {
         app.sidebar.width = config.sidebar_width;
         app.typing_notices = config.typing_notices;
         app.read_receipts = config.read_receipts;
+        app.do_not_disturb = config.do_not_disturb;
         app.read_markers = config.read_markers;
         app.mouse = config.mouse;
         app.download_dir = config.download_dir.clone();
@@ -487,6 +490,7 @@ impl App {
             typing_sent: None,
             typing_notices: true,
             read_receipts: true,
+            do_not_disturb: false,
             read_markers: true,
             mouse: true,
             pending_copy: None,
@@ -888,6 +892,7 @@ impl App {
             Setting::ReadReceipts => switch(self.read_receipts),
             Setting::ReadMarkers => switch(self.read_markers),
             Setting::Notifications => switch(self.notify_mode != crate::notify::NotifyMode::Off),
+            Setting::DoNotDisturb => switch(self.do_not_disturb),
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Profile => self.own_profile_summary(),
@@ -941,6 +946,17 @@ impl App {
             Setting::ReadReceipts => {
                 self.read_receipts = !self.read_receipts;
                 self.save_setting("read_receipts", self.read_receipts);
+            }
+            Setting::DoNotDisturb => {
+                self.do_not_disturb = !self.do_not_disturb;
+                self.save_setting("do_not_disturb", self.do_not_disturb);
+                // What was waiting to be shown is not shown later either.
+                self.pending_notices.clear();
+                self.show_toast(if self.do_not_disturb {
+                    "Do not disturb: no notifications"
+                } else {
+                    "Notifications are back on"
+                });
             }
             Setting::ReadMarkers => {
                 self.read_markers = !self.read_markers;
@@ -1045,7 +1061,11 @@ impl App {
             && !self.timeline.detached
             && self.room().is_some_and(|room| room.id == notice.room_id)
             && self.threads.open_root() == notice.thread.as_deref();
-        if self.notify_mode == crate::notify::NotifyMode::Off || watching || self.logged_out {
+        if self.notify_mode == crate::notify::NotifyMode::Off
+            || self.do_not_disturb
+            || watching
+            || self.logged_out
+        {
             return;
         }
         // A burst (a busy room, catching up after sleep) must not flood the desktop:
@@ -6338,6 +6358,48 @@ mod tests {
         app.on_event(key_mod(KeyCode::Down, KeyModifiers::CONTROL));
         assert_eq!((app.active, app.focus), (order[0], Pane::Sidebar));
         redraw(&mut app, &mut terminal);
+    }
+
+    #[test]
+    fn do_not_disturb_holds_every_notification_back_and_says_that_it_is_on() {
+        use crate::matrix::Notice;
+        use crate::notify::NotifyMode;
+        let (mut app, mut terminal, _commands) = connected();
+        let mut screen = |app: &mut App| {
+            terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+            format!("{}", terminal.backend())
+        };
+        app.notify_mode = NotifyMode::Terminal;
+        let notice = |highlight| {
+            MatrixEvent::Notice(Notice {
+                room_id: "!b".into(),
+                room: "Beta".into(),
+                sender: "ann".into(),
+                body: "hello".into(),
+                highlight,
+                thread: None,
+            })
+        };
+        // One is waiting when the switch is turned on: it is not shown later either.
+        app.on_matrix(notice(false));
+        assert_eq!(app.pending_notices.len(), 1);
+        app.perform(Action::Setting(Setting::DoNotDisturb));
+        assert!(app.do_not_disturb);
+        assert!(app.pending_notices.is_empty());
+        app.shown_notices.clear();
+        app.on_matrix(notice(false));
+        app.on_matrix(notice(true));
+        assert!(app.pending_notices.is_empty());
+        app.toast = None;
+        assert!(screen(&mut app).contains("do not disturb"));
+
+        // Off again: notifications come back, the mark goes.
+        app.perform(Action::Setting(Setting::DoNotDisturb));
+        app.shown_notices.clear();
+        app.on_matrix(notice(false));
+        assert_eq!(app.pending_notices.len(), 1);
+        app.toast = None;
+        assert!(!screen(&mut app).contains("do not disturb"));
     }
 
     #[test]

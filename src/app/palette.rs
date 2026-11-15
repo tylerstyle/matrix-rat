@@ -89,6 +89,7 @@ impl App {
             mouse: self.mouse,
             typing_notices: self.typing_notices,
             read_receipts: self.read_receipts,
+            do_not_disturb: self.do_not_disturb,
             read_markers: self.read_markers,
             room_previews: self.room_previews,
             link_previews: self.link_previews,
@@ -227,6 +228,7 @@ impl App {
             Setting::Mouse
             | Setting::TypingNotices
             | Setting::ReadReceipts
+            | Setting::DoNotDisturb
             | Setting::ReadMarkers
             | Setting::RoomPreviews
             | Setting::LinkPreviews

@@ -307,6 +307,8 @@ pub enum Setting {
     Mouse,
     TypingNotices,
     ReadReceipts,
+    /// No notifications for now.
+    DoNotDisturb,
     Notifications,
     DownloadDir,
     Keys,
@@ -330,7 +332,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 20] = [
+    pub const ALL: [Setting; 21] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -343,6 +345,7 @@ impl Setting {
         Setting::ReadReceipts,
         Setting::ReadMarkers,
         Setting::Notifications,
+        Setting::DoNotDisturb,
         Setting::DownloadDir,
         Setting::Keys,
         Setting::Profile,
@@ -378,6 +381,7 @@ impl Setting {
             Setting::ReadReceipts => "Read receipts",
             Setting::ReadMarkers => "Read markers",
             Setting::Notifications => "Notifications",
+            Setting::DoNotDisturb => "Do not disturb",
             Setting::DownloadDir => "Download folder",
             Setting::Keys => "Key bindings",
             Setting::Profile => "Profile",
@@ -410,6 +414,9 @@ impl Setting {
             Setting::ReadMarkers => "Show under messages who has read up to there.",
             Setting::Notifications => {
                 "Tell you about new messages while you are in another room or window."
+            }
+            Setting::DoNotDisturb => {
+                "No notifications for now. Unread marks and counts go on; the status line shows that it is on."
             }
             Setting::DownloadDir => {
                 "Where s saves files and pictures. Enter to change; empty for the default."
