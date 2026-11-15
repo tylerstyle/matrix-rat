@@ -212,8 +212,22 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
     }
 
     let theme = app.theme.clone();
-    let visible = inner.height as usize;
+    // The last lines belong to what the selected row does: they are kept free also
+    // where the rows alone would fill the popup, and the rows scroll instead.
+    let hint_lines: u16 = match inner.height {
+        0..=5 => 0,
+        6..=9 => 1,
+        _ => 2,
+    };
+    let fits = lines.len() as u16 + hint_lines <= inner.height;
+    let visible = if fits {
+        lines.len()
+    } else {
+        inner.height.saturating_sub(hint_lines) as usize
+    };
     let scroll = (selected_line + 1).saturating_sub(visible);
+    // Where rows are out of sight, the edge they are beyond says so.
+    let (above, below) = (scroll > 0, scroll + visible < lines.len());
     let mut y = 0u16;
     for line in lines.iter().skip(scroll).take(visible) {
         let rect = row(inner, y);
@@ -328,7 +342,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
                 spans.push(Span::styled(truncate(&value, room), theme.style(role)));
             }
             Setting::IgnoredUsers => {
-                let role = if value == "none" {
+                let role = if value.eq_ignore_ascii_case("none") {
                     Role::Muted
                 } else {
                     Role::Text
@@ -338,7 +352,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
             Setting::Logout => {
                 if menu.confirm_logout {
                     spans.push(Span::styled(
-                        truncate("Enter again to log out, Esc to stay", room),
+                        truncate("Enter again logs out · Esc stays", room),
                         theme.style(Role::Error),
                     ));
                 } else {
@@ -355,8 +369,18 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
             frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
         }
     }
+    for (more, at, mark) in [(above, 0, "▲"), (below, y.saturating_sub(1), "▼")] {
+        if more && inner.width > 2 && y > 0 {
+            let rect = row(inner, at);
+            let mark_rect = Rect::new(rect.right().saturating_sub(1), rect.y, 1, 1);
+            frame.render_widget(
+                Line::from(Span::styled(mark, theme.style(Role::Muted))),
+                mark_rect,
+            );
+        }
+    }
     // What the selected row does, at the bottom.
-    let hint_top = if airy { y + 1 } else { y };
+    let hint_top = if airy && fits { y + 1 } else { y };
     if hint_top < inner.height {
         let hint = Rect::new(
             inner.x,

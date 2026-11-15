@@ -441,6 +441,49 @@ mod tests {
     }
 
     #[test]
+    fn settings_on_a_small_terminal_keep_the_hint_and_say_what_is_out_of_sight() {
+        use crate::modal::Modal;
+        let mut app = App::demo();
+        render(&mut app, 80, 24);
+        app.perform(Action::OpenSettings);
+        // With the dark and light slots shown there are more rows than lines.
+        if let Some(Modal::Settings(menu)) = &mut app.modal {
+            menu.show_theme_pair = true;
+        }
+        let top = render(&mut app, 80, 24);
+        // The hint of the selected row is there, and a mark for rows further down.
+        assert!(top.contains("▼"), "{top}");
+        assert!(!top.contains("▲"), "{top}");
+        let hint = match &app.modal {
+            Some(Modal::Settings(menu)) => menu.current().hint(),
+            _ => panic!("no settings"),
+        };
+        let first_words: String = hint
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            top.contains(&first_words),
+            "hint missing: {first_words}\n{top}"
+        );
+        insta::assert_snapshot!("settings_small_top", top);
+        // At the last row: Log out is in view, the mark points up, and asking to
+        // confirm fits its column.
+        if let Some(Modal::Settings(menu)) = &mut app.modal {
+            menu.step(-1);
+            menu.confirm_logout = true;
+        }
+        let bottom = render(&mut app, 80, 24);
+        assert!(bottom.contains("▲") && !bottom.contains("▼"), "{bottom}");
+        assert!(
+            bottom.contains("Enter again logs out · Esc stays"),
+            "{bottom}"
+        );
+        insta::assert_snapshot!("settings_small_bottom", bottom);
+    }
+
+    #[test]
     fn room_previews() {
         let mut app = App::demo();
         app.room_previews = true;
