@@ -320,6 +320,13 @@ Setting `preset = "vim"` keeps the default keys and adds:
   messages have blocks (Markdown fences from matrix-rat and other clients, `<pre>` HTML);
   a plain message that merely contains backticks is shown as written and has none. Like
   all copying here it goes through the terminal (OSC 52), so the terminal must allow it.
+- **Colours in code**: a code block whose sender named its language (```` ```rust ````,
+  ```` ```py ````, …) is coloured: keywords, strings, comments, numbers and constants,
+  types, function names. About 75 common languages are known; blocks without a language,
+  in an unknown one, or very large ones (over 600 lines or 48 KB) stay in the single code
+  colour. The colours are the theme's: `code_text`, `code_keyword`, `code_string`,
+  `code_comment`, `code_constant`, `code_type` and `code_function` in a theme's `[ui]`
+  table (set them all to the same colour to have no colouring).
 - **Key backup and recovery are not created here yet.** matrix-rat uses a backup and a
   recovery key that exist, and tells you when they are missing; to set them up (or reset
   them), use Element: Settings → Encryption.
