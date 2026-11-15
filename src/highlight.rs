@@ -68,6 +68,9 @@ static KINDS: LazyLock<Vec<(Scope, Syntax)>> = LazyLock::new(|| {
         ("entity.name.function", Syntax::Function),
         ("support.function", Syntax::Function),
         ("variable.function", Syntax::Function),
+        ("variable.parameter.option", Syntax::Constant),
+        ("variable.other.readwrite", Syntax::Type),
+        ("variable.language", Syntax::Type),
         ("entity.name", Syntax::Type),
         ("entity.other.inherited-class", Syntax::Type),
         ("entity.other.attribute-name", Syntax::Type),
@@ -411,6 +414,19 @@ mod tests {
         for lang in ["nix", "toml", "swift", "dockerfile"] {
             assert!(!known(lang), "{lang}");
         }
+    }
+
+    #[test]
+    fn a_plain_shell_command_is_coloured_too() {
+        let rich = coloured(
+            "<pre><code class=\"language-bash\">ls -la /tmp\nexport FOO=bar\necho $FOO\n</code></pre>",
+        );
+        assert_eq!(mark_of(&rich, "ls"), Some(Syntax::Function));
+        // Options and variables: without them a command line is one word of colour.
+        assert_eq!(mark_of(&rich, "-la"), Some(Syntax::Constant));
+        assert_eq!(mark_of(&rich, "FOO"), Some(Syntax::Type));
+        assert_eq!(mark_of(&rich, "export"), Some(Syntax::Keyword));
+        assert_eq!(mark_of(&rich, "bar"), Some(Syntax::String));
     }
 
     #[test]

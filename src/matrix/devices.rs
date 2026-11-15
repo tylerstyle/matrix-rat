@@ -671,6 +671,16 @@ async fn web_page(client: &Client, device: &DeviceId) -> Option<String> {
     matches!(url.scheme(), "https" | "http").then(|| url.to_string())
 }
 
+/// Whether the server said that it has no such request (`M_UNRECOGNIZED`, or a bare
+/// 404 or 405), as opposed to refusing it.
+fn endpoint_gone(err: &HttpError) -> bool {
+    if matches!(err.client_api_error_kind(), Some(ErrorKind::Unrecognized)) {
+        return true;
+    }
+    err.as_client_api_error()
+        .is_some_and(|api| matches!(api.status_code.as_u16(), 404 | 405))
+}
+
 /// Signs another session out (`POST /delete_devices`). The server answers the first,
 /// bare request with the ways it accepts as proof that this is the account's owner.
 /// Only the account password is something we can give; with it the request is made
@@ -702,6 +712,14 @@ async fn sign_out(
         Ok(()) => return SignOutOutcome::Done,
         Err(err) => match err.as_uiaa_response() {
             Some(info) => info.clone(),
+            // A homeserver that has handed its accounts to an authentication service
+            // does not know this request any more, also for a login from before that:
+            // sessions are ended on the service's pages.
+            None if endpoint_gone(&err) => {
+                return SignOutOutcome::Web {
+                    url: web_page(client, &device).await,
+                };
+            }
             None => return failed(err),
         },
     };
