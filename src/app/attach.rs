@@ -20,7 +20,7 @@ use crate::upload::{self, Chosen};
 /// Like drafts, they belong to the conversation they were attached in.
 pub type Scope = (String, Option<String>);
 
-/// What was last handed to the worker, to give it back if none of it could be sent.
+/// What a send handed to the worker, to give it back if none of it could be sent.
 #[derive(Debug)]
 struct Handed {
     scope: Scope,
@@ -34,7 +34,12 @@ pub struct AttachState {
     pub(super) pending: HashMap<Scope, Vec<Chosen>>,
     /// The draft put aside while an `/upload` command is typed.
     stash: HashMap<Scope, String>,
-    handed: Option<Handed>,
+    /// The sends the worker has not answered yet, by their number. It reads the files
+    /// only some time after it was handed them, so no picture of ours goes while one
+    /// is out; and each answer finds its own files, whichever comes first.
+    handed: HashMap<u64, Handed>,
+    /// Sends numbered so far.
+    sends: u64,
     /// The largest file the server accepts, once it has said so.
     pub limit: Option<u64>,
     /// The last draw had no room to show the waiting files.
@@ -42,9 +47,6 @@ pub struct AttachState {
     /// Pictures pasted from the clipboard: files of ours, each removed (by being
     /// dropped) once no chip and no send needs it any more.
     pub(super) pasted: Vec<TempPicture>,
-    /// Sends handed to the worker that it has not answered yet. It reads the files only
-    /// some time after it was handed them, so no picture of ours goes while one is out.
-    sends_out: usize,
     /// The clipboard is being read for this conversation; the number tells the answer
     /// from that of a reading given up before.
     pub(super) reading: Option<(u64, Scope)>,
@@ -56,6 +58,12 @@ pub struct AttachState {
 }
 
 impl AttachState {
+    /// The number of the send handed to the worker last.
+    #[cfg(test)]
+    pub(super) fn last_send(&self) -> u64 {
+        self.sends
+    }
+
     /// The files waiting in `scope`.
     pub fn files(&self, scope: Option<&Scope>) -> &[Chosen] {
         scope
@@ -91,7 +99,7 @@ impl AttachState {
     /// the worker has answered every send (it may still be about to read one that went).
     /// Called wherever a chip goes or a send is answered.
     fn sweep(&mut self) {
-        if self.sends_out > 0 {
+        if !self.handed.is_empty() {
             return;
         }
         let pending = &self.pending;
@@ -390,7 +398,9 @@ impl App {
 
         if self.matrix.is_some() {
             self.clear_marked_unread(self.active);
+            self.attach.sends += 1;
             self.send_matrix(MatrixCmd::SendFiles {
+                send: self.attach.sends,
                 room_id: room_id.clone(),
                 files: files.iter().map(|file| file.path.clone()).collect(),
                 caption,
@@ -423,13 +433,13 @@ impl App {
             }
         }
         self.attach.pending.remove(&scope);
-        self.attach.handed = self.matrix.is_some().then(|| Handed {
-            scope,
-            files,
-            text: self.composer.text().to_owned(),
-        });
         if self.matrix.is_some() {
-            self.attach.sends_out += 1;
+            let handed = Handed {
+                scope,
+                files,
+                text: self.composer.text().to_owned(),
+            };
+            self.attach.handed.insert(self.attach.sends, handed);
         }
         // In the demo a pasted picture has been "sent" now; else it waits for the answer.
         self.attach.sweep();
@@ -446,12 +456,15 @@ impl App {
         true
     }
 
-    /// The worker could not send the first of the files last handed to it, the one the
-    /// caption (and a reply) belonged to, and so sent none: they wait again, and the
-    /// text is back if nothing was written in the meantime.
-    pub(super) fn on_files_not_sent(&mut self, reason: String) {
-        self.attach.sends_out = self.attach.sends_out.saturating_sub(1);
-        if let Some(handed) = self.attach.handed.take() {
+    /// The worker could not send the first of a send's files, the one the caption (and a
+    /// reply) belonged to, and so sent none: they wait again, and the text is back if
+    /// nothing was written in the meantime.
+    pub(super) fn on_files_not_sent(&mut self, send: u64, reason: String) {
+        // A room that was left meanwhile has no composer for them to wait in.
+        if let Some(handed) = self.attach.handed.remove(&send)
+            && !self.logged_out
+            && self.rooms.iter().any(|room| room.id == handed.scope.0)
+        {
             let here = self.attach_scope().as_ref() == Some(&handed.scope);
             let waiting = self.attach.pending.entry(handed.scope).or_default();
             for file in handed.files {
@@ -470,12 +483,8 @@ impl App {
 
     /// The worker has read the files of a send and needs them no more: pasted pictures
     /// that no chip shows go, once no other send is out.
-    pub(super) fn on_files_sent(&mut self) {
-        self.attach.sends_out = self.attach.sends_out.saturating_sub(1);
-        if self.attach.sends_out == 0 {
-            // Every send is answered: none can come back any more.
-            self.attach.handed = None;
-        }
+    pub(super) fn on_files_sent(&mut self, send: u64) {
+        self.attach.handed.remove(&send);
         self.attach.sweep();
     }
 }
@@ -543,6 +552,7 @@ mod tests {
                 files,
                 caption,
                 reply_to,
+                ..
             } = command
             {
                 seen.push((room_id, files, caption, reply_to));
@@ -1192,15 +1202,19 @@ mod tests {
         assert_eq!(sent(&mut commands).len(), 1);
         assert!(app.attachments().is_empty() && app.composer.is_empty());
 
-        app.on_matrix(MatrixEvent::FilesNotSent(
-            "notes.txt does not exist".to_owned(),
-        ));
+        app.on_matrix(MatrixEvent::FilesNotSent {
+            send: app.attach.last_send(),
+            reason: "notes.txt does not exist".to_owned(),
+        });
         assert_eq!(toast(&app), "notes.txt does not exist. Nothing was sent");
         assert_eq!(paths(&app), [notes.clone(), other.clone()]);
         assert_eq!(app.composer.text(), "the caption");
         // Only once, and never over something written since.
         app.composer.set_text("new words");
-        app.on_matrix(MatrixEvent::FilesNotSent("again".to_owned()));
+        app.on_matrix(MatrixEvent::FilesNotSent {
+            send: app.attach.last_send(),
+            reason: "again".to_owned(),
+        });
         assert_eq!(app.composer.text(), "new words");
         assert_eq!(app.attachments().len(), 2);
 
@@ -1209,10 +1223,51 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         assert_eq!(sent(&mut commands).len(), 1);
         app.open_room(1);
-        app.on_matrix(MatrixEvent::FilesNotSent("no".to_owned()));
+        app.on_matrix(MatrixEvent::FilesNotSent {
+            send: app.attach.last_send(),
+            reason: "no".to_owned(),
+        });
         assert!(app.attachments().is_empty() && app.composer.is_empty());
         app.open_room(0);
         assert_eq!(app.attachments().len(), 2);
+    }
+
+    #[test]
+    fn each_answer_gives_back_the_files_of_its_own_send() {
+        let scratch = Scratch::new("app-two-sends");
+        let first = scratch.file("first.txt", b"hello");
+        let second = scratch.file("second.txt", b"hello");
+        let (mut app, mut commands) = connected();
+        app.on_event(Event::Paste(first.display().to_string()));
+        app.on_event(key(KeyCode::Enter));
+        let first_send = app.attach.last_send();
+        app.open_room(1);
+        app.focus = Pane::Composer;
+        app.on_event(Event::Paste(second.display().to_string()));
+        app.on_event(key(KeyCode::Enter));
+        let second_send = app.attach.last_send();
+        assert_ne!(first_send, second_send);
+        assert_eq!(sent(&mut commands).len(), 2);
+
+        // The second is done, then the first fails: the first's file comes back, to
+        // the room it was sent in, and the second's does not.
+        app.on_matrix(MatrixEvent::FilesSent(second_send));
+        app.on_matrix(MatrixEvent::FilesNotSent {
+            send: first_send,
+            reason: "no".to_owned(),
+        });
+        assert!(app.attachments().is_empty());
+        app.open_room(0);
+        assert_eq!(paths(&app), std::slice::from_ref(&first));
+
+        // An answer for a send that is not out (answered twice) changes nothing.
+        app.on_matrix(MatrixEvent::FilesNotSent {
+            send: second_send,
+            reason: "late".to_owned(),
+        });
+        assert_eq!(paths(&app), std::slice::from_ref(&first));
+        app.open_room(1);
+        assert!(app.attachments().is_empty());
     }
 
     #[test]
@@ -1224,9 +1279,12 @@ mod tests {
         type_text(&mut app, "the caption");
         app.on_event(key(KeyCode::Enter));
         assert_eq!(sent(&mut commands).len(), 1);
-        app.on_matrix(MatrixEvent::FilesSent);
+        app.on_matrix(MatrixEvent::FilesSent(app.attach.last_send()));
         // Every send is answered: nothing is kept to be given back.
-        app.on_matrix(MatrixEvent::FilesNotSent("late".to_owned()));
+        app.on_matrix(MatrixEvent::FilesNotSent {
+            send: app.attach.last_send(),
+            reason: "late".to_owned(),
+        });
         assert!(app.attachments().is_empty());
         assert!(app.composer.is_empty());
     }

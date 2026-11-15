@@ -3148,8 +3148,8 @@ impl App {
             MatrixEvent::Verification(update) => self.on_verification(update),
             MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
             MatrixEvent::UploadLimit(bytes) => self.attach.limit = Some(bytes),
-            MatrixEvent::FilesNotSent(reason) => self.on_files_not_sent(reason),
-            MatrixEvent::FilesSent => self.on_files_sent(),
+            MatrixEvent::FilesNotSent { send, reason } => self.on_files_not_sent(send, reason),
+            MatrixEvent::FilesSent(send) => self.on_files_sent(send),
             MatrixEvent::RoomMembers {
                 room_id,
                 members,

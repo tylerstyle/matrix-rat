@@ -285,6 +285,8 @@ pub enum MatrixCmd {
     /// Send files from disk, in order. They show up in the timeline at once and upload
     /// in the background.
     SendFiles {
+        /// The app's number for this send; the answer carries it.
+        send: u64,
         room_id: String,
         files: Vec<std::path::PathBuf>,
         /// Text that goes with the first file.
@@ -765,12 +767,15 @@ pub enum MatrixEvent {
     UploadLimit(u64),
     /// The first file of a [`MatrixCmd::SendFiles`] could not be sent, so none was:
     /// the caption and the reply belong to that one. Carries the reason.
-    FilesNotSent(String),
+    FilesNotSent {
+        send: u64,
+        reason: String,
+    },
     /// The files of a [`MatrixCmd::SendFiles`] were read and handed to the send queue,
     /// which keeps its own copy (a later file that could not be was reported on its
     /// own): none of them is needed on disk any more. Every `SendFiles` is answered by
     /// this or by [`MatrixEvent::FilesNotSent`].
-    FilesSent,
+    FilesSent(u64),
     /// Joined members and `@room` permission for a room, used for `@` completions.
     RoomMembers {
         room_id: String,
@@ -953,8 +958,8 @@ impl std::fmt::Debug for MatrixEvent {
             Self::FileSaved { result, .. } => write!(f, "FileSaved(ok: {})", result.is_ok()),
             Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
             // The reason names a file.
-            Self::FilesNotSent(_) => f.write_str("FilesNotSent"),
-            Self::FilesSent => f.write_str("FilesSent"),
+            Self::FilesNotSent { .. } => f.write_str("FilesNotSent"),
+            Self::FilesSent(_) => f.write_str("FilesSent"),
             // Member display names and user ids are omitted from the log.
             Self::RoomMembers {
                 room_id,

@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(sent_files(&mut commands), std::slice::from_ref(&path));
         assert!(app.attachments().is_empty());
         assert!(path.exists());
-        app.on_matrix(MatrixEvent::FilesSent);
+        app.on_matrix(MatrixEvent::FilesSent(app.attach.last_send()));
         assert!(!path.exists());
     }
 
@@ -281,7 +281,10 @@ mod tests {
         let path = attached(&app);
         app.on_event(key(KeyCode::Enter));
         assert_eq!(sent_files(&mut commands), std::slice::from_ref(&path));
-        app.on_matrix(MatrixEvent::FilesNotSent("no".to_owned()));
+        app.on_matrix(MatrixEvent::FilesNotSent {
+            send: app.attach.last_send(),
+            reason: "no".to_owned(),
+        });
         assert_eq!(attached(&app), path);
         assert!(path.exists());
 
@@ -296,7 +299,7 @@ mod tests {
         app.on_event(key(KeyCode::Backspace));
         assert!(app.attachments().is_empty());
         assert!(path.exists());
-        app.on_matrix(MatrixEvent::FilesSent);
+        app.on_matrix(MatrixEvent::FilesSent(app.attach.last_send()));
         assert!(!path.exists());
         // A file of the user's own is never removed.
         assert!(notes.exists());
@@ -313,10 +316,11 @@ mod tests {
         let second = attached(&app);
         app.on_event(key(KeyCode::Enter));
         assert_eq!(sent_files(&mut commands), [first.clone(), second.clone()]);
-        // Answers do not say which send they are about: all pictures wait for the last.
-        app.on_matrix(MatrixEvent::FilesSent);
+        // While one send is out, no picture goes: the later answer may come first.
+        let last = app.attach.last_send();
+        app.on_matrix(MatrixEvent::FilesSent(last));
         assert!(first.exists() && second.exists());
-        app.on_matrix(MatrixEvent::FilesSent);
+        app.on_matrix(MatrixEvent::FilesSent(last - 1));
         assert!(!first.exists() && !second.exists());
     }
 
@@ -343,7 +347,7 @@ mod tests {
             panic!("not a file command");
         };
         assert_eq!(files, std::slice::from_ref(&path));
-        app.on_matrix(MatrixEvent::FilesSent);
+        app.on_matrix(MatrixEvent::FilesSent(app.attach.last_send()));
         assert!(!path.exists());
     }
 
