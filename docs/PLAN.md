@@ -499,7 +499,8 @@ differentiators and can be reviewed with fake data in days.
     The terminal, pictures, the SDK and the clipboard tools (`pbpaste` in place of
     `wl-paste`) are not the problem. A medium piece of work, and nobody to test it on.
     *Windows* is a large one: the code uses Unix file modes, `poll` and signals in many
-    places, on top of the three parts above. *Other Linux packaging* (AUR, a `.deb`) is
+    places, on top of the three parts above. The user decided on 2026-11-15: no
+    Windows build; the README says how to run it in WSL (untried by us). *Other Linux packaging* (AUR, a `.deb`) is
     small once the prebuilt archives exist: both would wrap them.
   - **Later, by demand:** several accounts in one window, QR login, other
     terminals' picture protocols, languages, export, playing audio and voice messages inside the

@@ -110,6 +110,27 @@ application launchers (it opens in your terminal) and can be chosen as the progr
 `matrix:` links. With Cargo, copy them yourself if you want them: see
 [`assets/`](assets/README.md).
 
+**On Windows**: there is no Windows build and none is planned, but matrix-rat runs in
+[WSL](https://learn.microsoft.com/windows/wsl/install), the Linux environment Windows
+ships. Nobody here has tried it, so take this as a starting point:
+
+```powershell
+wsl --install -d Ubuntu-24.04      # once, in PowerShell; then open "Ubuntu" from the Start menu
+```
+
+Inside Ubuntu, install the ready-made binary as described above (it needs Ubuntu 22.04
+or newer), and run `matrix-rat` in Windows Terminal. What to expect there:
+
+- Pictures are drawn with coloured blocks (Windows Terminal has no kitty graphics).
+- Notifications come through the terminal, not as Windows notifications: there is no
+  Linux desktop to send them to.
+- Opening a link, a picture or a file in a Windows program (`o`, `O`) needs `xdg-open`
+  to lead to Windows: `sudo apt install wslu` provides that.
+- Copying (`c`, `C`) works through the terminal. Pasting a picture (`Alt-I`) needs
+  `wl-clipboard` and may not see the Windows clipboard.
+- Your login and message store stay inside the Linux environment
+  (`~/.local/share/matrix-rat`).
+
 **Just try it**, without an account and without installing:
 
 ```sh
