@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use matrix_sdk::ruma::EventId;
 use matrix_sdk::ruma::events::receipt::{ReceiptThread, ReceiptType};
+use matrix_sdk::ruma::{EventId, MilliSecondsSinceUnixEpoch, UserId};
 use matrix_sdk::{Room, ThreadingSupport};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
@@ -162,15 +162,13 @@ pub async fn newest_reply(timeline: &Timeline) -> Vec<String> {
 }
 
 /// Event ids of the messages in `items` whose threads have a newest reply the user
-/// has not read: it is someone else's, and neither this session nor a read receipt
-/// of the user's covers it. Only looks at what is stored; nothing is loaded or kept
-/// per thread.
+/// has not read (see [`reply_unread`]). Only looks at what is stored; nothing is
+/// loaded or kept per thread.
 pub async fn unread(
     room: &Room,
     items: &Vector<Arc<TimelineItem>>,
     read: &ReadMarks,
 ) -> HashSet<String> {
-    let own = room.own_user_id();
     let mut unread = HashSet::new();
     for event in items.iter().filter_map(|item| item.as_event()) {
         let Some(root) = event.event_id() else {
@@ -186,32 +184,57 @@ pub async fn unread(
         let TimelineEventItemId::EventId(newest_id) = &newest.identifier else {
             continue;
         };
-        if newest.sender == own
-            || read.covers(
-                &key(room.room_id().as_str(), Some(root.as_str())),
-                newest_id.as_str(),
-            )
+        if reply_unread(
+            room,
+            root,
+            newest_id,
+            &newest.sender,
+            newest.timestamp,
+            read,
+        )
+        .await
         {
-            continue;
-        }
-        // A receipt for the thread, or one for the whole room as clients without
-        // threads send it. The room's own ("main") receipt says nothing about threads.
-        let mut seen = false;
-        for thread in [
-            ReceiptThread::Thread(root.to_owned()),
-            ReceiptThread::Unthreaded,
-        ] {
-            for kind in [ReceiptType::Read, ReceiptType::ReadPrivate] {
-                if let Ok(Some((at, receipt))) = room.load_user_receipt(kind, &thread, own).await {
-                    seen |= at == *newest_id || receipt.ts.is_some_and(|ts| ts >= newest.timestamp);
-                }
-            }
-        }
-        if !seen {
             unread.insert(root.to_string());
         }
     }
     unread
+}
+
+/// Whether `newest`, the newest reply in the thread that starts at `root`, is one the
+/// user has not read: it is someone else's, and neither this session nor a read
+/// receipt of the user's covers it.
+async fn reply_unread(
+    room: &Room,
+    root: &EventId,
+    newest: &EventId,
+    sender: &UserId,
+    at: MilliSecondsSinceUnixEpoch,
+    read: &ReadMarks,
+) -> bool {
+    let own = room.own_user_id();
+    if sender == own
+        || read.covers(
+            &key(room.room_id().as_str(), Some(root.as_str())),
+            newest.as_str(),
+        )
+    {
+        return false;
+    }
+    // A receipt for the thread, or one for the whole room as clients without
+    // threads send it. The room's own ("main") receipt says nothing about threads.
+    for thread in [
+        ReceiptThread::Thread(root.to_owned()),
+        ReceiptThread::Unthreaded,
+    ] {
+        for kind in [ReceiptType::Read, ReceiptType::ReadPrivate] {
+            if let Ok(Some((seen_at, receipt))) = room.load_user_receipt(kind, &thread, own).await
+                && (seen_at.as_str() == newest.as_str() || receipt.ts.is_some_and(|ts| ts >= at))
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Finishes the messages of a snapshot: marks the threads with unread replies, or,
