@@ -10,8 +10,10 @@ use crate::paths::Paths;
 /// own notes. The SDK's request layer is left out: it writes the server's answer to a
 /// failed request into the log as it came, room ids and all, and a lookup that finds
 /// nothing (a room without pinned messages) is such a failure. This program logs its
-/// own failures, without those.
-const DEFAULT_FILTER: &str = "warn,matrix_rat=info,matrix_sdk::http_client=off";
+/// own failures, without those. So for the SDK's notification settings: when a push rule
+/// cannot be changed, they log its id, and the id of a keyword's rule is the keyword.
+const DEFAULT_FILTER: &str =
+    "warn,matrix_rat=info,matrix_sdk::http_client=off,matrix_sdk::notification_settings=off";
 
 /// Starts logging to `<log_dir>/matrix-rat.log` (rotated daily).
 /// Level comes from `MATRIX_RAT_LOG` (e.g. `debug`, `matrix_sdk=trace`); default `info`.

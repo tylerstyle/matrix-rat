@@ -55,6 +55,8 @@ pub enum InputTarget {
     StickerFilter,
     /// Filter input of the threads popup.
     ThreadsFilter,
+    /// The field of the notification keywords popup.
+    Keyword,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +168,10 @@ pub enum HitId {
     ThreadsMore,
     /// The "only mine" switch of the threads popup.
     ThreadsMine,
+    /// A row of the notification keywords popup.
+    KeywordRow(usize),
+    /// The remove mark on a row of the notification keywords popup.
+    KeywordRemove(usize),
 }
 
 #[derive(Debug, Default)]

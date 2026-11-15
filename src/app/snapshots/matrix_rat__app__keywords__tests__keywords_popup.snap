@@ -1,0 +1,28 @@
+---
+source: src/app/keywords.rs
+expression: text
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 No room ───────────────────────────────────────────╮"
+"│ Filter rooms…        ││ No rooms yet.                                        │"
+"│ ○ Unread  ○ People   ││                                                      │"
+"│ no rooms yet         ││                                                      │"
+"│                      ││                                                      │"
+"│                      ││                                                      │"
+"│   ╭ Notification keywords ───────────────────────────────────────────────╮   │"
+"│   │ Messages with one of these words notify you like a mention. Your     │   │"
+"│   │ server keeps them, so your other clients use them too.               │   │"
+"│   │                                                                      │   │"
+"│   │ Add          deploy________________________________________________  │   │"
+"│   │                                                                      │   │"
+"│   │ › lunch                                                      remove  │   │"
+"│   │   release                                                            │   │"
+"│   │   sliding sync                                                       │   │"
+"│   │ 3 keywords                                                           │   │"
+"│   ╰────────────────────── Enter add · Del remove · ↑↓ select · Esc close ╯   │"
+"│                      ││                                                      │"
+"│                      ││                                                      │"
+"│                      │╰──────────────────────────────────────────────────────╯"
+"│                      │╭ 3 Message ──────────────────────────────── A  alice ─╮"
+"│                      ││ Type a message…                                📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
+"╰──────────────────────╯╰──────────────────────────────────────────────────────╯"
+" ◌ connecting…  Enter send    Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

@@ -1202,6 +1202,7 @@ impl Timelines {
             | MatrixCmd::ReportContent { .. }
             | MatrixCmd::SearchUsers { .. }
             | MatrixCmd::Devices(_)
+            | MatrixCmd::Keywords(_)
             | MatrixCmd::CancelUserSearch
             | MatrixCmd::SearchDirectory { .. }
             | MatrixCmd::DirectoryNextPage { .. }

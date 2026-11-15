@@ -16,6 +16,7 @@ mod format;
 mod highlight;
 mod images;
 mod keymap;
+mod keywords;
 mod lineedit;
 mod lock;
 mod logging;

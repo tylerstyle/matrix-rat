@@ -1065,6 +1065,19 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::Keywords)),
+            title: Setting::Keywords.label(),
+            hint: None,
+            aliases: &[
+                "keywords",
+                "highlight words",
+                "mention words",
+                "push rules",
+                "setting",
+            ],
+            enabled: true,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::ReadReceipts)),
             title: Setting::ReadReceipts.label(),
             hint: Some(switch(ctx.read_receipts)),

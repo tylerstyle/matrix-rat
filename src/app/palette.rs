@@ -250,6 +250,7 @@ impl App {
             Setting::Encryption => self.start_verification(),
             Setting::IgnoredUsers => self.change_setting(Setting::IgnoredUsers, 0),
             Setting::Sessions => self.open_sessions(),
+            Setting::Keywords => self.open_keywords(),
             Setting::KeyBackup => self.open_keys(),
             Setting::Logout => {
                 if self.matrix.is_none() {
