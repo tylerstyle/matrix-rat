@@ -88,6 +88,11 @@ git clone https://github.com/tylerstyle/matrix-rat && cd matrix-rat
 cargo install --path .        # installs to ~/.cargo/bin
 ```
 
+The Nix package also installs a launcher entry and the icon, so matrix-rat shows up in
+application launchers (it opens in your terminal) and can be chosen as the program for
+`matrix:` links. With Cargo, copy them yourself if you want them: see
+[`assets/`](assets/README.md).
+
 **Just try it**, without an account and without installing:
 
 ```sh

@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>matrix-rat</title>
+  <desc>The matrix-rat icon in one colour: it takes the colour of the text around it (currentColor), and has no background.</desc>
+  <defs>
+    <!-- White is kept, black is cut out. The cuts stand in for what the colours
+         separate in the full icon. -->
+    <mask id="cuts" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <!-- Between the hat and its band, and between the band and the face -->
+      <rect x="150" y="160" width="212" height="12" fill="#000"/>
+      <rect x="180" y="200" width="152" height="10" fill="#000"/>
+      <!-- Inner ears -->
+      <circle cx="152" cy="226" r="17" fill="#000"/>
+      <circle cx="360" cy="226" r="17" fill="#000"/>
+      <!-- Eyes -->
+      <circle cx="220" cy="264" r="15" fill="#000"/>
+      <circle cx="292" cy="264" r="15" fill="#000"/>
+      <!-- Room around the terminal window and the nose -->
+      <rect x="69" y="321" width="374" height="146" rx="34" fill="#000"/>
+      <circle cx="256" cy="340" r="30" fill="#000"/>
+    </mask>
+  </defs>
+
+  <g fill="currentColor" mask="url(#cuts)">
+    <!-- Chef's hat and band -->
+    <path d="M 188 184 C 156 172, 152 124, 184 108 C 188 74, 228 58, 256 76 C 284 58, 324 74, 328 108 C 360 124, 356 172, 324 184 Z"/>
+    <rect x="188" y="172" width="136" height="28" rx="8"/>
+    <!-- Ears and face -->
+    <circle cx="152" cy="226" r="44"/>
+    <circle cx="360" cy="226" r="44"/>
+    <path d="M 172 200 H 340 L 316 320 L 256 356 L 196 320 Z"/>
+    <!-- Whiskers -->
+    <g stroke="currentColor" stroke-width="8" stroke-linecap="round">
+      <line x1="118" y1="290" x2="196" y2="302"/>
+      <line x1="394" y1="290" x2="316" y2="302"/>
+    </g>
+  </g>
+
+  <!-- Eye glints -->
+  <circle cx="223" cy="261" r="5" fill="currentColor"/>
+  <circle cx="295" cy="261" r="5" fill="currentColor"/>
+
+  <!-- Terminal window, open at the top where the nose rests on it -->
+  <path d="M 222 336 H 106 A 22 22 0 0 0 84 358 V 430 A 22 22 0 0 0 106 452 H 406 A 22 22 0 0 0 428 430 V 358 A 22 22 0 0 0 406 336 H 290"
+        fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="256" cy="340" r="18" fill="currentColor"/>
+
+  <!-- Matrix brackets, prompt and cursor -->
+  <g fill="none" stroke="currentColor" stroke-width="12">
+    <path d="M 148 368 H 126 V 420 H 148" stroke-linecap="square"/>
+    <path d="M 364 368 H 386 V 420 H 364" stroke-linecap="square"/>
+    <path d="M 188 376 L 216 394 L 188 412" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <rect x="240" y="376" width="28" height="36" rx="4" fill="currentColor"/>
+  <rect x="290" y="382" width="40" height="24" rx="4" fill="none" stroke="currentColor" stroke-width="8"/>
+</svg>

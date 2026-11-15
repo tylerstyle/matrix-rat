@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>matrix-rat</title>
+  <desc>The matrix-rat icon as a line drawing in one colour: it takes the colour of the text around it (currentColor), and has no background. For places that want a symbolic icon, such as notifications and panels.</desc>
+  <defs>
+    <!-- White is kept, black is hidden: the lines that would run behind another shape. -->
+    <mask id="behind" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <!-- The hat ends where its band begins -->
+      <rect x="150" y="172" width="212" height="60" fill="#000"/>
+    </mask>
+    <mask id="behind-face" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#fff"/>
+      <!-- The ears end at the face and at the hat band -->
+      <path d="M 172 206 H 340 L 316 320 H 196 Z" fill="#000" stroke="#000" stroke-width="12" stroke-linejoin="round"/>
+      <rect x="182" y="166" width="148" height="40" rx="10" fill="#000"/>
+    </mask>
+  </defs>
+
+  <g fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Chef's hat and band -->
+    <path mask="url(#behind)" d="M 188 184 C 156 172, 152 124, 184 108 C 188 74, 228 58, 256 76 C 284 58, 324 74, 328 108 C 360 124, 356 172, 324 184"/>
+    <rect x="188" y="172" width="136" height="28" rx="8"/>
+    <!-- Ears -->
+    <g mask="url(#behind-face)">
+      <circle cx="152" cy="226" r="40"/>
+      <circle cx="360" cy="226" r="40"/>
+    </g>
+    <!-- Face: its two sides, down to the terminal window -->
+    <path d="M 172 206 L 195 318"/>
+    <path d="M 340 206 L 317 318"/>
+    <!-- Whiskers -->
+    <line x1="116" y1="288" x2="176" y2="298"/>
+    <line x1="396" y1="288" x2="336" y2="298"/>
+    <!-- Terminal window, open at the top where the nose rests on it -->
+    <path d="M 220 336 H 106 A 22 22 0 0 0 84 358 V 430 A 22 22 0 0 0 106 452 H 406 A 22 22 0 0 0 428 430 V 358 A 22 22 0 0 0 406 336 H 292"/>
+    <circle cx="256" cy="338" r="16"/>
+    <!-- Matrix brackets, prompt and cursor -->
+    <path d="M 148 368 H 126 V 420 H 148" stroke-linecap="square" stroke-linejoin="miter"/>
+    <path d="M 364 368 H 386 V 420 H 364" stroke-linecap="square" stroke-linejoin="miter"/>
+    <path d="M 188 376 L 216 394 L 188 412"/>
+    <rect x="246" y="380" width="26" height="28" rx="4"/>
+  </g>
+  <!-- Eyes -->
+  <circle cx="220" cy="262" r="13" fill="currentColor"/>
+  <circle cx="292" cy="262" r="13" fill="currentColor"/>
+</svg>

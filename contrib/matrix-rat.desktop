@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=matrix-rat
+GenericName=Matrix Client
+Comment=A mouse-friendly, themeable Matrix client for the terminal
+Exec=matrix-rat %u
+Icon=matrix-rat
+Terminal=true
+Categories=Network;InstantMessaging;Chat;ConsoleOnly;
+Keywords=matrix;chat;messenger;im;terminal;tui;
+MimeType=x-scheme-handler/matrix;
+StartupNotify=false
