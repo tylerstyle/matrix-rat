@@ -90,6 +90,8 @@ pub enum Action {
     /// Narrow the room list to the next or previous space ("all rooms" in between).
     SpaceNext,
     SpacePrev,
+    /// Show the info of the space the room list is narrowed to, with its rooms.
+    SpaceInfo,
     /// Toggle the "unread only" quick filter in the room list.
     FilterUnread,
     /// Toggle the "people / direct chats only" quick filter in the room list.

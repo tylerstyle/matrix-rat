@@ -27,7 +27,7 @@ use crate::text::sanitize_line;
 
 /// A room that was joined or created shows up in the room list a moment later. Longer
 /// than this and opening it by itself would come as a surprise.
-const OPEN_WITHIN: Duration = Duration::from_secs(60);
+pub(super) const OPEN_WITHIN: Duration = Duration::from_secs(60);
 pub(super) const NO_ACCOUNT: &str = "The demo has no account to do this with.";
 /// What servers accept for a room name.
 const NAME_MAX: usize = 255;
@@ -38,11 +38,21 @@ pub struct ManageState {
     pending_open: Option<(String, Instant)>,
     /// Numbers the requests whose answers have to find the popup that asked.
     requests: u64,
+    /// The space to select as soon as the room list has it, and since when.
+    pub(super) pending_space: Option<(String, Instant)>,
+    /// The demo's suggested rooms, by space and room id.
+    pub(super) demo_suggested: Vec<(String, String)>,
 }
 
 impl ManageState {
     pub(super) fn record_pending_open(&mut self, room_id: String) {
         self.pending_open = Some((room_id, Instant::now()));
+    }
+
+    /// The number of the request made last.
+    #[cfg(test)]
+    pub(super) fn requests_for_test(&self) -> u64 {
+        self.requests
     }
 }
 
@@ -83,6 +93,7 @@ impl App {
             Action::NewRoom => self.open_new(Stage::Choose),
             Action::InviteUser => self.open_new(Stage::Invite),
             Action::RoomInfo => self.open_info(self.target_room(), None),
+            Action::SpaceInfo => self.open_selected_space_info(),
             Action::LeaveRoom => self.open_info(self.target_room(), Some(InfoRow::Leave)),
             Action::Manage(click) => self.manage_click(click),
             _ => {}
@@ -144,6 +155,13 @@ impl App {
             Some(Modal::New(_)) | None => None,
             Some(_) => return,
         };
+        // A space is not in the room list: its info knows what to invite to.
+        let space = match &self.modal {
+            Some(Modal::RoomInfo(info)) if info.space => {
+                Some((info.room_id.clone(), info.name.clone()))
+            }
+            _ => None,
+        };
         if self.images.viewer_open() {
             return;
         }
@@ -163,7 +181,12 @@ impl App {
         }
         let mut popup = NewPopup::new(stage);
         fill(&mut popup);
-        if stage == Stage::Invite {
+        if stage == Stage::Invite
+            && let Some(space) = space
+        {
+            popup.room = Some(space);
+            popup.into_space = true;
+        } else if stage == Stage::Invite {
             let room = match &from_info {
                 Some(id) => self.rooms.iter().find(|room| room.id == *id),
                 None => self.target_room().and_then(|index| self.rooms.get(index)),
@@ -253,6 +276,32 @@ impl App {
                 let room_id = room_id.ok_or_else(|| "No room to invite to.".to_owned())?;
                 Ok((ManageCmd::Invite { room_id, user_id }, "Inviting…"))
             }),
+            Stage::CreateSpace => (|| {
+                let name = clean_input(popup.name.trim());
+                if name.is_empty() {
+                    return Err("Give the space a name.".to_owned());
+                }
+                if name.len() > NAME_MAX {
+                    return Err("That name is too long.".to_owned());
+                }
+                let alias = if !popup.public {
+                    None
+                } else if popup.alias.trim().trim_start_matches('#').is_empty() {
+                    return Err("A public space needs an address.".to_owned());
+                } else {
+                    Some(parse_alias_local(&popup.alias)?)
+                };
+                let topic = clean_input(popup.topic.trim());
+                Ok((
+                    ManageCmd::CreateSpace {
+                        request,
+                        name,
+                        topic: (!topic.is_empty()).then_some(topic),
+                        alias,
+                    },
+                    "Creating the space…",
+                ))
+            })(),
             Stage::Create => (|| {
                 // Nothing that is not text goes to the server as a name or topic.
                 let name = clean_input(popup.name.trim());
@@ -320,7 +369,7 @@ impl App {
                     popup.go(Stage::CHOICES[popup.choice]);
                     entered = true;
                 }
-                KeyCode::Char(c @ '1'..='4') if plain => {
+                KeyCode::Char(c @ '1'..='5') if plain => {
                     popup.choice = c as usize - '1' as usize;
                     popup.go(Stage::CHOICES[popup.choice]);
                     entered = true;
@@ -726,6 +775,31 @@ impl App {
         }
     }
 
+    /// "Open" in a preview of a room or space we are in: a room opens; a space is
+    /// what the room list is narrowed to, or, deeper than the list goes, its info.
+    fn open_previewed(&mut self) {
+        let Some(Modal::New(popup)) = &self.modal else {
+            return;
+        };
+        let preview = popup.preview.as_ref();
+        let room_id = preview.map_or_else(|| popup.preview_target.clone(), |p| p.room_id.clone());
+        let room = self
+            .find_joined_room(&room_id)
+            .or_else(|| self.find_joined_room(&popup.preview_target));
+        let listed = self.spaces.iter().position(|space| space.id == room_id);
+        let space = preview
+            .filter(|p| p.space)
+            .map(|p| p.name.clone().unwrap_or_default());
+        self.close_manage();
+        if let Some(index) = room {
+            self.open_joined_room_index(index);
+        } else if let Some(at) = listed {
+            self.select_space(Some(at));
+        } else if let Some(name) = space {
+            self.open_space_info(&room_id, &name, None);
+        }
+    }
+
     fn submit_preview_button(&mut self, button: PreviewButton) {
         match button {
             PreviewButton::Cancel => {
@@ -742,21 +816,7 @@ impl App {
                 }
                 return;
             }
-            PreviewButton::Open => {
-                let idx = match &self.modal {
-                    Some(Modal::New(popup)) => popup
-                        .preview
-                        .as_ref()
-                        .and_then(|p| self.find_joined_room(&p.room_id))
-                        .or_else(|| self.find_joined_room(&popup.preview_target)),
-                    _ => None,
-                };
-                self.close_manage();
-                if let Some(index) = idx {
-                    self.open_joined_room_index(index);
-                }
-                return;
-            }
+            PreviewButton::Open => return self.open_previewed(),
             PreviewButton::Accept => {
                 let room_id = match &self.modal {
                     Some(Modal::New(popup)) => popup
@@ -883,6 +943,8 @@ impl App {
         if self.matrix.is_none() {
             popup.details = Some(demo_details(room));
         }
+        let (in_space, can_add) = self.space_context(&room.id);
+        popup.set_space_context(in_space, can_add);
         if let Some(row) = select {
             popup.select(row);
         }
@@ -1089,6 +1151,9 @@ impl App {
         }
         let page = info.page.saturating_sub(1).max(1) as isize;
         let row = info.current();
+        // While the selected row is out of view for a filter that nobody matches,
+        // the keys that would act on it edit the filter.
+        let blind = info.typing_blind();
         match code {
             KeyCode::F(4) if mods.is_empty() => self.close_manage(),
             KeyCode::Up | KeyCode::BackTab => info.step(-1),
@@ -1102,10 +1167,10 @@ impl App {
                 info.reveal = false;
             }
             KeyCode::End => info.step(isize::MAX / 2),
-            KeyCode::Left | KeyCode::Right if row == Some(InfoRow::Notify) && plain => {
+            KeyCode::Left | KeyCode::Right if row == Some(InfoRow::Notify) && plain && !blind => {
                 self.info_activate(InfoRow::Notify, if code == KeyCode::Left { -1 } else { 1 });
             }
-            KeyCode::Left if row == Some(InfoRow::SettingsToggle) && plain => {
+            KeyCode::Left if row == Some(InfoRow::SettingsToggle) && plain && !blind => {
                 if info.settings_open {
                     info.settings_open = false;
                     info.error = None;
@@ -1113,7 +1178,7 @@ impl App {
                     info.reveal = true;
                 }
             }
-            KeyCode::Right if row == Some(InfoRow::SettingsToggle) && plain => {
+            KeyCode::Right if row == Some(InfoRow::SettingsToggle) && plain && !blind => {
                 if !info.settings_open {
                     info.settings_open = true;
                     info.error = None;
@@ -1121,25 +1186,36 @@ impl App {
                     info.reveal = true;
                 }
             }
+            // While a member filter is typed, a space belongs to it.
             KeyCode::Char(' ')
                 if matches!(
                     row,
                     Some(InfoRow::SettingsToggle | InfoRow::Setting(RoomSetting::Direct))
-                ) && plain =>
+                ) && plain
+                    && info.filter.is_empty() =>
             {
                 if let Some(row) = row {
                     self.info_activate(row, 0);
                 }
             }
-            KeyCode::Enter => {
+            // Not on a row that is out of view behind a filter nobody matches.
+            KeyCode::Enter if !blind => {
                 if let Some(row) = row {
                     self.info_activate(row, 0);
                 }
             }
-            KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) => {
+            KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) && plain && !blind => {
                 self.remove_or_unban_member()
             }
-            KeyCode::Delete if matches!(row, Some(InfoRow::KnockRequest(_))) => {
+            KeyCode::Delete if matches!(row, Some(InfoRow::Child(_))) && plain && !blind => {
+                self.remove_child()
+            }
+            KeyCode::Char(' ')
+                if matches!(row, Some(InfoRow::Child(_))) && plain && info.filter.is_empty() =>
+            {
+                self.toggle_child_suggested();
+            }
+            KeyCode::Delete if matches!(row, Some(InfoRow::KnockRequest(_))) && plain && !blind => {
                 self.decline_knock()
             }
             KeyCode::Char('i')
@@ -1149,6 +1225,7 @@ impl App {
             }
             KeyCode::Char('b')
                 if mods == KeyModifiers::ALT
+                    && !blind
                     && matches!(row, Some(InfoRow::Member(_) | InfoRow::KnockRequest(_))) =>
             {
                 self.open_ban_prompt();
@@ -1160,9 +1237,14 @@ impl App {
             }
             _ => {
                 let keys = EditKeys {
-                    arrows: row != Some(InfoRow::Notify) && row != Some(InfoRow::SettingsToggle),
+                    arrows: blind
+                        || (row != Some(InfoRow::Notify) && row != Some(InfoRow::SettingsToggle)),
                     home_end: false,
-                    delete: !matches!(row, Some(InfoRow::Member(_) | InfoRow::KnockRequest(_))),
+                    delete: blind
+                        || !matches!(
+                            row,
+                            Some(InfoRow::Member(_) | InfoRow::KnockRequest(_) | InfoRow::Child(_))
+                        ),
                     kill_to_end: true,
                 };
                 info.apply_filter(|f| f.handle_key(code, mods, keys));
@@ -1245,6 +1327,7 @@ impl App {
                     info.selected = index;
                     info.confirm = None;
                 }
+                info.blind = false;
                 match click {
                     Click::Row(_) => self.info_activate(row, 0),
                     Click::Step(_, step) => self.info_activate(row, step),
@@ -1297,6 +1380,22 @@ impl App {
             Click::AddressPublishAlt(idx) => self.publish_alt_alias_at(idx),
             Click::AddressUnpublish(idx) => self.unpublish_alias_at(idx),
             Click::AddressDeleteLocal(idx) => self.delete_local_alias_at(idx),
+            Click::AddToSpace => self.add_target_room_to_space(),
+            // Asked in the room's info, as leaving is.
+            Click::RemoveFromSpace => {
+                self.open_info(self.target_room(), Some(InfoRow::RemoveFromSpace));
+            }
+            Click::AddRoomToSpace => self.add_room_to_selected_space(),
+            Click::ChildOpen => {
+                if let Some(Modal::RoomInfo(info)) = &self.modal
+                    && info.busy.is_none()
+                    && let Some(row @ InfoRow::Child(_)) = info.current()
+                {
+                    self.open_child(row);
+                }
+            }
+            Click::ChildSuggest => self.toggle_child_suggested(),
+            Click::ChildRemove => self.remove_child(),
             Click::PermSet(row_idx, level) => {
                 if let Some(Modal::RoomInfo(info)) = &mut self.modal
                     && info.busy.is_none()
@@ -1367,6 +1466,11 @@ impl App {
                 | InfoRow::Pinned
                 | InfoRow::SettingsToggle
                 | InfoRow::Member(_)
+                // The demo changes its own space.
+                | InfoRow::AddToSpace
+                | InfoRow::RemoveFromSpace
+                | InfoRow::AddChild
+                | InfoRow::Child(_)
         ) && !matches!(row, InfoRow::Setting(s) if s != RoomSetting::Direct);
         if sends && !connected {
             info.error = Some(NO_ACCOUNT.to_owned());
@@ -1456,6 +1560,27 @@ impl App {
                 (ManageCmd::Leave { room_id }, Pending::Leave, "Leaving…")
             }
             InfoRow::KnockRequest(_) => return self.accept_knock(),
+            InfoRow::AddToSpace => return self.add_to_space_from_info(),
+            InfoRow::RemoveFromSpace => {
+                match &info.in_space {
+                    None => return,
+                    Some(space) if !space.can_edit => {
+                        info.error = Some(format!(
+                            "You are not allowed to take rooms out of {}.",
+                            space.name
+                        ));
+                        return;
+                    }
+                    Some(_) => {}
+                }
+                if confirmed != Some(Confirm::RemoveFromSpace) {
+                    info.confirm = Some(Confirm::RemoveFromSpace);
+                    return;
+                }
+                return self.remove_from_selected_space();
+            }
+            InfoRow::AddChild => return self.add_child_from_info(),
+            InfoRow::Child(_) => return self.open_child(row),
             InfoRow::SettingsToggle => {
                 info.settings_open = !info.settings_open;
                 info.reveal = true;
@@ -1935,6 +2060,12 @@ impl App {
         fallback_toast: &str,
         open_toast: Option<&str>,
     ) {
+        // What the preview said: a space is not in the room list once we are in it.
+        let space = matches!(
+            &self.modal,
+            Some(Modal::New(popup)) if popup.request == Some(request)
+                && popup.preview.as_ref().is_some_and(|preview| preview.space)
+        );
         let asked = match &mut self.modal {
             Some(Modal::New(popup)) if popup.request == Some(request) => {
                 popup.request = None;
@@ -1947,6 +2078,12 @@ impl App {
         match (result, asked) {
             (Ok(room_id), true) => {
                 self.close_manage();
+                if space {
+                    // Joined, it is selected once the list of spaces has it; asked
+                    // to join, it waits in the room list as a request does.
+                    self.manage.pending_space = Some((room_id.clone(), Instant::now()));
+                    self.select_pending_space();
+                }
                 self.manage.pending_open = Some((room_id, Instant::now()));
                 self.open_pending_room();
                 if let Some(toast) = open_toast {
@@ -1989,15 +2126,18 @@ impl App {
                 if let Ok(ref preview) = result
                     && preview.membership == PreviewMembership::None
                 {
-                    membership_override =
-                        self.rooms
-                            .iter()
-                            .find(|r| r.id == preview.room_id)
-                            .map(|r| match r.kind {
-                                RoomKind::Invite => PreviewMembership::Invited,
-                                RoomKind::Knock => PreviewMembership::Knocked,
-                                _ => PreviewMembership::Joined,
-                            });
+                    // A space we are in is among the spaces, not the rooms.
+                    let space = self.spaces.iter().any(|space| space.id == preview.room_id);
+                    membership_override = self
+                        .rooms
+                        .iter()
+                        .find(|r| r.id == preview.room_id)
+                        .map(|r| match r.kind {
+                            RoomKind::Invite => PreviewMembership::Invited,
+                            RoomKind::Knock => PreviewMembership::Knocked,
+                            _ => PreviewMembership::Joined,
+                        })
+                        .or(space.then_some(PreviewMembership::Joined));
                 }
                 if let Some(Modal::New(popup)) = &mut self.modal
                     && popup.stage == Stage::Preview
@@ -2078,6 +2218,17 @@ impl App {
                 change,
                 result,
             } => self.on_change_done(&room_id, change, result),
+            ManageEvent::SpaceCreated { request, result } => {
+                self.on_space_created(request, result);
+            }
+            ManageEvent::SpaceEdited {
+                request,
+                space_id,
+                child_id,
+                edit,
+                result,
+            } => self.on_space_edited(request, &space_id, &child_id, edit, result),
+            ManageEvent::Gone { room_id } => self.info_gone(&room_id),
             ManageEvent::Info { room_id, result } => {
                 if let Some(Modal::RoomInfo(info)) = &mut self.modal
                     && info.room_id == room_id
@@ -2215,9 +2366,13 @@ impl App {
     /// what a room offers, a room that is gone takes its popup with it.
     fn follow_room_list(&mut self) {
         let (room_id, leaving) = match &self.modal {
+            // A space is not in the room list; `follow_spaces` keeps its info.
+            Some(Modal::RoomInfo(info)) if info.space => return,
             Some(Modal::RoomInfo(info)) => {
                 (info.room_id.clone(), info.pending == Some(Pending::Leave))
             }
+            // Spaces are not in the room list.
+            Some(Modal::New(popup)) if popup.stage == Stage::Invite && popup.into_space => return,
             Some(Modal::New(popup)) if popup.stage == Stage::Invite => match &popup.room {
                 Some((id, _)) => (id.clone(), false),
                 None => return,
@@ -2244,6 +2399,21 @@ impl App {
                 self.show_toast("You are no longer in that room");
             }
         }
+    }
+
+    /// The worker says that we are no longer in the room whose info is open: the info
+    /// closes, as when the room leaves the room list. Our own leaving closes it when
+    /// its answer is there.
+    fn info_gone(&mut self, room_id: &str) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if info.room_id != room_id || info.pending == Some(Pending::Leave) {
+            return;
+        }
+        let what = if info.space { "space" } else { "room" };
+        self.close_manage();
+        self.show_toast(format!("You are no longer in that {what}"));
     }
 
     /// Opens the room that was just joined or created, once the room list has it.
@@ -3430,6 +3600,86 @@ mod tests {
                 result: Ok(Box::new(details())),
             },
         );
+    }
+
+    #[test]
+    fn keys_typed_into_a_member_filter_that_nobody_matches_never_change_the_room() {
+        let (mut app, _terminal, mut commands) = connected();
+        with_info(&mut app, &mut commands);
+        let select = |app: &mut App, row: InfoRow| {
+            if let Some(Modal::RoomInfo(info)) = &mut app.modal {
+                info.settings_open = true;
+                info.select(row);
+            }
+            assert_eq!(info(app).current(), Some(row));
+        };
+        let direct = InfoRow::Setting(RoomSetting::Direct);
+        // Nobody is called "zed": the selection stays on the setting, and the space
+        // is part of the filter.
+        select(&mut app, direct);
+        type_text(&mut app, "zed q");
+        assert_eq!(info(&app).filter.as_str(), "zed q");
+        assert_eq!(info(&app).current(), Some(direct));
+        assert!(sent(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Esc));
+        assert!(info(&app).filter.is_empty());
+        // So on the line of the settings, where the arrows move in the filter too, as
+        // they do on the notification level.
+        for row in [InfoRow::SettingsToggle, InfoRow::Notify] {
+            select(&mut app, row);
+            type_text(&mut app, "zz z");
+            app.on_event(key(KeyCode::Left));
+            app.on_event(key(KeyCode::Right));
+            assert_eq!(info(&app).filter.as_str(), "zz z");
+            assert!(info(&app).settings_open);
+            assert!(sent(&mut commands).is_empty(), "{row:?}");
+            app.on_event(key(KeyCode::Esc));
+        }
+        // A member's row takes Del only without Ctrl or Alt.
+        select(&mut app, InfoRow::Member(2));
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::CONTROL,
+        )));
+        assert!(info(&app).confirm.is_none());
+        assert!(sent(&mut commands).is_empty());
+
+        // Enter does not run a row that is out of view: not Leave, not a setting.
+        for row in [InfoRow::Leave, direct, InfoRow::Favourite] {
+            select(&mut app, row);
+            type_text(&mut app, "zed");
+            assert!(info(&app).typing_blind());
+            app.on_event(key(KeyCode::Enter));
+            assert!(info(&app).confirm.is_none(), "{row:?}");
+            assert_eq!(info(&app).filter.as_str(), "zed");
+            assert!(sent(&mut commands).is_empty(), "{row:?}");
+            app.on_event(key(KeyCode::Esc));
+        }
+        // Up from the first row while it is out of view brings it into view.
+        if let Some(Modal::RoomInfo(info)) = &mut app.modal {
+            info.selected = 0;
+        }
+        type_text(&mut app, "zed");
+        assert!(info(&app).typing_blind());
+        app.on_event(key(KeyCode::Up));
+        assert!(!info(&app).typing_blind());
+        assert!(info(&app).reveal && info(&app).selected == 0);
+        app.on_event(key(KeyCode::Esc));
+
+        // Chosen with the arrows, a row is in view again, however low the window.
+        let mut short = Terminal::new(TestBackend::new(100, 18)).unwrap();
+        select(&mut app, direct);
+        type_text(&mut app, "zed");
+        assert!(info(&app).typing_blind());
+        find(&screen(&mut app, &mut short), "⌕ zed");
+        for _ in 0..20 {
+            if info(&app).current() == Some(InfoRow::Leave) {
+                break;
+            }
+            app.on_event(key(KeyCode::Up));
+        }
+        assert!(!info(&app).typing_blind());
+        find(&screen(&mut app, &mut short), "Leave room");
     }
 
     #[test]
@@ -5216,7 +5466,7 @@ mod tests {
 
         // Choosing option 4 opens Browse with own HS hint and searches immediately.
         app.on_event(ctrl('n'));
-        app.on_event(key(KeyCode::Char('4')));
+        app.on_event(key(KeyCode::Char('5')));
         match &app.modal {
             Some(Modal::New(popup)) => {
                 assert_eq!(popup.stage, Stage::Browse);
@@ -5420,6 +5670,7 @@ mod tests {
             world_readable: false,
             membership: PreviewMembership::None,
             via: vec!["other.org".into()],
+            space: false,
         };
         for dbg in [
             format!("{page1:?}"),
@@ -5478,7 +5729,7 @@ mod tests {
 
         // Browse -> Enter on unjoined knock room -> Preview -> Esc back to Browse -> Re-enter -> Knock.
         app.on_event(ctrl('n'));
-        app.on_event(key(KeyCode::Char('4')));
+        app.on_event(key(KeyCode::Char('5')));
         let g = app.dir_search_gen;
         all_commands(&mut commands);
         app.on_matrix(MatrixEvent::DirectoryResults(DirectoryPage {
@@ -5525,6 +5776,7 @@ mod tests {
                     world_readable: false,
                     membership: PreviewMembership::None,
                     via: vec!["other.org".into()],
+                    space: false,
                 })),
             },
         );
@@ -5555,6 +5807,7 @@ mod tests {
                     world_readable: false,
                     membership: PreviewMembership::None,
                     via: vec!["other.org".into()],
+                    space: false,
                 })),
             },
         );
@@ -5678,6 +5931,7 @@ mod tests {
             world_readable: false,
             membership: PreviewMembership::None,
             via: vec![],
+            space: false,
         };
 
         let cases = [

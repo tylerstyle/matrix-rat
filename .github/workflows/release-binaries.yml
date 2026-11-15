@@ -1,0 +1,96 @@
+# Builds matrix-rat for Linux when a release is published and attaches the archives
+# to it. Run by hand (Actions → Release binaries → Run workflow) it only builds and
+# keeps the archives with the run, to try the recipe without touching a release.
+#
+# The actions are pinned to exact commits: a tag can be moved, a commit cannot.
+# Building and publishing are separate jobs: the build runs code from many crates
+# (build scripts, macros) and never holds a token that can write.
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ubuntu the runners offer: the binary needs no newer glibc (2.35)
+          # than that, so it runs on every current distribution.
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      # TLS (aws-lc) and SQLite are compiled from their sources during the build.
+      - name: Build tools
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y cmake perl pkg-config
+
+      # A release whose tag and Cargo.toml disagree would get archives named for
+      # another version.
+      - name: The tag is this version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          [ "$TAG" = "v$version" ] || { echo "tag $TAG, but Cargo.toml says $version"; exit 1; }
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Pack
+        id: pack
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          name="matrix-rat-$version-${{ matrix.target }}"
+          mkdir "$name"
+          cp target/release/matrix-rat README.md LICENSE NOTICE "$name/"
+          mkdir "$name/share"
+          cp contrib/matrix-rat.desktop assets/icon.svg assets/icon-outline.svg assets/icon-256.png "$name/share/"
+          "$name/matrix-rat" --version
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: |
+            ${{ steps.pack.outputs.name }}.tar.gz
+            ${{ steps.pack.outputs.name }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Attach to the release
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      # To attach the archives to the release; nothing else is written.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" matrix-rat-*.tar.gz matrix-rat-*.tar.gz.sha256 --clobber

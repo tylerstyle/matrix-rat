@@ -24,6 +24,7 @@ mod previews;
 mod rooms;
 mod safety;
 pub mod search;
+mod spaces;
 mod thread;
 mod thread_list;
 mod unread;
@@ -54,7 +55,7 @@ use crate::matrix::{
     SyncStatus,
 };
 use crate::modal::{
-    EmojiPicker, LoginForm, Modal, RecoveryForm, ReportForm, Setting, SettingsMenu,
+    EmojiPicker, LoginForm, Modal, Pick, RecoveryForm, ReportForm, Setting, SettingsMenu,
 };
 use crate::model::{
     ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, SendState, demo_rooms,
@@ -1311,6 +1312,7 @@ impl App {
                     | Modal::PollForm(_)
                     | Modal::PollVote(_)
                     | Modal::Stickers(_)
+                    | Modal::Emoji(_)
                     | Modal::Details(_)
                     | Modal::Threads(_)
                     | Modal::Keywords(_)
@@ -1555,6 +1557,10 @@ impl App {
         // is that space, else wherever it went. Gone means all rooms.
         let selected = self.space.take();
         let was_at = self.space_at.take();
+        let shown_listed = match &self.modal {
+            Some(Modal::RoomInfo(info)) => self.spaces.iter().any(|s| s.id == info.room_id),
+            _ => false,
+        };
         self.spaces = spaces;
         let at = selected.and_then(|id| {
             was_at
@@ -1565,6 +1571,9 @@ impl App {
         self.set_space(at);
         let last = self.visible_rooms().len().saturating_sub(1);
         self.sidebar.cursor = self.sidebar.cursor.min(last);
+        // First the new selection, which an open room info then follows.
+        self.select_pending_space();
+        self.follow_spaces(shown_listed);
     }
 
     /// Ctrl-↑/↓: opens the neighbouring room in the list, wrapping at the ends, and
@@ -2017,6 +2026,11 @@ impl App {
     /// Called after each draw: loads older messages when the view shows the oldest
     /// loaded one, and newer ones when at the bottom of a detached slice.
     pub fn after_draw(&mut self) {
+        // A custom emoji's picture travelled in a cell that was painted over: drawn
+        // again, with another copy carrying it (see `ImageStore::verify`).
+        if self.images.take_redraw() {
+            self.dirty = true;
+        }
         self.maybe_mark_read();
         self.maybe_load_older();
         self.maybe_load_newer();
@@ -2257,6 +2271,20 @@ impl App {
     }
 
     fn toggle_reaction(&mut self, msg: usize, key: &str) {
+        // A custom emoji goes by its address; its name goes along for other clients to
+        // show where they do not know the picture. The key itself is sent as it is: an
+        // own reaction is taken back by exactly its key.
+        let address = key.trim();
+        let shortcode = crate::matrix::is_valid_mxc(address)
+            .then(|| self.emotes.catalog.shortcode_for_url(address))
+            .flatten()
+            .map(str::to_owned);
+        self.toggle_reaction_named(msg, key, shortcode);
+    }
+
+    /// [`App::toggle_reaction`], with the `shortcode` a custom emoji was chosen by: two
+    /// packs may name the same picture differently.
+    fn toggle_reaction_named(&mut self, msg: usize, key: &str, shortcode: Option<String>) {
         if self.matrix.is_some() {
             let item = self.messages().get(msg).and_then(|m| m.item.clone());
             if let (Some(item), Some(room_id)) = (item, self.room_id()) {
@@ -2264,6 +2292,7 @@ impl App {
                     room_id,
                     item,
                     key: key.to_owned(),
+                    shortcode,
                 });
             }
             return;
@@ -2563,7 +2592,10 @@ impl App {
                     && self.modal.is_none()
                     && let Some(message) = self.messages().get(i)
                 {
-                    let picker = EmojiPicker::for_reaction(i, message.id.clone());
+                    let mut picker = EmojiPicker::for_reaction(i, message.id.clone());
+                    // Custom emoji too; the packs are loaded now if they were not yet.
+                    self.want_emotes();
+                    picker.set_custom(&self.emotes.catalog);
                     self.open_modal(Modal::Emoji(picker));
                 }
             }
@@ -2651,7 +2683,10 @@ impl App {
             Action::OpenEmoji => {
                 if self.modal.is_none() {
                     self.set_focus(Pane::Composer);
-                    self.open_modal(Modal::Emoji(EmojiPicker::default()));
+                    self.want_emotes();
+                    let mut picker = EmojiPicker::default();
+                    picker.set_custom(&self.emotes.catalog);
+                    self.open_modal(Modal::Emoji(picker));
                 }
             }
             Action::LoginSubmit => self.submit_login(false),
@@ -2727,6 +2762,7 @@ impl App {
             }
             Action::NewRoom
             | Action::RoomInfo
+            | Action::SpaceInfo
             | Action::LeaveRoom
             | Action::InviteUser
             | Action::Manage(_) => self.perform_manage(action),
@@ -2822,7 +2858,6 @@ impl App {
             Some(
                 Modal::Emoji(_)
                 | Modal::Settings(_)
-                | Modal::Palette(_)
                 | Modal::Keybinds(_)
                 | Modal::IgnoredUsers(_)
                 | Modal::Report(_)
@@ -2835,6 +2870,7 @@ impl App {
             ) => {
                 self.modal = None;
             }
+            Some(Modal::Palette(_)) => self.close_palette(),
             Some(Modal::Search(_)) => self.close_search(),
             Some(Modal::GlobalSearch(_)) => self.close_global_search(),
             Some(Modal::Verify(_)) => self.verify_escape(),
@@ -2851,15 +2887,33 @@ impl App {
         }
     }
 
-    /// An emoji was chosen in the picker: react with it, or put it in the draft.
-    fn pick_emoji(&mut self, emoji: &str) {
+    /// Result `at` of the picker was chosen: react with it, or put it in the draft.
+    fn pick_emoji(&mut self, at: usize) {
+        let Some(Modal::Emoji(picker)) = &self.modal else {
+            return;
+        };
+        let Some(pick) = picker.results.get(at).copied() else {
+            return;
+        };
+        let custom = picker.custom_at(at).cloned();
         let Some(Modal::Emoji(picker)) = self.modal.take() else {
             return;
         };
         let Some((index, id)) = picker.react_to else {
             self.set_focus(Pane::Composer);
-            self.insert_composer_text(emoji);
+            match (pick, custom) {
+                (Pick::Custom(_), Some(custom)) => self.insert_custom_emoji(&custom),
+                (Pick::Unicode(emoji), _) => self.insert_composer_text(emoji.as_str()),
+                (Pick::Custom(_), None) => {}
+            }
             return;
+        };
+        // A custom emoji reacts by its address, with the name it was chosen by (see
+        // `toggle_reaction`).
+        let (key, shortcode) = match (pick, custom) {
+            (Pick::Custom(_), Some(custom)) => (custom.url, Some(custom.shortcode)),
+            (Pick::Unicode(emoji), _) => (emoji.as_str().to_owned(), None),
+            (Pick::Custom(_), None) => return,
         };
         // The message may have moved while the picker was open.
         let index = if id.is_empty() {
@@ -2868,8 +2922,32 @@ impl App {
             self.messages().iter().position(|m| m.id == id)
         };
         if let Some(index) = index {
-            self.toggle_reaction(index, emoji);
+            self.toggle_reaction_named(index, &key, shortcode);
         }
+    }
+
+    /// Puts a custom emoji into the draft as an accepted `:` completion would, so that
+    /// it is sent as its picture. It is set apart from a word before it: a shortcode
+    /// in the middle of a word stays text.
+    fn insert_custom_emoji(&mut self, emoji: &crate::matrix::CustomEmoji) {
+        let cursor = self.composer.cursor();
+        let after_word = self.composer.text()[..cursor]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace());
+        if after_word {
+            self.insert_composer_text(" ");
+        }
+        let at = self.composer.cursor();
+        let target = crate::complete::Target::CustomEmoji {
+            shortcode: emoji.shortcode.clone(),
+            url: emoji.url.clone(),
+        };
+        let (text, mark) = crate::complete::replacement(self.composer.text(), &(at..at), &target);
+        self.composer.replace_range(at..at, &text);
+        self.adjust_marks_for_splice(at, at, self.composer.cursor());
+        self.complete.marks.extend(mark);
+        self.sync_completion();
     }
 
     fn on_modal_key(&mut self, key: KeyEvent, code: KeyCode, mods: KeyModifiers) {
@@ -2910,21 +2988,19 @@ impl App {
                 }
             },
             Some(Modal::Emoji(picker)) => {
-                let columns = picker.columns.max(1) as isize;
-                let page = columns * picker.rows.max(1) as isize;
+                let page = picker.rows.max(1) as isize;
                 match code {
                     KeyCode::Esc => self.modal = None,
                     KeyCode::Enter => {
-                        if let Some(emoji) = picker.selected() {
-                            self.pick_emoji(emoji.as_str());
-                        }
+                        let selected = picker.selected;
+                        self.pick_emoji(selected);
                     }
                     KeyCode::Left if plain => picker.step(-1),
                     KeyCode::Right if plain => picker.step(1),
-                    KeyCode::Up => picker.step(-columns),
-                    KeyCode::Down => picker.step(columns),
-                    KeyCode::PageUp => picker.step(-page),
-                    KeyCode::PageDown => picker.step(page),
+                    KeyCode::Up => picker.step_rows(-1),
+                    KeyCode::Down => picker.step_rows(1),
+                    KeyCode::PageUp => picker.step_rows(-page),
+                    KeyCode::PageDown => picker.step_rows(page),
                     _ => {
                         // Plain Left/Right step the emoji grid; word motion and
                         // line-edit shortcuts still edit the search query.
@@ -3160,6 +3236,7 @@ impl App {
                 self.images.on_loaded(&key, full, result);
             }
             MatrixEvent::Avatar { url, result } => self.images.on_avatar(&url, result),
+            MatrixEvent::EmotePicture { url, result } => self.images.on_emote(&url, result),
             MatrixEvent::LinkPreview { url, result } => self.on_link_preview(&url, result),
             MatrixEvent::Spaces(_) if self.logged_out => {}
             MatrixEvent::Spaces(spaces) => self.apply_spaces(spaces),
@@ -3214,8 +3291,8 @@ impl App {
                 note,
             } => self.on_search_results(generation, hits, done, note),
             MatrixEvent::IgnoredUsers(users) => self.on_ignored_users_list(users),
-            MatrixEvent::EmotePacks(_) if self.logged_out => {}
-            MatrixEvent::EmotePacks(catalog) => self.on_emote_packs(catalog),
+            MatrixEvent::EmotePacks { .. } if self.logged_out => {}
+            MatrixEvent::EmotePacks { room_id, catalog } => self.on_emote_packs(room_id, catalog),
             MatrixEvent::Threads(page) => self.on_threads(page),
             MatrixEvent::ThreadsFailed {
                 room_id,
@@ -3785,7 +3862,6 @@ impl App {
                             Some(
                                 Modal::Emoji(_)
                                     | Modal::Settings(_)
-                                    | Modal::Palette(_)
                                     | Modal::Keybinds(_)
                                     | Modal::IgnoredUsers(_)
                                     | Modal::Report(_)
@@ -3821,6 +3897,10 @@ impl App {
                             self.close_global_search();
                         }
                         self.close_manage();
+                        // Like Esc: a picker goes back to the room info it came from.
+                        if matches!(self.modal, Some(Modal::Palette(_))) {
+                            self.close_palette();
+                        }
                     }
                     Some(HitId::Field(slot)) => match &mut self.modal {
                         Some(Modal::Login(form)) if form.busy.is_none() => form.focus_slot(slot),
@@ -3843,15 +3923,7 @@ impl App {
                             .map_or(0, |(rect, _)| mouse.column.saturating_sub(rect.x) as usize);
                         self.click_input(target, rel_col);
                     }
-                    Some(HitId::Emoji(index)) => {
-                        let emoji = match &self.modal {
-                            Some(Modal::Emoji(picker)) => picker.results.get(index).copied(),
-                            _ => None,
-                        };
-                        if let Some(emoji) = emoji {
-                            self.pick_emoji(emoji.as_str());
-                        }
-                    }
+                    Some(HitId::Emoji(index)) => self.pick_emoji(index),
                     Some(HitId::Setting(index, delta)) => {
                         if let Some(Modal::Settings(menu)) = &mut self.modal
                             && let Some(setting) = Setting::ALL.get(index).copied()
@@ -4181,6 +4253,7 @@ impl App {
             InputTarget::EmojiQuery => {
                 if let Some(Modal::Emoji(picker)) = &mut self.modal {
                     picker.query.place(rel_col, false);
+                    picker.goal = None;
                 }
             }
             InputTarget::PaletteQuery => {
@@ -4498,6 +4571,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     }
     app.startup_target = target;
     if demo {
+        app.add_demo_space();
         app.maybe_open_startup_target();
     }
     let notify_icons = Arc::new(crate::notify::IconCache::new(paths.notify_icons_dir()));
@@ -5674,7 +5748,15 @@ mod tests {
         app.on_event(key(KeyCode::Char('r')));
         app.on_event(key(KeyCode::Enter));
         app.on_event(key(KeyCode::Delete));
-        assert_eq!(drain(&mut commands), ["ToggleReaction(!a)", "Redact(!a)"]);
+        // The reaction picker asks for the image packs, for their custom emoji.
+        assert_eq!(
+            drain(&mut commands),
+            [
+                "EnsureEmotePacks(has_room: true)",
+                "ToggleReaction(!a)",
+                "Redact(!a)"
+            ]
+        );
         // Nothing changes locally; the worker's next update shows the result.
         assert_eq!(app.rooms[0].messages.len(), 2);
 
@@ -6631,6 +6713,7 @@ mod tests {
             name: name.into(),
             level,
             rooms: rooms.iter().map(|r| (*r).to_owned()).collect(),
+            ..Default::default()
         };
         // No spaces: no header line, and the key says so.
         app.on_event(key_mod(KeyCode::Char('s'), KeyModifiers::ALT));
@@ -7259,6 +7342,7 @@ mod tests {
             name: "Space".into(),
             level: 0,
             rooms: vec!["!a".into()],
+            ..Default::default()
         }]));
         app.select_space(Some(0));
         assert!(app.space.is_some());
@@ -8172,6 +8256,7 @@ mod tests {
             name: "Friends".into(),
             level: 0,
             rooms: vec!["!dmfav".into(), "!open".into()],
+            ..Default::default()
         }]));
         app.select_space(Some(0));
         assert_eq!(names(&app), ["Alice", "OpenChannel"]);
@@ -8246,12 +8331,14 @@ mod tests {
                 name: "Work".into(),
                 level: 0,
                 rooms: vec!["!rp".into(), "!rs".into()],
+                ..Default::default()
             },
             SpaceSummary {
                 id: "!team".into(),
                 name: "Team".into(),
                 level: 1,
                 rooms: vec!["!rs".into(), "!rm".into(), "!rsh".into()],
+                ..Default::default()
             },
             // Second top-level space Play shares !rsh and contains marked-unread !rmk.
             SpaceSummary {
@@ -8259,6 +8346,7 @@ mod tests {
                 name: "Play".into(),
                 level: 0,
                 rooms: vec!["!rsh".into(), "!rmk".into()],
+                ..Default::default()
             },
         ]));
 

@@ -28,7 +28,7 @@ notifications and themes that follow your desktop are all there.
 | | |
 |---|---|
 | 🔐 **Private by default** | End-to-end encryption, device verification by emoji comparison, recovery key, and warnings on messages that cannot be fully trusted. See where your account is logged in and sign sessions out, check your key backup, move message keys between devices in a file, and read why a message could not be decrypted. |
-| 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list (kitty graphics only; coloured initials otherwise). |
+| 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list and custom emoji in the text (kitty graphics only; coloured initials and `:names:` otherwise). |
 | 💬 **Everything a chat needs** | Replies, edits, reactions, threads, polls, stickers and custom emoji, mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
 | 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread to come back to it later (your other clients see that too), or everything as read. |
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, or `Alt-I` for the picture in the clipboard; `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
@@ -82,6 +82,22 @@ nix-env -if .                 # or install into your profile
 ```
 Hype it, like it, use it and when traction hits critical, we'll go to nixpkgs.
 
+**A ready-made binary** (Linux on x86-64 or ARM64, glibc 2.35 or newer, which means
+Ubuntu 22.04, Debian 12, Fedora 36 and later): releases from 0.7.0 on carry a
+`matrix-rat-<version>-<target>.tar.gz` and its `.sha256` on the
+[releases page](https://github.com/tylerstyle/matrix-rat/releases).
+
+```sh
+f=matrix-rat-0.7.0-x86_64-unknown-linux-gnu   # the archive you downloaded, without .tar.gz
+sha256sum -c $f.tar.gz.sha256                 # the file is the one that was built
+tar -xzf $f.tar.gz
+install -Dm755 $f/matrix-rat ~/.local/bin/matrix-rat
+```
+
+The archive also holds the launcher entry and the icon (`share/`), to copy if you want
+them: see [`assets/`](assets/README.md). The binaries are built by the workflow in
+`.github/workflows/release-binaries.yml` from the tagged source.
+
 **With Cargo** (Rust 1.96 or newer, plus a C compiler, `make`, `cmake` and `perl`):
 
 ```sh
@@ -93,6 +109,27 @@ The Nix package also installs a launcher entry and the icon, so matrix-rat shows
 application launchers (it opens in your terminal) and can be chosen as the program for
 `matrix:` links. With Cargo, copy them yourself if you want them: see
 [`assets/`](assets/README.md).
+
+**On Windows**: there is no Windows build and none is planned, but matrix-rat runs in
+[WSL](https://learn.microsoft.com/windows/wsl/install), the Linux environment Windows
+ships. Nobody here has tried it, so take this as a starting point:
+
+```powershell
+wsl --install -d Ubuntu-24.04      # once, in PowerShell; then open "Ubuntu" from the Start menu
+```
+
+Inside Ubuntu, install the ready-made binary as described above (it needs Ubuntu 22.04
+or newer), and run `matrix-rat` in Windows Terminal. What to expect there:
+
+- Pictures are drawn with coloured blocks (Windows Terminal has no kitty graphics).
+- Notifications come through the terminal, not as Windows notifications: there is no
+  Linux desktop to send them to.
+- Opening a link, a picture or a file in a Windows program (`o`, `O`) needs `xdg-open`
+  to lead to Windows: `sudo apt install wslu` provides that.
+- Copying (`c`, `C`) works through the terminal. Pasting a picture (`Alt-I`) needs
+  `wl-clipboard` and may not see the Windows clipboard.
+- Your login and message store stay inside the Linux environment
+  (`~/.local/share/matrix-rat`).
 
 **Just try it**, without an account and without installing:
 
@@ -129,9 +166,9 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
-| `Ctrl-N` | join a room, browse public rooms, start a chat (search people by name or ID), create a room (`info` or `Enter` for User info) |
+| `Ctrl-N` | join a room, browse public rooms, start a chat (search people by name or ID), create a room or a space (`info` or `Enter` for User info) |
 | `F4` | room details, Room settings (join rule, history, encryption, picture, addresses, direct chat, permissions), join requests, members (`Enter` on a member for User info) |
-| `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`) |
+| `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`); right-click the header for the space's info and its rooms (see Spaces below) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
 | `Alt-I` | attach the picture in the clipboard (a screenshot, a picture copied in the browser); needs `wl-clipboard` on Wayland or `xclip` on X11 |
@@ -323,7 +360,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
@@ -361,6 +398,18 @@ Setting `preset = "vim"` keeps the default keys and adds:
 
 ## Good to know
 
+- **Spaces** narrow the room list (`Alt-S`, or the line above the list). Right-click
+  that line, or `Ctrl-P` "Space info", for the space's info: name, topic, members and
+  settings as for a room, and its **Rooms**, marked when you are not in one or when
+  the space suggests it. `Enter` opens a room (or previews one you are not in, to join
+  from), `Space` marks it suggested or not, `Del` twice takes it out of the space, and
+  "Add a room…" picks one of your rooms or spaces to put in. A room's menu, its info
+  and `Ctrl-P` offer "Add to a space…" and, while the list is narrowed to a space the
+  room is in, "Remove from" that space. `Ctrl-N` creates a space; an invitation to one
+  is with the other invitations, and once accepted the space is in the list of spaces.
+  Changing what is in a space takes the right to do so there; where you may change the
+  room as well, it names the space as its parent too. The demo (`--demo`) has a space to
+  try all this on.
 - **Bridged chats** (Signal, WhatsApp…) show a quiet "sent on the sender's behalf" remark:
   the bridge encrypts for the people on the other side.
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
@@ -447,12 +496,18 @@ Setting `preset = "vim"` keeps the default keys and adds:
 - **Custom emoji and stickers** come from image packs: your own, the open room's, and
   those of other rooms you switched on for everywhere (packs are made in another client,
   such as Cinny or FluffyChat). They are loaded the first time something needs them
-  (typing `:` and two letters, or the sticker picker), not at start. Custom emoji in
-  messages show as their `:shortcode:` text, not as pictures; a reaction with one shows
-  its shortcode when your packs know it, else `:?:`. Choosing one from the `:`
-  completions sends it as a picture to other clients. Stickers show as small pictures;
-  "Send a sticker…" in the command palette (or `/sticker`, with words to filter by)
-  lists yours by name.
+  (typing `:` and two letters, the emoji picker, the sticker picker, or a room with a
+  reaction made with a custom emoji), not at start.
+  With the kitty graphics protocol, custom emoji in messages and on reactions show as
+  small pictures, two columns wide like any emoji. Until a picture has arrived, when it
+  cannot be loaded, in other terminals and with pictures off, an emoji shows as its
+  `:shortcode:`, and a reaction with one as its shortcode when your packs know it, else
+  `:?:`. Nothing is fetched for a message that is deleted, for a spoiler you have not
+  uncovered, or for someone you ignore. The emoji picker (`Alt-E`, or `r` on a message)
+  lists your custom emoji by name: choosing one reacts with it (its shortcode goes along
+  for other clients) or puts it into your message, which, as with the `:` completions,
+  sends it as a picture. Stickers show as small pictures; "Send a sticker…" in the
+  command palette (or `/sticker`, with words to filter by) lists yours by name.
 - **Key backup and recovery are not created here yet.** matrix-rat uses a backup and a
   recovery key that exist, and tells you when they are missing; to set them up (or reset
   them), use Element: Settings → Encryption.

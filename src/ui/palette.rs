@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use super::hit::{HitId, InputTarget};
 use super::modal::{centered, popup, row};
 use crate::app::App;
-use crate::palette::{Category, Palette};
+use crate::palette::{Category, Palette, Pick};
 use crate::text::{truncate, width};
 use crate::theme::Role;
 
@@ -19,18 +19,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
     let Some(rect) = centered(area, WIDTH, HEIGHT) else {
         return;
     };
-    let (title, footer, placeholder) = if palette.forward.is_some() {
-        (
-            "Forward to room",
-            "↑↓ move · Enter forward · Esc cancel",
-            "type a room name…",
-        )
-    } else {
-        (
+    let (title, footer, placeholder) = match &palette.pick {
+        Some(pick) => pick.texts(),
+        None => (
             "Command palette",
             "↑↓ move · Enter run · Esc close",
             "type a command, room, or theme…",
-        )
+        ),
     };
     let inner = popup(frame, app, area, rect, title, footer);
     let theme = &app.theme;
@@ -71,12 +66,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
         let rule_rect = row(inner, 1);
         let count = format!(" {}/{}", palette.filtered.len(), palette.entries.len());
         let count_w = width(&count);
-        if let Some(target) = &palette.forward
+        if let Some(pick) = &palette.pick
             && rule_rect.width as usize >= count_w + 12
         {
-            let prefix = "Message: ";
+            let (prefix, about) = pick.about();
             let avail = rule_rect.width as usize - count_w - width(prefix) - 1;
-            let preview = truncate(&target.preview, avail);
+            let preview = truncate(&about, avail);
             let pad = rule_rect
                 .width
                 .saturating_sub((width(prefix) + width(&preview) + count_w) as u16)
@@ -138,9 +133,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
     }
 
     if palette.filtered.is_empty() {
+        let nothing = palette
+            .pick
+            .as_ref()
+            .map_or("no matching commands", Pick::nothing);
         frame.render_widget(
             Line::from(Span::styled(
-                "  no matching commands",
+                format!("  {nothing}"),
                 theme.style(Role::Muted),
             )),
             row(inner, list_y),

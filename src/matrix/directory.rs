@@ -7,7 +7,7 @@ use std::time::Duration;
 use matrix_sdk::room_directory_search::{RoomDescription, RoomDirectorySearch};
 use matrix_sdk::ruma::api::client::room::get_summary;
 use matrix_sdk::ruma::api::error::ErrorKind;
-use matrix_sdk::ruma::room::{JoinRuleKind, JoinRuleSummary};
+use matrix_sdk::ruma::room::{JoinRuleKind, JoinRuleSummary, RoomType};
 use matrix_sdk::ruma::{OwnedRoomOrAliasId, OwnedServerName, RoomOrAliasId, ServerName};
 use matrix_sdk::{Client, EncryptionState, RoomState};
 use tokio::sync::{Mutex, mpsc};
@@ -137,6 +137,8 @@ pub struct RoomPreview {
     pub world_readable: bool,
     pub membership: PreviewMembership,
     pub via: Vec<String>,
+    /// It is a space: joined, it is found among the spaces, not the rooms.
+    pub space: bool,
 }
 
 impl fmt::Debug for RoomPreview {
@@ -152,6 +154,7 @@ impl fmt::Debug for RoomPreview {
             .field("world_readable", &self.world_readable)
             .field("membership", &self.membership)
             .field("via_count", &self.via.len())
+            .field("space", &self.space)
             .finish_non_exhaustive()
     }
 }
@@ -489,6 +492,7 @@ pub(super) async fn fetch_preview(
         world_readable: preview.is_world_readable.unwrap_or(false),
         membership,
         via,
+        space: preview.room_type == Some(RoomType::Space),
     })
 }
 
@@ -664,6 +668,7 @@ mod tests {
             world_readable: false,
             membership: PreviewMembership::None,
             via: vec![secret_via.into()],
+            space: false,
         };
         let prev_dbg = format!("{preview:?}");
         assert!(!prev_dbg.contains(secret_id));

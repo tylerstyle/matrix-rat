@@ -812,9 +812,19 @@ impl Timelines {
                 })
                 .await;
             }
-            MatrixCmd::ToggleReaction { room_id, item, key } => {
+            MatrixCmd::ToggleReaction {
+                room_id,
+                item,
+                key,
+                shortcode,
+            } => {
+                let extra = shortcode
+                    .as_deref()
+                    .and_then(super::emotes::reaction_shortcode);
                 self.with_active_timeline(&room_id, "Could not react", |timeline| async move {
-                    timeline.toggle_reaction(&item_id(&item)?, &key).await?;
+                    timeline
+                        .toggle_reaction_with_extra_content(&item_id(&item)?, &key, extra)
+                        .await?;
                     Ok(())
                 })
                 .await;
@@ -1128,6 +1138,7 @@ impl Timelines {
                 Err(err) => self.fail("Could not leave", err),
             },
             MatrixCmd::FetchAvatar { url } => self.media.fetch_avatar(url),
+            MatrixCmd::FetchEmotePicture { url } => self.media.fetch_emote(url),
             MatrixCmd::LinkPreview { url } => self.previews.fetch(url),
             MatrixCmd::FetchImage {
                 key,

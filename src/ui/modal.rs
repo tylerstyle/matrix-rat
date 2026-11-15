@@ -9,12 +9,13 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use super::hit::{HitId, InputTarget};
 use crate::action::Action;
 use crate::app::App;
+use crate::images::EMOTE_CELLS;
 use crate::keymap::Context;
 use crate::lineedit::LineEdit;
 use crate::matrix::ReauthKind;
 use crate::modal::{
-    EmojiPicker, IgnoredUsersPopup, LoginForm, Modal, PinnedPopup, ReasonConfirmKind,
-    ReasonConfirmPopup, RecoveryForm, ReportForm, Setting, SettingsMenu,
+    EMOJI_CELL, EmojiPicker, IgnoredUsersPopup, LoginForm, Modal, Pick, PinnedPopup,
+    ReasonConfirmKind, ReasonConfirmPopup, RecoveryForm, ReportForm, Setting, SettingsMenu,
 };
 use crate::text::{sanitize, sanitize_line, truncate, width};
 use crate::theme::{Role, Theme};
@@ -681,9 +682,6 @@ fn recovery(frame: &mut Frame, app: &mut App, area: Rect, form: &mut RecoveryFor
     }
 }
 
-/// Columns per emoji cell: two for the glyph, one of spacing.
-const CELL: u16 = 3;
-
 fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker) {
     // Sits above the composer's right end, next to the button that opens it.
     let anchor = app.composer_view.area;
@@ -725,7 +723,7 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
         },
     );
     let theme = &app.theme;
-    if inner.height < 3 || inner.width < CELL {
+    if inner.height < 3 || inner.width < EMOJI_CELL {
         return;
     }
 
@@ -754,20 +752,22 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
         HitId::Input(InputTarget::EmojiQuery),
     );
 
-    // Grid, with the last row kept for the selected emoji's name.
+    // Grid, with the last row kept for the selected emoji's name. Custom emoji take
+    // wider cells, in rows of their own.
     let grid = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 2);
-    let columns = (grid.width / CELL).max(1) as usize;
+    picker.columns = (grid.width / EMOJI_CELL).max(1) as usize;
+    picker.custom_columns = (grid.width / crate::modal::CUSTOM_CELL).max(1) as usize;
     let rows = grid.height as usize;
-    picker.columns = columns;
     picker.rows = rows;
-    let total_rows = picker.results.len().div_ceil(columns);
+    let total_rows = picker.grid_rows();
     if picker.reveal {
         picker.reveal = false;
-        let selected_row = picker.selected / columns;
-        if selected_row < picker.scroll {
-            picker.scroll = selected_row;
-        } else if selected_row >= picker.scroll + rows {
-            picker.scroll = selected_row + 1 - rows;
+        if let Some((selected_row, _, _)) = picker.cell_of(picker.selected) {
+            if selected_row < picker.scroll {
+                picker.scroll = selected_row;
+            } else if selected_row >= picker.scroll + rows {
+                picker.scroll = selected_row + 1 - rows;
+            }
         }
     }
     picker.scroll = picker.scroll.min(total_rows.saturating_sub(rows));
@@ -778,22 +778,52 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
             grid,
         );
     }
-    let first = picker.scroll * columns;
-    for (n, emoji) in picker
-        .results
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(rows * columns)
-    {
-        let at = n - first;
+    let mut pictures: Vec<(Rect, String)> = Vec::new();
+    let mut wanted: Vec<String> = Vec::new();
+    for (n, at_row, x, cell_width) in picker.cells(picker.scroll..picker.scroll + rows) {
+        let Some(pick) = picker.results.get(n) else {
+            continue;
+        };
         let cell = Rect::new(
-            grid.x + (at % columns) as u16 * CELL,
-            grid.y + (at / columns) as u16,
-            CELL,
+            grid.x + x,
+            grid.y + (at_row - picker.scroll) as u16,
+            cell_width.min(grid.width.saturating_sub(x)),
             1,
         );
-        frame.render_widget(Line::from(emoji.as_str()), cell);
+        if cell.width == 0 {
+            continue;
+        }
+        match pick {
+            Pick::Unicode(emoji) => frame.render_widget(Line::from(emoji.as_str()), cell),
+            Pick::Custom(at) => {
+                let Some(custom) = picker.custom.get(*at) else {
+                    continue;
+                };
+                // Its picture where there is one, and always its name: without
+                // pictures, the name is how it is found.
+                let name = format!(":{}:", custom.shortcode);
+                let room = usize::from(cell.width.saturating_sub(1));
+                let picture =
+                    app.images.emote_ready(&custom.url) && room > usize::from(EMOTE_CELLS.0) + 1;
+                let text = if picture {
+                    let room = room - usize::from(EMOTE_CELLS.0) - 1;
+                    format!("{} {}", crate::rich::EMOTE_BOX, truncate(&name, room))
+                } else {
+                    truncate(&name, room)
+                };
+                frame.render_widget(
+                    Line::from(Span::styled(text, theme.style(Role::Text))),
+                    cell,
+                );
+                if picture {
+                    pictures.push((
+                        Rect::new(cell.x, cell.y, EMOTE_CELLS.0, EMOTE_CELLS.1),
+                        custom.url.clone(),
+                    ));
+                }
+                wanted.push(custom.url.clone());
+            }
+        }
         // After drawing: rendering a wide glyph resets the style of its second column.
         if n == picker.selected {
             frame.buffer_mut().set_style(cell, theme.style(Role::Pill));
@@ -802,11 +832,25 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
         }
         app.hits.add(cell, HitId::Emoji(n));
     }
+    // Pictures last, over the highlight: it stays behind their transparent parts.
+    for (rect, url) in pictures {
+        super::image::draw_emote(frame, &mut app.images, theme, &url, rect, false);
+    }
+    // Those on screen are fetched, a few at a time (see `ImageStore::request_emotes`).
+    app.images.request_emotes(wanted.iter().map(String::as_str));
 
     if let Some(selected) = picker.selected() {
-        let name = match selected.shortcode() {
-            Some(code) => format!("{}  :{code}:", selected.name()),
-            None => selected.name().to_owned(),
+        let name = match selected {
+            Pick::Unicode(emoji) => match emoji.shortcode() {
+                Some(code) => format!("{}  :{code}:", emoji.name()),
+                None => emoji.name().to_owned(),
+            },
+            // The name, and which pack it is from.
+            Pick::Custom(at) => picker
+                .custom
+                .get(at)
+                .map(|custom| format!(":{}:  {}", custom.shortcode, custom.pack_name))
+                .unwrap_or_default(),
         };
         frame.render_widget(
             Line::from(Span::styled(

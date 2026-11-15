@@ -50,6 +50,16 @@ pub const AVATAR_PIXELS: (u32, u32) = (96, 96);
 pub const AVATAR_CELLS: (u16, u16) = (2, 1);
 /// Room pictures kept; at 96x96 each that is some 20 MB at the very most.
 const AVATAR_ENTRIES: usize = 512;
+/// Custom emoji are fetched as thumbnails no larger than this.
+pub const EMOTE_PIXELS: (u32, u32) = (64, 64);
+/// Columns and rows a custom emoji's picture takes in a line of text or on a reaction:
+/// the width of an ordinary emoji, so lines keep their layout.
+pub const EMOTE_CELLS: (u16, u16) = (2, 1);
+/// Custom emoji pictures kept; at 64x64 each that is some 4 MB at the very most.
+const EMOTE_ENTRIES: usize = 256;
+/// Custom emoji pictures on their way at once. A screen full of new ones is fetched a
+/// few at a time, the rest in later frames.
+pub const EMOTE_IN_FLIGHT: usize = 6;
 /// Sizes remembered for pictures whose message did not state one.
 const LEARNED_ENTRIES: usize = 4096;
 /// A request the worker never answered (it restarted) may be made again after this.
@@ -406,6 +416,43 @@ fn cover_crop(source: (u32, u32), target: (u32, u32)) -> (u32, u32) {
     }
 }
 
+/// A custom emoji for its cells: scaled to fit them, proportions kept, in the middle of
+/// a transparent box of exactly their size. Nothing is cut off: a wide emoji is still
+/// the whole emoji.
+fn encode_emote(
+    pixels: &DynamicImage,
+    graphics: Graphics,
+    kitty_id: u32,
+    cells: (u16, u16),
+) -> Option<Encoded> {
+    let Some(Protocol::Kitty { .. }) = graphics.protocol else {
+        return None;
+    };
+    let (cols, rows) = cells;
+    let width = u32::from(cols.max(1)) * u32::from(graphics.font.0.max(1));
+    let height = u32::from(rows.max(1)) * u32::from(graphics.font.1.max(1));
+    let scaled = pixels
+        .resize(width, height, FilterType::Triangle)
+        .into_rgba8();
+    let mut canvas = RgbaImage::new(width, height);
+    image::imageops::overlay(
+        &mut canvas,
+        &scaled,
+        i64::from(width.saturating_sub(scaled.width()) / 2),
+        i64::from(height.saturating_sub(scaled.height()) / 2),
+    );
+    let fitted = DynamicImage::ImageRgba8(canvas);
+    let bytes = fitted.as_bytes().len();
+    let kitty = Kitty::new(fitted, Size::new(cols, rows), kitty_id, false, false).ok()?;
+    Some(Encoded {
+        size: cells,
+        protocol: SlicedProtocol::Kitty(kitty),
+        kitty_id: Some(kitty_id),
+        shown: false,
+        bytes,
+    })
+}
+
 /// Decodes a room picture and makes it a small square, cut from the middle.
 pub fn decode_avatar(bytes: &[u8]) -> Result<Decoded, String> {
     // Larger than it is kept at, to leave enough of a non-square one for cutting.
@@ -515,20 +562,30 @@ enum Target {
     Inline(String),
     Viewer,
     Avatar(String),
+    Emote(String),
 }
 
-/// The small picture of a room, shown in the room list.
-struct Avatar {
-    state: AvatarState,
+/// A small picture by its `mxc://` address: a room's or a person's picture, or a
+/// custom emoji.
+struct Small {
+    state: SmallState,
     /// The frame it was last drawn in.
     used: u64,
 }
 
-enum AvatarState {
+impl Small {
+    /// Asked for, and not given up on: the worker may still answer.
+    fn on_its_way(&self) -> bool {
+        matches!(self.state, SmallState::Loading { since } if since.elapsed() < REQUEST_TIMEOUT)
+    }
+}
+
+enum SmallState {
     Loading {
         since: Instant,
     },
-    /// The list shows the coloured tile instead, without a word.
+    /// The list shows the coloured tile instead (a custom emoji its name), without a
+    /// word.
     Failed,
     Ready {
         pixels: Pixels,
@@ -560,10 +617,23 @@ pub struct ImageStore {
     encoder: Option<UnboundedSender<EncodeDone>>,
     /// Room pictures by their `mxc://` address. They are tiny and have their own
     /// limit, apart from the pictures in messages.
-    avatars: HashMap<String, Avatar>,
+    avatars: HashMap<String, Small>,
     avatar_requests: Vec<String>,
     /// The size room pictures are drawn at.
     avatar_cells: (u16, u16),
+    /// Custom emoji pictures by their `mxc://` address, with a limit of their own.
+    emotes: HashMap<String, Small>,
+    emote_requests: Vec<String>,
+    /// Changes when a custom emoji's picture arrives or goes: the lines it is in are
+    /// laid out again, with two cells for it or with its name.
+    pub emote_rev: u64,
+    /// Cells where a custom emoji's data was painted over by something drawn later in
+    /// the frame: no copy there carries it in the next frame (see
+    /// [`ImageStore::verify`]).
+    emotes_painted_over: Vec<(u16, u16)>,
+    /// A custom emoji's data was painted over: the frame is drawn again, the data
+    /// travelling with another copy.
+    redraw: bool,
 }
 
 impl std::fmt::Debug for ImageStore {
@@ -600,6 +670,11 @@ impl ImageStore {
             avatars: HashMap::new(),
             avatar_requests: Vec::new(),
             avatar_cells: AVATAR_CELLS,
+            emotes: HashMap::new(),
+            emote_requests: Vec::new(),
+            emote_rev: 0,
+            emotes_painted_over: Vec::new(),
+            redraw: false,
         }
     }
 
@@ -793,7 +868,11 @@ impl ImageStore {
         self.unverified.clear();
         self.avatars.clear();
         self.avatar_requests.clear();
+        self.emotes.clear();
+        self.emote_requests.clear();
+        self.emotes_painted_over.clear();
         self.layout_rev += 1;
+        self.emote_rev += 1;
     }
 
     // ----- room pictures -------------------------------------------------------------
@@ -809,7 +888,7 @@ impl ImageStore {
         }
         self.avatar_cells = cells;
         for avatar in self.avatars.values_mut() {
-            if let AvatarState::Ready { encoded, .. } = &mut avatar.state {
+            if let SmallState::Ready { encoded, .. } = &mut avatar.state {
                 Self::discard(&mut self.garbage, encoded.take());
             }
         }
@@ -818,16 +897,16 @@ impl ImageStore {
     fn queue_avatar_if_needed(&mut self, url: &str) -> bool {
         let wanted = match self.avatars.get(url).map(|avatar| &avatar.state) {
             None => true,
-            Some(AvatarState::Loading { since }) => since.elapsed() >= REQUEST_TIMEOUT,
+            Some(SmallState::Loading { since }) => since.elapsed() >= REQUEST_TIMEOUT,
             _ => false,
         };
         if wanted {
-            let state = AvatarState::Loading {
+            let state = SmallState::Loading {
                 since: Instant::now(),
             };
             self.avatars.insert(
                 url.to_owned(),
-                Avatar {
+                Small {
                     state,
                     used: self.frame,
                 },
@@ -847,7 +926,7 @@ impl ImageStore {
         let avatar = self.avatars.get_mut(url)?;
         avatar.used = self.frame;
         match &avatar.state {
-            AvatarState::Ready { pixels, .. } => Some(Arc::clone(pixels)),
+            SmallState::Ready { pixels, .. } => Some(Arc::clone(pixels)),
             _ => None,
         }
     }
@@ -864,7 +943,7 @@ impl ImageStore {
         }
         let missing = matches!(
             self.avatars.get(url)?.state,
-            AvatarState::Ready { encoded: None, .. }
+            SmallState::Ready { encoded: None, .. }
         );
         let id = if missing && !covered {
             self.fresh_id()
@@ -873,7 +952,7 @@ impl ImageStore {
         };
         let avatar = self.avatars.get_mut(url)?;
         avatar.used = frame;
-        let AvatarState::Ready { pixels, encoded } = &mut avatar.state else {
+        let SmallState::Ready { pixels, encoded } = &mut avatar.state else {
             return None;
         };
         if missing {
@@ -896,15 +975,15 @@ impl ImageStore {
         let Some(avatar) = self.avatars.get_mut(url) else {
             return;
         };
-        if !matches!(avatar.state, AvatarState::Loading { .. }) {
+        if !matches!(avatar.state, SmallState::Loading { .. }) {
             return;
         }
         avatar.state = match result {
-            Ok(decoded) => AvatarState::Ready {
+            Ok(decoded) => SmallState::Ready {
                 pixels: decoded.pixels,
                 encoded: None,
             },
-            Err(_) => AvatarState::Failed,
+            Err(_) => SmallState::Failed,
         };
     }
 
@@ -922,12 +1001,184 @@ impl ImageStore {
                 .min_by_key(|(_, avatar)| avatar.used)
                 .map(|(url, _)| url.clone());
             let Some(url) = oldest else { return };
-            if let Some(Avatar {
-                state: AvatarState::Ready { encoded, .. },
+            if let Some(Small {
+                state: SmallState::Ready { encoded, .. },
                 ..
             }) = self.avatars.remove(&url)
             {
                 Self::discard(&mut self.garbage, encoded);
+            }
+        }
+    }
+
+    // ----- custom emoji ------------------------------------------------------------
+
+    /// Whether custom emoji are drawn as pictures at all: only with kitty's protocol.
+    /// Two cells of half blocks would be four pixels; everywhere else they keep their
+    /// names, and nothing is fetched for them.
+    pub fn emote_pictures(&self) -> bool {
+        self.is_kitty()
+    }
+
+    /// Whether the picture of a custom emoji is there to be drawn. Lines are laid out
+    /// with two cells for it then, and with its name until then.
+    pub fn emote_ready(&self, url: &str) -> bool {
+        self.is_kitty()
+            && matches!(
+                self.emotes.get(url),
+                Some(Small {
+                    state: SmallState::Ready { .. },
+                    ..
+                })
+            )
+    }
+
+    /// Makes sure the pictures of the custom emoji that are on screen are in the cache
+    /// or on their way. Called on every frame with every one shown; only
+    /// [`EMOTE_IN_FLIGHT`] are fetched at a time, the others are asked for again in
+    /// later frames.
+    pub fn request_emotes<'a>(&mut self, urls: impl IntoIterator<Item = &'a str>) {
+        if !self.is_kitty() {
+            return;
+        }
+        let frame = self.frame;
+        let mut loading = self
+            .emotes
+            .values()
+            .filter(|small| small.on_its_way())
+            .count();
+        for url in urls {
+            if let Some(small) = self.emotes.get_mut(url) {
+                small.used = frame;
+                // One the worker never answered (it restarted) is asked for again.
+                if let SmallState::Loading { since } = &mut small.state
+                    && since.elapsed() >= REQUEST_TIMEOUT
+                    && loading < EMOTE_IN_FLIGHT
+                {
+                    *since = Instant::now();
+                    loading += 1;
+                    self.emote_requests.push(url.to_owned());
+                }
+                continue;
+            }
+            if loading >= EMOTE_IN_FLIGHT || !crate::matrix::is_valid_mxc(url) {
+                continue;
+            }
+            loading += 1;
+            self.emotes.insert(
+                url.to_owned(),
+                Small {
+                    state: SmallState::Loading {
+                        since: Instant::now(),
+                    },
+                    used: frame,
+                },
+            );
+            self.emote_requests.push(url.to_owned());
+            self.evict_emotes();
+        }
+    }
+
+    /// [`ImageStore::request_emotes`] for one.
+    #[cfg(test)]
+    pub fn request_emote(&mut self, url: &str) {
+        self.request_emotes([url]);
+    }
+
+    /// The addresses of custom emoji asked for since the last call, for the worker.
+    pub fn take_emote_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.emote_requests)
+    }
+
+    /// The worker fetched (or failed to fetch) a custom emoji's picture.
+    pub fn on_emote(&mut self, url: &str, result: Result<Decoded, String>) {
+        // Not asked for (any more), such as after logging out.
+        let Some(small) = self.emotes.get_mut(url) else {
+            return;
+        };
+        if !matches!(small.state, SmallState::Loading { .. }) {
+            return;
+        }
+        small.state = match result {
+            Ok(decoded) => {
+                // Two cells instead of the name: the lines are laid out again.
+                self.emote_rev += 1;
+                SmallState::Ready {
+                    pixels: decoded.pixels,
+                    encoded: None,
+                }
+            }
+            // The name stays where it is.
+            Err(_) => SmallState::Failed,
+        };
+    }
+
+    /// A custom emoji's picture ready to draw into its two cells, if it is there.
+    /// `covered` as for [`ImageStore::inline`].
+    pub fn emote(&mut self, url: &str, covered: bool) -> Option<&mut Encoded> {
+        if !self.is_kitty() {
+            return None;
+        }
+        let graphics = self.graphics;
+        let frame = self.frame;
+        let missing = matches!(
+            self.emotes.get(url)?.state,
+            SmallState::Ready { encoded: None, .. }
+        );
+        let id = if missing && !covered {
+            self.fresh_id()
+        } else {
+            0
+        };
+        let small = self.emotes.get_mut(url)?;
+        small.used = frame;
+        let SmallState::Ready { pixels, encoded } = &mut small.state else {
+            return None;
+        };
+        if missing {
+            if covered {
+                return None;
+            }
+            *encoded = encode_emote(pixels, graphics, id, EMOTE_CELLS);
+        }
+        encoded.as_mut().filter(|encoded| encoded.shown || !covered)
+    }
+
+    pub fn sent_emote(&mut self, url: &str, x: u16, y: u16) {
+        self.unverified.push((Target::Emote(url.to_owned()), x, y));
+    }
+
+    /// Whether a custom emoji's data was painted over at this cell in the last frame,
+    /// so that a copy drawn there must not carry it again.
+    pub fn emote_painted_over(&self, x: u16, y: u16) -> bool {
+        self.emotes_painted_over.contains(&(x, y))
+    }
+
+    /// Whether the frame just drawn has to be drawn again (see [`ImageStore::verify`]).
+    pub fn take_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.redraw)
+    }
+
+    /// Keeps the custom emoji pictures within their limit, dropping those unseen for
+    /// longest. One on its way stays, or more than [`EMOTE_IN_FLIGHT`] could be.
+    fn evict_emotes(&mut self) {
+        while self.emotes.len() > EMOTE_ENTRIES {
+            let oldest = self
+                .emotes
+                .iter()
+                .filter(|(_, small)| small.used < self.frame)
+                .filter(|(_, small)| !matches!(small.state, SmallState::Loading { .. }))
+                .min_by_key(|(_, small)| small.used)
+                .map(|(url, _)| url.clone());
+            let Some(url) = oldest else { return };
+            if let Some(Small {
+                state: SmallState::Ready { encoded, .. },
+                ..
+            }) = self.emotes.remove(&url)
+            {
+                Self::discard(&mut self.garbage, encoded);
+                // Its lines show its name again.
+                self.emote_rev += 1;
             }
         }
     }
@@ -1065,9 +1316,18 @@ impl ImageStore {
     ///
     /// Only that one cell matters: the transmission is the whole picture, and the
     /// other cells are plain placeholders that may be covered freely. Whatever is drawn
-    /// over the timeline later in a frame either sets `covered` (popups, the viewer),
-    /// which holds new transmissions back, or is caught here.
+    /// over the timeline later in a frame either sets `covered` (popups, the viewer,
+    /// the timeline's pills and the completion popup), which holds new transmissions
+    /// back, or is caught here.
+    ///
+    /// A custom emoji is often on screen more than once, the other copies referring to
+    /// the one that carries the data. When that one is painted over, they would stay
+    /// empty: the frame is drawn again, and no copy in that cell carries the data then.
+    /// The cells are forgotten with the first frame that loses no custom emoji's data:
+    /// by then it has arrived with another copy, if one is on screen, and a copy under
+    /// whatever is drawn over it only refers to that.
     pub fn verify(&mut self, intact: impl Fn(u16, u16) -> bool) {
+        let mut emote_lost = false;
         for (target, x, y) in std::mem::take(&mut self.unverified) {
             let slot = match &target {
                 Target::Inline(key) => match self.entries.get_mut(key) {
@@ -1082,8 +1342,15 @@ impl ImageStore {
                     None => continue,
                 },
                 Target::Avatar(url) => match self.avatars.get_mut(url) {
-                    Some(Avatar {
-                        state: AvatarState::Ready { encoded, .. },
+                    Some(Small {
+                        state: SmallState::Ready { encoded, .. },
+                        ..
+                    }) => encoded,
+                    _ => continue,
+                },
+                Target::Emote(url) => match self.emotes.get_mut(url) {
+                    Some(Small {
+                        state: SmallState::Ready { encoded, .. },
                         ..
                     }) => encoded,
                     _ => continue,
@@ -1095,7 +1362,16 @@ impl ImageStore {
                 }
             } else {
                 Self::discard(&mut self.garbage, slot.take());
+                if matches!(target, Target::Emote(_)) {
+                    emote_lost = true;
+                    self.emotes_painted_over.push((x, y));
+                }
             }
+        }
+        if emote_lost {
+            self.redraw = true;
+        } else {
+            self.emotes_painted_over.clear();
         }
     }
 
@@ -1107,8 +1383,8 @@ impl ImageStore {
                 Self::discard(&mut self.garbage, encoded.take());
             }
         }
-        for avatar in self.avatars.values_mut() {
-            if let AvatarState::Ready { encoded, .. } = &mut avatar.state {
+        for small in self.avatars.values_mut().chain(self.emotes.values_mut()) {
+            if let SmallState::Ready { encoded, .. } = &mut small.state {
                 Self::discard(&mut self.garbage, encoded.take());
             }
         }
@@ -1815,6 +2091,152 @@ mod tests {
         // Warm on the left, cool on the right.
         assert!(left[0] > left[2]);
         assert!(right[2] > right[0]);
+    }
+
+    #[test]
+    fn custom_emoji_pictures_are_only_fetched_for_kitty_and_a_few_at_a_time() {
+        // Half blocks or pictures off: the names stay, nothing is fetched.
+        for graphics in [Graphics::halfblocks(), Graphics::off()] {
+            let mut store = ImageStore::new(graphics);
+            store.begin_frame();
+            store.request_emote("mxc://example.org/blob");
+            assert!(store.take_emote_requests().is_empty());
+            assert!(!store.emote_pictures());
+            assert!(!store.emote_ready("mxc://example.org/blob"));
+        }
+
+        let mut store = ImageStore::new(kitty());
+        store.begin_frame();
+        // Only plain `mxc://` addresses are asked for.
+        for bad in ["https://example.org/blob", "mxc://example.org/a/b", ""] {
+            store.request_emote(bad);
+        }
+        assert!(store.take_emote_requests().is_empty());
+
+        // A screen full of new ones: a few are on their way, the rest wait.
+        let urls: Vec<String> = (0..20).map(|n| format!("mxc://example.org/e{n}")).collect();
+        for url in &urls {
+            store.request_emote(url);
+        }
+        let first = store.take_emote_requests();
+        assert_eq!(first.len(), EMOTE_IN_FLIGHT);
+        // Asked again on the next frame: nothing more while those are on their way.
+        store.begin_frame();
+        for url in &urls {
+            store.request_emote(url);
+        }
+        assert!(store.take_emote_requests().is_empty());
+        // One answer makes room for one more.
+        store.on_emote(&first[0], Ok(decoded(64, 64)));
+        store.begin_frame();
+        for url in &urls {
+            store.request_emote(url);
+        }
+        assert_eq!(store.take_emote_requests(), [urls[EMOTE_IN_FLIGHT].clone()]);
+    }
+
+    #[test]
+    fn a_custom_emoji_picture_that_arrives_changes_the_layout_and_one_that_fails_does_not() {
+        let mut store = ImageStore::new(kitty());
+        let (good, bad) = ("mxc://example.org/good", "mxc://example.org/bad");
+        store.begin_frame();
+        store.request_emote(good);
+        store.request_emote(bad);
+        assert_eq!(store.take_emote_requests().len(), 2);
+        assert!(!store.emote_ready(good));
+        assert!(store.emote(good, false).is_none());
+
+        let before = store.emote_rev;
+        store.on_emote(bad, Err("could not be loaded".into()));
+        assert_eq!(store.emote_rev, before);
+        assert!(!store.emote_ready(bad));
+        // A failure is not asked for again.
+        store.request_emote(bad);
+        assert!(store.take_emote_requests().is_empty());
+
+        store.on_emote(good, Ok(decoded(128, 64)));
+        assert!(store.emote_rev > before);
+        assert!(store.emote_ready(good));
+        // Nothing new is sent to the terminal while a popup may cover it.
+        assert!(store.emote(good, true).is_none());
+        let encoded = store.emote(good, false).unwrap();
+        assert_eq!(encoded.size, EMOTE_CELLS);
+        // The whole box, 2x10 by 20 pixels, transparent where the picture is not.
+        assert_eq!(encoded.bytes, 20 * 20 * 4);
+        assert!(!encoded.shown);
+        store.sent_emote(good, 4, 2);
+        store.verify(|x, y| (x, y) == (4, 2));
+        assert!(store.emote(good, true).unwrap().shown);
+
+        // A late or unasked-for answer changes nothing.
+        let rev = store.emote_rev;
+        store.on_emote(good, Ok(decoded(10, 10)));
+        store.on_emote("mxc://example.org/never", Ok(decoded(10, 10)));
+        assert_eq!(store.emote_rev, rev);
+        assert!(!store.emote_ready("mxc://example.org/never"));
+
+        // Logging out forgets them, and the lines show names again.
+        store.clear();
+        assert!(!store.emote_ready(good));
+        assert!(store.emote_rev > rev);
+    }
+
+    #[test]
+    fn a_custom_emoji_whose_data_is_painted_over_goes_with_another_copy_in_the_next_frame() {
+        let mut store = ImageStore::new(kitty());
+        let url = "mxc://example.org/blob";
+        store.begin_frame();
+        store.request_emote(url);
+        store.on_emote(url, Ok(decoded(64, 64)));
+
+        // The copy at (2, 3) carries the data, and something drawn later in the frame
+        // goes over it: the picture is freed, and the frame is to be drawn again.
+        assert!(!store.emote_painted_over(2, 3));
+        assert!(store.emote(url, false).is_some());
+        store.sent_emote(url, 2, 3);
+        store.verify(|_, _| false);
+        assert!(store.take_redraw());
+        assert!(!store.take_redraw());
+        assert_eq!(store.cleanup_sequence(false).matches("a=d,d=I").count(), 1);
+
+        // Then that cell is passed over, and the copy at (10, 5) carries it.
+        store.begin_frame();
+        assert!(store.emote_painted_over(2, 3));
+        assert!(store.emote(url, true).is_none());
+        assert!(!store.emote(url, false).unwrap().shown);
+        store.sent_emote(url, 10, 5);
+        store.verify(|x, y| (x, y) == (10, 5));
+        assert!(!store.take_redraw());
+        assert!(!store.emote_painted_over(2, 3));
+
+        // From then on every copy refers to it, wherever it is: nothing is sent or
+        // freed again, and no frame asks for another.
+        for _ in 0..3 {
+            store.begin_frame();
+            assert!(store.emote(url, false).unwrap().shown);
+            store.verify(|_, _| false);
+            assert!(!store.take_redraw());
+            assert!(store.cleanup_sequence(false).is_empty());
+        }
+    }
+
+    #[test]
+    fn custom_emoji_pictures_have_their_own_limit() {
+        let mut store = ImageStore::new(kitty());
+        for n in 0..EMOTE_ENTRIES + 20 {
+            store.begin_frame();
+            let url = format!("mxc://x/e{n}");
+            store.request_emote(&url);
+            store.on_emote(&url, Ok(decoded(64, 64)));
+            assert!(store.emote(&url, false).is_some());
+        }
+        assert_eq!(store.emotes.len(), EMOTE_ENTRIES);
+        // The oldest are gone, their copies in the terminal are freed, and room
+        // pictures and pictures in messages are not touched by any of it.
+        assert!(!store.emote_ready("mxc://x/e0"));
+        assert!(store.emote_ready(&format!("mxc://x/e{}", EMOTE_ENTRIES + 19)));
+        assert_eq!(store.cleanup_sequence(false).matches("a=d,d=I").count(), 20);
+        assert!(store.entries.is_empty() && store.avatars.is_empty());
     }
 
     #[test]

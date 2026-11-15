@@ -1339,6 +1339,7 @@ mod tests {
             name: "Space".into(),
             level: 0,
             rooms: vec![ROOM_A.into()],
+            ..Default::default()
         }];
         app.select_space(Some(0));
         app.open_thread(0);

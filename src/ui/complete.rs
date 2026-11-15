@@ -16,28 +16,27 @@ const MAX_SHOWN: usize = 8;
 const MIN_WIDTH: u16 = 24;
 const MAX_WIDTH: u16 = 60;
 
-pub fn draw(frame: &mut Frame, app: &mut App, chat_area: Rect, composer_top: u16) {
+/// Where the popup goes in this frame, if it is shown at all. Needs the composer drawn
+/// (it sits at its cursor), and is known before the timeline's pictures are drawn: none
+/// may be sent to the terminal under it.
+pub fn area(app: &App, chat_area: Rect, screen: Rect, composer_top: u16) -> Option<Rect> {
     if app.focus != crate::action::Pane::Composer
         || app.help_open
         || app.modal.is_some()
         || app.images.viewer_open()
     {
-        return;
+        return None;
     }
-    let Some((cx, cy)) = app.composer_view.cursor else {
-        return;
-    };
-    let Some(completion) = app.complete.active.clone() else {
-        return;
-    };
+    let (cx, cy) = app.composer_view.cursor?;
+    let completion = app.complete.active.as_ref()?;
     if completion.items.is_empty() {
-        return;
+        return None;
     }
 
     let bounds = if chat_area.width >= MIN_WIDTH {
         chat_area
     } else {
-        frame.area()
+        screen
     };
     // Sit right above the composer's top border when typing on the first row so the
     // `"3 Message"` frame stays intact; otherwise sit right above the cursor row.
@@ -48,7 +47,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, chat_area: Rect, composer_top: u16
     };
     let avail_top = anchor_y.saturating_sub(bounds.y);
     if bounds.width < 12 || avail_top < 3 {
-        return;
+        return None;
     }
 
     let shown_rows = completion
@@ -57,10 +56,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, chat_area: Rect, composer_top: u16
         .min(MAX_SHOWN)
         .min((avail_top - 2) as usize);
     if shown_rows == 0 {
-        return;
+        return None;
     }
+    Some(popup_rect(bounds, cx, anchor_y, shown_rows, completion))
+}
 
-    let rect = popup_rect(bounds, cx, anchor_y, shown_rows, &completion);
+pub fn draw(frame: &mut Frame, app: &mut App, chat_area: Rect, composer_top: u16) {
+    let Some(rect) = area(app, chat_area, frame.area(), composer_top) else {
+        return;
+    };
+    let (Some((cx, cy)), Some(completion)) =
+        (app.composer_view.cursor, app.complete.active.clone())
+    else {
+        return;
+    };
     frame.render_widget(Clear, rect);
 
     let title = match completion.kind {
