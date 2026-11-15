@@ -23,6 +23,8 @@ pub struct Inline<'a> {
     pub skip: u16,
     /// Size of the whole picture in cells.
     pub size: (u16, u16),
+    /// Whether this thumbnail represents a playable video (draws a play badge).
+    pub play_mark: bool,
     /// A popup is open on top of the timeline.
     pub covered: bool,
 }
@@ -33,6 +35,7 @@ pub fn draw_inline(frame: &mut Frame, images: &mut ImageStore, theme: &Theme, in
         area,
         skip,
         size,
+        play_mark,
         covered,
     } = inline;
     if area.width == 0 || area.height == 0 {
@@ -55,6 +58,17 @@ pub fn draw_inline(frame: &mut Frame, images: &mut ImageStore, theme: &Theme, in
             let spinner = images.is_loading(&info.key).then(|| images.spinner());
             placeholder(frame, theme, area, skip, size, spinner, &info.name);
         }
+    }
+    // Keep the top-left cell `(area.x, area.y)` untouched because Kitty anchors
+    // image placement data there; place the badge on the bottom-left row instead.
+    if play_mark && area.height >= 2 && area.width >= 6 {
+        frame.buffer_mut().set_stringn(
+            area.x + 1,
+            area.bottom() - 1,
+            " ▶ ",
+            3,
+            theme.style(Role::UnreadBadge),
+        );
     }
 }
 

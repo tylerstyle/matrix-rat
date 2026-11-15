@@ -132,16 +132,30 @@ pub fn draw_user_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut U
     ))));
 
     let mut rooms_heading_done = false;
+    let shared_heading = |count: usize, incomplete: bool| {
+        if incomplete {
+            format!("Shared rooms ({count}, maybe more)")
+        } else {
+            format!("Shared rooms ({count})")
+        }
+    };
     for (index, item) in rows.iter().enumerate() {
         if matches!(item, UserInfoRow::SharedRoom(_)) && !rooms_heading_done {
             rooms_heading_done = true;
             entries.push(Entry::Text(Line::default()));
             entries.push(Entry::Text(Line::from(Span::styled(
-                format!("Shared rooms ({})", info.shared_rooms().len()),
+                shared_heading(info.shared_rooms().len(), info.shared_rooms_incomplete()),
                 theme.style(Role::SidebarSection),
             ))));
         }
         entries.push(Entry::Row(index, *item));
+    }
+    if !rooms_heading_done && info.shared_rooms_incomplete() {
+        entries.push(Entry::Text(Line::default()));
+        entries.push(Entry::Text(Line::from(Span::styled(
+            shared_heading(0, true),
+            theme.style(Role::SidebarSection),
+        ))));
     }
 
     let status = inner.height >= 4;

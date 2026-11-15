@@ -6,7 +6,48 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::text::{sanitize, unsafe_char, width};
+use crate::text::{is_blank, sanitize, sanitize_line, truncate, unsafe_char, width};
+
+/// Stands in for a custom emoji whose name is not known: pictures are not shown inline.
+pub const EMOTICON_PLACEHOLDER: &str = ":?:";
+
+/// A custom emoji as text: its `:shortcode:` from the `alt` or `title` the sender gave,
+/// cleaned like all message text and kept short.
+/// Whether an `<img>` is a custom emoji. The mark for it (`data-mx-emoticon`) does not
+/// survive the SDK's cleaning of received HTML, so a name of the form `:shortcode:` in
+/// `alt` or `title` counts as well: that is how every client writes them.
+pub(crate) fn is_emoticon(attributes: &str) -> bool {
+    attribute(attributes, "data-mx-emoticon").is_some()
+        || ["alt", "title"].into_iter().any(|attr| {
+            attribute(attributes, attr).is_some_and(|raw| {
+                let name = decode_entities(raw);
+                let name = name.trim();
+                name.len() > 2
+                    && name.starts_with(':')
+                    && name.ends_with(':')
+                    && !name[1..name.len() - 1].contains(|c: char| c == ':' || c.is_whitespace())
+            })
+        })
+}
+
+fn emoticon_label(attributes: &str) -> String {
+    let name = ["alt", "title"].into_iter().find_map(|attr| {
+        let raw = decode_entities(attribute(attributes, attr)?);
+        let name = sanitize_line(&raw);
+        let name: String = name
+            .trim()
+            .trim_matches(':')
+            .trim()
+            .chars()
+            .take(64)
+            .collect();
+        (!is_blank(&name)).then(|| truncate(&name, 32))
+    });
+    match name {
+        Some(name) => format!(":{name}:"),
+        None => EMOTICON_PLACEHOLDER.to_owned(),
+    }
+}
 
 /// How a piece of text should look. Resolved to colours by the theme at draw time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -126,23 +167,106 @@ impl Rich {
     }
 }
 
+/// Checks an RFC 5870 `geo:` URI so only safe, syntactically valid coordinates
+/// with no whitespace, control characters, or shell-special markup become links.
+pub fn safe_geo_uri(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("geo:") else {
+        return false;
+    };
+    if rest.is_empty()
+        || rest.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | '"' | '\'' | '\\' | '`')
+        })
+    {
+        return false;
+    }
+    let mut parts = rest.split(';');
+    let Some(coords) = parts.next() else {
+        return false;
+    };
+    let mut nums = coords.split(',');
+    let (Some(lat_s), Some(lon_s)) = (nums.next(), nums.next()) else {
+        return false;
+    };
+    let alt_s = nums.next();
+    if nums.next().is_some() {
+        return false;
+    }
+    let valid_coord_str = |v: &str| {
+        !v.is_empty()
+            && v.bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.'))
+    };
+    if !valid_coord_str(lat_s) || !valid_coord_str(lon_s) {
+        return false;
+    }
+    let (Ok(lat), Ok(lon)) = (lat_s.parse::<f64>(), lon_s.parse::<f64>()) else {
+        return false;
+    };
+    if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+        return false;
+    }
+    if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+        return false;
+    }
+    if let Some(alt_s) = alt_s {
+        if !valid_coord_str(alt_s) {
+            return false;
+        }
+        let Ok(alt) = alt_s.parse::<f64>() else {
+            return false;
+        };
+        if !alt.is_finite() {
+            return false;
+        }
+    }
+    for param in parts {
+        let Some((name, value)) = param.split_once('=') else {
+            return false;
+        };
+        if name.is_empty()
+            || value.is_empty()
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'~' | b'%'))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn find_plain_link(rest: &str) -> Option<(usize, usize)> {
     let web = ["https://", "http://"]
         .into_iter()
         .filter_map(|scheme| rest.find(scheme).map(|pos| (pos, scheme.len())))
         .min_by_key(|&(pos, _)| pos);
+    let is_boundary = |pos: usize| {
+        pos == 0
+            || !rest[..pos].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+    };
     let matrix = rest
         .match_indices("matrix:")
+        .find(|&(pos, _)| is_boundary(pos))
+        .map(|(pos, s)| (pos, s.len()));
+    let geo = rest
+        .match_indices("geo:")
         .find(|&(pos, _)| {
-            pos == 0
-                || !rest[..pos]
-                    .ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+            if !is_boundary(pos) {
+                return false;
+            }
+            let tail = &rest[pos..];
+            let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+            let candidate =
+                tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'', '"']);
+            safe_geo_uri(candidate)
         })
         .map(|(pos, s)| (pos, s.len()));
-    match (web, matrix) {
-        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
-        (a, b) => a.or(b),
-    }
+    [web, matrix, geo]
+        .into_iter()
+        .flatten()
+        .min_by_key(|&(pos, _)| pos)
 }
 
 #[derive(Debug, PartialEq)]
@@ -192,7 +316,7 @@ fn tokenize(html: &str) -> Vec<Token<'_>> {
 }
 
 /// The value of `name` in a tag's attribute text; `Some("")` for a bare attribute.
-fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
     let mut rest = attributes;
     loop {
         rest = rest.trim_start();
@@ -456,6 +580,14 @@ impl Builder {
                 self.end_line();
                 return;
             }
+            // A void element: nothing to close, so no format to keep. Only custom emoji
+            // are shown, as text.
+            "img" => {
+                if is_emoticon(attributes) {
+                    self.push_piece(&emoticon_label(attributes), &format);
+                }
+                return;
+            }
             "p" | "div" | "tr" => self.block_break(),
             "td" | "th" => {
                 // Table cells on one row, separated.
@@ -519,10 +651,11 @@ impl Builder {
                 if let Some(href) = attribute(attributes, "href") {
                     let href = sanitize(&decode_entities(href)).trim().to_owned();
                     // Only addresses that are safe to hand to the system opener.
-                    let safe = ["https://", "http://", "mailto:", "matrix:"]
+                    let safe = (["https://", "http://", "mailto:", "matrix:"]
                         .iter()
                         .any(|scheme| href.starts_with(scheme))
-                        && !href.contains(char::is_whitespace);
+                        && !href.contains(char::is_whitespace))
+                        || safe_geo_uri(&href);
                     if safe {
                         format.link = Some(self.rich.links.len());
                         self.rich.links.push(href);
@@ -1057,5 +1190,99 @@ mod tests {
             "<a href=\" https://ok.example \">x</a><a href=\"https://bad example\">y</a>",
         );
         assert_eq!(rich.links, ["https://ok.example"]);
+    }
+
+    #[test]
+    fn geo_uris_are_validated_and_linked() {
+        assert!(safe_geo_uri("geo:51.5074,-0.1278"));
+        assert!(safe_geo_uri("geo:-33.8688,151.2093,12.5;crs=wgs84;u=35"));
+        assert!(!safe_geo_uri("geo:95.0,0.0"));
+        assert!(!safe_geo_uri("geo:0.0,185.0"));
+        assert!(!safe_geo_uri("geo:51.5,-0.1;u=evil<script>"));
+        assert!(!safe_geo_uri("geo:bad"));
+
+        let plain = Rich::plain(
+            "Meet at geo:51.5074,-0.1278;u=35. Skip geo:bad and still link https://example.org",
+        );
+        assert_eq!(
+            plain.links,
+            ["geo:51.5074,-0.1278;u=35", "https://example.org"]
+        );
+
+        let html =
+            from_html("<a href=\"geo:48.8566,2.3522\">Paris</a> <a href=\"geo:999,0\">Nowhere</a>");
+        assert_eq!(html.links, ["geo:48.8566,2.3522"]);
+    }
+
+    #[test]
+    fn custom_emoji_show_as_their_shortcodes_and_other_pictures_as_nothing() {
+        let rich = from_html(
+            "hi <img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blobcat:\" \
+             title=\":blobcat:\" height=\"32\" /> and <b><img data-mx-emoticon \
+             src=\"mxc://example.org/b\" title=\"party\"></b> <img src=\"mxc://example.org/pic\" \
+             alt=\"a photo\">done",
+        );
+        assert_eq!(texts(&rich), ["hi :blobcat: and :party: done"]);
+        assert!(
+            rich.lines[0]
+                .segments
+                .iter()
+                .any(|s| s.text == ":party:" && s.format.bold)
+        );
+        // The address itself is never shown.
+        assert!(!texts(&rich)[0].contains("mxc"));
+    }
+
+    #[test]
+    fn a_custom_emoji_is_known_by_its_name_when_its_mark_was_cleaned_away() {
+        // What the SDK leaves of one: no `data-mx-emoticon`.
+        let rich = from_html(
+            "hello <img src=\"mxc://e.org/x\" alt=\":ratwave:\" title=\":ratwave:\" height=\"32\"> there",
+        );
+        let text: String = rich.lines[0]
+            .segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(text, "hello :ratwave: there");
+        // An ordinary picture in a message is still not shown.
+        for html in [
+            "a <img src=\"mxc://e.org/x\" alt=\"a photo\"> b",
+            "a <img src=\"mxc://e.org/x\" alt=\"::\"> b",
+            "a <img src=\"mxc://e.org/x\" alt=\":two words:\"> b",
+            "a <img src=\"mxc://e.org/x\"> b",
+        ] {
+            let rich = from_html(html);
+            let text: String = rich.lines[0]
+                .segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect();
+            assert_eq!(text, "a b", "{html}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_custom_emoji_name_is_cleaned_and_kept_short() {
+        let rich = from_html(&format!(
+            "<img data-mx-emoticon src=\"mxc://e.org/x\" alt=\"\u{1b}[31m{}\nevil\">",
+            "a".repeat(500)
+        ));
+        let text = texts(&rich).concat();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains('\n'));
+        assert!(
+            text.starts_with(":[31maaa") && text.ends_with("…:"),
+            "{text}"
+        );
+        assert!(width(&text) <= 34, "{text}");
+
+        for html in [
+            "<img data-mx-emoticon src=\"mxc://e.org/x\">",
+            "<img data-mx-emoticon alt=\"::\" title=\"\u{200b}\">",
+            "<img data-mx-emoticon alt=\"   \">",
+        ] {
+            assert_eq!(texts(&from_html(html)), [EMOTICON_PLACEHOLDER], "{html}");
+        }
     }
 }

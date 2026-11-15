@@ -147,7 +147,25 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 push_action(&mut hints, Context::Timeline, A::Back, "back");
             }
             Pane::Timeline => {
-                push_action(&mut hints, Context::Timeline, A::Open, "view");
+                // What opening the selected message does, if anything.
+                let open = app
+                    .timeline
+                    .selected
+                    .and_then(|i| app.room()?.messages.get(i))
+                    .and_then(|message| {
+                        if message.poll.as_ref().is_some_and(|poll| !poll.ended) {
+                            Some("vote")
+                        } else if message.is_playable() {
+                            Some("play")
+                        } else if message.image.is_some() {
+                            Some("view")
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(open) = open {
+                    push_action(&mut hints, Context::Timeline, A::Open, open);
+                }
                 push_action(&mut hints, Context::Timeline, A::Reply, "reply");
                 push_action(&mut hints, Context::Timeline, A::OpenThread, "thread");
                 push_action(&mut hints, Context::Timeline, A::Edit, "edit");
@@ -188,12 +206,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         // Saving is only offered where there is something to save.
         let can_save = app.can_save();
         hints.retain(|(_, text, _)| *text != "save" || can_save);
-        let picture = app
-            .timeline
-            .selected
-            .and_then(|i| app.room()?.messages.get(i))
-            .is_some_and(|message| message.image.is_some());
-        hints.retain(|(_, text, _)| *text != "view" || picture);
         let mut col = area.x + spans.iter().map(|s| width(&s.content) as u16).sum::<u16>();
         let mut drew_hint = false;
         for (k, text, action) in hints {

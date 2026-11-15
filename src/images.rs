@@ -27,6 +27,8 @@ use crate::termquery;
 /// The largest picture drawn between messages, in cells.
 pub const MAX_COLS: u16 = 40;
 pub const MAX_ROWS: u16 = 12;
+/// A sticker is a small picture: it gets less room than a photo.
+const STICKER_MAX_CELLS: (u16, u16) = (18, 7);
 /// Space kept for a picture whose size is not known yet.
 const UNKNOWN_CELLS: (u16, u16) = (24, 8);
 /// Pictures between messages are kept no larger than this, in pixels.
@@ -644,7 +646,13 @@ impl ImageStore {
         {
             return Slot::Failed(reason.clone());
         }
-        let limit = inline_limit(width);
+        let mut limit = inline_limit(width);
+        if info.sticker {
+            limit = (
+                limit.0.min(STICKER_MAX_CELLS.0),
+                limit.1.min(STICKER_MAX_CELLS.1),
+            );
+        }
         match info.dimensions.or(self.learned.get(&info.key).copied()) {
             Some(pixels) => {
                 let (cols, rows) = fit_cells(pixels, self.graphics.font, limit);
@@ -1290,6 +1298,7 @@ pub mod testing {
             caption: None,
             dimensions,
             size: Some(2048),
+            sticker: false,
         }
     }
 

@@ -197,6 +197,8 @@ action_table! {
     Action::PinMessage => ("pin_message", Context::Timeline, "Pin or unpin message"),
     Action::ForwardMessage => ("forward_message", Context::Timeline, "Forward message"),
     Action::UserInfo => ("user_info", Context::Timeline, "User info"),
+    Action::CreatePoll => ("create_poll", Context::Global, "Start a poll…"),
+    Action::OpenStickers => ("stickers", Context::Global, "Send a sticker…"),
     Action::OpenPinned => ("open_pinned", Context::Timeline, "Pinned messages"),
     Action::RetryDecryption => ("retry_decryption", Context::Timeline, "Try decrypting again"),
     Action::JumpToNewest => ("jump_to_newest", Context::Timeline, "Jump to newest"),

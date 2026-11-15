@@ -29,7 +29,7 @@ notifications and themes that follow your desktop are all there.
 |---|---|
 | 🔐 **Private by default** | End-to-end encryption, device verification by emoji comparison, recovery key, and warnings on messages that cannot be fully trusted. See where your account is logged in and sign sessions out, check your key backup, move message keys between devices in a file, and read why a message could not be decrypted. |
 | 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list (kitty graphics only; coloured initials otherwise). |
-| 💬 **Everything a chat needs** | Replies, edits, reactions, threads, mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
+| 💬 **Everything a chat needs** | Replies, edits, reactions, threads, polls, stickers and custom emoji, mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
 | 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread to come back to it later (your other clients see that too), or everything as read. |
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
@@ -139,8 +139,9 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 
 What you type is sent as Markdown: `**bold**`, `*italic*`, `` `code` ``, `||spoiler||`,
 `> quote`, lists and links (the composer shows the plain text; the formatting appears in
-the sent message). `/me`, `/spoiler`, `/plain`, `/shrug` and friends work as commands;
-`@`, `:`, `#` and `/` open completions.
+the sent message). `/me`, `/spoiler`, `/plain`, `/shrug` and friends work as commands,
+`/poll` starts a poll and `/sticker` picks a sticker to send; `@`, `:`, `#` and `/` open
+completions (`:` offers your custom emoji too).
 
 Unsent text stays with its room or thread and is still there after a restart (it is kept
 in the encrypted session store). A reply comes back as its text, without what it answered.
@@ -239,7 +240,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
@@ -334,6 +335,15 @@ Setting `preset = "vim"` keeps the default keys and adds:
   colour. The colours are the theme's: `code_text`, `code_keyword`, `code_string`,
   `code_comment`, `code_constant`, `code_type` and `code_function` in a theme's `[ui]`
   table (set them all to the same colour to have no colouring).
+- **Custom emoji and stickers** come from image packs: your own, the open room's, and
+  those of other rooms you switched on for everywhere (packs are made in another client,
+  such as Cinny or FluffyChat). They are loaded the first time something needs them
+  (typing `:` and two letters, or the sticker picker), not at start. Custom emoji in
+  messages show as their `:shortcode:` text, not as pictures; a reaction with one shows
+  its shortcode when your packs know it, else `:?:`. Choosing one from the `:`
+  completions sends it as a picture to other clients. Stickers show as small pictures;
+  "Send a sticker…" in the command palette (or `/sticker`, with words to filter by)
+  lists yours by name.
 - **Key backup and recovery are not created here yet.** matrix-rat uses a backup and a
   recovery key that exist, and tells you when they are missing; to set them up (or reset
   them), use Element: Settings → Encryption.

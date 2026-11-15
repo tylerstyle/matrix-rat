@@ -9,6 +9,7 @@ use matrix_sdk::ruma::{OwnedUserId, RoomAliasId, RoomId, UserId};
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
+use crate::matrix::EmoteCatalog;
 use crate::text::sanitize_line;
 
 /// Maximum number of completion candidates retained and displayed in the popup.
@@ -47,6 +48,11 @@ pub enum Target {
     },
     RoomMention,
     Emoji(String),
+    /// A custom emoji from an image pack, by its shortcode (without colons).
+    CustomEmoji {
+        shortcode: String,
+        url: String,
+    },
     RoomLink {
         label: String,
         uri: String,
@@ -65,9 +71,20 @@ pub struct Candidate {
 /// What kind of target a [`MentionMark`] resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MentionKind {
-    User { label: String, user_id: String },
+    User {
+        label: String,
+        user_id: String,
+    },
     RoomNotification,
-    RoomLink { label: String, uri: String },
+    RoomLink {
+        label: String,
+        uri: String,
+    },
+    /// A custom emoji: `code` is its `:shortcode:` as typed, `url` its picture.
+    Emoticon {
+        code: String,
+        url: String,
+    },
 }
 
 /// An accepted mention or room link tracked alongside composer text.
@@ -106,6 +123,16 @@ impl MentionMark {
         }
     }
 
+    pub fn emoticon(shortcode: &str, url: impl Into<String>) -> Self {
+        Self {
+            kind: MentionKind::Emoticon {
+                code: format!(":{shortcode}:"),
+                url: url.into(),
+            },
+            at: None,
+        }
+    }
+
     pub fn with_at(mut self, at: Option<usize>) -> Self {
         self.at = at;
         self
@@ -114,6 +141,7 @@ impl MentionMark {
     pub fn needle(&self) -> &str {
         match &self.kind {
             MentionKind::User { label, .. } | MentionKind::RoomLink { label, .. } => label.as_str(),
+            MentionKind::Emoticon { code, .. } => code.as_str(),
             MentionKind::RoomNotification => "@room",
         }
     }
@@ -159,6 +187,8 @@ pub struct Context<'a> {
     pub recent_speakers: &'a [String],
     pub can_mention_room: bool,
     pub rooms: &'a [RoomTarget],
+    /// Custom emoji offered next to the standard ones.
+    pub emotes: &'a EmoteCatalog,
 }
 
 /// Slash commands recognised by `crate::format` and `crate::upload`.
@@ -171,6 +201,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/shrug", "Prepend ¯\\_(ツ)_/¯ to the message"),
     ("/tableflip", "Prepend (╯°□°)╯︵ ┻━┻ to the message"),
     ("/lenny", "Prepend ( ͡° ͜ʖ ͡°) to the message"),
+    ("/poll", "Start a poll"),
+    ("/sticker", "Send a sticker from your image packs"),
     ("/upload", "Attach and upload a file"),
     ("/file", "Attach and upload a file"),
 ];
@@ -213,6 +245,11 @@ pub fn replacement(
             Some(MentionMark::room_notification().with_at(Some(range.start))),
         ),
         Target::Emoji(ch) => (ch.clone(), None),
+        // Spaced like a mention: a shortcode only becomes a picture when it stands apart.
+        Target::CustomEmoji { shortcode, url } => (
+            format!(":{shortcode}:{suffix}"),
+            Some(MentionMark::emoticon(shortcode, url.clone()).with_at(Some(range.start))),
+        ),
         Target::RoomLink { label, uri } => (
             format!("{label}{suffix}"),
             Some(MentionMark::room_link(label.clone(), uri.clone()).with_at(Some(range.start))),
@@ -257,7 +294,7 @@ pub fn find(text: &str, cursor: usize, ctx: &Context<'_>) -> Option<Completion> 
     let (kind, range, query) = detect_trigger(prefix, &mask)?;
     let items = match kind {
         Kind::Command => match_commands(query),
-        Kind::Emoji => match_emoji(query),
+        Kind::Emoji => match_emoji(query, ctx.emotes),
         Kind::Mention => match_mentions(query, ctx),
         Kind::Room => match_rooms(query, ctx.rooms),
     };
@@ -270,6 +307,17 @@ pub fn find(text: &str, cursor: usize, ctx: &Context<'_>) -> Option<Completion> 
         items,
         selected: 0,
     })
+}
+
+/// The kind of completion being typed at `cursor`, whether or not anything matches.
+pub fn trigger(text: &str, cursor: usize) -> Option<Kind> {
+    let cursor = clamp_boundary(text, cursor);
+    let prefix = &text[..cursor];
+    let mask = code_mask(prefix, true);
+    if mask.last().is_none_or(|&code| code) {
+        return None;
+    }
+    detect_trigger(prefix, &mask).map(|(kind, _, _)| kind)
 }
 
 fn clamp_boundary(text: &str, mut index: usize) -> usize {
@@ -391,10 +439,41 @@ fn command_candidate(cmd: &str, desc: &str) -> Candidate {
     }
 }
 
-fn match_emoji(query: &str) -> Vec<Candidate> {
+/// The user's own custom emoji come first (those starting with the query before those
+/// only containing it), then the standard ones.
+fn match_emoji(query: &str, emotes: &EmoteCatalog) -> Vec<Candidate> {
+    const MAX_CUSTOM: usize = 5;
+    let needle = query.to_lowercase();
+    let (mut starts, mut contains) = (Vec::new(), Vec::new());
+    for emoji in emotes.emojis() {
+        let code = emoji.shortcode.to_lowercase();
+        if code.starts_with(&needle) {
+            starts.push(emoji);
+        } else if code.contains(&needle) {
+            contains.push(emoji);
+        }
+    }
+    let mut items: Vec<Candidate> = starts
+        .into_iter()
+        .chain(contains)
+        .take(MAX_CUSTOM)
+        .map(|emoji| Candidate {
+            primary: format!(":{}:", emoji.shortcode),
+            secondary: format!("custom · {}", emoji.pack_name),
+            target: Target::CustomEmoji {
+                shortcode: emoji.shortcode.clone(),
+                url: emoji.url.clone(),
+            },
+        })
+        .collect();
+    items.extend(standard_emoji(query, MAX_CANDIDATES - items.len()));
+    items
+}
+
+fn standard_emoji(query: &str, max: usize) -> impl Iterator<Item = Candidate> {
     crate::emoji::search(query)
         .into_iter()
-        .take(MAX_CANDIDATES)
+        .take(max)
         .map(|emoji| {
             let short = emoji
                 .shortcode()
@@ -410,7 +489,6 @@ fn match_emoji(query: &str) -> Vec<Candidate> {
                 target: Target::Emoji(emoji.as_str().to_owned()),
             }
         })
-        .collect()
 }
 
 fn match_mentions(query: &str, ctx: &Context<'_>) -> Vec<Candidate> {
@@ -766,7 +844,7 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
     let mut room_mention = false;
     let mut replacements: Vec<(Range<usize>, String)> = Vec::new();
 
-    let mut apply = |pos: usize, end: usize, mark: &MentionMark| match &mark.kind {
+    let mut apply = |pos: usize, end: usize, idx: usize, mark: &MentionMark| match &mark.kind {
         MentionKind::User { label, user_id } => {
             if let Ok(uid) = UserId::parse(user_id) {
                 let uri = uid.matrix_to_uri().to_string();
@@ -782,6 +860,7 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
                 replacements.push((pos..end, markdown_link(label, uri)));
             }
         }
+        MentionKind::Emoticon { .. } => replacements.push((pos..end, emote_placeholder(idx))),
     };
 
     // Pass 1: honour exact accepted positions first so an earlier ordinary word (e.g. "May") does
@@ -801,13 +880,13 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
             || !text.is_char_boundary(end)
             || !text[pos..].starts_with(needle)
             || occupied[pos..end].iter().any(|&b| b)
-            || !is_mark_boundary(text, pos, end)
+            || !mark_fits(text, pos, end, mark)
         {
             continue;
         }
         used[idx] = true;
         occupied[pos..end].fill(true);
-        apply(pos, end, mark);
+        apply(pos, end, idx, mark);
     }
 
     // Pass 2: match any remaining unused mark against the first unused occurrence left to right.
@@ -830,7 +909,7 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
             if occupied[pos..end].iter().any(|&b| b) {
                 continue;
             }
-            if !is_mark_boundary(text, pos, end) {
+            if !mark_fits(text, pos, end, mark) {
                 continue;
             }
             chosen = Some((idx, mark, needle));
@@ -840,7 +919,7 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
             let end = pos + needle.len();
             used[idx] = true;
             occupied[pos..end].fill(true);
-            apply(pos, end, mark);
+            apply(pos, end, idx, mark);
             pos = end;
         } else {
             pos += next_char_len(text, pos);
@@ -862,8 +941,29 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
     (linked, mentions)
 }
 
+/// Custom emoji are HTML that Markdown would escape, so [`resolve_marks`] leaves a
+/// placeholder for each, naming the mark by its index, and `crate::format` puts the
+/// picture in after rendering. Private-use characters pass Markdown untouched.
+pub const EMOTE_OPEN: char = '\u{E000}';
+pub const EMOTE_CLOSE: char = '\u{E001}';
+
+fn emote_placeholder(index: usize) -> String {
+    format!("{EMOTE_OPEN}{index}{EMOTE_CLOSE}")
+}
+
 fn next_char_len(text: &str, pos: usize) -> usize {
     text[pos..].chars().next().map_or(1, char::len_utf8)
+}
+
+/// Whether `mark` may stand at `text[start..end]`. A custom emoji also needs to start a
+/// word as its completion did (or follow another one): after a `/` it would be part of
+/// an address.
+fn mark_fits(text: &str, start: usize, end: usize, mark: &MentionMark) -> bool {
+    let before = text[..start].chars().next_back();
+    is_mark_boundary(text, start, end)
+        && (!matches!(mark.kind, MentionKind::Emoticon { .. })
+            || is_trigger_boundary(before)
+            || matches!(before, Some(':' | '*' | '~' | '|' | '>')))
 }
 
 fn is_mark_boundary(text: &str, start: usize, end: usize) -> bool {
@@ -923,6 +1023,9 @@ pub fn marks_from_message(html: Option<&str>, mentions: Option<&Mentions>) -> Ve
                 marks.push(MentionMark::room_link(label, href));
             }
         }
+        for (shortcode, url) in extract_emoticons(html) {
+            marks.push(MentionMark::emoticon(&shortcode, url));
+        }
     }
 
     if let Some(mentions) = mentions {
@@ -973,6 +1076,42 @@ fn extract_matrix_to_links(html: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The custom emoji of a message's HTML, as `(shortcode, url)`, so an edit keeps them.
+fn extract_emoticons(html: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = strip_mx_reply(html);
+    while let Some(open) = rest.find('<') {
+        let tail = &rest[open + 1..];
+        let Some(end) = tail.find('>') else {
+            break;
+        };
+        let tag = tail[..end].trim().trim_end_matches('/');
+        rest = &tail[end + 1..];
+        if !is_tag(tag, "img") {
+            continue;
+        }
+        let attributes = &tag[3..];
+        if !crate::rich::is_emoticon(attributes) {
+            continue;
+        }
+        let url = crate::rich::attribute(attributes, "src").map(crate::rich::decode_entities);
+        let code = ["alt", "title"].into_iter().find_map(|name| {
+            let raw = crate::rich::decode_entities(crate::rich::attribute(attributes, name)?);
+            let code = raw.trim().trim_matches(':');
+            let ok = !code.is_empty()
+                && code.len() <= crate::matrix::MAX_SHORTCODE_LEN
+                && !code.contains(|c: char| c.is_whitespace() || c == ':' || c.is_control());
+            ok.then(|| code.to_owned())
+        });
+        if let (Some(url), Some(code)) = (url, code)
+            && crate::matrix::is_valid_mxc(&url)
+        {
+            out.push((code, url));
+        }
+    }
+    out
+}
+
 fn strip_mx_reply(html: &str) -> &str {
     let lower = html.to_ascii_lowercase();
     if let Some(start) = lower.find("<mx-reply")
@@ -985,8 +1124,9 @@ fn strip_mx_reply(html: &str) -> &str {
 }
 
 fn is_tag(tag: &str, name: &str) -> bool {
-    tag.len() >= name.len()
-        && tag[..name.len()].eq_ignore_ascii_case(name)
+    // `get`: a tag of the sender's may start with a character wider than one byte.
+    tag.get(..name.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(name))
         && tag[name.len()..]
             .chars()
             .next()
@@ -1064,6 +1204,8 @@ fn percent_decode(s: &str) -> String {
 mod tests {
     use super::*;
 
+    static NO_EMOTES: EmoteCatalog = EmoteCatalog { packs: Vec::new() };
+
     fn test_ctx<'a>(
         members: &'a [Member],
         recent: &'a [String],
@@ -1074,6 +1216,7 @@ mod tests {
             recent_speakers: recent,
             can_mention_room: true,
             rooms,
+            emotes: &NO_EMOTES,
         }
     }
 
@@ -1193,6 +1336,7 @@ mod tests {
             recent_speakers: &recent,
             can_mention_room: true,
             rooms: &[],
+            emotes: &NO_EMOTES,
         };
 
         let empty = find("@", 1, &ctx).unwrap();
@@ -1210,6 +1354,7 @@ mod tests {
             recent_speakers: &recent,
             can_mention_room: false,
             rooms: &[],
+            emotes: &NO_EMOTES,
         };
         let no_room = find("@room", 5, &restricted);
         assert!(no_room.is_none());
@@ -1288,5 +1433,84 @@ mod tests {
                 MentionMark::room_link("#rust:hs", "https://matrix.to/#/%23rust:hs"),
             ]
         );
+    }
+
+    fn catalog(codes: &[&str]) -> EmoteCatalog {
+        use crate::matrix::{CustomEmoji, EmotePack};
+        EmoteCatalog {
+            packs: vec![EmotePack {
+                id: "user".into(),
+                name: "Mine".into(),
+                emojis: codes
+                    .iter()
+                    .map(|code| CustomEmoji {
+                        shortcode: (*code).into(),
+                        url: format!("mxc://example.org/{code}"),
+                        body: None,
+                        pack_name: "Mine".into(),
+                    })
+                    .collect(),
+                stickers: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn custom_emoji_starting_with_the_query_come_before_the_standard_ones() {
+        let emotes = catalog(&["smile_rat", "blobsmile", "partyparrot"]);
+        let ctx = Context {
+            members: &[],
+            recent_speakers: &[],
+            can_mention_room: false,
+            rooms: &[],
+            emotes: &emotes,
+        };
+        let found = find("hi :smi", 7, &ctx).expect("emoji completion");
+        assert_eq!(found.kind, Kind::Emoji);
+        assert!(found.items.len() <= MAX_CANDIDATES);
+        let primaries: Vec<&str> = found.items.iter().map(|i| i.primary.as_str()).collect();
+        assert_eq!(primaries[..2], [":smile_rat:", ":blobsmile:"]);
+        assert_eq!(found.items[0].secondary, "custom · Mine");
+        assert!(matches!(found.items[2].target, Target::Emoji(_)));
+
+        // Something only a custom emoji matches still opens the list.
+        let emotes = catalog(&["qxzparrot"]);
+        let ctx = Context {
+            emotes: &emotes,
+            ..ctx
+        };
+        let found = find(":qxzp", 5, &ctx).expect("custom only");
+        assert_eq!(found.items.len(), 1);
+        let (insert, mark) = replacement(":qxzp", &found.range, &found.items[0].target);
+        assert_eq!(insert, ":qxzparrot: ");
+        assert_eq!(
+            mark,
+            Some(
+                MentionMark::emoticon("qxzparrot", "mxc://example.org/qxzparrot").with_at(Some(0))
+            )
+        );
+        assert_eq!(trigger(":pa", 3), Some(Kind::Emoji));
+        assert_eq!(trigger(":p", 2), None);
+        assert_eq!(trigger("`:pa", 4), None);
+    }
+
+    #[test]
+    fn an_edit_keeps_the_custom_emoji_of_the_message() {
+        let html = "<mx-reply><img data-mx-emoticon src=\"mxc://example.org/old\" alt=\":old:\"></mx-reply>\
+                    hi <img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blob:\" title=\":blob:\"> \
+                    <img data-mx-emoticon src=\"https://evil.example/x\" alt=\":bad:\"> \
+                    <img data-mx-emoticon src=\"mxc://example.org/two\" alt=\"two words\"> \
+                    <img src=\"mxc://example.org/pic\" alt=\"a picture\"> \
+                    <img src=\"mxc://example.org/named\" alt=\":named:\"> <éé> <é";
+        // The last one has lost its mark, as received messages do, and is known by its name.
+        assert_eq!(
+            marks_from_message(Some(html), None),
+            vec![
+                MentionMark::emoticon("blob", "mxc://example.org/blob"),
+                MentionMark::emoticon("named", "mxc://example.org/named")
+            ]
+        );
+        let (linked, _) = resolve_marks("hi :blob:", &marks_from_message(Some(html), None));
+        assert_eq!(linked, format!("hi {EMOTE_OPEN}0{EMOTE_CLOSE}"));
     }
 }

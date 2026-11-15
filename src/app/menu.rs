@@ -269,6 +269,7 @@ impl App {
                 HitId::Message(index)
                 | HitId::Reaction(index, _)
                 | HitId::Image(index)
+                | HitId::PlayMedia(index)
                 | HitId::Thread(index)
                 | HitId::CopyCode(index, _)
                 | HitId::ReplyQuote(index),
@@ -432,6 +433,8 @@ impl App {
                     }
                     Run::Report => self.open_report_modal(index),
                     Run::BanUser => self.open_ban_confirm_from_message(index),
+                    Run::VotePoll => self.open_poll_vote(index),
+                    Run::EndPoll => self.end_poll(index),
                     _ => {}
                 }
             }

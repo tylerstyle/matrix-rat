@@ -173,6 +173,7 @@ mod tests {
                 key: key.clone(),
                 name: name.to_owned(),
                 size: Some(size),
+                kind: crate::model::MediaKind::File,
                 source: Box::new(MediaSource::Plain(OwnedMxcUri::from(key))),
             }),
             ..Message::default()
@@ -340,5 +341,72 @@ mod tests {
         assert_eq!(app.download_dir, "~/inbox");
         assert!(app.download_dir().ends_with("inbox"));
         assert!(app.download_dir().is_absolute());
+    }
+
+    #[test]
+    fn voice_video_and_location_play_and_open() {
+        let mut voice = file_message("voice.ogg", 1024);
+        voice.body = "🎤 voice.ogg · 0:12 · 1.0 kB".into();
+        voice.file.as_mut().unwrap().kind = crate::model::MediaKind::Voice;
+
+        let mut video = file_message("clip.mp4", 4096);
+        video.body = "🎞  clip.mp4 · 0:30 · 4.0 kB".into();
+        video.file.as_mut().unwrap().kind = crate::model::MediaKind::Video;
+        video.image = Some(crate::images::testing::remote_image(
+            "mxc://example.org/vthumb",
+            Some((320, 180)),
+        ));
+
+        let mut loc = file_message("loc", 0);
+        loc.file = None;
+        loc.body = "📍 Big Ben · geo:51.5074,-0.1278".into();
+
+        let (mut app, mut commands) = app_with(vec![voice, video, loc]);
+
+        // Enter replies, as on every message; `o` plays (`open: true`).
+        app.timeline.selected = Some(0);
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            app.compose_mode,
+            crate::app::ComposeMode::Reply(_)
+        ));
+        assert!(saves(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Esc));
+        app.focus = crate::app::Pane::Timeline;
+        app.timeline.selected = Some(0);
+        app.on_event(key(KeyCode::Char('o')));
+        assert_eq!(
+            saves(&mut commands),
+            [("voice.ogg".to_owned(), app.download_dir(), true)]
+        );
+
+        // `o` and clicking the thumbnail of a video play the video instead of viewing its thumbnail.
+        app.timeline.selected = Some(1);
+        app.on_event(key(KeyCode::Char('o')));
+        assert!(!app.images.viewer_open());
+        assert_eq!(
+            saves(&mut commands),
+            [("clip.mp4".to_owned(), app.download_dir(), true)]
+        );
+        app.saving.clear();
+        app.click_image(1);
+        assert!(!app.images.viewer_open());
+        assert_eq!(saves(&mut commands).len(), 1);
+
+        // `s` still saves without playing (`open: false`).
+        app.saving.clear();
+        app.on_event(key(KeyCode::Char('s')));
+        assert_eq!(
+            saves(&mut commands),
+            [("clip.mp4".to_owned(), app.download_dir(), false)]
+        );
+
+        // `o` on a location opens its geo: URI.
+        crate::app::TEST_OPENED_URLS.with(|u| u.borrow_mut().clear());
+        app.timeline.selected = Some(2);
+        app.on_event(key(KeyCode::Char('o')));
+        crate::app::TEST_OPENED_URLS.with(|u| {
+            assert_eq!(*u.borrow(), ["geo:51.5074,-0.1278"]);
+        });
     }
 }

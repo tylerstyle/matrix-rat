@@ -478,6 +478,8 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         Action::PinMessage,
         Action::ForwardMessage,
         Action::UserInfo,
+        Action::CreatePoll,
+        Action::OpenStickers,
     ];
     for binding in active_bindings {
         if include_keymap_action(binding.action) == ActionInclusion::Skip {
@@ -632,6 +634,28 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         action_enabled(Action::UserInfo, ctx),
         0,
     );
+    push_entry(
+        out,
+        Target::Action(Action::CreatePoll),
+        Category::Action,
+        "Start a poll…",
+        key_of(Action::CreatePoll),
+        "Start a poll…",
+        &["poll", "vote", "question", "survey"],
+        action_enabled(Action::CreatePoll, ctx),
+        0,
+    );
+    push_entry(
+        out,
+        Target::Action(Action::OpenStickers),
+        Category::Action,
+        "Send a sticker…",
+        key_of(Action::OpenStickers),
+        "Send a sticker…",
+        &["sticker", "image pack", "emote"],
+        action_enabled(Action::OpenStickers, ctx),
+        0,
+    );
 }
 
 #[derive(PartialEq, Eq)]
@@ -687,7 +711,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::JumpToReply => sel.can_jump_to_reply,
         Action::CloseThread => ctx.thread_open,
         Action::EditLast => ctx.can_edit_last,
-        Action::Attach => {
+        Action::Attach | Action::CreatePoll | Action::OpenStickers => {
             ctx.has_room && !in_pending && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
         Action::ComposeInEditor => ctx.has_room && !in_pending,
@@ -806,7 +830,12 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
         ),
         Pane::Composer => matches!(
             action,
-            Action::OpenEmoji | Action::Attach | Action::ComposeInEditor | Action::FocusRoomFilter
+            Action::OpenEmoji
+                | Action::Attach
+                | Action::CreatePoll
+                | Action::OpenStickers
+                | Action::ComposeInEditor
+                | Action::FocusRoomFilter
         ),
     }
 }

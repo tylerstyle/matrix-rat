@@ -209,6 +209,12 @@ impl UserInfoPopup {
             .map_or(&[], |p| p.shared_rooms.as_slice())
     }
 
+    pub fn shared_rooms_incomplete(&self) -> bool {
+        self.profile
+            .as_ref()
+            .is_some_and(|p| p.shared_rooms_incomplete)
+    }
+
     pub fn rows(&self, ctx: &UserInfoCtx) -> Vec<UserInfoRow> {
         let mut rows = Vec::new();
         if !ctx.is_self {

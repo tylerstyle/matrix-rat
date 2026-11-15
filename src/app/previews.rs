@@ -216,6 +216,7 @@ mod tests {
             key: "mxc://example.org/f".into(),
             name: "f.txt".into(),
             size: Some(1),
+            kind: crate::model::MediaKind::File,
             source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
                 "mxc://example.org/f".into(),
             )),

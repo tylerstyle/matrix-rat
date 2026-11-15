@@ -395,10 +395,17 @@ impl App {
         // timeline does not hold it yet, the room's is the one that can change it.
         if let (Some(root), Some(view)) = (&root, view)
             && !view.root_loaded
-            && let MatrixCmd::Edit { item, .. }
-            | MatrixCmd::ToggleReaction { item, .. }
-            | MatrixCmd::Redact { item, .. } = &command
-            && matches!(item, ItemRef::Event(id) if id == root)
+            && match &command {
+                MatrixCmd::Edit { item, .. }
+                | MatrixCmd::EditPoll { item, .. }
+                | MatrixCmd::ToggleReaction { item, .. }
+                | MatrixCmd::Redact { item, .. } => {
+                    matches!(item, ItemRef::Event(id) if id == root)
+                }
+                MatrixCmd::VotePoll { poll_event_id, .. }
+                | MatrixCmd::EndPoll { poll_event_id, .. } => poll_event_id == root,
+                _ => false,
+            }
         {
             return command;
         }
@@ -407,6 +414,11 @@ impl App {
                 Some(root),
                 command @ (MatrixCmd::Send { .. }
                 | MatrixCmd::Edit { .. }
+                | MatrixCmd::SendSticker { .. }
+                | MatrixCmd::SendPoll { .. }
+                | MatrixCmd::EditPoll { .. }
+                | MatrixCmd::VotePoll { .. }
+                | MatrixCmd::EndPoll { .. }
                 | MatrixCmd::ToggleReaction { .. }
                 | MatrixCmd::Redact { .. }
                 | MatrixCmd::Retry { .. }

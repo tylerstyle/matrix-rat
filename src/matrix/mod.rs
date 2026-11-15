@@ -5,6 +5,7 @@ mod convert;
 mod devices;
 mod directory;
 mod drafts;
+mod emotes;
 mod keyring;
 mod manage;
 mod media;
@@ -29,6 +30,9 @@ pub use devices::{
 #[cfg(test)]
 pub use directory::PreviewJoinRule;
 pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
+#[cfg(test)]
+pub use emotes::{CustomEmoji, EmotePack};
+pub use emotes::{EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
 pub use keyring::SecretStoreMode;
 #[cfg(test)]
 pub use manage::RoomSettingsPower;
@@ -129,6 +133,43 @@ pub enum MatrixCmd {
         room_id: String,
         item: ItemRef,
         message: Outgoing,
+    },
+    SendPoll {
+        room_id: String,
+        question: String,
+        answers: Vec<String>,
+        disclosed: bool,
+        max_selections: u32,
+    },
+    EditPoll {
+        room_id: String,
+        item: ItemRef,
+        question: String,
+        answers: Vec<String>,
+        disclosed: bool,
+        max_selections: u32,
+    },
+    VotePoll {
+        room_id: String,
+        poll_event_id: String,
+        answers: Vec<String>,
+    },
+    EndPoll {
+        room_id: String,
+        poll_event_id: String,
+    },
+    /// Lazily loads MSC2545 / Matrix 1.19 image packs for the session and `room_id`.
+    EnsureEmotePacks {
+        room_id: Option<String>,
+    },
+    /// Sends an `m.sticker` event to `room_id` (or the active thread when wrapped in `InThread`).
+    SendSticker {
+        room_id: String,
+        name: String,
+        url: String,
+        dimensions: Option<(u32, u32)>,
+        size: Option<u64>,
+        mime: Option<String>,
     },
     ToggleReaction {
         room_id: String,
@@ -367,6 +408,16 @@ impl std::fmt::Debug for MatrixCmd {
             // Message text is private too.
             Self::Send { room_id, .. } => write!(f, "Send({room_id})"),
             Self::Edit { room_id, .. } => write!(f, "Edit({room_id})"),
+            Self::SendPoll { room_id, .. } => write!(f, "SendPoll({room_id})"),
+            Self::EditPoll { room_id, .. } => write!(f, "EditPoll({room_id})"),
+            Self::VotePoll { room_id, .. } => write!(f, "VotePoll({room_id})"),
+            Self::EndPoll { room_id, .. } => write!(f, "EndPoll({room_id})"),
+            Self::EnsureEmotePacks { room_id } => {
+                write!(f, "EnsureEmotePacks(has_room: {})", room_id.is_some())
+            }
+            Self::SendSticker { dimensions, .. } => {
+                write!(f, "SendSticker(has_dims: {})", dimensions.is_some())
+            }
             Self::ToggleReaction { room_id, .. } => write!(f, "ToggleReaction({room_id})"),
             Self::Redact { room_id, .. } => write!(f, "Redact({room_id})"),
             Self::Pin {
@@ -774,6 +825,8 @@ pub enum MatrixEvent {
         generation: u64,
         message: String,
     },
+    /// Session-cached MSC2545 / Matrix 1.19 custom emoji and sticker packs.
+    EmotePacks(EmoteCatalog),
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -937,6 +990,7 @@ impl std::fmt::Debug for MatrixEvent {
             Self::DirectoryError { generation, .. } => {
                 write!(f, "DirectoryError(generation {generation})")
             }
+            Self::EmotePacks(catalog) => write!(f, "EmotePacks({catalog:?})"),
         }
     }
 }
@@ -1415,6 +1469,8 @@ impl Worker {
             own_refresh.clone(),
         );
         let mut devices = devices::Devices::new(client.clone(), self.events.clone());
+        let mut emote_mgr = emotes::EmoteManager::new(client.clone(), self.events.clone());
+        let emote_handlers = emote_mgr.register_handlers(client);
         let power_events = self.events.clone();
         let manage_refresh = manager.refresh_signal();
         let power_handler = client.add_event_handler(
@@ -1632,12 +1688,16 @@ impl Worker {
                         dir_searcher.next_page(generation);
                     }
                     Some(MatrixCmd::CancelDirectorySearch) => dir_searcher.cancel(),
+                    Some(MatrixCmd::EnsureEmotePacks { room_id }) => emote_mgr.ensure(room_id),
                     Some(command) => timelines.handle(command).await,
                 },
             }
         };
         client.remove_event_handler(power_handler);
         client.remove_event_handler(member_handler);
+        for handler in emote_handlers {
+            client.remove_event_handler(handler);
+        }
         for handler in room_state_handlers {
             client.remove_event_handler(handler);
         }
@@ -1645,6 +1705,7 @@ impl Worker {
         people_mgr.stop();
         manager.stop();
         devices.stop();
+        emote_mgr.stop();
         searcher.stop();
         user_searcher.stop();
         dir_searcher.stop();

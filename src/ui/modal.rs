@@ -19,7 +19,7 @@ use crate::modal::{
 use crate::text::{sanitize, sanitize_line, truncate, width};
 use crate::theme::{Role, Theme};
 
-const FIELD_LABEL: usize = 13;
+pub(super) const FIELD_LABEL: usize = 13;
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     // Taken out while drawing so the popup state and the rest of the app can be
@@ -48,6 +48,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::ReasonConfirm(confirm) => reason_confirm(frame, app, area, confirm),
         Modal::Sessions(popup) => super::devices::draw_sessions(frame, app, area, popup),
         Modal::Keys(popup) => super::devices::draw_keys(frame, app, area, popup),
+        Modal::PollForm(form) => super::poll::draw_form(frame, app, area, form),
+        Modal::PollVote(vote) => super::poll::draw_vote(frame, app, area, vote),
+        Modal::Stickers(picker) => super::stickers::draw(frame, app, area, picker),
     }
     app.modal = Some(modal);
 }
