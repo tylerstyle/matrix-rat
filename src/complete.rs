@@ -203,6 +203,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/shrug", "Prepend ¯\\_(ツ)_/¯ to the message"),
     ("/tableflip", "Prepend (╯°□°)╯︵ ┻━┻ to the message"),
     ("/lenny", "Prepend ( ͡° ͜ʖ ͡°) to the message"),
+    ("/code", "Send as a code block: /code [language] text"),
     ("/poll", "Start a poll"),
     ("/sticker", "Send a sticker from your image packs"),
     ("/upload", "Attach and upload a file"),

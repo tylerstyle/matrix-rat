@@ -150,7 +150,7 @@ fn syntax_for(lang: &str) -> Option<&'static syntect::parsing::SyntaxReference> 
 }
 
 /// Whether there is a grammar for this language name (and it is not just plain text).
-fn known(lang: &str) -> bool {
+pub(crate) fn known(lang: &str) -> bool {
     syntax_for(lang).is_some_and(|syntax| syntax.name != SYNTAXES.find_syntax_plain_text().name)
 }
 

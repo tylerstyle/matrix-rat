@@ -181,6 +181,7 @@ pub fn parse_with_mentions(
                 mentions: finish_mentions(mentions, preserve_empty_mentions),
             })
         }
+        "code" => needs_text(code_message(argument, preserve_empty_mentions)),
         "shrug" => face_message(SHRUG, argument, &arg_marks, preserve_empty_mentions),
         "tableflip" => face_message(TABLEFLIP, argument, &arg_marks, preserve_empty_mentions),
         "lenny" => face_message(LENNY, argument, &arg_marks, preserve_empty_mentions),
@@ -231,11 +232,169 @@ fn face_message(
 }
 
 fn markdown_message(text: &str, marks: &[MentionMark], preserve_empty: bool) -> Outgoing {
+    let tidied = tidy_fences(text);
+    // Moving code onto lines of its own moves what follows: marks are then found by
+    // their text, not by their place.
+    let unanchored: Vec<MentionMark>;
+    let (text, marks) = match &tidied {
+        std::borrow::Cow::Borrowed(_) => (text, marks),
+        std::borrow::Cow::Owned(changed) => {
+            unanchored = marks.iter().map(|m| m.clone().with_at(None)).collect();
+            (changed.as_str(), unanchored.as_slice())
+        }
+    };
     let (linked, mentions) = resolve_marks(text, marks);
     Outgoing::Text {
         plain: text.to_owned(),
         html: message_html(&linked, marks),
         mentions: finish_mentions(mentions, preserve_empty),
+    }
+}
+
+/// The run of three or more backticks a line starts with (after up to three spaces),
+/// and what follows it.
+fn fence_start(line: &str) -> Option<(usize, &str)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let ticks = rest.len() - rest.trim_start_matches('`').len();
+    (ticks >= 3).then(|| (ticks, &rest[ticks..]))
+}
+
+/// What people type when they mean a code block is often all on one line:
+/// ```` ```bash ls -la``` ````, or the code right after the language. Markdown reads
+/// everything after the opening backticks as the block's label and the block as
+/// empty: the code would be gone from the message. Such code is moved onto a line of
+/// its own (and a closing run at the end of the line onto the next), so that it is
+/// the block's content. The first word stays the language only if it is one.
+fn tidy_fences(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("```") {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut changed = false;
+    // The length of the run that opened the block we are in.
+    let mut open: Option<usize> = None;
+    // The length of the run of `~` that opened the block we are in; such a block is
+    // left alone as a whole.
+    let mut tildes: Option<usize> = None;
+    for (n, line) in text.split('\n').enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        if open.is_none() {
+            let indent = line.len() - line.trim_start_matches(' ').len();
+            let after = &line[indent..];
+            let run = after.len() - after.trim_start_matches('~').len();
+            let fence = indent <= 3 && run >= 3;
+            match tildes {
+                // Ended only by a bare run that is long enough, as with backticks.
+                Some(opened) => {
+                    if fence && run >= opened && after[run..].trim().is_empty() {
+                        tildes = None;
+                    }
+                    out.push_str(line);
+                    continue;
+                }
+                None if fence => {
+                    tildes = Some(run);
+                    out.push_str(line);
+                    continue;
+                }
+                None => {}
+            }
+        }
+        let Some((ticks, rest)) = fence_start(line) else {
+            out.push_str(line);
+            continue;
+        };
+        if let Some(opened) = open {
+            // Inside a block only a bare run that is long enough ends it.
+            if ticks >= opened && rest.trim().is_empty() {
+                open = None;
+            }
+            out.push_str(line);
+            continue;
+        }
+        let fence = &line[..line.len() - rest.len()];
+        let label = rest.trim();
+        // Closed on the same line?
+        let closing = label.len() - label.trim_end_matches('`').len();
+        let (inner, closed) = if closing >= ticks {
+            (label[..label.len() - closing].trim(), true)
+        } else {
+            (label, false)
+        };
+        let (first, more) = match inner.split_once(char::is_whitespace) {
+            Some((first, more)) => (first, more.trim()),
+            None => (inner, ""),
+        };
+        let (lang, code) = if more.is_empty() && !closed {
+            // A label and nothing else: an ordinary opening line.
+            open = Some(ticks);
+            out.push_str(line);
+            continue;
+        } else if !more.is_empty() && crate::highlight::known(first) {
+            (first, more)
+        } else {
+            ("", inner)
+        };
+        if inner.contains('`') || code.is_empty() {
+            // Not something to guess at (an inline piece like ```a``` b ```c```).
+            open = (!closed).then_some(ticks);
+            out.push_str(line);
+            continue;
+        }
+        changed = true;
+        out.push_str(fence);
+        out.push_str(lang);
+        out.push('\n');
+        out.push_str(code);
+        if closed {
+            out.push('\n');
+            out.push_str(&"`".repeat(ticks));
+        } else {
+            open = Some(ticks);
+        }
+    }
+    if changed { out.into() } else { text.into() }
+}
+
+/// `/code [language] text`: a code block without typing any backticks. The first word
+/// is the language if it is one and code follows it.
+fn code_message(argument: &str, preserve_empty: bool) -> Outgoing {
+    // After the language: spaces up to the code on the same line, or one line break.
+    // What the code's first line is indented by is the code's.
+    let (first, more) = match argument.find(char::is_whitespace) {
+        Some(at) => {
+            let more = argument[at..].trim_start_matches([' ', '\t']);
+            let more = more
+                .strip_prefix("\r\n")
+                .or_else(|| more.strip_prefix('\n'))
+                .unwrap_or(more);
+            (&argument[..at], more)
+        }
+        None => (argument, ""),
+    };
+    let (lang, code) = if !more.trim().is_empty() && crate::highlight::known(first) {
+        (first, more)
+    } else {
+        ("", argument)
+    };
+    // A run of backticks longer than any in the code, so that it cannot end the block.
+    let longest = code.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    let class = if lang.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"language-{}\"", escape(lang))
+    };
+    Outgoing::Text {
+        plain: format!("{fence}{lang}\n{code}\n{fence}"),
+        html: Some(format!("<pre><code{class}>{}\n</code></pre>", escape(code))),
+        mentions: finish_mentions(Mentions::new(), preserve_empty),
     }
 }
 
@@ -661,6 +820,113 @@ mod tests {
         let html = html.unwrap();
         assert!(!html.contains("<script>"), "{html}");
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn code_typed_on_the_opening_line_is_the_blocks_content_not_its_label() {
+        let block = |typed: &str| {
+            let Outgoing::Text { plain, html, .. } = parse(typed) else {
+                panic!("expected text for {typed}");
+            };
+            (plain, html.unwrap_or_default())
+        };
+        // All on one line, as it is typed without thinking of line breaks.
+        let (plain, html) = block("```bash ls -la /tmp```");
+        assert_eq!(plain, "```bash\nls -la /tmp\n```");
+        assert!(
+            html.contains("<pre><code class=\"language-bash\">ls -la /tmp\n</code></pre>"),
+            "{html}"
+        );
+        // Without a language: the first word is code too.
+        let (plain, html) = block("```ls -la /tmp```");
+        assert_eq!(plain, "```\nls -la /tmp\n```");
+        assert!(
+            html.contains("<pre><code>ls -la /tmp\n</code></pre>"),
+            "{html}"
+        );
+        // The code after the language, the rest as usual.
+        let (plain, html) = block("```rust fn main() {\n    run();\n}\n```");
+        assert_eq!(plain, "```rust\nfn main() {\n    run();\n}\n```");
+        assert!(html.contains("language-rust") && html.contains("fn main() {\n    run();\n}"));
+        // Text around it stays where it is.
+        let (plain, html) = block("look:\n```sh echo hi```\nthat is all");
+        assert_eq!(plain, "look:\n```sh\necho hi\n```\nthat is all");
+        assert!(
+            html.contains("echo hi") && html.contains("that is all"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn well_formed_blocks_and_inline_pieces_are_left_as_typed() {
+        for typed in [
+            "```rust\nfn main() {}\n```",
+            "```\nplain\n```",
+            "```rust\n``` not an end\n```",
+            "a `piece` of code",
+            "```a``` and ```b```",
+            "no code at all",
+        ] {
+            assert!(
+                matches!(tidy_fences(typed), std::borrow::Cow::Borrowed(_)),
+                "{typed}"
+            );
+        }
+        // Nor inside a block fenced with tildes.
+        let typed = "~~~\n```bash ls -la```\n~~~\nafter";
+        assert!(matches!(tidy_fences(typed), std::borrow::Cow::Borrowed(_)));
+        // A longer run of tildes is not ended by a shorter one, nor by one with a label.
+        let typed = "~~~~\n~~~\n```bash ls -la```\n~~~ x\n```sh echo```\n~~~~";
+        assert!(matches!(tidy_fences(typed), std::borrow::Cow::Borrowed(_)));
+        // After the block has ended, the repair works again.
+        let typed = "~~~\ninside\n~~~\n```sh echo hi```";
+        assert_eq!(tidy_fences(typed), "~~~\ninside\n~~~\n```sh\necho hi\n```");
+        // Inside a block nothing is touched, whatever it looks like.
+        let typed = "```\n```bash ls```\n```";
+        assert!(matches!(tidy_fences(typed), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn the_code_command_needs_no_backticks() {
+        let block = |typed: &str| {
+            let Outgoing::Text { plain, html, .. } = parse(typed) else {
+                panic!("expected text for {typed}");
+            };
+            (plain, html.unwrap_or_default())
+        };
+        let (plain, html) = block("/code bash ls -la /tmp");
+        assert_eq!(plain, "```bash\nls -la /tmp\n```");
+        assert_eq!(
+            html,
+            "<pre><code class=\"language-bash\">ls -la /tmp\n</code></pre>"
+        );
+        // No language named: all of it is code.
+        let (plain, html) = block("/code ls -la /tmp");
+        assert_eq!(plain, "```\nls -la /tmp\n```");
+        assert_eq!(html, "<pre><code>ls -la /tmp\n</code></pre>");
+        // A language alone is code as well (there is nothing else to send).
+        assert_eq!(block("/code rust").0, "```\nrust\n```");
+        // Several lines, the language on the first.
+        let (plain, html) = block("/code rust\nfn main() {\n    a < b;\n}");
+        assert_eq!(plain, "```rust\nfn main() {\n    a < b;\n}\n```");
+        assert!(
+            html.contains("a &lt; b;") && html.contains("language-rust"),
+            "{html}"
+        );
+        // The indentation of the first line of code is kept.
+        let (plain, html) = block("/code python\n    return 1\n\n    pass");
+        assert_eq!(plain, "```python\n    return 1\n\n    pass\n```");
+        assert!(
+            html.contains(">    return 1\n\n    pass\n</code>"),
+            "{html}"
+        );
+        // Backticks in the code cannot end the block.
+        let (plain, _) = block("/code echo ```hi```");
+        assert!(
+            plain.starts_with("````\n") && plain.ends_with("\n````"),
+            "{plain}"
+        );
+        assert!(matches!(parse("/code"), Outgoing::Rejected(_)));
     }
 
     #[test]

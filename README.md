@@ -142,7 +142,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 What you type is sent as Markdown: `**bold**`, `*italic*`, `` `code` ``, `||spoiler||`,
 `> quote`, lists and links (the composer shows the plain text; the formatting appears in
 the sent message). `/me`, `/spoiler`, `/plain`, `/shrug` and friends work as commands,
-`/poll` starts a poll and `/sticker` picks a sticker to send; `@`, `:`, `#` and `/` open
+`/code` sends a code block, `/poll` starts a poll and `/sticker` picks a sticker to send; `@`, `:`, `#` and `/` open
 completions (`:` offers your custom emoji too).
 
 `t` on a message opens its thread; `T` (or **Threads** in a room's menu, or `Ctrl-P`) lists
@@ -244,6 +244,13 @@ fn main() {
 }
 ```
 ````
+
+Two shortcuts, for keyboards where a backtick takes three key presses:
+
+- `/code bash ls -la /tmp` sends a code block without any backticks. The first word is the
+  language if it is one (`/code ls -la /tmp` works too); lines after the first, typed with
+  `Shift-Enter`, belong to the block.
+- All on one line also works: ```` ```bash ls -la /tmp``` ```` is sent as a proper block.
 
 Longer pieces are easier in your editor: `Alt-V` opens it with what you have typed so
 far, and what you save comes back into the composer to be sent.
