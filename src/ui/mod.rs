@@ -83,8 +83,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let [timeline_area, composer_area] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(composer_height)])
                 .areas(area);
-        timeline::draw(frame, app, timeline_area);
+        // The composer first: where its cursor is decides where the completion popup
+        // goes over the timeline, and the timeline's pictures keep clear of it.
         composer::draw(frame, app, composer_area);
+        let popup = complete::area(app, area, frame.area(), composer_area.y);
+        timeline::draw(frame, app, timeline_area, popup);
         complete::draw(frame, app, area, composer_area.y);
     }
     status::draw(frame, app, status_area);

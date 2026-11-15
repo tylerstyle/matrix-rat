@@ -898,6 +898,198 @@ mod tests {
         assert!(cells[0].2.starts_with("\x1b_G"));
     }
 
+    const BLOB: &str = "<img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blob:\">";
+
+    /// A message whose text is `html`.
+    fn formatted(id: &str, html: String) -> Message {
+        Message {
+            html: Some(html),
+            ..text(id, "text")
+        }
+    }
+
+    fn blob_arrives(app: &mut App) {
+        app.on_matrix(MatrixEvent::EmotePicture {
+            url: "mxc://example.org/blob".into(),
+            result: Ok(decoded(64, 64)),
+        });
+    }
+
+    /// Cells that carry a picture's data to the terminal.
+    fn transmissions(terminal: &Terminal<TestBackend>) -> Vec<(u16, u16)> {
+        kitty_cells(terminal.backend().buffer())
+            .into_iter()
+            .filter(|cell| cell.2.starts_with("\x1b_G"))
+            .map(|(x, y, _)| (x, y))
+            .collect()
+    }
+
+    /// Draws a few more frames with nothing changed, as a clock or a sync would: the
+    /// picture neither goes to the terminal again nor is freed there, the cells in
+    /// view keep showing it, and no frame asks for another.
+    fn stays_put(app: &mut App, terminal: &mut Terminal<TestBackend>, shown: &[(u16, u16)]) {
+        for _ in 0..3 {
+            app.dirty = false;
+            frame(app, terminal);
+            assert!(!app.dirty);
+            assert!(transmissions(terminal).is_empty());
+            assert!(app.images.cleanup_sequence(false).is_empty());
+            let cells: Vec<(u16, u16)> = kitty_cells(terminal.backend().buffer())
+                .into_iter()
+                .map(|(x, y, _)| (x, y))
+                .collect();
+            assert_eq!(cells, shown);
+        }
+    }
+
+    /// The popup's rectangle on screen.
+    fn completion_popup(app: &App, terminal: &Terminal<TestBackend>) -> ratatui::layout::Rect {
+        let area = terminal.backend().buffer().area;
+        (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .find_map(|(x, y)| match app.hits.at_rect(x, y) {
+                Some((rect, crate::ui::hit::HitId::Overlay)) => Some(rect),
+                _ => None,
+            })
+            .expect("the completion popup is open")
+    }
+
+    #[test]
+    fn a_custom_emoji_under_the_completion_popup_leaves_its_data_to_a_copy_in_view() {
+        // The same emoji twice: on the right of a line, and at the start of the next.
+        let (mut app, mut terminal, _commands) = app_with(
+            kitty(),
+            vec![
+                formatted("1", format!("{} {BLOB}", "a".repeat(30))),
+                formatted("2", format!("{BLOB} and more")),
+            ],
+        );
+        blob_arrives(&mut app);
+        // A mention typed far to the right: the popup opens over the first one.
+        app.on_matrix(MatrixEvent::RoomMembers {
+            room_id: "!a".into(),
+            members: vec![crate::complete::Member {
+                user_id: "@alice:example.org".into(),
+                display_name: "Alice".into(),
+            }],
+            can_mention_room: false,
+        });
+        app.perform(Action::Focus(Pane::Composer));
+        for c in format!("{} @al", "b".repeat(28)).chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        app.dirty = false;
+        frame(&mut app, &mut terminal);
+        assert!(!app.dirty);
+        let popup = completion_popup(&app, &terminal);
+        let first = (
+            row_of(&terminal, "aaaa") as u16,
+            row_of(&terminal, "and more") as u16,
+        );
+        let cells = kitty_cells(terminal.backend().buffer());
+        // Only the second one is in view, and it carries the data itself.
+        assert_eq!(cells.len(), 2, "{}", screen(&terminal));
+        assert_eq!(cells[0].1, first.1);
+        assert!(!popup.contains(ratatui::layout::Position::new(cells[0].0, cells[0].1)));
+        assert!(popup.y <= first.0 && first.0 < popup.bottom());
+        assert_eq!(transmissions(&terminal), [(cells[0].0, cells[0].1)]);
+        // Nothing was painted over, nothing is freed, nothing is sent again while
+        // the popup stays.
+        assert!(app.images.cleanup_sequence(false).is_empty());
+        let shown = [(cells[0].0, cells[0].1), (cells[1].0, cells[1].1)];
+        stays_put(&mut app, &mut terminal, &shown);
+
+        // Closed: the first one shows too, without being sent again.
+        app.on_event(key(KeyCode::Esc));
+        app.dirty = false;
+        frame(&mut app, &mut terminal);
+        assert!(!app.dirty);
+        assert_eq!(kitty_cells(terminal.backend().buffer()).len(), 4);
+        assert!(transmissions(&terminal).is_empty());
+        assert!(app.images.cleanup_sequence(false).is_empty());
+    }
+
+    #[test]
+    fn a_custom_emoji_under_a_corner_pill_leaves_its_data_to_a_copy_in_view() {
+        // The same emoji twice in the bottom line: at its start, where the pill of
+        // newer messages being loaded goes, and further on.
+        let (mut app, mut terminal, _commands) = app_with(
+            kitty(),
+            vec![formatted("1", format!("{BLOB} {} {BLOB}", "a".repeat(30)))],
+        );
+        app.timeline.loading_newer = true;
+        blob_arrives(&mut app);
+        app.dirty = false;
+        frame(&mut app, &mut terminal);
+        assert!(!app.dirty);
+        let row = row_of(&terminal, "aaaa") as u16;
+        assert!(screen(&terminal).contains("loading newer messages"));
+        assert_eq!(
+            row,
+            row_of(&terminal, "loading newer messages") as u16,
+            "{}",
+            screen(&terminal)
+        );
+        let cells = kitty_cells(terminal.backend().buffer());
+        // The first one is under the pill; the second one carries the data.
+        assert_eq!(cells.len(), 2, "{}", screen(&terminal));
+        assert!(cells.iter().all(|cell| cell.1 == row));
+        assert_eq!(transmissions(&terminal), [(cells[0].0, row)]);
+        assert!(app.images.cleanup_sequence(false).is_empty());
+        let shown = [(cells[0].0, row), (cells[1].0, row)];
+        stays_put(&mut app, &mut terminal, &shown);
+
+        // Loaded: the first one shows too, without being sent again.
+        app.timeline.loading_newer = false;
+        app.dirty = false;
+        frame(&mut app, &mut terminal);
+        assert_eq!(kitty_cells(terminal.backend().buffer()).len(), 4);
+        assert!(transmissions(&terminal).is_empty());
+        assert!(app.images.cleanup_sequence(false).is_empty());
+    }
+
+    #[test]
+    fn a_picture_whose_corner_is_under_the_completion_popup_waits_for_it_to_close() {
+        // Five rows high, at the bottom of the view; its data travels in its top left
+        // corner.
+        let (mut app, mut terminal, _commands) = app_with(
+            kitty(),
+            vec![picture("1", remote_image(KEY, Some((320, 100))))],
+        );
+        app.on_matrix(loaded(320, 100));
+        frame(&mut app, &mut terminal);
+        let corner = transmissions(&terminal);
+        assert_eq!(corner.len(), 1);
+        let corner = corner[0];
+        // The terminal forgets it (as after a resize), and a shortcode at the start of
+        // the draft opens the popup over that corner.
+        app.images.forget_encoded();
+        app.images.cleanup_sequence(false);
+        app.perform(Action::Focus(Pane::Composer));
+        for c in ":sm".chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        frame(&mut app, &mut terminal);
+        let popup = completion_popup(&app, &terminal);
+        assert!(
+            popup.contains(ratatui::layout::Position::new(corner.0, corner.1)),
+            "{}",
+            screen(&terminal)
+        );
+        // Nothing went to the terminal to be painted over, so nothing has to be freed
+        // or sent again.
+        for _ in 0..2 {
+            assert!(transmissions(&terminal).is_empty());
+            assert!(app.images.cleanup_sequence(false).is_empty());
+            frame(&mut app, &mut terminal);
+        }
+
+        app.on_event(key(KeyCode::Esc));
+        frame(&mut app, &mut terminal);
+        assert_eq!(transmissions(&terminal), [corner]);
+        assert_eq!(kitty_cells(terminal.backend().buffer()).len(), 32 * 5);
+    }
+
     /// An app connected to a fake worker with `count` rooms, each with a picture.
     fn app_with_rooms(
         graphics: Graphics,

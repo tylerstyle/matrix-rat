@@ -1,7 +1,7 @@
 mod receipts;
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
@@ -1044,7 +1044,9 @@ struct Anchor {
     scroll: usize,
 }
 
-pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
+/// Draws the timeline into `area`. `popup`: where the completion popup goes over it
+/// later in this frame.
+pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
     let Some(room) = app.rooms.get(app.active) else {
         let block = super::pane_block(app, Pane::Timeline, "No room");
         let inner = block.inner(area);
@@ -1329,8 +1331,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Pictures are painted over the rows kept free for them; what is scrolled out of
-    // the view is left out.
+    // the view is left out. Nothing new is sent to the terminal where something is
+    // drawn over it later in the frame (a popup, a corner pill, the completion popup):
+    // such a transmission never arrives, and the other copies of that picture on
+    // screen would stay empty (see `ImageStore::verify`). A picture already sent
+    // shows around them.
     let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
+    let pills = corner_pills(app, content, scroll);
+    let overlays: Vec<Rect> = pills.iter().map(|pill| pill.0).chain(popup).collect();
+    // A picture's data travels in its first cell.
+    let under_overlay = |x: u16, y: u16| {
+        overlays
+            .iter()
+            .any(|overlay| overlay.contains(Position::new(x, y)))
+    };
     let indent = INDENT.len() as u16;
     let last_visible = (top + height).min(rows.len());
     let mut n = top;
@@ -1359,21 +1373,23 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 skip: slot.row,
                 size: (slot.cols, slot.rows),
                 play_mark: msg.is_playable() && msg.state != SendState::Failed,
-                covered,
+                covered: covered || under_overlay(rect.x, rect.y),
             };
             super::image::draw_inline(frame, &mut app.images, theme, inline);
         }
         n += count;
     }
     // Custom emoji pictures, over the two cells kept for each. Until one can be drawn
-    // (it is held back while a popup is open, see `ImageStore::inline`) the cells stay
-    // empty.
+    // (it is held back where it could be painted over, see `ImageStore::inline`) the
+    // cells stay empty. The same emoji is often on screen more than once: its data
+    // travels with the first copy that nothing is drawn over.
     for (n, row) in rows.iter().enumerate().take(last_visible).skip(top) {
         let y = content.y + pad + (n - top) as u16;
         for spot in &row.emotes {
             let x = content.x + spot.col;
             if x + EMOTE_CELLS.0 <= content.right() {
                 let rect = Rect::new(x, y, EMOTE_CELLS.0, EMOTE_CELLS.1);
+                let covered = covered || under_overlay(x, y);
                 super::image::draw_emote(frame, &mut app.images, theme, &spot.url, rect, covered);
             }
         }
@@ -1441,24 +1457,38 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_stateful_widget(bar, inner, &mut state);
     }
 
+    for (rect, label, hit) in pills {
+        frame.render_widget(
+            Line::from(Span::styled(label, theme.style(Role::Pill))),
+            rect,
+        );
+        if let Some(hit) = hit {
+            app.hits.add(rect, hit);
+        }
+    }
+    cache.anchor = anchor;
+    app.row_cache = Some(cache);
+}
+
+/// The pills in the corners of the view: what is being loaded, and the way back to the
+/// newest message, with what a click on one does. Known before the pictures are drawn,
+/// which must not send anything to the terminal under them.
+fn corner_pills(
+    app: &App,
+    content: Rect,
+    scroll: usize,
+) -> Vec<(Rect, &'static str, Option<HitId>)> {
+    let mut pills = Vec::new();
     if app.timeline.loading_older && content.width > 24 {
         let label = " loading older messages… ";
         let rect = Rect::new(content.x + 1, content.y, width(label) as u16, 1);
-        frame.render_widget(
-            Line::from(Span::styled(label, theme.style(Role::Pill))),
-            rect,
-        );
+        pills.push((rect, label, None));
     }
-
     if app.timeline.loading_newer && content.width > 26 && (scroll == 0 || content.width > 38) {
         let label = " loading newer messages… ";
         let rect = Rect::new(content.x + 1, content.bottom() - 1, width(label) as u16, 1);
-        frame.render_widget(
-            Line::from(Span::styled(label, theme.style(Role::Pill))),
-            rect,
-        );
+        pills.push((rect, label, None));
     }
-
     if scroll > 0 {
         let label = " ↓ newest ";
         let label_width = width(label) as u16;
@@ -1469,13 +1499,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 label_width,
                 1,
             );
-            let line = Line::from(Span::styled(label, theme.style(Role::Pill)));
-            frame.render_widget(&line, rect);
-            app.hits.add(rect, HitId::Button(Button::JumpToNewest));
+            pills.push((rect, label, Some(HitId::Button(Button::JumpToNewest))));
         }
     }
-    cache.anchor = anchor;
-    app.row_cache = Some(cache);
+    pills
 }
 
 #[cfg(test)]

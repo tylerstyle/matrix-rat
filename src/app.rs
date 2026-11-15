@@ -2015,6 +2015,11 @@ impl App {
     /// Called after each draw: loads older messages when the view shows the oldest
     /// loaded one, and newer ones when at the bottom of a detached slice.
     pub fn after_draw(&mut self) {
+        // A custom emoji's picture travelled in a cell that was painted over: drawn
+        // again, with another copy carrying it (see `ImageStore::verify`).
+        if self.images.take_redraw() {
+            self.dirty = true;
+        }
         self.maybe_mark_read();
         self.maybe_load_older();
         self.maybe_load_newer();

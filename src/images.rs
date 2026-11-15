@@ -627,6 +627,13 @@ pub struct ImageStore {
     /// Changes when a custom emoji's picture arrives or goes: the lines it is in are
     /// laid out again, with two cells for it or with its name.
     pub emote_rev: u64,
+    /// Cells where a custom emoji's data was painted over by something drawn later in
+    /// the frame: no copy there carries it in the next frame (see
+    /// [`ImageStore::verify`]).
+    emotes_painted_over: Vec<(u16, u16)>,
+    /// A custom emoji's data was painted over: the frame is drawn again, the data
+    /// travelling with another copy.
+    redraw: bool,
 }
 
 impl std::fmt::Debug for ImageStore {
@@ -666,6 +673,8 @@ impl ImageStore {
             emotes: HashMap::new(),
             emote_requests: Vec::new(),
             emote_rev: 0,
+            emotes_painted_over: Vec::new(),
+            redraw: false,
         }
     }
 
@@ -861,6 +870,7 @@ impl ImageStore {
         self.avatar_requests.clear();
         self.emotes.clear();
         self.emote_requests.clear();
+        self.emotes_painted_over.clear();
         self.layout_rev += 1;
         self.emote_rev += 1;
     }
@@ -1138,6 +1148,17 @@ impl ImageStore {
         self.unverified.push((Target::Emote(url.to_owned()), x, y));
     }
 
+    /// Whether a custom emoji's data was painted over at this cell in the last frame,
+    /// so that a copy drawn there must not carry it again.
+    pub fn emote_painted_over(&self, x: u16, y: u16) -> bool {
+        self.emotes_painted_over.contains(&(x, y))
+    }
+
+    /// Whether the frame just drawn has to be drawn again (see [`ImageStore::verify`]).
+    pub fn take_redraw(&mut self) -> bool {
+        std::mem::take(&mut self.redraw)
+    }
+
     /// Keeps the custom emoji pictures within their limit, dropping those unseen for
     /// longest. One on its way stays, or more than [`EMOTE_IN_FLIGHT`] could be.
     fn evict_emotes(&mut self) {
@@ -1295,9 +1316,18 @@ impl ImageStore {
     ///
     /// Only that one cell matters: the transmission is the whole picture, and the
     /// other cells are plain placeholders that may be covered freely. Whatever is drawn
-    /// over the timeline later in a frame either sets `covered` (popups, the viewer),
-    /// which holds new transmissions back, or is caught here.
+    /// over the timeline later in a frame either sets `covered` (popups, the viewer,
+    /// the timeline's pills and the completion popup), which holds new transmissions
+    /// back, or is caught here.
+    ///
+    /// A custom emoji is often on screen more than once, the other copies referring to
+    /// the one that carries the data. When that one is painted over, they would stay
+    /// empty: the frame is drawn again, and no copy in that cell carries the data then.
+    /// The cells are forgotten with the first frame that loses no custom emoji's data:
+    /// by then it has arrived with another copy, if one is on screen, and a copy under
+    /// whatever is drawn over it only refers to that.
     pub fn verify(&mut self, intact: impl Fn(u16, u16) -> bool) {
+        let mut emote_lost = false;
         for (target, x, y) in std::mem::take(&mut self.unverified) {
             let slot = match &target {
                 Target::Inline(key) => match self.entries.get_mut(key) {
@@ -1332,7 +1362,16 @@ impl ImageStore {
                 }
             } else {
                 Self::discard(&mut self.garbage, slot.take());
+                if matches!(target, Target::Emote(_)) {
+                    emote_lost = true;
+                    self.emotes_painted_over.push((x, y));
+                }
             }
+        }
+        if emote_lost {
+            self.redraw = true;
+        } else {
+            self.emotes_painted_over.clear();
         }
     }
 
@@ -2140,6 +2179,45 @@ mod tests {
         store.clear();
         assert!(!store.emote_ready(good));
         assert!(store.emote_rev > rev);
+    }
+
+    #[test]
+    fn a_custom_emoji_whose_data_is_painted_over_goes_with_another_copy_in_the_next_frame() {
+        let mut store = ImageStore::new(kitty());
+        let url = "mxc://example.org/blob";
+        store.begin_frame();
+        store.request_emote(url);
+        store.on_emote(url, Ok(decoded(64, 64)));
+
+        // The copy at (2, 3) carries the data, and something drawn later in the frame
+        // goes over it: the picture is freed, and the frame is to be drawn again.
+        assert!(!store.emote_painted_over(2, 3));
+        assert!(store.emote(url, false).is_some());
+        store.sent_emote(url, 2, 3);
+        store.verify(|_, _| false);
+        assert!(store.take_redraw());
+        assert!(!store.take_redraw());
+        assert_eq!(store.cleanup_sequence(false).matches("a=d,d=I").count(), 1);
+
+        // Then that cell is passed over, and the copy at (10, 5) carries it.
+        store.begin_frame();
+        assert!(store.emote_painted_over(2, 3));
+        assert!(store.emote(url, true).is_none());
+        assert!(!store.emote(url, false).unwrap().shown);
+        store.sent_emote(url, 10, 5);
+        store.verify(|x, y| (x, y) == (10, 5));
+        assert!(!store.take_redraw());
+        assert!(!store.emote_painted_over(2, 3));
+
+        // From then on every copy refers to it, wherever it is: nothing is sent or
+        // freed again, and no frame asks for another.
+        for _ in 0..3 {
+            store.begin_frame();
+            assert!(store.emote(url, false).unwrap().shown);
+            store.verify(|_, _| false);
+            assert!(!store.take_redraw());
+            assert!(store.cleanup_sequence(false).is_empty());
+        }
     }
 
     #[test]

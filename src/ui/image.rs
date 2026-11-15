@@ -116,6 +116,9 @@ pub fn draw_emote(
     area: Rect,
     covered: bool,
 ) {
+    // Where its data was painted over in the last frame, a copy does not carry it
+    // again: another one does (see `ImageStore::verify`).
+    let covered = covered || images.emote_painted_over(area.x, area.y);
     let Some(encoded) = images.emote(url, covered) else {
         return;
     };
@@ -128,7 +131,8 @@ pub fn draw_emote(
         .set_style(area, Style::new().remove_modifier(Modifier::all()));
     render(frame, theme, encoded, area, 0);
     // The same emoji is often on screen many times: only the first one drawn carries
-    // the data, as with room pictures.
+    // the data, as with room pictures. The others are drawn after it, or not at all
+    // while it is not shown (see `ImageStore::emote`).
     let carries_data = frame
         .buffer_mut()
         .cell((area.x, area.y))
