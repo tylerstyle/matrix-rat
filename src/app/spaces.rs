@@ -109,7 +109,10 @@ impl App {
             .filter(|space| space.id != room_id && space.children.iter().any(|c| c == room_id))
             .map(|space| SpaceRef {
                 id: space.id.clone(),
-                name: self.space_name().unwrap_or_else(|| space.name.clone()),
+                // Safe to show wherever the room info and the menus put it.
+                name: crate::text::sanitize_line(
+                    &self.space_name().unwrap_or_else(|| space.name.clone()),
+                ),
                 can_edit: space.can_edit,
             });
         (in_space, !self.spaces_for(room_id).is_empty())
@@ -1703,6 +1706,55 @@ mod tests {
                 "{wanted:?} in {titles:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_info_of_a_space_says_space_id_while_its_details_are_on_their_way() {
+        let (mut app, mut terminal, _commands) = connected();
+        app.select_space(Some(0));
+        app.perform(Action::SpaceInfo);
+        assert!(info(&app).details.is_none());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Space ID");
+        assert!(!text.contains("Room ID"), "{text}");
+    }
+
+    #[test]
+    fn a_picker_that_finds_nothing_says_what_it_looked_for() {
+        let (mut app, mut terminal, _commands) = connected();
+        app.select_space(Some(0));
+        app.perform(Action::Manage(Click::AddRoomToSpace));
+        type_text(&mut app, "zzzz");
+        find(&screen(&mut app, &mut terminal), "no matching rooms");
+        app.on_event(key(KeyCode::Esc));
+        app.select_space(None);
+        app.open_room(app.rooms.iter().position(|r| r.id == CHEESE).unwrap());
+        app.set_focus(Pane::Composer);
+        app.perform(Action::Manage(Click::AddToSpace));
+        type_text(&mut app, "zzzz");
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "no matching spaces");
+        assert!(!text.contains("no matching commands"), "{text}");
+    }
+
+    #[test]
+    fn the_name_of_a_space_is_made_safe_where_a_room_info_shows_it() {
+        let (mut app, _terminal, _commands) = connected();
+        app.on_matrix(MatrixEvent::Spaces(vec![space(
+            SPACE,
+            "Wo\u{1b}[31mrk",
+            &[RATS],
+            true,
+        )]));
+        app.select_space(Some(0));
+        app.open_info(app.rooms.iter().position(|r| r.id == RATS), None);
+        assert_eq!(
+            info(&app)
+                .in_space
+                .as_ref()
+                .map(|space| space.name.as_str()),
+            Some("Wo[31mrk")
+        );
     }
 
     #[test]

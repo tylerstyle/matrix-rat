@@ -1057,7 +1057,8 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
         }
         None => {
             entries.push(Entry::Text(Line::default()));
-            entries.push(fact(&theme, "Room ID", room_id.clone(), Role::Text, room));
+            let id_label = if info.space { "Space ID" } else { "Room ID" };
+            entries.push(fact(&theme, id_label, room_id.clone(), Role::Text, room));
             if info.error.is_none() {
                 entries.push(Entry::Text(Line::from(Span::styled(
                     "Loading…",

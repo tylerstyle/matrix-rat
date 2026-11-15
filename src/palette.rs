@@ -178,12 +178,22 @@ impl Pick {
         }
     }
 
-    /// What the pick is about, for the line under the search: a label and a name.
-    pub fn about(&self) -> (&'static str, &str) {
-        match self {
+    /// What the pick is about, for the line under the search: a label and a name,
+    /// safe to show.
+    pub fn about(&self) -> (&'static str, String) {
+        let (label, about) = match self {
             Self::Forward(target) => ("Message: ", &target.preview),
             Self::IntoSpace { space_name, .. } => ("Space: ", space_name),
             Self::ToSpace { room_name, .. } => ("Room: ", room_name),
+        };
+        (label, crate::text::sanitize_line(about))
+    }
+
+    /// What the list says when nothing matches the search.
+    pub fn nothing(&self) -> &'static str {
+        match self {
+            Self::Forward(_) | Self::IntoSpace { .. } => "no matching rooms",
+            Self::ToSpace { .. } => "no matching spaces",
         }
     }
 
@@ -1533,6 +1543,17 @@ fn score_entry(
 mod tests {
     use super::*;
     use crate::action::Dir;
+
+    #[test]
+    fn what_a_pick_is_about_is_safe_to_show() {
+        let pick = Pick::ToSpace {
+            room_id: "!rats:example.org".into(),
+            room_name: "Ra\u{1b}[2Jts\u{202e}".into(),
+            back: None,
+        };
+        assert_eq!(pick.about(), ("Room: ", "Ra[2Jts".to_owned()));
+        assert_eq!(pick.nothing(), "no matching spaces");
+    }
 
     fn sample_context() -> PaletteContext {
         PaletteContext {

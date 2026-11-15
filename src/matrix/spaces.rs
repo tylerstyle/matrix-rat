@@ -92,14 +92,9 @@ pub async fn summarize(client: &Client, filters: &Vector<SpaceFilter>) -> Vec<Sp
 }
 
 fn summary_of(filter: &SpaceFilter) -> SpaceSummary {
-    let name = sanitize_line(&filter.space_room.display_name);
     SpaceSummary {
         id: filter.space_room.room_id.to_string(),
-        name: if name.trim().is_empty() {
-            "Unnamed space".to_owned()
-        } else {
-            name
-        },
+        name: space_name(&filter.space_room.display_name),
         level: filter.level,
         rooms: filter.descendants.iter().map(|id| id.to_string()).collect(),
         ..SpaceSummary::default()
@@ -238,6 +233,17 @@ pub(super) type Named = HashMap<String, (String, bool)>;
 
 fn clean_name(name: &str) -> String {
     truncate(sanitize_line(name).trim(), NAME_MAX)
+}
+
+/// The name of a space for the room list, as any other name kept here: safe, not
+/// too wide, and never blank.
+fn space_name(display_name: &str) -> String {
+    let name = clean_name(display_name);
+    if crate::text::is_blank(&name) {
+        "Unnamed space".to_owned()
+    } else {
+        name
+    }
 }
 
 /// The rooms of `space` for its info. Names come from this client where it is in the
@@ -732,6 +738,15 @@ mod tests {
 
     fn get(client: &Client, id: &str) -> Room {
         client.get_room(&RoomId::parse(id).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_space_is_named_safely_and_not_too_widely() {
+        assert_eq!(space_name("  Rat\u{1b}[2J club "), "Rat[2J club");
+        assert_eq!(space_name(" \u{200b} "), "Unnamed space");
+        let long = space_name(&"x".repeat(NAME_MAX + 50));
+        assert_eq!(crate::text::width(&long), NAME_MAX);
+        assert!(long.ends_with('…'));
     }
 
     #[test]

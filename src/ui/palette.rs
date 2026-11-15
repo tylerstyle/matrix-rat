@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use super::hit::{HitId, InputTarget};
 use super::modal::{centered, popup, row};
 use crate::app::App;
-use crate::palette::{Category, Palette};
+use crate::palette::{Category, Palette, Pick};
 use crate::text::{truncate, width};
 use crate::theme::Role;
 
@@ -71,7 +71,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
         {
             let (prefix, about) = pick.about();
             let avail = rule_rect.width as usize - count_w - width(prefix) - 1;
-            let preview = truncate(about, avail);
+            let preview = truncate(&about, avail);
             let pad = rule_rect
                 .width
                 .saturating_sub((width(prefix) + width(&preview) + count_w) as u16)
@@ -133,9 +133,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
     }
 
     if palette.filtered.is_empty() {
+        let nothing = palette
+            .pick
+            .as_ref()
+            .map_or("no matching commands", Pick::nothing);
         frame.render_widget(
             Line::from(Span::styled(
-                "  no matching commands",
+                format!("  {nothing}"),
                 theme.style(Role::Muted),
             )),
             row(inner, list_y),

@@ -1361,16 +1361,18 @@ impl InfoPopup {
     }
 
     /// What the room list says about this room and the spaces. A question about a
-    /// space the room is no longer in is withdrawn; the selection stays on its row,
-    /// or goes to the one above where the row is gone.
+    /// space the room is no longer in, or that we may no longer change, is withdrawn;
+    /// the selection stays on its row, or goes to the one above where the row is gone.
     pub fn set_space_context(&mut self, in_space: Option<SpaceRef>, can_add: bool) {
         if self.in_space == in_space && self.can_add_to_space == can_add {
             return;
         }
         let row = self.current();
-        if in_space.as_ref().map(|space| &space.id) != self.in_space.as_ref().map(|space| &space.id)
-            && self.confirm == Some(Confirm::RemoveFromSpace)
-        {
+        let still_asked = matches!(
+            (&in_space, &self.in_space),
+            (Some(new), Some(old)) if new.id == old.id && new.can_edit
+        );
+        if !still_asked && self.confirm == Some(Confirm::RemoveFromSpace) {
             self.confirm = None;
         }
         self.in_space = in_space;
@@ -2412,9 +2414,18 @@ mod tests {
         room.set_space_context(Some(work.clone()), true);
         room.select(InfoRow::RemoveFromSpace);
         room.confirm = Some(Confirm::RemoveFromSpace);
-        room.set_space_context(Some(work), false);
+        room.set_space_context(Some(work.clone()), false);
         assert_eq!(room.confirm, Some(Confirm::RemoveFromSpace));
         assert_eq!(room.current(), Some(InfoRow::RemoveFromSpace));
+        // Nor while we may no longer change the space.
+        let read_only = SpaceRef {
+            can_edit: false,
+            ..work
+        };
+        room.set_space_context(Some(read_only), false);
+        assert!(room.confirm.is_none());
+        assert_eq!(room.current(), Some(InfoRow::RemoveFromSpace));
+        room.confirm = Some(Confirm::RemoveFromSpace);
         room.set_space_context(None, false);
         assert!(room.confirm.is_none());
         // Its row is gone; the one above it is selected, not Leave.
