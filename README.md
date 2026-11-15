@@ -261,6 +261,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 |---|---|
 | `room_previews` | latest message under each room, larger room pictures |
 | `link_previews` | `"off"` (default), `"unencrypted"` or `"all"`: a preview (title and two lines) under messages with a link, for the first link. **Your homeserver fetches the link**, see Good to know |
+| `notification_icon` | the program's icon in desktop notifications: `"color"` (default), `"outline"` (a line drawing in one colour) or `"generic"` (the desktop's own new-message icon). matrix-rat's icons are used when they are installed (the Nix package does that, see [`assets/`](assets/README.md)), else the desktop's own |
 | `sidebar_width` | width of the room list (or drag the divider) |
 | `read_receipts`, `read_markers`, `typing_notices` | what others see of you, and what you see of them |
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |

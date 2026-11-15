@@ -29,6 +29,8 @@ pub struct Config {
     pub read_markers: bool,
     /// Notifications for new messages: "auto", "desktop", "terminal" or "off".
     pub notifications: crate::notify::NotifyMode,
+    /// The program's icon in desktop notifications: "color", "outline" or "generic".
+    pub notification_icon: crate::notify::AppIcon,
     /// Show the text of the message in notifications.
     pub notification_preview: bool,
     /// A shell command run when a desktop notification is clicked, to bring the
@@ -158,6 +160,7 @@ impl Default for Config {
             read_receipts: true,
             read_markers: true,
             notifications: crate::notify::NotifyMode::Auto,
+            notification_icon: crate::notify::AppIcon::Color,
             notification_preview: true,
             notification_click_command: String::new(),
             room_previews: true,

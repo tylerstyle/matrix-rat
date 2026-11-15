@@ -27,6 +27,68 @@ const GLYPH_ORIGIN_X: u32 = (TILE_SIZE - GLYPH_COLS * GLYPH_SCALE) / 2;
 const GLYPH_ORIGIN_Y: u32 = (TILE_SIZE - GLYPH_ROWS * GLYPH_SCALE) / 2;
 const DEFAULT_CACHE_LIMIT: usize = 64;
 
+/// Which icon desktop notifications name as the program's own. (A room's picture, where
+/// there is one, is shown as well; that is not this.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppIcon {
+    /// matrix-rat's icon in colour.
+    #[default]
+    Color,
+    /// matrix-rat's icon as a line drawing in one colour.
+    Outline,
+    /// The desktop's own "new message" icon.
+    Generic,
+}
+
+/// The desktop's own icon for a new message: every icon theme has it.
+const GENERIC_ICON: &str = "mail-message-new";
+
+/// The icon name notifications use, settled once at start.
+static APP_ICON: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Settles which icon notifications name. matrix-rat's own icons are only named when
+/// they are installed where the desktop looks for icons (the Nix package does that): a
+/// name the desktop cannot find would leave notifications without any icon.
+pub fn set_app_icon(choice: AppIcon) {
+    let _ = APP_ICON.set(pick_app_icon(choice, &icon_data_dirs()));
+}
+
+/// The directories whose `icons/` the desktop searches, most important first.
+fn icon_data_dirs() -> Vec<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let mut dirs = Vec::new();
+    match var("XDG_DATA_HOME") {
+        Some(home) => dirs.push(PathBuf::from(home)),
+        None => {
+            if let Some(home) = var("HOME") {
+                dirs.push(Path::new(&home).join(".local/share"));
+            }
+        }
+    }
+    match var("XDG_DATA_DIRS") {
+        Some(list) => dirs.extend(std::env::split_paths(&list)),
+        None => dirs.extend(["/usr/local/share", "/usr/share"].map(PathBuf::from)),
+    }
+    dirs
+}
+
+fn pick_app_icon(choice: AppIcon, data_dirs: &[PathBuf]) -> &'static str {
+    let (name, file) = match choice {
+        AppIcon::Color => ("matrix-rat", "icons/hicolor/scalable/apps/matrix-rat.svg"),
+        AppIcon::Outline => (
+            "matrix-rat-symbolic",
+            "icons/hicolor/symbolic/apps/matrix-rat-symbolic.svg",
+        ),
+        AppIcon::Generic => return GENERIC_ICON,
+    };
+    if data_dirs.iter().any(|dir| dir.join(file).is_file()) {
+        name
+    } else {
+        GENERIC_ICON
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NotifyMode {
@@ -417,7 +479,7 @@ fn desktop_notification(prepared: &PreparedDesktop) -> notify_rust::Notification
         .appname("matrix-rat")
         .summary(&prepared.summary)
         .body(&prepared.body)
-        .icon("mail-message-new");
+        .icon(APP_ICON.get().copied().unwrap_or(GENERIC_ICON));
     if let Some(path) = prepared.icon_path.as_deref().and_then(|p| p.to_str()) {
         notification.image_path(path);
     }
@@ -995,6 +1057,52 @@ fn terminal_sequence(title: &str, text: &str, kitty: bool, id: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn our_own_icon_is_only_named_where_it_is_installed() {
+        let root = std::env::temp_dir().join(format!("matrix-rat-icons-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (empty, with) = (root.join("empty"), root.join("with"));
+        std::fs::create_dir_all(&empty).unwrap();
+        let apps = with.join("icons/hicolor/scalable/apps");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::write(apps.join("matrix-rat.svg"), "<svg/>").unwrap();
+
+        let dirs = [empty.clone(), with.clone()];
+        assert_eq!(pick_app_icon(AppIcon::Color, &dirs), "matrix-rat");
+        // The line drawing is not there: the desktop's own icon instead of none.
+        assert_eq!(pick_app_icon(AppIcon::Outline, &dirs), GENERIC_ICON);
+        assert_eq!(pick_app_icon(AppIcon::Generic, &dirs), GENERIC_ICON);
+        assert_eq!(pick_app_icon(AppIcon::Color, &[empty]), GENERIC_ICON);
+        assert_eq!(pick_app_icon(AppIcon::Color, &[]), GENERIC_ICON);
+
+        let symbolic = with.join("icons/hicolor/symbolic/apps");
+        std::fs::create_dir_all(&symbolic).unwrap();
+        std::fs::write(symbolic.join("matrix-rat-symbolic.svg"), "<svg/>").unwrap();
+        assert_eq!(
+            pick_app_icon(AppIcon::Outline, &[with]),
+            "matrix-rat-symbolic"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_icon_setting_reads_its_three_values() {
+        for (text, icon) in [
+            ("color", AppIcon::Color),
+            ("outline", AppIcon::Outline),
+            ("generic", AppIcon::Generic),
+        ] {
+            let config: crate::config::Config =
+                toml::from_str(&format!("notification_icon = \"{text}\"")).unwrap();
+            assert_eq!(config.notification_icon, icon);
+        }
+        assert_eq!(
+            crate::config::Config::default().notification_icon,
+            AppIcon::Color
+        );
+        assert!(toml::from_str::<crate::config::Config>("notification_icon = \"big\"").is_err());
+    }
 
     fn notice(room: &str, sender: &str, body: &str, highlight: bool) -> Notice {
         Notice {
