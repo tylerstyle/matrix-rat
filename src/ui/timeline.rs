@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 
 use crate::config::LinkPreviews;
 use crate::images::{ImageStore, Slot};
+use crate::matrix::EmoteCatalog;
 use crate::model::{Message, MsgKind, Room, RoomKind, SendState, ThreadSummary};
 use crate::previews::{Preview, PreviewStore};
 use crate::rich::{self, Format, Rich, Segment};
@@ -58,6 +59,22 @@ impl Row {
 }
 
 const INDENT: &str = "  ";
+
+/// What a reaction chip shows. A custom emoji (its key is an `mxc://` address) shows
+/// by its shortcode where the packs know it, and never by its address.
+fn reaction_label(key: &str, emotes: &EmoteCatalog) -> String {
+    let is_mxc = key
+        .trim_start()
+        .get(..6)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mxc://"));
+    if !is_mxc {
+        return key.to_owned();
+    }
+    match emotes.shortcode_for_url(key.trim()) {
+        Some(code) => format!(":{code}:"),
+        None => rich::EMOTICON_PLACEHOLDER.to_owned(),
+    }
+}
 
 /// The label that copies a code block, at the right end of its first line.
 const COPY_LABEL: &str = "copy";
@@ -170,7 +187,16 @@ pub fn build_rows(
     revealed: Option<usize>,
     images: &ImageStore,
 ) -> Vec<Row> {
-    build_layout(room, max_width, theme, revealed, images, None).rows
+    build_layout(
+        room,
+        max_width,
+        theme,
+        revealed,
+        images,
+        None,
+        &EmoteCatalog::default(),
+    )
+    .rows
 }
 
 /// [`build_rows`], with link previews when `previews` says so.
@@ -181,6 +207,7 @@ pub fn build_layout(
     revealed: Option<usize>,
     images: &ImageStore,
     previews: Option<&PreviewView>,
+    emotes: &EmoteCatalog,
 ) -> Layout {
     let mut wants = Vec::new();
     let body_width = max_width.saturating_sub(INDENT.len()).max(1);
@@ -526,7 +553,11 @@ pub fn build_layout(
             let mut col = INDENT.len();
             for (r, reaction) in message.reactions.iter().enumerate() {
                 let chip = truncate(
-                    &format!(" {} {} ", reaction.key, reaction.count),
+                    &format!(
+                        " {} {} ",
+                        reaction_label(&reaction.key, emotes),
+                        reaction.count
+                    ),
                     body_width,
                 );
                 let chip_width = width(&chip);
@@ -850,6 +881,8 @@ struct RowKey {
     /// What decides about link previews: one arrives, the mode or the room's encryption
     /// changes, or a sender is ignored.
     previews: (u64, LinkPreviews, bool, usize),
+    /// Changes when image packs arrive: reactions show their shortcodes.
+    emotes: u64,
 }
 
 /// The laid-out rows of the open room, reused between frames while nothing that
@@ -1023,6 +1056,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             room.encrypted,
             app.ignored_users.len(),
         ),
+        emotes: app.emotes.rev,
     };
     let previous = app.row_cache.take();
     let mut cache = match previous {
@@ -1041,6 +1075,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 revealed,
                 &app.images,
                 Some(&view),
+                &app.emotes.catalog,
             );
             if app.read_markers {
                 rows = receipts::add(rows, room, content.width as usize, theme);
@@ -1319,6 +1354,63 @@ mod tests {
             text.contains("hello") && text.contains("not encrypted"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn custom_emoji_reactions_show_their_shortcode_never_their_address() {
+        use crate::matrix::{CustomEmoji, EmotePack};
+        use crate::model::Reaction;
+        let emotes = EmoteCatalog {
+            packs: vec![EmotePack {
+                id: "user".into(),
+                name: "Mine".into(),
+                emojis: vec![CustomEmoji {
+                    shortcode: "blobcat".into(),
+                    url: "mxc://example.org/blobcat".into(),
+                    body: None,
+                    pack_name: "Mine".into(),
+                }],
+                stickers: Vec::new(),
+            }],
+        };
+        assert_eq!(reaction_label("👍", &emotes), "👍");
+        assert_eq!(
+            reaction_label("mxc://example.org/blobcat", &emotes),
+            ":blobcat:"
+        );
+        assert_eq!(
+            reaction_label(" MXC://example.org/other", &emotes),
+            rich::EMOTICON_PLACEHOLDER
+        );
+
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let mut room = demo_rooms().remove(0);
+        room.messages = vec![Message {
+            body: "hello".into(),
+            reactions: [
+                "mxc://example.org/blobcat",
+                "mxc://example.org/unknown",
+                "🐀",
+            ]
+            .into_iter()
+            .map(|key| Reaction {
+                key: key.into(),
+                count: 2,
+                own: false,
+            })
+            .collect(),
+            ..Message::default()
+        }];
+        let images = ImageStore::new(Graphics::halfblocks());
+        let text: String = build_layout(&room, 60, &theme, None, &images, None, &emotes)
+            .rows
+            .iter()
+            .map(|row| row.line.to_string())
+            .collect();
+        assert!(text.contains(" :blobcat: 2 "), "{text}");
+        assert!(text.contains(" :?: 2 "), "{text}");
+        assert!(text.contains(" 🐀 2 "), "{text}");
+        assert!(!text.contains("mxc"), "{text}");
     }
 
     #[test]

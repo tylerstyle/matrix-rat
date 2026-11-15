@@ -6,7 +6,31 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::text::{sanitize, unsafe_char, width};
+use crate::text::{is_blank, sanitize, sanitize_line, truncate, unsafe_char, width};
+
+/// Stands in for a custom emoji whose name is not known: pictures are not shown inline.
+pub const EMOTICON_PLACEHOLDER: &str = ":?:";
+
+/// A custom emoji as text: its `:shortcode:` from the `alt` or `title` the sender gave,
+/// cleaned like all message text and kept short.
+fn emoticon_label(attributes: &str) -> String {
+    let name = ["alt", "title"].into_iter().find_map(|attr| {
+        let raw = decode_entities(attribute(attributes, attr)?);
+        let name = sanitize_line(&raw);
+        let name: String = name
+            .trim()
+            .trim_matches(':')
+            .trim()
+            .chars()
+            .take(64)
+            .collect();
+        (!is_blank(&name)).then(|| truncate(&name, 32))
+    });
+    match name {
+        Some(name) => format!(":{name}:"),
+        None => EMOTICON_PLACEHOLDER.to_owned(),
+    }
+}
 
 /// How a piece of text should look. Resolved to colours by the theme at draw time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -273,7 +297,7 @@ fn tokenize(html: &str) -> Vec<Token<'_>> {
 }
 
 /// The value of `name` in a tag's attribute text; `Some("")` for a bare attribute.
-fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn attribute<'a>(attributes: &'a str, name: &str) -> Option<&'a str> {
     let mut rest = attributes;
     loop {
         rest = rest.trim_start();
@@ -535,6 +559,14 @@ impl Builder {
                 self.block_break();
                 self.push_piece("───", &Format::default());
                 self.end_line();
+                return;
+            }
+            // A void element: nothing to close, so no format to keep. Only custom emoji
+            // are shown, as text.
+            "img" => {
+                if attribute(attributes, "data-mx-emoticon").is_some() {
+                    self.push_piece(&emoticon_label(attributes), &format);
+                }
                 return;
             }
             "p" | "div" | "tr" => self.block_break(),
@@ -1161,5 +1193,48 @@ mod tests {
         let html =
             from_html("<a href=\"geo:48.8566,2.3522\">Paris</a> <a href=\"geo:999,0\">Nowhere</a>");
         assert_eq!(html.links, ["geo:48.8566,2.3522"]);
+    }
+
+    #[test]
+    fn custom_emoji_show_as_their_shortcodes_and_other_pictures_as_nothing() {
+        let rich = from_html(
+            "hi <img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blobcat:\" \
+             title=\":blobcat:\" height=\"32\" /> and <b><img data-mx-emoticon \
+             src=\"mxc://example.org/b\" title=\"party\"></b> <img src=\"mxc://example.org/pic\" \
+             alt=\"a photo\">done",
+        );
+        assert_eq!(texts(&rich), ["hi :blobcat: and :party: done"]);
+        assert!(
+            rich.lines[0]
+                .segments
+                .iter()
+                .any(|s| s.text == ":party:" && s.format.bold)
+        );
+        // The address itself is never shown.
+        assert!(!texts(&rich)[0].contains("mxc"));
+    }
+
+    #[test]
+    fn a_hostile_custom_emoji_name_is_cleaned_and_kept_short() {
+        let rich = from_html(&format!(
+            "<img data-mx-emoticon src=\"mxc://e.org/x\" alt=\"\u{1b}[31m{}\nevil\">",
+            "a".repeat(500)
+        ));
+        let text = texts(&rich).concat();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains('\n'));
+        assert!(
+            text.starts_with(":[31maaa") && text.ends_with("…:"),
+            "{text}"
+        );
+        assert!(width(&text) <= 34, "{text}");
+
+        for html in [
+            "<img data-mx-emoticon src=\"mxc://e.org/x\">",
+            "<img data-mx-emoticon alt=\"::\" title=\"\u{200b}\">",
+            "<img data-mx-emoticon alt=\"   \">",
+        ] {
+            assert_eq!(texts(&from_html(html)), [EMOTICON_PLACEHOLDER], "{html}");
+        }
     }
 }

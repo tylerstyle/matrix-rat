@@ -179,6 +179,12 @@ impl App {
             self.complete.active = None;
             return;
         }
+        // An emoji shortcode being typed is the first use of the image packs.
+        if complete::trigger(self.composer.text(), self.composer.cursor())
+            == Some(complete::Kind::Emoji)
+        {
+            self.want_emotes();
+        }
 
         let recent = self.recent_speakers();
         let room_targets = self.room_targets();
@@ -200,6 +206,7 @@ impl App {
             recent_speakers: &recent,
             can_mention_room,
             rooms: &room_targets,
+            emotes: &self.emotes.catalog,
         };
         let prev_selected = self
             .complete

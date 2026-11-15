@@ -6,7 +6,7 @@
 use comrak::Options;
 use matrix_sdk::ruma::events::Mentions;
 
-use crate::complete::{MentionMark, resolve_marks};
+use crate::complete::{EMOTE_CLOSE, EMOTE_OPEN, MentionKind, MentionMark, resolve_marks};
 
 /// What to do with a line of input.
 #[derive(Debug, Clone)]
@@ -109,7 +109,7 @@ pub fn parse_with_mentions(
             let (linked, mentions) = resolve_marks(argument, &arg_marks);
             needs_text(Outgoing::Emote {
                 plain: argument.to_owned(),
-                html: markdown_html(&linked),
+                html: message_html(&linked, &arg_marks),
                 mentions: finish_mentions(mentions, preserve_empty_mentions),
             })
         }
@@ -142,7 +142,7 @@ pub fn parse_with_mentions(
                 plain: format!("||{argument}||"),
                 html: Some(format!(
                     "<span data-mx-spoiler>{}</span>",
-                    inline_html(&linked)
+                    fill_emotes(&inline_html(&linked), &arg_marks)
                 )),
                 mentions: finish_mentions(mentions, preserve_empty_mentions),
             })
@@ -199,7 +199,7 @@ fn face_message(
     let (linked, mentions) = resolve_marks(argument, marks);
     Outgoing::Text {
         plain: prepend(face, argument),
-        html: markdown_html(&prepend(face, &linked)),
+        html: message_html(&prepend(face, &linked), marks),
         mentions: finish_mentions(mentions, preserve_empty),
     }
 }
@@ -208,7 +208,7 @@ fn markdown_message(text: &str, marks: &[MentionMark], preserve_empty: bool) -> 
     let (linked, mentions) = resolve_marks(text, marks);
     Outgoing::Text {
         plain: text.to_owned(),
-        html: markdown_html(&linked),
+        html: message_html(&linked, marks),
         mentions: finish_mentions(mentions, preserve_empty),
     }
 }
@@ -322,6 +322,74 @@ fn tighten_spoilers(text: &str) -> std::borrow::Cow<'_, str> {
 /// Renders Markdown to Matrix HTML. `None` when the text contains no formatting, so
 /// plain messages are sent without a redundant HTML copy.
 pub fn markdown_html(text: &str) -> Option<String> {
+    let (html, formatted) = render_markdown(text);
+    formatted.then_some(html)
+}
+
+/// The HTML of a message whose Markdown, with accepted completions resolved, is
+/// `linked`: like [`markdown_html`], but a message with a custom emoji always has HTML,
+/// since that is the only place its picture can be.
+fn message_html(linked: &str, marks: &[MentionMark]) -> Option<String> {
+    let (html, formatted) = render_markdown(linked);
+    if html.contains(EMOTE_OPEN) {
+        Some(fill_emotes(&html, marks))
+    } else {
+        formatted.then_some(html)
+    }
+}
+
+/// Puts the custom emoji of `marks` in place of the placeholders `resolve_marks` left.
+/// Inside a tag (an address the Markdown made a link of) only its text goes in.
+fn fill_emotes(html: &str, marks: &[MentionMark]) -> String {
+    if !html.contains(EMOTE_OPEN) {
+        return html.to_owned();
+    }
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut in_tag = false;
+    let mut rest = html;
+    while let Some(c) = rest.chars().next() {
+        if let Some((code, url, len)) = placeholder_at(rest, marks) {
+            let code = escape(code);
+            if in_tag || !crate::matrix::is_valid_mxc(url) {
+                out.push_str(&code);
+            } else {
+                out.push_str(&format!(
+                    "<img data-mx-emoticon src=\"{url}\" alt=\"{code}\" title=\"{code}\" height=\"32\">"
+                ));
+            }
+            rest = &rest[len..];
+            continue;
+        }
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ => {}
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// The custom emoji whose placeholder starts `text`: its `:shortcode:`, its address, and
+/// the placeholder's length in bytes.
+fn placeholder_at<'m>(text: &str, marks: &'m [MentionMark]) -> Option<(&'m str, &'m str, usize)> {
+    let inner = text.strip_prefix(EMOTE_OPEN)?;
+    let end = inner.find(EMOTE_CLOSE)?;
+    let index: usize = inner[..end].parse().ok()?;
+    let MentionKind::Emoticon { code, url } = &marks.get(index)?.kind else {
+        return None;
+    };
+    Some((
+        code.as_str(),
+        url.as_str(),
+        EMOTE_OPEN.len_utf8() + end + EMOTE_CLOSE.len_utf8(),
+    ))
+}
+
+/// Markdown rendered to HTML, and whether it has any markup beyond paragraphs and
+/// line breaks.
+fn render_markdown(text: &str) -> (String, bool) {
     let mut options = Options::default();
     options.extension.strikethrough = true;
     options.extension.spoiler = true;
@@ -350,7 +418,8 @@ pub fn markdown_html(text: &str) -> Option<String> {
     for tag in ["<br />\n", "<br />", "</p>\n", "</p>", "<p>"] {
         bare = bare.replace(tag, "");
     }
-    if bare.contains('<') { Some(html) } else { None }
+    let formatted = bare.contains('<');
+    (html, formatted)
 }
 
 /// HTML for inside an inline element: Markdown formatting, but line and paragraph
@@ -666,5 +735,89 @@ mod tests {
         };
         let cleared = cleared.expect("should preserve empty mentions when editing");
         assert!(cleared.user_ids.is_empty() && !cleared.room);
+    }
+
+    #[test]
+    fn a_chosen_custom_emoji_is_sent_as_a_picture_with_its_shortcode_as_text() {
+        let blob = "<img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blob:\" \
+                    title=\":blob:\" height=\"32\">";
+        let marks = vec![MentionMark::emoticon("blob", "mxc://example.org/blob").with_at(Some(3))];
+        // No other formatting: the HTML is there for the picture alone.
+        assert_eq!(
+            parse_with_mentions("hi :blob: there", &marks, false),
+            text("hi :blob: there", Some(&format!("hi {blob} there")))
+        );
+        // With Markdown around it, and in an action.
+        let Outgoing::Text { html, .. } = parse_with_mentions("hi :blob: **yes**", &marks, false)
+        else {
+            panic!("expected text");
+        };
+        assert_eq!(
+            html.as_deref(),
+            Some(format!("hi {blob} <strong>yes</strong>").as_str())
+        );
+        let me = vec![MentionMark::emoticon("blob", "mxc://example.org/blob")];
+        let Outgoing::Emote { plain, html, .. } = parse_with_mentions("/me :blob:", &me, false)
+        else {
+            panic!("expected emote");
+        };
+        assert_eq!(plain, ":blob:");
+        assert_eq!(html.as_deref(), Some(blob));
+        let Outgoing::Text { html, .. } = parse_with_mentions("/spoiler :blob:", &me, false) else {
+            panic!("expected text");
+        };
+        assert_eq!(
+            html.as_deref(),
+            Some(format!("<span data-mx-spoiler>{blob}</span>").as_str())
+        );
+        // `/plain` stays plain.
+        assert_eq!(
+            parse_with_mentions("/plain :blob:", &me, false),
+            text(":blob:", None)
+        );
+    }
+
+    #[test]
+    fn a_custom_emoji_shortcode_stays_text_in_code_in_a_word_and_in_an_address() {
+        let marks = vec![MentionMark::emoticon("blob", "mxc://example.org/blob")];
+        for typed in ["`:blob:`", "x:blob:", ":blob:s"] {
+            let Outgoing::Text { html, .. } = parse_with_mentions(typed, &marks, false) else {
+                panic!("expected text");
+            };
+            assert!(!html.unwrap_or_default().contains("<img"), "{typed}");
+        }
+        // Made a link by the Markdown: the picture cannot go inside the address.
+        let Outgoing::Text { html, .. } =
+            parse_with_mentions("https://example.org/:blob: ok", &marks, false)
+        else {
+            panic!("expected text");
+        };
+        let html = html.unwrap();
+        assert!(
+            html.contains("<a href=\"https://example.org/:blob"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("<img") && !html.contains('\u{e000}'),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_custom_emoji_with_a_bad_address_or_name_cannot_break_the_html() {
+        let marks = vec![
+            MentionMark::emoticon("a\"b<c>", "mxc://example.org/ok"),
+            MentionMark::emoticon("evil", "mxc://example.org/x\" onerror=\"y"),
+        ];
+        let Outgoing::Text { plain, html, .. } =
+            parse_with_mentions(":a\"b<c>: :evil:", &marks, false)
+        else {
+            panic!("expected text");
+        };
+        assert_eq!(plain, ":a\"b<c>: :evil:");
+        let html = html.unwrap();
+        assert!(html.contains("alt=\":a&quot;b&lt;c&gt;:\""), "{html}");
+        assert!(!html.contains("onerror"), "{html}");
+        assert!(html.ends_with(" :evil:"), "{html}");
     }
 }
