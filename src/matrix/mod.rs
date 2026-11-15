@@ -1818,6 +1818,8 @@ impl Worker {
                 // it is time to ask the server about one. (A space can be such a room:
                 // the spaces are told again too.)
                 () = left.due() => {
+                    // One that is back has its latest message followed from now on.
+                    previews.listen(client, &rooms, left);
                     self.emit(MatrixEvent::Rooms(
                         summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                     ));

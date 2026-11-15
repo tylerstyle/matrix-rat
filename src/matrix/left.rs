@@ -257,8 +257,8 @@ impl LeftRooms {
 
     /// Resolves when the room list is to be made again: a room kept out of it turned out
     /// to be joined, an answer changed when to ask next, or it is time to ask about one
-    /// (which is done while the list is made). Nothing in the room list may change by
-    /// itself meanwhile, so this is the only thing that wakes the list then.
+    /// (which is done while the list is made). The rooms themselves may not change
+    /// meanwhile, and then nothing else would make the list again.
     pub async fn due(&self) {
         let next = self.next_ask();
         let time_to_ask = async {
