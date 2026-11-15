@@ -953,6 +953,7 @@ impl App {
                 self.save_setting("do_not_disturb", self.do_not_disturb);
                 // What was waiting to be shown is not shown later either.
                 self.pending_notices.clear();
+                self.count_notices.clear();
                 self.show_toast(if self.do_not_disturb {
                     "Do not disturb: no notifications"
                 } else {
