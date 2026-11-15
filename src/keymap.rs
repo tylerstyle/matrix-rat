@@ -1778,7 +1778,7 @@ pub struct EditorRow {
 }
 
 /// UI state for the Settings -> Key bindings editor modal.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Editor {
     pub selected: usize,
     pub scroll: usize,
@@ -1787,6 +1787,24 @@ pub struct Editor {
     /// `(message, is_error)` feedback shown inside the modal.
     pub feedback: Option<(String, bool)>,
     rows: Vec<EditorRow>,
+}
+
+/// Hand-written: what it tells the user can name the configuration file (when saving
+/// to it failed), and that is a path.
+impl std::fmt::Debug for Editor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Editor")
+            .field("selected", &self.selected)
+            .field("scroll", &self.scroll)
+            .field("follow_selection", &self.follow_selection)
+            .field("stage", &self.stage)
+            .field(
+                "feedback",
+                &self.feedback.as_ref().map(|(_, is_error)| is_error),
+            )
+            .field("rows", &self.rows.len())
+            .finish()
+    }
 }
 
 impl Editor {

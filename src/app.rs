@@ -113,7 +113,7 @@ pub struct SidebarState {
     pub reveal_cursor: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct TimelineState {
     pub selected: Option<usize>,
     /// Rows scrolled up from the newest message.
@@ -162,6 +162,38 @@ pub struct TimelineState {
     pub detached_new: u32,
 }
 
+/// Hand-written: what was marked read names an event and a room; only whether there is
+/// one is shown.
+impl std::fmt::Debug for TimelineState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimelineState")
+            .field("selected", &self.selected)
+            .field("scroll", &self.scroll)
+            .field("reveal_selected", &self.reveal_selected)
+            .field("reveal_unread", &self.reveal_unread)
+            .field("page", &self.page)
+            .field("want_older", &self.want_older)
+            .field("loading_older", &self.loading_older)
+            .field("reached_start", &self.reached_start)
+            .field("older_armed", &self.older_armed)
+            .field("view_full", &self.view_full)
+            .field("count_at_request", &self.count_at_request)
+            .field("empty_batches", &self.empty_batches)
+            .field("drawn", &self.drawn)
+            .field("marked_read", &self.marked_read.is_some())
+            .field("hidden_read_state", &self.hidden_read_state.is_some())
+            .field("detached", &self.detached)
+            .field("want_newer", &self.want_newer)
+            .field("loading_newer", &self.loading_newer)
+            .field("reached_end", &self.reached_end)
+            .field("newer_armed", &self.newer_armed)
+            .field("forward_count_at_request", &self.forward_count_at_request)
+            .field("empty_forward_batches", &self.empty_forward_batches)
+            .field("detached_new", &self.detached_new)
+            .finish()
+    }
+}
+
 /// Where the composer's text was drawn, for mapping clicks to a cursor position.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ComposerView {
@@ -178,7 +210,6 @@ pub struct ReadyNotices {
     pub icon_cache: Option<(Arc<crate::notify::IconCache>, u64)>,
 }
 
-#[derive(Debug)]
 pub struct App {
     pub rooms: Vec<Room>,
     pub active: usize,
@@ -355,6 +386,63 @@ pub struct App {
     pub keywords: crate::keywords::KeywordsState,
     /// Custom emoji and stickers from image packs.
     pub emotes: emotes::EmoteState,
+}
+
+/// Hand-written: the app holds everything private there is (messages, drafts, ids,
+/// names, paths, the clipboard's text). Only the shape of its state is shown; the
+/// parts it shows have redacted `Debug`s of their own.
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App")
+            .field("rooms", &self.rooms.len())
+            .field("active", &self.active)
+            .field("focus", &self.focus)
+            .field("sidebar", &self.sidebar)
+            .field("timeline", &self.timeline)
+            .field("composer", &self.composer)
+            .field("compose_mode", &self.compose_mode)
+            .field("help_open", &self.help_open)
+            .field("modal", &self.modal)
+            .field("connected", &self.matrix.is_some())
+            .field("sync", &self.sync)
+            .field("logged_in", &self.user_id.is_some())
+            .field("own_profile", &self.own_profile)
+            .field("generation", &self.generation)
+            .field("window_focused", &self.window_focused)
+            .field("edit_stash", &self.edit_stash.is_some())
+            .field("pending_copy", &self.pending_copy.is_some())
+            .field("notify_mode", &self.notify_mode)
+            .field("pending_notices", &self.pending_notices.len())
+            .field("link_previews", &self.link_previews)
+            .field("previews", &self.previews)
+            .field("spaces", &self.spaces.len())
+            .field("space", &self.space_at)
+            .field("logged_out", &self.logged_out)
+            .field("saving", &self.saving.len())
+            .field("saved", &self.saved.len())
+            .field("color_scheme", &self.color_scheme)
+            .field("theme_rev", &self.theme_rev)
+            .field("timeline_rev", &self.timeline_rev)
+            .field("row_cache", &self.row_cache)
+            .field("verify", &self.verify)
+            .field("toast", &self.toast.is_some())
+            .field("screen", &self.screen)
+            .field("editor_request", &self.editor_request.is_some())
+            .field("images", &self.images)
+            .field("threads", &self.threads)
+            .field("attach", &self.attach)
+            .field("drafts", &self.drafts)
+            .field("unread", &self.unread)
+            .field("complete", &self.complete)
+            .field("manage", &self.manage)
+            .field("pending_jump", &self.pending_jump)
+            .field("startup_target", &self.startup_target.is_some())
+            .field("ignored_users", &self.ignored_users.len())
+            .field("devices", &self.devices)
+            .field("keywords", &self.keywords)
+            .field("emotes", &self.emotes)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Shared 250 ms search debounce window used by directory & user lookups.
@@ -7964,6 +8052,9 @@ mod tests {
                         .any(|item| item.label == "Go to replied message"),
                     "{:?}",
                     menu.items
+                        .iter()
+                        .map(|item| &item.label)
+                        .collect::<Vec<_>>()
                 );
             }
             other => panic!("expected message menu, got {other:?}"),
@@ -8416,5 +8507,181 @@ mod tests {
         find(&terminal, "7 unread · @");
         app.on_event(key(KeyCode::Enter));
         assert_eq!(app.space_name().as_deref(), Some("Work › Team"));
+    }
+
+    /// The net for a field added later: the whole app, filled with recognisable private
+    /// things and with one popup after another open, says none of them in `Debug`.
+    #[test]
+    fn the_debug_output_of_the_app_holds_nothing_private() {
+        const PRIVATE: &[&str] = &[
+            "hidden-room",
+            "Secret Garden",
+            "#garden",
+            "@alice",
+            "Alice Hidden",
+            "@bob",
+            "Bob Hidden",
+            "$launch",
+            "launch codes",
+            "private.example",
+            "needle",
+            "my private draft",
+            "garden filter",
+            "typed into",
+            "copied secret",
+            "toast about",
+            "/home/alice",
+            "raise-alice",
+            "@self-secret",
+            "@troll",
+            "!space-secret",
+            "Space Secret",
+            "Hush",
+        ];
+        let mut app = App::demo();
+        let (handle, _commands) = MatrixHandle::for_test();
+        app.matrix = Some(handle);
+        app.user_id = Some("@self-secret:example.org".into());
+        app.own_profile = Some(crate::matrix::OwnProfile {
+            display_name: Some("Hush Self".into()),
+            avatar: Some("mxc://private.example.org/me".into()),
+            room_names: Default::default(),
+        });
+        let message = |id: &str, sender: &str, sender_id: &str, body: &str| Message {
+            id: id.to_owned(),
+            item: Some(ItemRef::Event(format!("${id}:example.org"))),
+            sender: sender.to_owned(),
+            sender_id: Some(sender_id.to_owned()),
+            body: body.to_owned(),
+            html: Some(format!("<b>{body}</b>")),
+            ..Message::default()
+        };
+        let mut room = Room::new("!hidden-room:example.org", "Secret Garden", RoomKind::Room);
+        room.alias = Some("#garden:example.org".into());
+        room.messages = vec![
+            message(
+                "launch",
+                "Alice Hidden",
+                "@alice:example.org",
+                "the launch codes are at https://private.example.org/plans",
+            ),
+            message(
+                "needle",
+                "Bob Hidden",
+                "@bob:example.org",
+                "needle in the haystack",
+            ),
+        ];
+        app.rooms = vec![room];
+        app.active = 0;
+        app.spaces = vec![crate::matrix::SpaceSummary {
+            id: "!space-secret:example.org".into(),
+            name: "Space Secret".into(),
+            level: 0,
+            rooms: vec!["!hidden-room:example.org".into()],
+            children: vec!["!hidden-room:example.org".into()],
+            can_edit: true,
+        }];
+        app.link_previews = crate::config::LinkPreviews::All;
+        app.download_dir = "/home/alice/Downloads".into();
+        app.notification_click_command = Some("raise-alice-terminal".into());
+        app.pending_copy = Some("copied secret".into());
+        app.toast = Some(("toast about Secret Garden".into(), Instant::now()));
+        app.ignored_users.insert("@troll:example.org".into());
+        app.timeline.marked_read = Some("$needle:example.org".into());
+        app.sidebar.filter.set("garden filter");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        // Lays out the messages: the row cache and the link previews fill.
+        redraw(&mut app, &mut terminal);
+        assert!(app.row_cache.is_some());
+
+        let mut shown = Vec::new();
+        // A draft, and a mention being completed in it.
+        app.on_room_members(
+            "!hidden-room:example.org".into(),
+            vec![crate::complete::Member {
+                user_id: "@alice:example.org".into(),
+                display_name: "Alice Hidden".into(),
+            }],
+            true,
+        );
+        app.focus = Pane::Composer;
+        type_text(&mut app, "my private draft @Ali");
+        assert!(app.complete.active.is_some());
+        shown.push(format!("{app:?}"));
+        app.on_event(key(KeyCode::Esc));
+
+        // One popup after another; where it takes text, something is typed into it.
+        for (action, takes_text) in [
+            (Action::Search, true),
+            (Action::ContextMenu, false),
+            (Action::OpenPalette, true),
+            (Action::RoomInfo, false),
+            (Action::UserInfo, false),
+            (Action::MessageDetails, false),
+            (Action::OpenPinned, false),
+            (Action::OpenThreads, true),
+            (Action::NewRoom, false),
+            (Action::React, true),
+            (Action::ForwardMessage, true),
+        ] {
+            app.modal = None;
+            app.focus = Pane::Timeline;
+            app.timeline.selected = Some(0);
+            app.perform(action);
+            if takes_text {
+                type_text(&mut app, "needle");
+            }
+            shown.push(format!("{app:?}"));
+        }
+        app.modal = Some(Modal::Settings(SettingsMenu {
+            editing: Some(LineEdit::from("/home/alice/elsewhere")),
+            ..SettingsMenu::default()
+        }));
+        shown.push(format!("{app:?}"));
+        app.modal = Some(Modal::Login(LoginForm::reauth(
+            crate::matrix::ReauthTarget {
+                homeserver: "https://private.example.org".into(),
+                user_id: "@self-secret:example.org".into(),
+                device_id: "Hush".into(),
+                kind: crate::matrix::ReauthKind::Password,
+                client_id: None,
+            },
+            "Session of @self-secret expired".into(),
+        )));
+        type_text(&mut app, "typed into the password");
+        shown.push(format!("{app:?}"));
+
+        // A thread, with the room's draft put aside.
+        app.modal = None;
+        app.composer.set_text("my private draft");
+        app.focus = Pane::Timeline;
+        app.timeline.selected = Some(1);
+        app.perform(Action::OpenThread);
+        assert!(app.threads.open.is_some());
+        shown.push(format!("{app:?}"));
+
+        let all = shown.join("\n");
+        for popup in [
+            "Search(",
+            "Menu(",
+            "Palette(",
+            "RoomInfo(",
+            "UserInfo(",
+            "Details(",
+            "Pinned(",
+            "Threads(",
+            "New(",
+            "Emoji(",
+            "Settings(",
+            "Login(",
+        ] {
+            assert!(all.contains(popup), "{popup} never open in {all}");
+        }
+        for text in &shown {
+            for private in PRIVATE {
+                assert!(!text.contains(private), "{private} in {text}");
+            }
+        }
     }
 }

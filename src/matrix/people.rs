@@ -592,12 +592,23 @@ enum FallbackMode {
     SingleStateEvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct FallbackCandidate {
     room_id: String,
     direct: bool,
     members_count: u64,
     mode: FallbackMode,
+}
+
+/// Hand-written: which room stays out of logs.
+impl fmt::Debug for FallbackCandidate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FallbackCandidate")
+            .field("direct", &self.direct)
+            .field("members_count", &self.members_count)
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
 }
 
 enum FallbackCheck {

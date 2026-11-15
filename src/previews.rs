@@ -126,7 +126,7 @@ enum Slot {
     Nothing,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct PreviewStore {
     slots: HashMap<String, Slot>,
     /// Addresses in the order they were first asked about.
@@ -136,6 +136,18 @@ pub struct PreviewStore {
     loading: usize,
     /// Changes when a preview appears or goes: the timeline lays out again.
     pub rev: u64,
+}
+
+/// Hand-written: the addresses are links from messages.
+impl fmt::Debug for PreviewStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreviewStore")
+            .field("slots", &self.slots.len())
+            .field("queue", &self.queue.len())
+            .field("loading", &self.loading)
+            .field("rev", &self.rev)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PreviewStore {

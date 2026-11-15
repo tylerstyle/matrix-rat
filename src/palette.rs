@@ -35,7 +35,9 @@ impl Category {
 }
 
 /// What running a command palette entry does.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Target {
     Action(Action),
     /// Matrix room id, resolved back to `App::rooms` when executed so background sync
@@ -46,8 +48,24 @@ pub enum Target {
     Theme(String),
 }
 
+/// Outside tests: which room, space or theme stays out of logs.
+#[cfg(not(test))]
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Action(action) => f.debug_tuple("Action").field(action).finish(),
+            Self::Room(_) => f.write_str("Room"),
+            Self::Space(space) => f
+                .debug_tuple("Space")
+                .field(&space.as_ref().map(|(index, _)| index))
+                .finish(),
+            Self::Theme(_) => f.write_str("Theme"),
+        }
+    }
+}
+
 /// One row in the command palette.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Entry {
     pub target: Target,
     pub category: Category,
@@ -62,8 +80,28 @@ pub struct Entry {
     base_order: usize,
 }
 
+/// Hand-written: titles and hints can be the names of rooms, spaces and themes. Of
+/// the target only the action or the kind is shown, as `Target` shows everything in
+/// tests.
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let target: &dyn std::fmt::Debug = match &self.target {
+            Target::Action(action) => action,
+            Target::Room(_) => &"Room",
+            Target::Space(_) => &"Space",
+            Target::Theme(_) => &"Theme",
+        };
+        f.debug_struct("Entry")
+            .field("target", target)
+            .field("category", &self.category)
+            .field("enabled", &self.enabled)
+            .field("base_order", &self.base_order)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Room metadata needed to populate the room-switching entries.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RoomItem {
     pub id: String,
     pub name: String,
@@ -71,14 +109,35 @@ pub struct RoomItem {
     pub active: bool,
 }
 
+/// Hand-written: which room and its name stay out of logs.
+impl std::fmt::Debug for RoomItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoomItem")
+            .field("unread", &self.unread)
+            .field("active", &self.active)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Space metadata needed to populate the space-switching entries.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SpaceItem {
     pub index: usize,
     pub id: String,
     pub name: String,
     pub unread: SpaceUnread,
     pub active: bool,
+}
+
+/// Hand-written: which space and its name stay out of logs.
+impl std::fmt::Debug for SpaceItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpaceItem")
+            .field("index", &self.index)
+            .field("unread", &self.unread)
+            .field("active", &self.active)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Availability of timeline actions for the currently selected message.
@@ -249,7 +308,7 @@ impl std::fmt::Debug for SpaceFacts {
 }
 
 /// Snapshot of application state used to construct palette entries and availability.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PaletteContext {
     pub focus: Pane,
     pub compose_mode: ComposeMode,
@@ -299,8 +358,48 @@ pub struct PaletteContext {
     pub keymap: keymap::Keymap,
 }
 
+/// Hand-written: it holds the user's id and name, the names of rooms, spaces and
+/// themes, and the download folder. Settings, counts and what is possible are shown.
+impl std::fmt::Debug for PaletteContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaletteContext")
+            .field("focus", &self.focus)
+            .field("compose_mode", &self.compose_mode)
+            .field("in_invite", &self.in_invite)
+            .field("in_knock", &self.in_knock)
+            .field("thread_open", &self.thread_open)
+            .field("has_room", &self.has_room)
+            .field("has_messages", &self.has_messages)
+            .field("can_edit_last", &self.can_edit_last)
+            .field("open_unread", &self.open_unread)
+            .field("connected", &self.connected)
+            .field("mouse", &self.mouse)
+            .field("typing_notices", &self.typing_notices)
+            .field("read_receipts", &self.read_receipts)
+            .field("do_not_disturb", &self.do_not_disturb)
+            .field("read_markers", &self.read_markers)
+            .field("room_previews", &self.room_previews)
+            .field("link_previews", &self.link_previews)
+            .field("notifications", &self.notifications)
+            .field("verify_status", &self.verify_status)
+            .field("backup_status", &self.backup_status)
+            .field("ignored_users", &self.ignored_users)
+            .field("themes", &self.themes.len())
+            .field("filter_unread", &self.filter_unread)
+            .field("filter_people", &self.filter_people)
+            .field("all_spaces_unread", &self.all_spaces_unread)
+            .field("all_spaces_active", &self.all_spaces_active)
+            .field("spaces", &self.spaces)
+            .field("space_facts", &self.space_facts)
+            .field("rooms", &self.rooms)
+            .field("selection", &self.selection)
+            .field("target", &self.target.as_ref().map(|(_, kind)| kind))
+            .finish_non_exhaustive()
+    }
+}
+
 /// State for the command palette popup (`Ctrl-P`).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Palette {
     pub query: LineEdit,
     pub entries: Vec<Entry>,
@@ -314,6 +413,23 @@ pub struct Palette {
     pub reveal: bool,
     /// When `Some`, the palette picks a room for this.
     pub pick: Option<Pick>,
+}
+
+/// Hand-written: the entries are the names of rooms, spaces and themes; only how
+/// many there are is shown (what was typed is kept out by `LineEdit` itself).
+impl std::fmt::Debug for Palette {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Palette")
+            .field("query", &self.query)
+            .field("entries", &self.entries.len())
+            .field("filtered", &self.filtered.len())
+            .field("selected", &self.selected)
+            .field("scroll", &self.scroll)
+            .field("rows", &self.rows)
+            .field("reveal", &self.reveal)
+            .field("pick", &self.pick)
+            .finish()
+    }
 }
 
 impl Palette {
@@ -1625,6 +1741,56 @@ mod tests {
             ],
             selection: MessageCaps::default(),
             keymap: keymap::Keymap::default(),
+        }
+    }
+
+    #[test]
+    fn the_palette_and_what_it_is_made_of_keep_names_and_ids_out_of_debug() {
+        let mut ctx = sample_context();
+        ctx.connected = true;
+        ctx.user_id = Some("@alice:secret.example.org".into());
+        ctx.own_display_name = Some("Alice Secret".into());
+        ctx.download_dir = "/home/alice/secret-downloads".into();
+        ctx.wanted_theme = "alice-secret-theme".into();
+        ctx.theme_dark = Some("alice-secret-dark".into());
+        ctx.theme_light = Some("alice-secret-light".into());
+        ctx.themes.push("alice-secret-theme".into());
+        ctx.target = Some(("Secret Room".into(), crate::model::RoomKind::Room));
+        ctx.rooms.push(RoomItem {
+            id: "!secret-room:example.org".into(),
+            name: "Secret Room".into(),
+            unread: 1,
+            active: false,
+        });
+        ctx.spaces.push(SpaceItem {
+            index: 0,
+            id: "!secret-space:example.org".into(),
+            name: "Secret Space".into(),
+            unread: SpaceUnread::default(),
+            active: false,
+        });
+        ctx.space_facts.selected = Some(("Secret Space".into(), true));
+        let mut palette = Palette::open(ctx.clone());
+        palette.query.set("secret");
+        let forward = Palette::open_forward(
+            &ctx.rooms,
+            ForwardTarget {
+                from_room_id: "!secret-room:example.org".into(),
+                event_id: "$secret-event:example.org".into(),
+                preview: "the secret plans".into(),
+            },
+        );
+        // Entries for the secret room, space and theme are there, and say nothing.
+        let entries: Vec<String> = palette.entries.iter().map(|e| format!("{e:?}")).collect();
+        assert!(entries.iter().any(|e| e.contains("Room")));
+        assert!(entries.iter().any(|e| e.contains("Space")));
+        assert!(entries.iter().any(|e| e.contains("Theme")));
+        let shown = format!(
+            "{ctx:?} {palette:?} {forward:?} {entries:?} {:?} {:?}",
+            ctx.rooms, ctx.spaces
+        );
+        for private in ["secret", "Secret", "alice", "Alice", "/home"] {
+            assert!(!shown.contains(private), "{private} in {shown}");
         }
     }
 

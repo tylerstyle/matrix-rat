@@ -13,13 +13,23 @@ use crate::format::{self, Outgoing};
 use crate::matrix::MatrixCmd;
 use crate::model::{MsgKind, OWN_NAME, RoomKind};
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct RoomMembers {
     members: Vec<Member>,
     can_mention_room: bool,
 }
 
-#[derive(Debug, Default)]
+/// Hand-written: who is in a room stays out of logs.
+impl std::fmt::Debug for RoomMembers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoomMembers")
+            .field("members", &self.members.len())
+            .field("can_mention_room", &self.can_mention_room)
+            .finish()
+    }
+}
+
+#[derive(Default)]
 pub struct CompleteState {
     pub active: Option<Completion>,
     pub(super) marks: Vec<MentionMark>,
@@ -32,6 +42,27 @@ pub struct CompleteState {
     opened_for_room: Option<String>,
     /// Trigger byte start dismissed with `Esc`; cleared when editing text or leaving trigger.
     dismissed_start: Option<usize>,
+}
+
+/// Hand-written: mentions and members are people, kept under the ids of rooms and
+/// threads; counts say enough.
+impl std::fmt::Debug for CompleteState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompleteState")
+            .field("active", &self.active)
+            .field("marks", &self.marks.len())
+            .field("edit_had_mentions", &self.edit_had_mentions)
+            .field("draft_marks", &self.draft_marks.len())
+            .field("thread_marks", &self.thread_marks.len())
+            .field(
+                "edit_stash_marks",
+                &self.edit_stash_marks.as_ref().map(Vec::len),
+            )
+            .field("room_members", &self.room_members.len())
+            .field("opened_for_room", &self.opened_for_room.is_some())
+            .field("dismissed_start", &self.dismissed_start)
+            .finish()
+    }
 }
 
 impl CompleteState {

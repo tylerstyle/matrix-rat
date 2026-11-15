@@ -17,7 +17,7 @@ use crate::model::RoomKind;
 /// that never occurs does not page through years of a busy room unasked.
 const MAX_DIG: u8 = 15;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SearchBar {
     pub query: LineEdit,
     /// Id of the message the search is at, if any matches.
@@ -38,6 +38,23 @@ pub struct SearchBar {
     origin: (Option<usize>, usize),
     /// The room the search is in; the bar closes if another one is shown.
     room: String,
+}
+
+/// Hand-written: the message it is at and the room it is in are named by their ids
+/// (what was typed is kept out by `LineEdit` itself).
+impl std::fmt::Debug for SearchBar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchBar")
+            .field("query", &self.query)
+            .field("hit", &self.hit.is_some())
+            .field("position", &self.position)
+            .field("total", &self.total)
+            .field("digging", &self.digging)
+            .field("note", &self.note)
+            .field("at", &self.at)
+            .field("origin", &self.origin)
+            .finish_non_exhaustive()
+    }
 }
 
 impl App {

@@ -128,7 +128,7 @@ struct Palette {
     success: Color,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Theme {
     pub name: String,
     styles: Vec<Style>,
@@ -139,6 +139,20 @@ pub struct Theme {
     no_color: bool,
     /// Problems found while loading (unknown keys, bad colours). Never fatal.
     pub warnings: Vec<String>,
+}
+
+/// Hand-written: a theme of the user's own is named after a file of theirs, and what
+/// was found wrong in it quotes that file.
+impl std::fmt::Debug for Theme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Theme")
+            .field("styles", &self.styles.len())
+            .field("users", &self.users.len())
+            .field("low_color", &self.low_color)
+            .field("no_color", &self.no_color)
+            .field("warnings", &self.warnings.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Deserialize)]

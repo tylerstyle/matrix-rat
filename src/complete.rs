@@ -26,22 +26,38 @@ pub enum Kind {
 }
 
 /// One room member eligible for `@` completion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Member {
     pub user_id: String,
     pub display_name: String,
 }
 
+/// Hand-written: who it is stays out of logs.
+impl std::fmt::Debug for Member {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Member")
+    }
+}
+
 /// One joined room eligible for `#` completion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RoomTarget {
     pub id: String,
     pub name: String,
     pub alias: Option<String>,
 }
 
+/// Hand-written: which room, its name and its address stay out of logs.
+impl std::fmt::Debug for RoomTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoomTarget")
+            .field("alias", &self.alias.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// What happens when a completion item is accepted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Target {
     User {
         user_id: String,
@@ -61,16 +77,41 @@ pub enum Target {
     Command(String),
 }
 
+/// Hand-written: names, ids, addresses and shortcodes stay out of logs.
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::User { .. } => "Target::User",
+            Self::RoomMention => "Target::RoomMention",
+            Self::Emoji(_) => "Target::Emoji",
+            Self::CustomEmoji { .. } => "Target::CustomEmoji",
+            Self::RoomLink { .. } => "Target::RoomLink",
+            Self::Command(_) => "Target::Command",
+        })
+    }
+}
+
 /// One row shown in the completion popup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub primary: String,
     pub secondary: String,
     pub target: Target,
 }
 
+/// Hand-written: what the row says names a person, a room or an emoji.
+impl std::fmt::Debug for Candidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Candidate")
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What kind of target a [`MentionMark`] resolves to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum MentionKind {
     User {
         label: String,
@@ -88,12 +129,38 @@ pub enum MentionKind {
     },
 }
 
+/// Outside tests: names, ids, addresses and shortcodes stay out of logs.
+#[cfg(not(test))]
+impl std::fmt::Debug for MentionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::User { .. } => "MentionKind::User",
+            Self::RoomNotification => "MentionKind::RoomNotification",
+            Self::RoomLink { .. } => "MentionKind::RoomLink",
+            Self::Emoticon { .. } => "MentionKind::Emoticon",
+        })
+    }
+}
+
 /// An accepted mention or room link tracked alongside composer text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MentionMark {
     pub kind: MentionKind,
     /// Byte offset in composer text where this completion was accepted, if known.
     pub at: Option<usize>,
+}
+
+/// Outside tests: what it names stays out of logs.
+#[cfg(not(test))]
+impl std::fmt::Debug for MentionMark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MentionMark")
+            .field("kind", &self.kind)
+            .field("at", &self.at)
+            .finish()
+    }
 }
 
 impl MentionMark {
@@ -172,13 +239,25 @@ impl MentionMark {
 }
 
 /// Active completion state while the user is typing in the composer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Completion {
     pub kind: Kind,
     /// Byte range in composer text covered by the trigger and query (e.g. `@al`).
     pub range: Range<usize>,
     pub items: Vec<Candidate>,
     pub selected: usize,
+}
+
+/// Hand-written: the rows name people, rooms and emoji (and their `Debug`s keep that out).
+impl std::fmt::Debug for Completion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Completion")
+            .field("kind", &self.kind)
+            .field("range", &self.range)
+            .field("items", &self.items)
+            .field("selected", &self.selected)
+            .finish()
+    }
 }
 
 /// Inputs used to compute completion candidates at the current cursor.

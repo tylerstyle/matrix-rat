@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::theme::DEFAULT_THEME;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Name of a built-in theme or of a file in `themes/` (without `.toml`).
@@ -59,6 +59,39 @@ pub struct Config {
     /// Order-preserving raw `[keys]` data parsed via `toml_edit` in `Config::parse`.
     #[serde(skip)]
     pub raw_keys: Option<RawKeyConfig>,
+}
+
+/// Hand-written: the download folder is a path, the click command can hold one, and
+/// theme names can be the names of the user's own files; for those only whether they
+/// are set is shown.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("theme_dark", &self.theme_dark.is_some())
+            .field("theme_light", &self.theme_light.is_some())
+            .field("sidebar_width", &self.sidebar_width)
+            .field("sidebar_hidden", &self.sidebar_hidden)
+            .field("mouse", &self.mouse)
+            .field("typing_notices", &self.typing_notices)
+            .field("read_receipts", &self.read_receipts)
+            .field("do_not_disturb", &self.do_not_disturb)
+            .field("read_markers", &self.read_markers)
+            .field("notifications", &self.notifications)
+            .field("notification_icon", &self.notification_icon)
+            .field("notification_preview", &self.notification_preview)
+            .field(
+                "notification_click_command",
+                &!self.notification_click_command.is_empty(),
+            )
+            .field("room_previews", &self.room_previews)
+            .field("link_previews", &self.link_previews)
+            .field("download_dir", &!self.download_dir.is_empty())
+            .field("images", &self.images)
+            .field("secret_store", &self.secret_store)
+            .field("preset", &self.preset.is_some())
+            .field("keys", &self.keys.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One raw `[keys]` value before `keymap` interprets action and key names.
@@ -575,6 +608,24 @@ pub fn save_key_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_names_no_folder_no_command_and_no_theme() {
+        let config = Config::parse(
+            "theme = \"alice-theme\"\n\
+             theme_dark = \"alice-dark\"\n\
+             theme_light = \"alice-light\"\n\
+             download_dir = \"/home/alice/secret-downloads\"\n\
+             notification_click_command = \"raise-window --title alice\"\n",
+        )
+        .unwrap();
+        let shown = format!("{config:?}");
+        for private in ["alice", "/home", "raise-window"] {
+            assert!(!shown.contains(private), "{private} in {shown}");
+        }
+        // Whether they are set still shows.
+        assert!(shown.contains("download_dir: true"), "{shown}");
+    }
 
     #[test]
     fn partial_config_keeps_defaults() {

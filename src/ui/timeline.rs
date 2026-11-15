@@ -24,7 +24,7 @@ use crate::text::{truncate, width, wrap};
 use crate::theme::{Role, Theme};
 
 /// One screen row of the timeline.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Row {
     line: Line<'static>,
     /// The message that can be selected through this row; `None` for dividers,
@@ -38,6 +38,20 @@ pub struct Row {
     image: Option<ImageRow>,
     /// Cells of the row that custom emoji pictures are painted over.
     emotes: Vec<EmoteSpot>,
+}
+
+/// Hand-written: the line is what the message says, and who sent it.
+impl std::fmt::Debug for Row {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Row")
+            .field("width", &self.line.width())
+            .field("msg", &self.msg)
+            .field("source", &self.source)
+            .field("hits", &self.hits)
+            .field("image", &self.image)
+            .field("emotes", &self.emotes.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The two cells of a row that a custom emoji's picture goes over.
@@ -1000,7 +1014,7 @@ fn push_poll_rows(
 }
 
 /// Everything the rows depend on: they are laid out again when any of it changes.
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 struct RowKey {
     room: String,
     messages: u64,
@@ -1019,9 +1033,23 @@ struct RowKey {
     emote_pictures: u64,
 }
 
+/// Hand-written: the room's id and the theme's name stay out of logs.
+impl std::fmt::Debug for RowKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowKey")
+            .field("messages", &self.messages)
+            .field("width", &self.width)
+            .field("revealed", &self.revealed)
+            .field("images", &self.images)
+            .field("previews", &self.previews)
+            .field("emotes", &self.emotes)
+            .field("emote_pictures", &self.emote_pictures)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The laid-out rows of the open room, reused between frames while nothing that
 /// affects them has changed.
-#[derive(Debug)]
 pub struct RowCache {
     key: RowKey,
     rows: Vec<Row>,
@@ -1033,9 +1061,23 @@ pub struct RowCache {
     anchor: Option<Anchor>,
 }
 
+/// Hand-written: the rows are the room's messages, the key names the room, and the
+/// wanted ones are addresses from messages; how many there are is shown.
+impl std::fmt::Debug for RowCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowCache")
+            .field("key", &self.key)
+            .field("rows", &self.rows.len())
+            .field("wants", &self.wants.len())
+            .field("emote_wants", &self.emote_wants.len())
+            .field("anchor", &self.anchor)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Pins the view to a message while the rows around it change: new messages below,
 /// a picture whose size becomes known, another width.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Anchor {
     /// The message the bottom row of the view belonged to.
     id: String,
@@ -1043,6 +1085,16 @@ struct Anchor {
     below: usize,
     /// The scroll position this was recorded at.
     scroll: usize,
+}
+
+/// Hand-written: which message it is stays out of logs.
+impl std::fmt::Debug for Anchor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Anchor")
+            .field("below", &self.below)
+            .field("scroll", &self.scroll)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Draws the timeline into `area`. `popup`: where the completion popup goes over it

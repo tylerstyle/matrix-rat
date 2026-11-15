@@ -9,11 +9,17 @@ use anyhow::{Context, Result, bail};
 use crate::paths::Paths;
 
 /// Exclusive lock on the profile plus a pid file; both released on drop.
-#[derive(Debug)]
 pub struct ProfileLock {
     _file: File,
     _pid: File,
     pid_file: PathBuf,
+}
+
+/// Hand-written: the pid file's path names the user's home folder and the profile.
+impl std::fmt::Debug for ProfileLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProfileLock")
+    }
 }
 
 impl ProfileLock {
@@ -90,6 +96,8 @@ mod tests {
         let paths = temp_paths("lock");
         let first = ProfileLock::acquire(&paths).unwrap();
         assert!(paths.pid_file().exists());
+        // Where the pid file is (the user's folders) stays out of `Debug`.
+        assert_eq!(format!("{first:?}"), "ProfileLock");
         assert!(ProfileLock::acquire(&paths).is_err());
         drop(first);
         assert!(!paths.pid_file().exists());

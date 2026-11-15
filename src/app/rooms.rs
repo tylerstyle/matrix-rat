@@ -32,7 +32,7 @@ pub(super) const NO_ACCOUNT: &str = "The demo has no account to do this with.";
 /// What servers accept for a room name.
 const NAME_MAX: usize = 255;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ManageState {
     /// The room to open as soon as the room list has it, and since when.
     pending_open: Option<(String, Instant)>,
@@ -42,6 +42,18 @@ pub struct ManageState {
     pub(super) pending_space: Option<(String, Instant)>,
     /// The demo's suggested rooms, by space and room id.
     pub(super) demo_suggested: Vec<(String, String)>,
+}
+
+/// Hand-written: the rooms and spaces waited for are named by their ids.
+impl std::fmt::Debug for ManageState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManageState")
+            .field("pending_open", &self.pending_open.is_some())
+            .field("requests", &self.requests)
+            .field("pending_space", &self.pending_space.is_some())
+            .field("demo_suggested", &self.demo_suggested.len())
+            .finish()
+    }
 }
 
 impl ManageState {

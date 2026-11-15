@@ -16,7 +16,7 @@ use crate::model::{ItemRef, Message, MsgKind, ThreadSummary};
 /// room cannot be used inside the thread.
 const ROOT_ID: &str = "thread-root";
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Threads {
     /// The thread shown in the messages pane, if any.
     pub open: Option<ThreadView>,
@@ -26,6 +26,17 @@ pub struct Threads {
     pub(super) list_gen: u64,
 }
 
+/// Hand-written: the drafts are what was typed, under the ids of rooms and threads.
+impl std::fmt::Debug for Threads {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Threads")
+            .field("open", &self.open)
+            .field("drafts", &self.drafts.len())
+            .field("list_gen", &self.list_gen)
+            .finish()
+    }
+}
+
 impl Threads {
     /// Event id of the message the open thread starts at.
     pub fn open_root(&self) -> Option<&str> {
@@ -33,7 +44,6 @@ impl Threads {
     }
 }
 
-#[derive(Debug)]
 pub struct ThreadView {
     /// Event id of the message the thread starts at; `None` in the demo.
     root: Option<String>,
@@ -57,6 +67,26 @@ pub struct ThreadView {
     /// False when jumping directly into an older slice of a thread before the room's
     /// copy of the root message was seen.
     has_root_message: bool,
+}
+
+/// Hand-written: the thread's id, the room's draft and its put-aside messages stay
+/// out of logs.
+impl std::fmt::Debug for ThreadView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadView")
+            .field("root", &self.root.is_some())
+            .field("root_message", &self.root_message)
+            .field("root_index", &self.root_index)
+            .field("room_messages", &self.room_messages.len())
+            .field("room_timeline", &self.room_timeline)
+            .field("room_rows", &self.room_rows.is_some())
+            .field("room_draft_bytes", &self.room_draft.len())
+            .field("focus", &self.focus)
+            .field("loaded", &self.loaded)
+            .field("root_loaded", &self.root_loaded)
+            .field("has_root_message", &self.has_root_message)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ThreadView {
