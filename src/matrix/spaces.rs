@@ -31,14 +31,16 @@ use crate::text::{sanitize, sanitize_line, truncate};
 /// The most rooms of one space that are listed or worked with: a space can name any
 /// number of them.
 pub const CHILDREN_MAX: usize = 500;
-/// The most `m.space.child` events read from one space before the rest are left alone.
+/// The most rooms of one space read before the rest are left alone.
 const EVENTS_MAX: usize = 5_000;
 /// The widest name kept for a room of a space.
 const NAME_MAX: usize = 255;
-/// How long the server gets to name the rooms of a space that we are not in.
-const HIERARCHY_TIMEOUT: Duration = Duration::from_secs(20);
-/// Pages of that list asked for at most.
+/// How long the server gets, all pages together, to name the rooms of a space that
+/// we are not in: meanwhile, the open info of the space shows nothing new.
+const HIERARCHY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Pages of that list asked for at most, and rooms on each: as many as are listed.
 const HIERARCHY_PAGES: usize = 5;
+const HIERARCHY_PAGE: u32 = (CHILDREN_MAX / HIERARCHY_PAGES) as u32;
 
 /// A space the room list can be narrowed to.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -177,28 +179,32 @@ async fn child_events(space: &Room) -> (Vec<ChildEvent>, bool) {
     else {
         return (Vec::new(), false);
     };
-    let mut children = Vec::new();
-    for raw in events.iter().take(EVENTS_MAX) {
-        // A room that was taken out has empty content, which does not read as a
-        // child; neither does anything malformed. Invitations show no rooms.
-        let RawSyncOrStrippedState::Sync(raw) = raw else {
-            continue;
-        };
-        let Ok(event) = raw.deserialize() else {
-            continue;
-        };
-        let Some(event) = event.as_original() else {
-            continue;
-        };
-        children.push(ChildEvent {
-            id: event.state_key.clone(),
-            via: event.content.via.clone(),
-            order: event.content.order.clone(),
-            suggested: event.content.suggested,
-            sent: event.origin_server_ts,
-        });
-    }
-    order_children(children)
+    order_children(live_children(&events))
+}
+
+/// The rooms that `events` put into a space, at most `EVENTS_MAX`. A room that was
+/// taken out has empty content, which does not read as a child; neither does
+/// anything malformed. Invitations show no rooms. Only rooms that are in the space
+/// count towards the bound: many that came and went do not hide the ones there.
+fn live_children(events: &[RawSyncOrStrippedState<SpaceChildEventContent>]) -> Vec<ChildEvent> {
+    events
+        .iter()
+        .filter_map(|raw| {
+            let RawSyncOrStrippedState::Sync(raw) = raw else {
+                return None;
+            };
+            let event = raw.deserialize().ok()?;
+            let event = event.as_original()?;
+            Some(ChildEvent {
+                id: event.state_key.clone(),
+                via: event.content.via.clone(),
+                order: event.content.order.clone(),
+                suggested: event.content.suggested,
+                sent: event.origin_server_ts,
+            })
+        })
+        .take(EVENTS_MAX)
+        .collect()
 }
 
 /// By `order` where the space gives one, then the oldest first, then by id; cut at
@@ -295,13 +301,20 @@ pub(super) fn names_missing(details: &SpaceDetails) -> bool {
 /// Asks the server for the names of the rooms in `space` (the ones we are not in are
 /// not known here). What could not be had is left out; the list is shown anyway.
 pub(super) async fn hierarchy_names(client: &Client, space: &Room) -> Named {
+    names_within(client, space.room_id(), HIERARCHY_TIMEOUT).await
+}
+
+/// `hierarchy_names` of the space `space_id`, given `within` for all of it.
+async fn names_within(client: &Client, space_id: &RoomId, within: Duration) -> Named {
+    let deadline = tokio::time::Instant::now() + within;
     let mut named = Named::new();
     let mut from = None;
     for _ in 0..HIERARCHY_PAGES {
-        let mut request = get_hierarchy::v1::Request::new(space.room_id().to_owned());
+        let mut request = get_hierarchy::v1::Request::new(space_id.to_owned());
         request.max_depth = Some(UInt::from(1u32));
+        request.limit = Some(UInt::from(HIERARCHY_PAGE));
         request.from = from.take();
-        let response = match tokio::time::timeout(HIERARCHY_TIMEOUT, client.send(request)).await {
+        let response = match tokio::time::timeout_at(deadline, client.send(request)).await {
             Ok(Ok(response)) => response,
             Ok(Err(err)) => {
                 tracing::warn!(why = %crate::logsafe::kind(&err), "could not list the rooms of a space");
@@ -313,10 +326,14 @@ pub(super) async fn hierarchy_names(client: &Client, space: &Room) -> Named {
             }
         };
         for chunk in response.rooms {
+            let summary = chunk.summary;
+            // The space itself comes first: it is not one of its rooms.
+            if summary.room_id.as_str() == space_id.as_str() {
+                continue;
+            }
             if named.len() >= CHILDREN_MAX {
                 break;
             }
-            let summary = chunk.summary;
             let name = summary
                 .name
                 .filter(|name| !crate::text::is_blank(name))
@@ -717,6 +734,84 @@ mod tests {
         client.get_room(&RoomId::parse(id).unwrap()).unwrap()
     }
 
+    #[test]
+    fn rooms_taken_out_of_a_space_do_not_count_towards_the_bound() {
+        let event = |n: usize, content: serde_json::Value| {
+            let event = json!({
+                "type": "m.space.child",
+                "state_key": format!("!r{n}:example.org"),
+                "content": content,
+                "sender": "@me:example.org",
+                "event_id": format!("$e{n}"),
+                "origin_server_ts": n,
+            });
+            RawSyncOrStrippedState::Sync(Raw::from_json_string(event.to_string()).unwrap())
+        };
+        let mut events: Vec<_> = (0..EVENTS_MAX).map(|n| event(n, json!({}))).collect();
+        events.push(event(EVENTS_MAX, json!({ "via": ["example.org"] })));
+        let children = live_children(&events);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, format!("!r{EVENTS_MAX}:example.org"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_server_names_the_rooms_of_a_space_page_by_page_but_not_the_space_or_for_long() {
+        const SPACE: &str = "!space:localhost";
+        let chunk = |id: &str, name: &str| {
+            json!({
+                "room_id": id,
+                "name": name,
+                "num_joined_members": 1,
+                "world_readable": false,
+                "guest_can_join": false,
+                "join_rule": "public",
+                "children_state": [],
+            })
+        };
+        let first = json!({
+            "rooms": [chunk(SPACE, "The space"), chunk("!a:localhost", "Alpha")],
+            "next_batch": "more",
+        })
+        .to_string();
+        // The second page never comes.
+        let server = fake::Server::answering(
+            json!({ "join": { SPACE: fake::joined(true, vec![]) } }),
+            Box::new(move |request| {
+                if !request.path.ends_with("/hierarchy") {
+                    None
+                } else if request.query.contains("from=") {
+                    Some(fake::Reply::Never)
+                } else {
+                    Some(fake::Reply::Json(first.clone()))
+                }
+            }),
+        )
+        .await;
+        let client = fake::client(&server).await;
+        let started = std::time::Instant::now();
+        let named = names_within(
+            &client,
+            &RoomId::parse(SPACE).unwrap(),
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(named.len(), 1, "{:?}", named.keys());
+        assert_eq!(named["!a:localhost"], ("Alpha".to_owned(), false));
+        let asked: Vec<String> = server
+            .requests()
+            .into_iter()
+            .filter(|request| request.path.ends_with("/hierarchy"))
+            .map(|request| request.query)
+            .collect();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(
+            asked[0].contains(&format!("limit={HIERARCHY_PAGE}")),
+            "{asked:?}"
+        );
+        assert!(asked[0].contains("max_depth=1"), "{asked:?}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn who_made_a_space_may_change_it_while_its_power_levels_are_not_known_here() {
         let server = fake::Server::start(json!({ "join": {
@@ -1038,7 +1133,8 @@ mod tests {
 }
 
 /// A homeserver for the tests of the worker's side of spaces, without a server: it
-/// answers one sync with the rooms it is given and keeps every request it is sent.
+/// answers one sync with the rooms it is given, keeps every request it is sent, and
+/// lets a test answer some of them its own way.
 #[cfg(test)]
 pub(super) mod fake {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1058,8 +1154,18 @@ pub(super) mod fake {
         pub method: String,
         /// Without the query.
         pub path: String,
+        pub query: String,
         pub body: String,
     }
+
+    /// A test's own answer to a request.
+    pub enum Reply {
+        Json(String),
+        /// No answer, ever: a server that has gone quiet.
+        Never,
+    }
+
+    pub type Answer = Box<dyn Fn(&Request) -> Option<Reply> + Send + Sync>;
 
     pub struct Server {
         pub url: String,
@@ -1076,21 +1182,32 @@ pub(super) mod fake {
     impl Server {
         /// `rooms`: the `rooms` of the sync it answers.
         pub async fn start(rooms: Value) -> Self {
+            Self::answering(rooms, Box::new(|_| None)).await
+        }
+
+        /// `start`, where `answer` has the first say on every request.
+        pub async fn answering(rooms: Value, answer: Answer) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
             let seen = requests.clone();
+            let answer = Arc::new(answer);
             let sync = json!({ "next_batch": "s1", "rooms": rooms }).to_string();
             let task = tokio::spawn(async move {
                 while let Ok((mut stream, _)) = listener.accept().await {
                     let seen = seen.clone();
+                    let answer = answer.clone();
                     let sync = sync.clone();
                     tokio::spawn(async move {
                         let Some(request) = read(&mut stream).await else {
                             return;
                         };
                         seen.lock().unwrap().push(request.clone());
-                        let body = usual(&request, &sync);
+                        let body = match answer(&request) {
+                            Some(Reply::Json(body)) => body,
+                            Some(Reply::Never) => return std::future::pending().await,
+                            None => usual(&request, &sync),
+                        };
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
@@ -1158,10 +1275,11 @@ pub(super) mod fake {
         let mut words = head.lines().next()?.split_whitespace();
         let method = words.next()?.to_owned();
         let target = words.next()?;
-        let path = target.split('?').next().unwrap_or(target);
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
         Some(Request {
             method,
             path: unescape(path),
+            query: query.to_owned(),
             body: String::from_utf8_lossy(&data[head_end..]).into_owned(),
         })
     }
