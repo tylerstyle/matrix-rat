@@ -889,6 +889,12 @@ impl ReasonConfirmPopup {
 
 pub const MAX_POLL_ANSWERS: usize = 20;
 pub const MIN_POLL_ANSWERS: usize = 2;
+/// A question or an answer may be this long; a paste is cut there.
+pub const POLL_TEXT_MAX_BYTES: usize = 500;
+
+fn poll_field() -> LineEdit {
+    LineEdit::new().with_max_bytes(POLL_TEXT_MAX_BYTES)
+}
 
 /// A poll form's question, answers, whether votes are shown while it is open, and
 /// how many answers each voter may pick.
@@ -934,7 +940,7 @@ impl std::fmt::Debug for PollFormPopup {
 
 impl PollFormPopup {
     pub fn create(room_id: String, initial_question: &str) -> Self {
-        let mut question = LineEdit::new();
+        let mut question = poll_field();
         let initial = crate::text::sanitize_line(initial_question.trim());
         let focus = if initial.is_empty() { 0 } else { 1 };
         question.set(initial);
@@ -942,7 +948,7 @@ impl PollFormPopup {
             room_id,
             editing: None,
             question,
-            answers: vec![LineEdit::new(), LineEdit::new()],
+            answers: vec![poll_field(), poll_field()],
             disclosed: true,
             max_selections: 1,
             focus,
@@ -956,20 +962,20 @@ impl PollFormPopup {
         target: crate::model::ItemRef,
         poll: &crate::model::PollInfo,
     ) -> Self {
-        let mut question = LineEdit::new();
+        let mut question = poll_field();
         question.set(poll.question.clone());
         let mut answers: Vec<LineEdit> = poll
             .answers
             .iter()
             .take(MAX_POLL_ANSWERS)
             .map(|a| {
-                let mut edit = LineEdit::new();
+                let mut edit = poll_field();
                 edit.set(a.text.clone());
                 edit
             })
             .collect();
         while answers.len() < MIN_POLL_ANSWERS {
-            answers.push(LineEdit::new());
+            answers.push(poll_field());
         }
         let max_selections = usize::try_from(poll.max_selections)
             .unwrap_or(1)
@@ -1024,7 +1030,7 @@ impl PollFormPopup {
             return false;
         }
         let new_idx = self.answers.len();
-        self.answers.push(LineEdit::new());
+        self.answers.push(poll_field());
         self.focus = 1 + new_idx;
         self.error = None;
         true

@@ -724,10 +724,22 @@ fn convert_poll_parts(
     own: &UserId,
     ignored: &HashSet<OwnedUserId>,
 ) {
-    let question = sanitize_line(raw_question.trim());
+    // A poll is somebody else's event: more answers than a poll may have are dropped,
+    // as are answers whose id is no id, and long texts are cut.
+    const TEXT_CHARS: usize = 600;
+    const ID_BYTES: usize = 255;
+    let cut = |text: &str| -> String {
+        sanitize_line(text.trim())
+            .chars()
+            .take(TEXT_CHARS)
+            .collect()
+    };
+    let question = cut(raw_question);
     let mut voters: HashSet<String> = HashSet::new();
     let answers: Vec<crate::model::PollAnswer> = raw_answers
         .into_iter()
+        .filter(|(id, _)| !id.is_empty() && id.len() <= ID_BYTES)
+        .take(crate::modal::MAX_POLL_ANSWERS)
         .map(|(id, text)| {
             let mut votes = 0u32;
             let mut own_voted = false;
@@ -747,7 +759,7 @@ fn convert_poll_parts(
             }
             crate::model::PollAnswer {
                 id,
-                text: sanitize_line(text.trim()),
+                text: cut(&text),
                 votes,
                 own: own_voted,
             }
@@ -1020,6 +1032,36 @@ mod tests {
         let bad_loc =
             LocationMessageEventContent::new("Trap".to_owned(), "javascript:alert(1)".to_owned());
         assert_eq!(format_location(&bad_loc), "📍 Trap");
+    }
+
+    #[test]
+    fn a_poll_made_to_be_huge_is_cut_down() {
+        let own = matrix_sdk::ruma::user_id!("@me:example.org").to_owned();
+        let mut answers: Vec<(String, String)> = (0..500)
+            .map(|n| (format!("a{n}"), format!("Answer {n}")))
+            .collect();
+        answers.insert(0, (String::new(), "no id".into()));
+        answers.insert(1, ("x".repeat(300), "a huge id".into()));
+        answers.insert(2, ("long".into(), "y".repeat(5000)));
+        let mut message = Message::default();
+        convert_poll_parts(
+            &mut message,
+            &"q".repeat(5000),
+            true,
+            1,
+            answers,
+            &std::collections::HashMap::new(),
+            false,
+            false,
+            false,
+            &own,
+            &HashSet::new(),
+        );
+        let poll = message.poll.as_ref().unwrap();
+        assert_eq!(poll.answers.len(), crate::modal::MAX_POLL_ANSWERS);
+        assert_eq!(poll.answers[0].id, "long");
+        assert_eq!(poll.answers[0].text.chars().count(), 600);
+        assert_eq!(poll.question.chars().count(), 600);
     }
 
     #[test]
