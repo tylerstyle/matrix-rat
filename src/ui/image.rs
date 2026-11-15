@@ -210,6 +210,14 @@ pub fn draw_viewer(frame: &mut Frame, app: &mut App, area: Rect) {
         title.push_str(&format!(" · {}", human_size(size)));
     }
     let title = truncate(&title, usize::from(area.width.saturating_sub(6)));
+    // The way to the system's viewer is named: in here a picture may be only blocks.
+    let hint = match app.keymap.label_in(
+        crate::keymap::Context::Timeline,
+        crate::action::Action::OpenExternal,
+    ) {
+        Some(key) => format!(" {key} system viewer · Esc close "),
+        None => " Esc close ".to_owned(),
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(theme.style(Role::OverlayBorder))
@@ -218,9 +226,7 @@ pub fn draw_viewer(frame: &mut Frame, app: &mut App, area: Rect) {
             format!(" {title} "),
             theme.style(Role::TitleFocused),
         )))
-        .title_bottom(
-            Line::from(Span::styled(" Esc close ", theme.style(Role::Muted))).right_aligned(),
-        );
+        .title_bottom(Line::from(Span::styled(hint, theme.style(Role::Muted))).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);

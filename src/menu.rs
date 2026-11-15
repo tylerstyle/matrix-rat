@@ -436,6 +436,15 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
             let hint = key_hint(keys, Timeline, Action::Open, first);
             items.push(Item::new(label, hint, Run::Do(Action::Open)));
         }
+        // A picture is viewed in here; the system's viewer shows it at full quality.
+        if message.file.is_none() && message.image.is_some() {
+            let hint = key_hint(keys, Timeline, Action::OpenExternal, true);
+            items.push(Item::new(
+                "Open in system viewer",
+                hint,
+                Run::Do(Action::OpenExternal),
+            ));
+        }
     }
     if message.attachment().is_some() {
         let label = match &message.file {
@@ -851,6 +860,7 @@ mod tests {
         });
         let items = message_items(&picture, CONNECTED, &keys());
         assert!(labels(&items).contains(&"View picture"));
+        assert!(labels(&items).contains(&"Open in system viewer"));
         // Pictures are not edited; the demo picture has no file to save.
         assert!(!labels(&items).contains(&"Edit"));
         assert!(!labels(&items).contains(&"Save picture"));

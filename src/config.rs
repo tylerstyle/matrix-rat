@@ -18,6 +18,8 @@ pub struct Config {
     pub theme_light: Option<String>,
     /// Width of the room list in columns.
     pub sidebar_width: u16,
+    /// The room list is put away (the "hide or show the room list" key).
+    pub sidebar_hidden: bool,
     /// Capture the mouse. Turn off to use the terminal's own text selection.
     pub mouse: bool,
     /// Let others see when you are typing.
@@ -157,6 +159,7 @@ impl Default for Config {
             theme_dark: None,
             theme_light: None,
             sidebar_width: 24,
+            sidebar_hidden: false,
             mouse: true,
             typing_notices: true,
             read_receipts: true,

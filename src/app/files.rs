@@ -31,6 +31,21 @@ impl App {
     /// Saves the current attachment; with `open` it is then handed to the desktop's
     /// program for it. False if there is nothing to save.
     pub(super) fn save_attachment(&mut self, open: bool) -> bool {
+        let asked_by = if open {
+            crate::action::Action::Open
+        } else {
+            crate::action::Action::Save
+        };
+        self.save_attachment_for(open, asked_by)
+    }
+
+    /// [`Self::save_attachment`] for the action that asked: a question about a large
+    /// download names that action's key as the one to press again.
+    pub(super) fn save_attachment_for(
+        &mut self,
+        open: bool,
+        asked_by: crate::action::Action,
+    ) -> bool {
         let Some(file) = self.current_attachment() else {
             return false;
         };
@@ -51,23 +66,15 @@ impl App {
         }
         // The whole file passes through memory, and the size is only the sender's
         // word: ask once for large files and for those that do not state a size.
-        let again = if open {
-            self.keymap
-                .last_label_in(
-                    crate::keymap::Context::Timeline,
-                    crate::action::Action::Open,
-                )
-                .or_else(|| self.keymap.label_for(crate::action::Action::Open))
-                .unwrap_or("this action")
+        let timeline = crate::keymap::Context::Timeline;
+        let again = if asked_by == crate::action::Action::Open {
+            // Its last key: the first one is the picture viewer's.
+            self.keymap.last_label_in(timeline, asked_by)
         } else {
-            self.keymap
-                .label_in(
-                    crate::keymap::Context::Timeline,
-                    crate::action::Action::Save,
-                )
-                .or_else(|| self.keymap.label_for(crate::action::Action::Save))
-                .unwrap_or("this action")
-        };
+            self.keymap.label_in(timeline, asked_by)
+        }
+        .or_else(|| self.keymap.label_for(asked_by))
+        .unwrap_or("this action");
         let question = match file.size {
             Some(size) if size > files::LARGE_FILE => Some(format!(
                 "{} is {}. Press {again} again to download it",
@@ -341,6 +348,33 @@ mod tests {
         assert_eq!(app.download_dir, "~/inbox");
         assert!(app.download_dir().ends_with("inbox"));
         assert!(app.download_dir().is_absolute());
+    }
+
+    #[test]
+    fn a_picture_opens_in_the_systems_viewer_on_request() {
+        let mut picture = file_message("cat.png", 2048);
+        picture.file = None;
+        picture.image = Some(crate::images::testing::remote_image(
+            "mxc://example.org/cat",
+            Some((640, 480)),
+        ));
+        let (mut app, mut commands) = app_with(vec![picture]);
+        app.timeline.selected = Some(0);
+
+        // `O`: saved to the download folder and handed to the desktop (`open: true`),
+        // without the viewer in here.
+        app.on_event(key(KeyCode::Char('O')));
+        assert!(!app.images.viewer_open());
+        let saved = saves(&mut commands);
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].2, "opened after saving");
+
+        // From inside the viewer as well.
+        app.saving.clear();
+        app.on_event(key(KeyCode::Char('v')));
+        assert!(app.images.viewer_open());
+        app.on_event(key(KeyCode::Char('O')));
+        assert_eq!(saves(&mut commands).len(), 1);
     }
 
     #[test]

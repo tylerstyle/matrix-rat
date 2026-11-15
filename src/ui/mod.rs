@@ -39,6 +39,11 @@ use hit::HitId;
 
 /// Below this width the room list and the chat are shown one at a time.
 pub const NARROW_WIDTH: u16 = 60;
+
+/// Whether one pane fills the window: it is narrow, or the user put the room list away.
+pub fn one_pane(app: &App, width: u16) -> bool {
+    width < NARROW_WIDTH || app.sidebar.hidden
+}
 pub const SIDEBAR_MIN: u16 = 16;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -53,7 +58,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, status_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
 
-    let narrow = area.width < NARROW_WIDTH;
+    let narrow = one_pane(app, area.width);
     let (sidebar_area, chat_area) = if narrow {
         if app.focus == Pane::Sidebar {
             (Some(main), None)
@@ -416,6 +421,34 @@ mod tests {
         insta::assert_snapshot!("narrow_chat", render(&mut app, 50, 20));
         app.perform(Action::Focus(Pane::Sidebar));
         insta::assert_snapshot!("narrow_rooms", render(&mut app, 50, 20));
+    }
+
+    #[test]
+    fn the_room_list_can_be_put_away_in_a_wide_window() {
+        let mut app = App::demo();
+        let wide = render(&mut app, 100, 20);
+        assert!(wide.contains("1 Rooms") && wide.contains("2 #"));
+        // Put away: the chat has the whole width.
+        app.perform(Action::ToggleSidebar);
+        let chat = render(&mut app, 100, 20);
+        assert!(!chat.contains("1 Rooms") && chat.contains("2 #"), "{chat}");
+        // Going to the list shows it in the chat's place; opening a room brings the
+        // chat back.
+        app.perform(Action::Focus(Pane::Sidebar));
+        let rooms = render(&mut app, 100, 20);
+        assert!(
+            rooms.contains("1 Rooms") && !rooms.contains("2 #"),
+            "{rooms}"
+        );
+        app.perform(Action::Focus(Pane::Composer));
+        assert!(!render(&mut app, 100, 20).contains("1 Rooms"));
+        // Put away while the list has the focus: the focus goes to the composer.
+        app.perform(Action::ToggleSidebar);
+        app.perform(Action::Focus(Pane::Sidebar));
+        app.perform(Action::ToggleSidebar);
+        assert_eq!(app.focus, Pane::Composer);
+        app.perform(Action::ToggleSidebar);
+        assert!(render(&mut app, 100, 20).contains("1 Rooms"));
     }
 
     #[test]

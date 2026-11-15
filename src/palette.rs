@@ -722,7 +722,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
             .is_some_and(|(_, kind)| !kind.is_pending()),
         Action::Copy => sel.can_copy,
         Action::CopyCode => sel.can_copy_code,
-        Action::Save => sel.can_save,
+        Action::Save | Action::OpenExternal => sel.can_save,
         Action::Open => sel.can_open,
         Action::OpenThread => sel.can_open_thread,
         Action::JumpToReply => sel.can_jump_to_reply,
@@ -839,6 +839,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::CopyCode
                 | Action::Save
                 | Action::Open
+                | Action::OpenExternal
                 | Action::OpenThread
                 | Action::JumpToReply
                 | Action::PinMessage
