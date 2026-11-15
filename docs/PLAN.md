@@ -472,7 +472,7 @@ differentiators and can be reviewed with fake data in days.
   - **0.4 "people, devices, rooms":** user info and own profile; session list (rename,
     verify, sign out another device); key backup status and key export/import; clearer
     "unable to decrypt"; public room directory with preview; room settings for admins.
-  - **0.5 "message types and terminal comforts":** polls; voice/audio/video entries played
+  - **0.5 "message types and terminal comforts" (done, released as 0.5.0):** polls; voice/audio/video entries played
     in the system player; stickers and custom emoji; link previews; code-block colours and
     copying a block; composing in `$EDITOR`.
   - **Later, by demand:** space management, threads list, room slash commands, message

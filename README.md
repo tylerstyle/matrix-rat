@@ -335,6 +335,17 @@ Setting `preset = "vim"` keeps the default keys and adds:
   colour. The colours are the theme's: `code_text`, `code_keyword`, `code_string`,
   `code_comment`, `code_constant`, `code_type` and `code_function` in a theme's `[ui]`
   table (set them all to the same colour to have no colouring).
+- **Polls**: `/poll` (with the question after it, if you like) or "Start a poll…" in the
+  command palette opens the form: 2 to 20 answers, one choice or several, counts shown
+  while it runs or only at the end. In the timeline, click an answer to vote, or select
+  the poll and press `o` (also "Vote in poll…" in the message menu); voting again changes
+  your vote. Your own poll can be ended from the message menu, and edited (`e`) as long as
+  nobody voted. Votes of people you ignore are not counted.
+- **Voice messages, audio, video and places**: a voice message shows its length and
+  waveform, audio and video their length and size; `o` (or a click on the `▶`) downloads
+  one and plays it in your system's player, `s` only saves it. A video shows its preview
+  picture where the sender gave one. A shared place shows its description and opens in
+  your map program with `o`.
 - **Custom emoji and stickers** come from image packs: your own, the open room's, and
   those of other rooms you switched on for everywhere (packs are made in another client,
   such as Cinny or FluffyChat). They are loaded the first time something needs them
