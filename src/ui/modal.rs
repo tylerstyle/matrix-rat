@@ -50,6 +50,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Keys(popup) => super::devices::draw_keys(frame, app, area, popup),
         Modal::PollForm(form) => super::poll::draw_form(frame, app, area, form),
         Modal::PollVote(vote) => super::poll::draw_vote(frame, app, area, vote),
+        Modal::Stickers(picker) => super::stickers::draw(frame, app, area, picker),
     }
     app.modal = Some(modal);
 }

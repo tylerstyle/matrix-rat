@@ -18,6 +18,7 @@ mod roominfo;
 mod search;
 mod sidebar;
 mod status;
+mod stickers;
 mod timeline;
 mod verify;
 

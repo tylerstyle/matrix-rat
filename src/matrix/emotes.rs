@@ -1,44 +1,67 @@
-//! MSC2545 / Matrix 1.19 image packs (`im.ponies.*` and `m.image_pack.*` / `m.room.image_pack`)
-//! for custom emoji and stickers, loaded lazily on first use and cached for the session.
+//! Image packs: custom emoji and stickers (MSC2545, `m.room.image_pack` and
+//! `m.image_pack.rooms` in Matrix 1.19, and the older `im.ponies.*` events). Loaded on
+//! first use and kept for the session.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use matrix_sdk::Client;
-use matrix_sdk::ruma::RoomId;
-use matrix_sdk::ruma::api::client::state::get_state_events;
+use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
+use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::events::{GlobalAccountDataEventType, StateEventType};
+use matrix_sdk::ruma::{MxcUri, RoomId};
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, mpsc::UnboundedSender};
+use tokio::sync::{Notify, mpsc::UnboundedSender};
 
 use super::MatrixEvent;
-use crate::text::sanitize_line;
+use crate::text::{is_blank, sanitize_line, truncate};
 
+/// Pack rooms named in the account data that are read; the rest are ignored.
 const MAX_PACK_ROOMS: usize = 8;
+/// Packs (state keys) read per room.
+const MAX_PACKS_PER_ROOM: usize = 8;
+/// Packs in the catalog in all.
+const MAX_PACKS: usize = 24;
+/// Images read per pack.
+const MAX_IMAGES_PER_PACK: usize = 300;
+/// Longest shortcode kept, in bytes.
+pub const MAX_SHORTCODE_LEN: usize = 64;
+/// Pack and sticker names are cut to this many columns.
+const MAX_NAME_WIDTH: usize = 64;
+const MAX_MXC_LEN: usize = 255;
 const STATE_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
 
-/// A custom emoji from an MSC2545 / Matrix image pack.
+/// The room pack event types, the stable one first: it wins over the older one when a
+/// room has both under the same state key.
+const ROOM_PACK_TYPES: [&str; 2] = ["m.room.image_pack", "im.ponies.room_emotes"];
+
+/// A custom emoji from an image pack.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CustomEmoji {
+    /// Without the colons.
     pub shortcode: String,
+    /// A validated `mxc://` address.
     pub url: String,
     pub body: Option<String>,
     pub pack_name: String,
 }
 
+/// Hand-written: shortcodes, names and addresses stay out of logs.
 impl fmt::Debug for CustomEmoji {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CustomEmoji").finish_non_exhaustive()
     }
 }
 
-/// A sticker from an MSC2545 / Matrix image pack.
+/// A sticker from an image pack.
 #[derive(Clone, PartialEq, Eq)]
 pub struct StickerItem {
     pub shortcode: String,
+    /// What the sticker is called: its `body`, or else its shortcode.
     pub name: String,
+    /// A validated `mxc://` address.
     pub url: String,
     pub pack_name: String,
     pub dimensions: Option<(u32, u32)>,
@@ -46,6 +69,7 @@ pub struct StickerItem {
     pub mime: Option<String>,
 }
 
+/// Hand-written: shortcodes, names and addresses stay out of logs.
 impl fmt::Debug for StickerItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StickerItem")
@@ -55,7 +79,7 @@ impl fmt::Debug for StickerItem {
     }
 }
 
-/// One loaded image pack (containing custom emoji, stickers, or both).
+/// One image pack: custom emoji, stickers, or both.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct EmotePack {
     pub id: String,
@@ -64,6 +88,7 @@ pub struct EmotePack {
     pub stickers: Vec<StickerItem>,
 }
 
+/// Hand-written: the pack's id holds a room id.
 impl fmt::Debug for EmotePack {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EmotePack")
@@ -73,7 +98,7 @@ impl fmt::Debug for EmotePack {
     }
 }
 
-/// Session-cached catalog of custom emoji and sticker packs active for the user and current room.
+/// The packs of the account and of the open room, most personal first.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct EmoteCatalog {
     pub packs: Vec<EmotePack>,
@@ -88,105 +113,95 @@ impl fmt::Debug for EmoteCatalog {
 }
 
 impl EmoteCatalog {
-    pub fn is_empty(&self) -> bool {
-        self.packs.is_empty()
-    }
-
-    pub fn emoji_packs(&self) -> impl Iterator<Item = &EmotePack> {
-        self.packs.iter().filter(|p| !p.emojis.is_empty())
-    }
-
-    pub fn sticker_packs(&self) -> impl Iterator<Item = &EmotePack> {
-        self.packs.iter().filter(|p| !p.stickers.is_empty())
-    }
-
-    /// Deduplicated custom emoji across all active packs, preserving pack priority order.
-    pub fn all_emojis(&self) -> Vec<CustomEmoji> {
+    /// Every custom emoji, the first pack winning where shortcodes repeat.
+    pub fn emojis(&self) -> impl Iterator<Item = &CustomEmoji> {
         let mut seen = HashSet::new();
-        let mut out = Vec::new();
-        for pack in &self.packs {
-            for emoji in &pack.emojis {
-                if seen.insert(emoji.shortcode.clone()) {
-                    out.push(emoji.clone());
-                }
-            }
-        }
-        out
+        self.packs
+            .iter()
+            .flat_map(|pack| &pack.emojis)
+            .filter(move |emoji| seen.insert(emoji.shortcode.as_str()))
     }
 
+    /// Every sticker, the same picture only once.
+    pub fn stickers(&self) -> Vec<&StickerItem> {
+        let mut seen = HashSet::new();
+        self.packs
+            .iter()
+            .flat_map(|pack| &pack.stickers)
+            .filter(|sticker| seen.insert(sticker.url.as_str()))
+            .collect()
+    }
+
+    /// The shortcode of the picture at `url` (from an emoji, or else a sticker), for
+    /// showing a reaction made with it.
     pub fn shortcode_for_url(&self, url: &str) -> Option<&str> {
-        for pack in &self.packs {
-            for emoji in &pack.emojis {
-                if emoji.url == url {
-                    return Some(&emoji.shortcode);
-                }
-            }
-        }
-        None
-    }
-
-    pub fn url_for_shortcode(&self, code: &str) -> Option<&str> {
-        let bare = code.trim().trim_matches(':');
-        for pack in &self.packs {
-            for emoji in &pack.emojis {
-                if emoji.shortcode.eq_ignore_ascii_case(bare) {
-                    return Some(&emoji.url);
-                }
-            }
-        }
-        None
+        let emoji = self
+            .packs
+            .iter()
+            .flat_map(|pack| &pack.emojis)
+            .find(|emoji| emoji.url == url)
+            .map(|emoji| emoji.shortcode.as_str());
+        emoji.or_else(|| {
+            self.packs
+                .iter()
+                .flat_map(|pack| &pack.stickers)
+                .find(|sticker| sticker.url == url)
+                .map(|sticker| sticker.shortcode.as_str())
+        })
     }
 }
 
+/// Whether `url` is an `mxc://` address that can go into a message and into HTML as it
+/// is: a valid server name and a media id of letters, digits, `-` and `_` only.
 pub fn is_valid_mxc(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("mxc://") else {
-        return false;
-    };
-    let Some((server, media_id)) = rest.split_once('/') else {
-        return false;
-    };
-    !server.is_empty()
-        && !media_id.is_empty()
-        && !url
-            .contains(|c: char| c.is_control() || c.is_whitespace() || matches!(c, '<' | '>' | '"'))
+    url.len() <= MAX_MXC_LEN
+        && <&MxcUri>::from(url).validate().is_ok()
+        && url.rsplit_once('/').is_some_and(|(_, id)| !id.is_empty())
 }
 
 fn clean_shortcode(raw: &str) -> Option<String> {
-    let trimmed = sanitize_line(raw.trim().trim_matches(':'));
-    if trimmed.is_empty()
-        || trimmed.len() > 64
-        || trimmed.contains(|c: char| c.is_whitespace() || c == ':')
-    {
-        return None;
-    }
-    Some(trimmed)
+    let code = sanitize_line(raw.trim().trim_matches(':'));
+    let ok = !code.is_empty()
+        && code.len() <= MAX_SHORTCODE_LEN
+        && !is_blank(&code)
+        && !code.contains(|c: char| c.is_whitespace() || c == ':');
+    ok.then_some(code)
+}
+
+/// A name from a pack, safe and short enough to show; `None` when nothing is left.
+fn clean_name(raw: &str) -> Option<String> {
+    let name = sanitize_line(raw.trim());
+    (!is_blank(&name)).then(|| truncate(name.trim(), MAX_NAME_WIDTH))
+}
+
+/// A MIME type is only passed on when it looks like one.
+fn clean_mime(raw: &str) -> Option<String> {
+    let ok = raw.len() <= 64
+        && raw
+            .split_once('/')
+            .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty())
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$&^_.+-/".contains(&b));
+    ok.then(|| raw.to_owned())
 }
 
 fn parse_usage(arr: Option<&Vec<Value>>, default: (bool, bool)) -> (bool, bool) {
     let Some(items) = arr else {
         return default;
     };
-    if items.is_empty() {
-        return default;
-    }
-    let mut emoticon = false;
-    let mut sticker = false;
-    for item in items {
-        match item.as_str() {
-            Some("emoticon") => emoticon = true,
-            Some("sticker") => sticker = true,
-            _ => {}
-        }
-    }
-    if !emoticon && !sticker {
-        default
-    } else {
+    let emoticon = items.iter().any(|i| i.as_str() == Some("emoticon"));
+    let sticker = items.iter().any(|i| i.as_str() == Some("sticker"));
+    // No (known) usage means both.
+    if emoticon || sticker {
         (emoticon, sticker)
+    } else {
+        default
     }
 }
 
-/// Parses a single MSC2545 / Matrix 1.19 image pack JSON object (`im.ponies.user_emotes`,
-/// `im.ponies.room_emotes`, or `m.room.image_pack`).
+/// Reads one pack's content (`im.ponies.user_emotes`, `im.ponies.room_emotes` or
+/// `m.room.image_pack`). `None` when it holds no usable image.
 pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option<EmotePack> {
     let pack_obj = raw.get("pack").and_then(Value::as_object);
     let pack_name = pack_obj
@@ -195,9 +210,9 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
                 .or_else(|| p.get("name"))
                 .and_then(Value::as_str)
         })
-        .map(sanitize_line)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| sanitize_line(default_name));
+        .and_then(clean_name)
+        .or_else(|| clean_name(default_name))
+        .unwrap_or_else(|| "Pack".to_owned());
     let pack_usage = parse_usage(
         pack_obj
             .and_then(|p| p.get("usage"))
@@ -207,9 +222,13 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
 
     let mut emojis = Vec::new();
     let mut stickers = Vec::new();
+    let mut taken = 0;
 
     if let Some(images) = raw.get("images").and_then(Value::as_object) {
         for (raw_key, entry) in images {
+            if taken >= MAX_IMAGES_PER_PACK {
+                break;
+            }
             let Some(shortcode) = clean_shortcode(raw_key) else {
                 continue;
             };
@@ -223,11 +242,8 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
             else {
                 continue;
             };
-            let body = obj
-                .get("body")
-                .and_then(Value::as_str)
-                .map(sanitize_line)
-                .filter(|s| !s.is_empty());
+            taken += 1;
+            let body = obj.get("body").and_then(Value::as_str).and_then(clean_name);
             let (is_emote, is_sticker) =
                 parse_usage(obj.get("usage").and_then(Value::as_array), pack_usage);
             let info = obj.get("info").and_then(Value::as_object);
@@ -239,8 +255,7 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
             let size = info.and_then(|inf| inf.get("size")?.as_u64());
             let mime = info
                 .and_then(|inf| inf.get("mimetype")?.as_str())
-                .map(sanitize_line)
-                .filter(|s| !s.is_empty());
+                .and_then(clean_mime);
 
             if is_emote {
                 emojis.push(CustomEmoji {
@@ -264,18 +279,22 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
         }
     }
 
-    // Legacy `im.ponies.user_emotes` `shortcodes: { "slug": "mxc://..." }` compatibility.
+    // The oldest `im.ponies.user_emotes` form: `shortcodes: { "name": "mxc://…" }`.
     if emojis.is_empty()
+        && stickers.is_empty()
         && let Some(shortcodes) = raw.get("shortcodes").and_then(Value::as_object)
     {
         for (raw_key, val) in shortcodes {
+            if emojis.len() >= MAX_IMAGES_PER_PACK {
+                break;
+            }
             let Some(shortcode) = clean_shortcode(raw_key) else {
                 continue;
             };
-            let url_opt = val
+            let url = val
                 .as_str()
                 .or_else(|| val.get("url").and_then(Value::as_str));
-            let Some(url) = url_opt.filter(|u| is_valid_mxc(u)) else {
+            let Some(url) = url.filter(|u| is_valid_mxc(u)) else {
                 continue;
             };
             emojis.push(CustomEmoji {
@@ -290,7 +309,6 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
     if emojis.is_empty() && stickers.is_empty() {
         return None;
     }
-
     Some(EmotePack {
         id: pack_id.to_owned(),
         name: pack_name,
@@ -299,41 +317,52 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
     })
 }
 
-/// Parses `im.ponies.emote_rooms` or `m.image_pack.rooms` global account data into
-/// `(room_id, state_keys)` pairs.
+/// Reads `im.ponies.emote_rooms` or `m.image_pack.rooms` account data: the rooms whose
+/// packs the user has switched on everywhere, with their state keys.
 pub fn parse_emote_rooms_json(raw: &Value) -> Vec<(String, Vec<String>)> {
     let Some(rooms) = raw.get("rooms").and_then(Value::as_object) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    for (room_id, keys_val) in rooms {
-        if room_id.is_empty() {
-            continue;
-        }
-        let keys: Vec<String> = keys_val
-            .as_object()
-            .map(|obj| obj.keys().cloned().collect())
-            .unwrap_or_default();
-        out.push((room_id.clone(), keys));
-    }
-    out
+    rooms
+        .iter()
+        .filter(|(room_id, _)| RoomId::parse(room_id.as_str()).is_ok())
+        .take(MAX_PACK_ROOMS)
+        .map(|(room_id, keys)| {
+            let keys = keys
+                .as_object()
+                .map(|obj| {
+                    obj.keys()
+                        .filter(|k| k.len() <= 255)
+                        .take(MAX_PACKS_PER_ROOM)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            (room_id.clone(), keys)
+        })
+        .collect()
 }
 
 #[derive(Default)]
 struct CacheState {
-    /// True only after the UI has asked for emote packs at least once in this session.
+    /// Set once the UI has asked for packs; nothing is loaded before.
     requested: bool,
     active_room: Option<String>,
+    /// `Some(None)`: looked, the account has no pack.
     user_pack: Option<Option<EmotePack>>,
     emote_rooms: Option<Vec<(String, Vec<String>)>>,
+    /// By room id: the packs found there, with their state keys.
     room_packs: HashMap<String, Vec<(String, EmotePack)>>,
 }
 
-/// Lazily loads and caches MSC2545 / Matrix 1.19 image packs for the session.
-/// Makes zero startup HTTP requests until [`EmoteManager::ensure`] is called.
+fn lock(state: &Mutex<CacheState>) -> MutexGuard<'_, CacheState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Loads the packs when asked to, and again when they change.
 pub(super) struct EmoteManager {
-    client: Client,
-    events: UnboundedSender<MatrixEvent>,
     state: Arc<Mutex<CacheState>>,
     poke: Arc<Notify>,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -343,115 +372,103 @@ impl EmoteManager {
     pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
         let state = Arc::new(Mutex::new(CacheState::default()));
         let poke = Arc::new(Notify::new());
-        let task_client = client.clone();
-        let task_events = events.clone();
         let task_state = state.clone();
         let task_poke = poke.clone();
         let task = tokio::spawn(async move {
             loop {
                 task_poke.notified().await;
                 let (requested, active_room) = {
-                    let guard = task_state.lock().await;
+                    let guard = lock(&task_state);
                     (guard.requested, guard.active_room.clone())
                 };
                 if !requested {
                     continue;
                 }
-                let catalog = load_catalog(&task_client, &task_state, active_room.as_deref()).await;
-                let _ = task_events.send(MatrixEvent::EmotePacks(catalog));
+                let catalog = load_catalog(&client, &task_state, active_room.as_deref()).await;
+                let _ = events.send(MatrixEvent::EmotePacks(catalog));
             }
         });
         Self {
-            client,
-            events,
             state,
             poke,
             task: Some(task),
         }
     }
 
+    /// Loads (or sends again) the packs of the account and of `room_id`.
     pub fn ensure(&self, room_id: Option<String>) {
-        let state = self.state.clone();
-        let poke = self.poke.clone();
-        tokio::spawn(async move {
-            let mut guard = state.lock().await;
+        {
+            let mut guard = lock(&self.state);
             guard.requested = true;
             if room_id.is_some() {
                 guard.active_room = room_id;
             }
-            drop(guard);
-            poke.notify_one();
-        });
+        }
+        self.poke.notify_one();
     }
 
+    /// Drops what changed from the cache when pack events arrive, and loads again if the
+    /// packs are in use.
     pub fn register_handlers(
         &self,
         client: &Client,
     ) -> [matrix_sdk::event_handler::EventHandlerHandle; 2] {
-        let state_global = self.state.clone();
-        let poke_global = self.poke.clone();
-        let global_handle = client.add_event_handler(
-            move |ev: matrix_sdk::ruma::serde::Raw<
-                matrix_sdk::ruma::events::AnyGlobalAccountDataEvent,
-            >| {
-                let state = state_global.clone();
-                let poke = poke_global.clone();
-                async move {
-                    let Ok(val) = serde_json::from_str::<Value>(ev.json().get()) else {
-                        return;
-                    };
-                    let Some(ev_type) = val.get("type").and_then(Value::as_str) else {
-                        return;
-                    };
-                    let is_user = ev_type == "im.ponies.user_emotes";
-                    let is_rooms =
-                        ev_type == "im.ponies.emote_rooms" || ev_type == "m.image_pack.rooms";
-                    if !is_user && !is_rooms {
-                        return;
-                    }
-                    let mut guard = state.lock().await;
+        use matrix_sdk::ruma::events::{AnyGlobalAccountDataEvent, AnySyncStateEvent};
+        use matrix_sdk::ruma::serde::Raw;
+
+        let state = self.state.clone();
+        let poke = self.poke.clone();
+        let global_handle = client.add_event_handler(move |ev: Raw<AnyGlobalAccountDataEvent>| {
+            let state = state.clone();
+            let poke = poke.clone();
+            async move {
+                let Ok(Some(ev_type)) = ev.get_field::<String>("type") else {
+                    return;
+                };
+                let is_user = ev_type == "im.ponies.user_emotes";
+                let is_rooms =
+                    ev_type == "im.ponies.emote_rooms" || ev_type == "m.image_pack.rooms";
+                if !is_user && !is_rooms {
+                    return;
+                }
+                let requested = {
+                    let mut guard = lock(&state);
                     if is_user {
                         guard.user_pack = None;
-                    }
-                    if is_rooms {
+                    } else {
                         guard.emote_rooms = None;
                     }
-                    let should_poke = guard.requested;
-                    drop(guard);
-                    if should_poke {
-                        poke.notify_one();
-                    }
+                    guard.requested
+                };
+                if requested {
+                    poke.notify_one();
                 }
-            },
-        );
+            }
+        });
 
-        let state_room = self.state.clone();
-        let poke_room = self.poke.clone();
-        let room_handle = client.add_event_handler(
-            move |ev: matrix_sdk::ruma::serde::Raw<matrix_sdk::ruma::events::AnySyncStateEvent>,
-                  room: matrix_sdk::Room| {
-                let state = state_room.clone();
-                let poke = poke_room.clone();
+        let state = self.state.clone();
+        let poke = self.poke.clone();
+        let room_handle =
+            client.add_event_handler(move |ev: Raw<AnySyncStateEvent>, room: matrix_sdk::Room| {
+                let state = state.clone();
+                let poke = poke.clone();
                 async move {
-                    let Ok(val) = serde_json::from_str::<Value>(ev.json().get()) else {
+                    let Ok(Some(ev_type)) = ev.get_field::<String>("type") else {
                         return;
                     };
-                    let Some(ev_type) = val.get("type").and_then(Value::as_str) else {
-                        return;
-                    };
-                    if ev_type != "im.ponies.room_emotes" && ev_type != "m.room.image_pack" {
+                    if !ROOM_PACK_TYPES.contains(&ev_type.as_str()) {
                         return;
                     }
-                    let mut guard = state.lock().await;
-                    guard.room_packs.remove(room.room_id().as_str());
-                    let should_poke = guard.requested;
-                    drop(guard);
-                    if should_poke {
+                    let requested = {
+                        let mut guard = lock(&state);
+                        guard.room_packs.remove(room.room_id().as_str());
+                        guard.requested
+                    };
+                    if requested {
                         poke.notify_one();
                     }
                 }
-            },
-        );
+            });
 
         [global_handle, room_handle]
     }
@@ -460,121 +477,119 @@ impl EmoteManager {
         if let Some(task) = self.task.take() {
             task.abort();
         }
-        let _ = (&self.client, &self.events);
     }
 }
 
+/// The content of global account data of type `event_type`: from the store, or else
+/// from the homeserver.
 async fn fetch_global_json(client: &Client, event_type: &str) -> Option<Value> {
     let ty = GlobalAccountDataEventType::from(event_type);
-    if let Ok(Some(raw)) = client.account().account_data_raw(ty.clone()).await
-        && let Ok(val) = serde_json::from_str::<Value>(raw.json().get())
-    {
-        return Some(val.get("content").cloned().unwrap_or(val));
-    }
-    if let Ok(Some(raw)) = client.account().fetch_account_data(ty).await
-        && let Ok(val) = serde_json::from_str::<Value>(raw.json().get())
-    {
-        return Some(val.get("content").cloned().unwrap_or(val));
-    }
-    None
+    let raw = match client.account().account_data_raw(ty.clone()).await {
+        Ok(Some(raw)) => raw,
+        _ => client.account().fetch_account_data(ty).await.ok()??,
+    };
+    serde_json::from_str(raw.json().get()).ok()
 }
 
-async fn load_room_packs(client: &Client, room_id_str: &str) -> Vec<(String, EmotePack)> {
-    let Ok(room_id) = RoomId::parse(room_id_str) else {
+/// The packs of one room, with their state keys. What the store has is used first; the
+/// sliding sync does not bring these events along, so the usual state keys (the empty
+/// one, and those the account data names) are then asked for one by one: the whole
+/// state of a big room would be megabytes.
+async fn load_room_packs(
+    client: &Client,
+    room_id: &str,
+    listed: &[String],
+) -> Vec<(String, EmotePack)> {
+    let Ok(room_id) = RoomId::parse(room_id) else {
         return Vec::new();
     };
     let Some(room) = client.get_room(&room_id) else {
         return Vec::new();
     };
-    let room_name = room
-        .name()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "Room pack".to_owned());
+    let room_name = room.name().unwrap_or_default();
 
-    let mut out = Vec::new();
-    let mut seen_keys = HashSet::new();
-
-    // 1. Check local state store first (zero HTTP requests when already synced).
-    for ev_type in [
-        StateEventType::from("im.ponies.room_emotes"),
-        StateEventType::RoomImagePack,
-    ] {
-        if let Ok(events) = room.get_state_events(ev_type).await {
-            for raw in events {
-                if let Ok(val) = serde_json::from_str::<Value>(raw.json().get()) {
-                    let state_key = val
-                        .get("state_key")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned();
-                    if let Some(content) = val.get("content")
-                        && seen_keys.insert(state_key.clone())
-                    {
-                        let pack_id = format!("{room_id_str}:{state_key}");
-                        if let Some(pack) = parse_pack_json(content, &room_name, &pack_id) {
-                            out.push((state_key, pack));
-                        }
-                    }
-                }
+    let mut found: Vec<(String, Value)> = Vec::new();
+    let mut seen = HashSet::new();
+    for ty in ROOM_PACK_TYPES {
+        let Ok(events) = room.get_state_events(StateEventType::from(ty)).await else {
+            continue;
+        };
+        for raw in events {
+            let json = match &raw {
+                RawAnySyncOrStrippedState::Sync(raw) => raw.json(),
+                RawAnySyncOrStrippedState::Stripped(raw) => raw.json(),
+            };
+            let Ok(val) = serde_json::from_str::<Value>(json.get()) else {
+                continue;
+            };
+            let key = val.get("state_key").and_then(Value::as_str).unwrap_or("");
+            if let Some(content) = val.get("content")
+                && found.len() < MAX_PACKS_PER_ROOM
+                && seen.insert(key.to_owned())
+            {
+                found.push((key.to_owned(), content.clone()));
             }
         }
     }
-    if !out.is_empty() {
-        return out;
-    }
 
-    // 2. Fallback to a single bounded `/state` fetch per room per session when unsynced.
-    let req = get_state_events::v3::Request::new(room_id);
-    if let Ok(Ok(resp)) = tokio::time::timeout(STATE_FETCH_TIMEOUT, client.send(req)).await {
-        for raw in resp.room_state {
-            if let Ok(val) = serde_json::from_str::<Value>(raw.json().get()) {
-                let ev_type = val.get("type").and_then(Value::as_str).unwrap_or("");
-                if ev_type != "im.ponies.room_emotes" && ev_type != "m.room.image_pack" {
-                    continue;
-                }
-                let state_key = val
-                    .get("state_key")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-                if let Some(content) = val.get("content")
-                    && seen_keys.insert(state_key.clone())
-                {
-                    let pack_id = format!("{room_id_str}:{state_key}");
-                    if let Some(pack) = parse_pack_json(content, &room_name, &pack_id) {
-                        out.push((state_key, pack));
-                    }
-                }
+    let mut keys = vec![String::new()];
+    for key in listed {
+        if !keys.contains(key) {
+            keys.push(key.clone());
+        }
+    }
+    keys.truncate(MAX_PACKS_PER_ROOM);
+    for key in keys {
+        for ty in ROOM_PACK_TYPES {
+            if seen.contains(&key) || found.len() >= MAX_PACKS_PER_ROOM {
+                continue;
+            }
+            let request = get_state_event_for_key::v3::Request::new(
+                room_id.clone(),
+                StateEventType::from(ty),
+                key.clone(),
+            );
+            let response = tokio::time::timeout(STATE_FETCH_TIMEOUT, client.send(request)).await;
+            if let Ok(Ok(response)) = response
+                && let Ok(content) = serde_json::from_str::<Value>(response.event_or_content.get())
+            {
+                seen.insert(key.clone());
+                found.push((key.clone(), content));
             }
         }
     }
-    out
+
+    found
+        .into_iter()
+        .filter_map(|(key, content)| {
+            let id = format!("{room_id}|{key}");
+            parse_pack_json(&content, &room_name, &id).map(|pack| (key, pack))
+        })
+        .collect()
 }
 
 async fn load_catalog(
     client: &Client,
-    state: &Arc<Mutex<CacheState>>,
+    state: &Mutex<CacheState>,
     active_room: Option<&str>,
 ) -> EmoteCatalog {
-    let need_user = state.lock().await.user_pack.is_none();
-    if need_user {
+    if lock(state).user_pack.is_none() {
         let user_pack = fetch_global_json(client, "im.ponies.user_emotes")
             .await
             .and_then(|val| parse_pack_json(&val, "Personal", "user"));
-        state.lock().await.user_pack = Some(user_pack);
+        lock(state).user_pack = Some(user_pack);
     }
 
-    let need_rooms = state.lock().await.emote_rooms.is_none();
-    if need_rooms {
+    if lock(state).emote_rooms.is_none() {
         let mut rooms = Vec::new();
-        if let Some(val) = fetch_global_json(client, "im.ponies.emote_rooms").await {
+        if let Some(val) = fetch_global_json(client, "m.image_pack.rooms").await {
             rooms.extend(parse_emote_rooms_json(&val));
         }
-        if let Some(val) = fetch_global_json(client, "m.image_pack.rooms").await {
+        if let Some(val) = fetch_global_json(client, "im.ponies.emote_rooms").await {
             for (rid, keys) in parse_emote_rooms_json(&val) {
-                if let Some((_, existing)) = rooms.iter_mut().find(|(r, _)| r == &rid) {
+                if let Some((_, existing)) = rooms.iter_mut().find(|(r, _)| *r == rid) {
                     for k in keys {
-                        if !existing.contains(&k) {
+                        if !existing.contains(&k) && existing.len() < MAX_PACKS_PER_ROOM {
                             existing.push(k);
                         }
                     }
@@ -584,65 +599,59 @@ async fn load_catalog(
             }
         }
         rooms.truncate(MAX_PACK_ROOMS);
-        state.lock().await.emote_rooms = Some(rooms);
+        lock(state).emote_rooms = Some(rooms);
     }
 
-    let mut target_rooms: Vec<String> = Vec::new();
+    let emote_rooms = lock(state).emote_rooms.clone().unwrap_or_default();
+    let mut targets: Vec<(String, Vec<String>)> = Vec::new();
     if let Some(rid) = active_room {
-        target_rooms.push(rid.to_owned());
+        let listed = emote_rooms
+            .iter()
+            .find(|(r, _)| r == rid)
+            .map(|(_, keys)| keys.clone())
+            .unwrap_or_default();
+        targets.push((rid.to_owned(), listed));
     }
-    {
-        let guard = state.lock().await;
-        if let Some(emote_rooms) = &guard.emote_rooms {
-            for (rid, _) in emote_rooms {
-                if !target_rooms.contains(rid) {
-                    target_rooms.push(rid.clone());
-                }
-            }
+    for (rid, keys) in &emote_rooms {
+        if !targets.iter().any(|(r, _)| r == rid) {
+            targets.push((rid.clone(), keys.clone()));
+        }
+    }
+    for (rid, listed) in &targets {
+        if !lock(state).room_packs.contains_key(rid) {
+            let loaded = load_room_packs(client, rid, listed).await;
+            lock(state).room_packs.insert(rid.clone(), loaded);
         }
     }
 
-    for rid in &target_rooms {
-        let already = state.lock().await.room_packs.contains_key(rid);
-        if !already {
-            let loaded = load_room_packs(client, rid).await;
-            state.lock().await.room_packs.insert(rid.clone(), loaded);
-        }
-    }
-
-    let guard = state.lock().await;
+    let guard = lock(state);
     let mut packs = Vec::new();
-    let mut seen_pack_ids = HashSet::new();
-
+    let mut seen = HashSet::new();
     if let Some(Some(user_pack)) = &guard.user_pack {
-        seen_pack_ids.insert(user_pack.id.clone());
+        seen.insert(user_pack.id.clone());
         packs.push(user_pack.clone());
     }
-
+    // The open room's packs all count; elsewhere only those the user switched on.
     if let Some(rid) = active_room
         && let Some(room_packs) = guard.room_packs.get(rid)
     {
         for (_, pack) in room_packs {
-            if seen_pack_ids.insert(pack.id.clone()) {
+            if seen.insert(pack.id.clone()) {
                 packs.push(pack.clone());
             }
         }
     }
-
-    if let Some(emote_rooms) = &guard.emote_rooms {
-        for (rid, keys) in emote_rooms {
-            if let Some(room_packs) = guard.room_packs.get(rid) {
-                for (skey, pack) in room_packs {
-                    if (keys.is_empty() || keys.contains(skey))
-                        && seen_pack_ids.insert(pack.id.clone())
-                    {
-                        packs.push(pack.clone());
-                    }
-                }
+    for (rid, keys) in &emote_rooms {
+        let Some(room_packs) = guard.room_packs.get(rid) else {
+            continue;
+        };
+        for (key, pack) in room_packs {
+            if (keys.is_empty() || keys.contains(key)) && seen.insert(pack.id.clone()) {
+                packs.push(pack.clone());
             }
         }
     }
-
+    packs.truncate(MAX_PACKS);
     EmoteCatalog { packs }
 }
 
@@ -652,7 +661,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parses_msc2545_user_and_room_packs_and_redacts_debug() {
+    fn packs_are_read_with_their_usage_and_debug_shows_nothing_private() {
         let raw = json!({
             "pack": {
                 "display_name": "Ferris & Friends",
@@ -687,36 +696,41 @@ mod tests {
         assert_eq!(pack.emojis[0].shortcode, "crab_both");
         assert_eq!(pack.emojis[1].shortcode, "crab_happy");
         assert_eq!(pack.stickers[1].shortcode, "crab_wave");
+        assert_eq!(pack.stickers[1].name, "Waving Ferris");
         assert_eq!(pack.stickers[1].dimensions, Some((256, 256)));
         assert_eq!(pack.stickers[1].size, Some(12345));
+        assert_eq!(pack.stickers[1].mime.as_deref(), Some("image/webp"));
 
         let catalog = EmoteCatalog { packs: vec![pack] };
         assert_eq!(
             catalog.shortcode_for_url("mxc://example.org/crab1"),
             Some("crab_happy")
         );
+        // A picture that is only a sticker still has a name for reactions.
         assert_eq!(
-            catalog.url_for_shortcode(":crab_happy:"),
-            Some("mxc://example.org/crab1")
+            catalog.shortcode_for_url("mxc://example.org/crab2"),
+            Some("crab_wave")
         );
+        assert_eq!(catalog.shortcode_for_url("mxc://example.org/nope"), None);
 
         let dbg = format!(
-            "{catalog:?} {:?} {:?}",
-            catalog.packs[0].emojis[0], catalog.packs[0].stickers[0]
+            "{catalog:?} {:?} {:?} {:?}",
+            catalog.packs[0], catalog.packs[0].emojis[0], catalog.packs[0].stickers[0]
         );
         assert!(!dbg.contains("Ferris"), "debug leaked pack name: {dbg}");
-        assert!(!dbg.contains("crab1"), "debug leaked mxc url: {dbg}");
-        assert!(!dbg.contains("crab_happy"), "debug leaked shortcode: {dbg}");
+        assert!(
+            !dbg.contains("crab"),
+            "debug leaked a shortcode or address: {dbg}"
+        );
+        assert!(!dbg.contains("room1"), "debug leaked the pack id: {dbg}");
     }
 
     #[test]
-    fn parses_emote_rooms_and_legacy_shortcodes() {
+    fn pack_rooms_and_the_oldest_shortcode_form_are_read() {
         let rooms_json = json!({
             "rooms": {
-                "!pack1:example.org": {
-                    "ponies": {},
-                    "default": {}
-                }
+                "!pack1:example.org": { "ponies": {}, "": {} },
+                "not a room": { "": {} }
             }
         });
         let rooms = parse_emote_rooms_json(&rooms_json);
@@ -730,8 +744,120 @@ mod tests {
             }
         });
         let pack = parse_pack_json(&legacy, "Personal", "user").expect("legacy pack");
+        assert_eq!(pack.name, "Personal");
         assert_eq!(pack.emojis.len(), 1);
         assert_eq!(pack.emojis[0].shortcode, "party_blob");
         assert!(pack.stickers.is_empty());
+    }
+
+    #[test]
+    fn hostile_packs_are_cut_down_and_cleaned() {
+        let mut images = serde_json::Map::new();
+        for n in 0..MAX_IMAGES_PER_PACK + 50 {
+            images.insert(
+                format!("e{n:04}"),
+                json!({ "url": format!("mxc://example.org/m{n}") }),
+            );
+        }
+        let long = "x".repeat(MAX_SHORTCODE_LEN + 1);
+        for (code, url) in [
+            (long.as_str(), "mxc://example.org/long"),
+            ("two words", "mxc://example.org/space"),
+            (":colon:in:", "mxc://example.org/colon"),
+            ("\u{200b}", "mxc://example.org/blank"),
+            ("aaa_quote", "mxc://example.org/a\"b"),
+            ("aaa_tag", "mxc://example.org/<b>"),
+            ("aaa_noid", "mxc://example.org/"),
+            ("aaa_noserver", "mxc:///media"),
+        ] {
+            images.insert(code.to_owned(), json!({ "url": url }));
+        }
+        images.insert(
+            "aaa_ok".to_owned(),
+            json!({
+                "url": "mxc://example.org/ok",
+                "body": "Line\none\u{1b}[31m",
+                "info": { "mimetype": "image/png\"><script>" }
+            }),
+        );
+        let raw = json!({
+            "pack": { "display_name": format!("Evil\u{7}{}", "n".repeat(200)) },
+            "images": images
+        });
+        let pack = parse_pack_json(&raw, "Fallback", "p").expect("pack");
+        assert_eq!(pack.emojis.len(), MAX_IMAGES_PER_PACK);
+        assert!(pack.name.starts_with("Eviln"), "{}", pack.name);
+        assert!(crate::text::width(&pack.name) <= MAX_NAME_WIDTH);
+        let ok = pack
+            .stickers
+            .iter()
+            .find(|s| s.shortcode == "aaa_ok")
+            .expect("the good one is kept");
+        assert_eq!(ok.name, "Line one[31m");
+        assert_eq!(ok.mime, None);
+        for emoji in &pack.emojis {
+            assert!(is_valid_mxc(&emoji.url), "{}", emoji.url);
+            assert!(emoji.shortcode.len() <= MAX_SHORTCODE_LEN);
+            assert!(!emoji.shortcode.contains([' ', ':']));
+        }
+    }
+
+    #[test]
+    fn only_plain_mxc_addresses_are_valid() {
+        assert!(is_valid_mxc("mxc://example.org/abc-DEF_123"));
+        assert!(is_valid_mxc("mxc://[::1]:8448/abc"));
+        for bad in [
+            "https://example.org/abc",
+            "mxc://example.org/",
+            "mxc://example.org/a/b",
+            "mxc://exa mple.org/abc",
+            "mxc://example.org/a\"onerror=\"x",
+            "mxc://example.org/abc?x=1",
+            "mxc://",
+        ] {
+            assert!(!is_valid_mxc(bad), "{bad}");
+        }
+        assert!(!is_valid_mxc(&format!(
+            "mxc://example.org/{}",
+            "a".repeat(MAX_MXC_LEN)
+        )));
+    }
+
+    #[test]
+    fn the_catalog_lists_each_shortcode_and_each_sticker_once() {
+        let pack = |id: &str, url: &str| EmotePack {
+            id: id.into(),
+            name: id.into(),
+            emojis: vec![CustomEmoji {
+                shortcode: "blob".into(),
+                url: url.into(),
+                body: None,
+                pack_name: id.into(),
+            }],
+            stickers: vec![StickerItem {
+                shortcode: "blob".into(),
+                name: "Blob".into(),
+                url: url.into(),
+                pack_name: id.into(),
+                dimensions: None,
+                size: None,
+                mime: None,
+            }],
+        };
+        let catalog = EmoteCatalog {
+            packs: vec![
+                pack("mine", "mxc://example.org/a"),
+                pack("room", "mxc://example.org/b"),
+                pack("again", "mxc://example.org/a"),
+            ],
+        };
+        let emojis: Vec<_> = catalog.emojis().map(|e| e.url.as_str()).collect();
+        assert_eq!(emojis, ["mxc://example.org/a"]);
+        let stickers: Vec<_> = catalog
+            .stickers()
+            .iter()
+            .map(|s| s.pack_name.as_str())
+            .collect();
+        assert_eq!(stickers, ["mine", "room"]);
     }
 }

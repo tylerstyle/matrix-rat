@@ -4,7 +4,7 @@ use emojis::Emoji;
 
 use crate::emoji;
 use crate::lineedit::LineEdit;
-use crate::matrix::{ReauthKind, ReauthTarget};
+use crate::matrix::{EmoteCatalog, ReauthKind, ReauthTarget, StickerItem};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReauthInfo {
@@ -1206,6 +1206,126 @@ impl PollVotePopup {
     }
 }
 
+/// Pop-up listing the stickers of the account's and the room's image packs by name.
+#[derive(Clone)]
+pub struct StickerPicker {
+    pub room_id: String,
+    pub filter: LineEdit,
+    pub all: Vec<StickerItem>,
+    /// Indices into `all` that match the filter.
+    pub filtered: Vec<usize>,
+    pub selected: usize,
+    pub scroll: usize,
+    /// List rows as of the last draw; PageUp/PageDown move by it.
+    pub page: usize,
+    pub reveal: bool,
+    /// The packs have not arrived yet.
+    pub loading: bool,
+}
+
+/// Hand-written: the room id, sticker names and addresses stay out of logs.
+impl std::fmt::Debug for StickerPicker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StickerPicker")
+            .field("count", &self.all.len())
+            .field("shown", &self.filtered.len())
+            .field("selected", &self.selected)
+            .field("loading", &self.loading)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StickerPicker {
+    pub fn new(room_id: String, filter: &str, catalog: &EmoteCatalog, loading: bool) -> Self {
+        let mut picker = Self {
+            room_id,
+            filter: LineEdit::new().with_max_bytes(256),
+            all: Vec::new(),
+            filtered: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            page: 0,
+            reveal: true,
+            loading,
+        };
+        picker.filter.set(filter.to_owned());
+        picker.set_catalog(catalog, loading);
+        picker
+    }
+
+    /// Takes newly arrived packs, keeping the selected sticker where it still exists.
+    pub fn set_catalog(&mut self, catalog: &EmoteCatalog, loading: bool) {
+        let keep = self.selected_sticker().map(|s| s.url.clone());
+        self.all = catalog.stickers().into_iter().cloned().collect();
+        self.loading = loading;
+        self.refilter_keeping(keep.as_deref());
+    }
+
+    pub fn refilter(&mut self) {
+        self.refilter_keeping(None);
+        self.scroll = 0;
+    }
+
+    /// A sticker matches when every word of the filter is in its name, shortcode or
+    /// pack name.
+    fn refilter_keeping(&mut self, keep: Option<&str>) {
+        let words: Vec<String> = self
+            .filter
+            .as_str()
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        self.filtered = self
+            .all
+            .iter()
+            .enumerate()
+            .filter(|(_, sticker)| {
+                let hay = format!(
+                    "{} {} {}",
+                    sticker.name.to_lowercase(),
+                    sticker.shortcode.to_lowercase(),
+                    sticker.pack_name.to_lowercase()
+                );
+                words.iter().all(|w| hay.contains(w.as_str()))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.selected = keep
+            .and_then(|url| {
+                self.filtered
+                    .iter()
+                    .position(|&i| self.all.get(i).is_some_and(|s| s.url == url))
+            })
+            .unwrap_or(0);
+        self.reveal = true;
+    }
+
+    pub fn selected_sticker(&self) -> Option<&StickerItem> {
+        self.sticker_at(self.selected)
+    }
+
+    /// The sticker on row `index` of the filtered list.
+    pub fn sticker_at(&self, index: usize) -> Option<&StickerItem> {
+        self.filtered.get(index).and_then(|&i| self.all.get(i))
+    }
+
+    pub fn step(&mut self, delta: isize) {
+        let len = self.filtered.len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        let max = (len - 1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+        self.reveal = true;
+    }
+
+    pub fn scroll_by(&mut self, lines: isize) {
+        self.scroll = (self.scroll as isize + lines).max(0) as usize;
+        self.reveal = false;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Modal {
     Login(LoginForm),
@@ -1244,6 +1364,8 @@ pub enum Modal {
     PollForm(PollFormPopup),
     /// Vote or change vote in a poll (`org.matrix.msc3381.poll.response`).
     PollVote(PollVotePopup),
+    /// Pick a sticker from the image packs and send it.
+    Stickers(StickerPicker),
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ mod code;
 mod complete;
 mod devices;
 mod drafts;
+mod emotes;
 mod external_editor;
 mod files;
 pub mod global_search;
@@ -333,6 +334,8 @@ pub struct App {
     pub(super) dir_search_debounce: Option<std::time::Instant>,
     /// The account's sessions and the key backup, for their popups.
     pub devices: crate::devices::DevicesState,
+    /// Custom emoji and stickers from image packs.
+    pub emotes: emotes::EmoteState,
 }
 
 /// Shared 250 ms search debounce window used by directory & user lookups.
@@ -544,6 +547,7 @@ impl App {
             dir_search_gen: 0,
             dir_search_debounce: None,
             devices: Default::default(),
+            emotes: Default::default(),
         }
     }
 
@@ -1227,6 +1231,7 @@ impl App {
         bump_search_gen(&mut self.user_search_gen, &mut self.user_search_debounce);
         bump_search_gen(&mut self.dir_search_gen, &mut self.dir_search_debounce);
         self.devices = Default::default();
+        self.reset_emotes();
         if let Some(Modal::New(popup)) = &mut self.modal {
             popup.clear_user_search();
             popup.clear_dir_search();
@@ -1245,6 +1250,7 @@ impl App {
                     | Modal::OwnProfile(_)
                     | Modal::PollForm(_)
                     | Modal::PollVote(_)
+                    | Modal::Stickers(_)
             )
         ) {
             self.modal = None;
@@ -1537,7 +1543,10 @@ impl App {
         // An `/upload` command attaches; with files waiting, Enter sends those. An
         // edit comes first: its text is a message, and files wait until it is done.
         if !matches!(self.compose_mode, ComposeMode::Edit(_))
-            && (self.upload_command() || self.poll_command() || self.send_attachments())
+            && (self.upload_command()
+                || self.poll_command()
+                || self.sticker_command()
+                || self.send_attachments())
         {
             return;
         }
@@ -1917,6 +1926,7 @@ impl App {
                 generation: self.generation,
             });
         }
+        self.follow_room_emotes();
     }
 
     /// Called after each draw: loads older messages when the view shows the oldest
@@ -2583,6 +2593,9 @@ impl App {
             },
             Action::UserInfo => self.open_user_info_from_selection(),
             Action::CreatePoll => self.open_poll_create(""),
+            Action::OpenStickers => {
+                self.open_stickers("");
+            }
             Action::NewRoom
             | Action::RoomInfo
             | Action::LeaveRoom
@@ -2687,7 +2700,8 @@ impl App {
                 | Modal::Pinned(_)
                 | Modal::ReasonConfirm(_)
                 | Modal::PollForm(_)
-                | Modal::PollVote(_),
+                | Modal::PollVote(_)
+                | Modal::Stickers(_),
             ) => {
                 self.modal = None;
             }
@@ -2833,6 +2847,7 @@ impl App {
             Some(Modal::OwnProfile(_)) => self.on_own_profile_key(code, mods),
             Some(Modal::PollForm(_)) => self.on_poll_form_key(code, mods),
             Some(Modal::PollVote(_)) => self.on_poll_vote_key(code, mods),
+            Some(Modal::Stickers(_)) => self.on_stickers_key(code, mods),
             None => {}
         }
     }
@@ -3058,6 +3073,8 @@ impl App {
                 note,
             } => self.on_search_results(generation, hits, done, note),
             MatrixEvent::IgnoredUsers(users) => self.on_ignored_users_list(users),
+            MatrixEvent::EmotePacks(_) if self.logged_out => {}
+            MatrixEvent::EmotePacks(catalog) => self.on_emote_packs(catalog),
             MatrixEvent::IgnoreResult {
                 user_id,
                 ignored,
@@ -3584,6 +3601,7 @@ impl App {
             Some(Modal::ReasonConfirm(_)) => return self.on_reason_confirm_paste(first_line),
             Some(Modal::PollForm(_)) => return self.on_poll_form_paste(first_line),
             Some(Modal::PollVote(_)) => return,
+            Some(Modal::Stickers(_)) => return self.on_stickers_paste(first_line),
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
@@ -3650,6 +3668,7 @@ impl App {
                                     | Modal::ReasonConfirm(_)
                                     | Modal::PollForm(_)
                                     | Modal::PollVote(_)
+                                    | Modal::Stickers(_)
                             )
                         ) || matches!(
                             &self.modal,
@@ -3850,6 +3869,7 @@ impl App {
                     Some(HitId::PollVoteAnswer(idx)) => self.click_poll_vote_answer(idx),
                     Some(HitId::PollVoteBtn(true)) => self.submit_poll_vote(),
                     Some(HitId::PollVoteBtn(false)) => self.modal = None,
+                    Some(HitId::StickerRow(index)) => self.send_sticker_at(index),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -3884,6 +3904,7 @@ impl App {
                             | Modal::Settings(_)
                             | Modal::PollForm(_)
                             | Modal::PollVote(_)
+                            | Modal::Stickers(_)
                     )
                 ) =>
             {
@@ -3909,6 +3930,7 @@ impl App {
                     Some(Modal::PollForm(_) | Modal::PollVote(_)) => {
                         self.scroll_poll_modal(delta);
                     }
+                    Some(Modal::Stickers(_)) => self.scroll_stickers(delta),
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.
                     Some(Modal::Settings(menu)) if menu.editing.is_none() => {
@@ -4086,6 +4108,11 @@ impl App {
             InputTarget::IgnoredFilter => {
                 if let Some(Modal::IgnoredUsers(popup)) = &mut self.modal {
                     popup.filter.place(rel_col, false);
+                }
+            }
+            InputTarget::StickerFilter => {
+                if let Some(Modal::Stickers(picker)) = &mut self.modal {
+                    picker.filter.place(rel_col, false);
                 }
             }
             InputTarget::ReportReason => {

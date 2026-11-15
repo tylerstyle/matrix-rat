@@ -51,6 +51,8 @@ pub enum InputTarget {
     PollQuestion,
     /// Answer input inside `PollFormPopup`, by 0-based index.
     PollAnswer(usize),
+    /// Filter input of the sticker picker.
+    StickerFilter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +152,8 @@ pub enum HitId {
     PollVoteAnswer(usize),
     /// Submit (`true`) or Cancel (`false`) button inside `PollVotePopup`.
     PollVoteBtn(bool),
+    /// A row of the sticker picker (index into its filtered list); clicking sends it.
+    StickerRow(usize),
 }
 
 #[derive(Debug, Default)]

@@ -30,7 +30,9 @@ pub use devices::{
 #[cfg(test)]
 pub use directory::PreviewJoinRule;
 pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
-pub use emotes::{CustomEmoji, EmoteCatalog, EmotePack, StickerItem, is_valid_mxc};
+#[cfg(test)]
+pub use emotes::{CustomEmoji, EmotePack};
+pub use emotes::{EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
 pub use keyring::SecretStoreMode;
 #[cfg(test)]
 pub use manage::RoomSettingsPower;
