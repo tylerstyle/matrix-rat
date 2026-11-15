@@ -260,7 +260,7 @@ mod tests {
         app.on_event(key(KeyCode::Char('i')));
         let request = popup(&app).request;
         let asked: Vec<String> = std::iter::from_fn(|| commands.try_recv().ok())
-            .map(|command| format!("{command:?}"))
+            .map(|command| command.describe())
             .collect();
         assert_eq!(asked, [format!("FetchSource(request {request})")]);
         let text = screen(&mut app, &mut terminal);

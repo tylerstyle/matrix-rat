@@ -6,11 +6,23 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::text::width;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct Composer {
     text: String,
     /// Byte offset into `text`, always on a grapheme boundary.
     cursor: usize,
+}
+
+/// Hand-written: what is being typed is private.
+impl std::fmt::Debug for Composer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Composer({} bytes, cursor {})",
+            self.text.len(),
+            self.cursor
+        )
+    }
 }
 
 /// One row as displayed. `range` excludes a trailing newline.

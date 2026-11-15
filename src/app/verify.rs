@@ -398,7 +398,7 @@ mod tests {
     fn drain(commands: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>) -> Vec<String> {
         let mut seen = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            seen.push(format!("{command:?}"));
+            seen.push(command.describe());
         }
         seen
     }

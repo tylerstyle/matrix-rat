@@ -248,7 +248,8 @@ Longer pieces are easier in your editor: `Alt-V` opens it with what you have typ
 far, and what you save comes back into the composer to be sent.
 
 **Reading code.** A block keeps its indentation and is never re-wrapped. If its sender
-named the language (`rust`, `py`, `js`, `sh`, `json`, `nix`, … about 75 are known), it is
+named the language (`bash`, `sh`, `rust`, `py`, `js`, `ts`, `json`, `yaml`, `c`, `go`, … about
+75 are known, though not `nix` or `toml`), it is
 coloured: keywords, strings, comments, numbers, types and function names. Without a
 language it is shown in one colour.
 

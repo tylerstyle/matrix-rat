@@ -56,11 +56,18 @@ pub struct SpaceUnread {
     pub mention: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Reaction {
     pub key: String,
     pub count: u32,
     pub own: bool,
+}
+
+/// Hand-written: the key of a reaction can be any text.
+impl fmt::Debug for Reaction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Reaction(count: {}, own: {})", self.count, self.own)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -86,14 +93,24 @@ pub enum SendState {
 }
 
 /// How the Matrix side addresses a message, for replies, edits, reactions and deletion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ItemRef {
     Event(String),
     /// A message of ours that the server has not confirmed yet.
     Transaction(String),
 }
 
-#[derive(Debug, Clone, Default)]
+/// Hand-written: which event it is stays out of logs.
+impl fmt::Debug for ItemRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Event(_) => "ItemRef::Event",
+            Self::Transaction(_) => "ItemRef::Transaction",
+        })
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct Message {
     /// Stable identity within the room's timeline; empty for demo data.
     pub id: String,
@@ -143,6 +160,30 @@ pub struct Message {
     /// Why the message could not be decrypted (`kind` is `Undecryptable`). `None`
     /// for demo data.
     pub utd: Option<UtdWhy>,
+}
+
+/// Hand-written: what it says, who sent it and which event it is stay out of logs.
+impl fmt::Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Message")
+            .field("kind", &self.kind)
+            .field("state", &self.state)
+            .field("own", &self.own)
+            .field("encrypted", &self.encrypted)
+            .field("edited", &self.edited)
+            .field("body_bytes", &self.body.len())
+            .field("reply", &self.reply_to.is_some())
+            .field("reactions", &self.reactions.len())
+            .field("image", &self.image.is_some())
+            .field("file", &self.file.is_some())
+            .field("thread", &self.thread)
+            .field("poll", &self.poll)
+            .field("upload", &self.upload)
+            .field("send_error", &self.send_error.is_some())
+            .field("shield", &self.shield)
+            .field("utd", &self.utd)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Why a message could not be decrypted, as far as the SDK can tell (its `UtdCause`).
@@ -250,13 +291,20 @@ impl ReadBy {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Reader {
     /// Display name, safe to show.
     pub name: String,
     /// When they read it ("14:05", or with the day when it was not today); empty if
     /// the receipt does not say.
     pub time: String,
+}
+
+/// Hand-written: who read it stays out of logs.
+impl fmt::Debug for Reader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reader").finish_non_exhaustive()
+    }
 }
 
 /// Why a message in an encrypted room cannot be fully trusted.
@@ -296,7 +344,7 @@ impl Shield {
 }
 
 /// One line under a message that started a thread.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ThreadSummary {
     pub replies: u32,
     /// Sender and start of the newest reply, when known.
@@ -306,6 +354,18 @@ pub struct ThreadSummary {
     /// The replies themselves, for the demo only; with an account they are loaded
     /// when the thread is opened.
     pub demo_replies: Vec<Message>,
+}
+
+/// Hand-written: the newest reply's sender and text stay out of logs.
+impl fmt::Debug for ThreadSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadSummary")
+            .field("replies", &self.replies)
+            .field("latest", &self.latest.is_some())
+            .field("unread", &self.unread)
+            .field("demo_replies", &self.demo_replies.len())
+            .finish()
+    }
 }
 
 /// One answer option in a Matrix poll (`m.poll.*`).
@@ -458,15 +518,16 @@ pub struct Attachment {
     pub source: Box<matrix_sdk::ruma::events::room::MediaSource>,
 }
 
-/// Hand-written: an encrypted source carries the key of the file.
+/// Hand-written: an encrypted source carries the key of the file, and the name can
+/// say what the file is about.
 impl std::fmt::Debug for Attachment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Attachment({})", self.name)
+        write!(f, "Attachment({:?}, size: {:?})", self.kind, self.size)
     }
 }
 
 /// A picture attached to a message.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ImageInfo {
     /// Identifies the picture in the image cache (its `mxc://` address).
     pub key: String,
@@ -481,6 +542,19 @@ pub struct ImageInfo {
     pub size: Option<u64>,
     /// Whether this picture is an `m.sticker` (small size, no caption line).
     pub sticker: bool,
+}
+
+/// Hand-written: its address, its name and the caption stay out of logs.
+impl fmt::Debug for ImageInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImageInfo")
+            .field("source", &self.source)
+            .field("caption", &self.caption.is_some())
+            .field("dimensions", &self.dimensions)
+            .field("size", &self.size)
+            .field("sticker", &self.sticker)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]
@@ -623,7 +697,7 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Room {
     /// Stable identity (the Matrix room id); indices change as the list reorders.
     pub id: String,
@@ -661,6 +735,26 @@ pub struct Room {
     pub power: RoomPower,
     /// Event IDs listed in `m.room.pinned_events` (server order).
     pub pinned_ids: Vec<String>,
+}
+
+/// Hand-written: which room, its name, its messages and the draft stay out of logs.
+impl fmt::Debug for Room {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Room")
+            .field("kind", &self.kind)
+            .field("unread", &self.unread)
+            .field("bold", &self.bold)
+            .field("marked_unread", &self.marked_unread)
+            .field("mention", &self.mention)
+            .field("messages", &self.messages.len())
+            .field("draft_bytes", &self.draft.len())
+            .field("direct", &self.direct)
+            .field("muted", &self.muted)
+            .field("encrypted", &self.encrypted)
+            .field("power", &self.power)
+            .field("pinned", &self.pinned_ids.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Effective moderation and state permissions derived from the room's power levels.
@@ -1034,6 +1128,56 @@ pub fn demo_rooms() -> Vec<Room> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_and_its_room_print_nothing_private() {
+        let message = Message {
+            id: "$event:example.org".into(),
+            item: Some(ItemRef::Event("$event:example.org".into())),
+            sender: "Alice".into(),
+            sender_id: Some("@alice:example.org".into()),
+            body: "the secret plan".into(),
+            reply_to: Some(("Bob".into(), "earlier secret".into())),
+            reactions: vec![Reaction {
+                key: "secret".into(),
+                count: 1,
+                own: false,
+            }],
+            thread: Some(ThreadSummary {
+                replies: 2,
+                latest: Some(("Bob".into(), "a secret reply".into())),
+                ..ThreadSummary::default()
+            }),
+            ..Message::default()
+        };
+        let room = Room {
+            id: "!room:example.org".into(),
+            name: "Secret room".into(),
+            kind: RoomKind::Room,
+            unread: 0,
+            bold: false,
+            marked_unread: false,
+            mention: false,
+            online: false,
+            typing: Some("Bob".into()),
+            messages: vec![message.clone()],
+            draft: "a secret draft".into(),
+            avatar: None,
+            preview: Some("Alice: the secret plan".into()),
+            server_count: 0,
+            alias: Some("#secret:example.org".into()),
+            direct: false,
+            muted: false,
+            encrypted: true,
+            power: RoomPower::default(),
+            pinned_ids: vec!["$event:example.org".into()],
+        };
+        for text in [format!("{message:?}"), format!("{room:?}")] {
+            for private in ["example.org", "secret", "Secret", "Alice", "Bob"] {
+                assert!(!text.contains(private), "{private} in {text}");
+            }
+        }
+    }
 
     #[test]
     fn poll_debug_is_redacted_and_helpers_behave() {

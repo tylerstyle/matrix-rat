@@ -1233,11 +1233,10 @@ pub struct InfoPopup {
     pub wanted: Option<InfoRow>,
 }
 
-/// Hand-written: names and topics stay out of logs.
+/// Hand-written: which room, names and topics stay out of logs.
 impl std::fmt::Debug for InfoPopup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InfoPopup")
-            .field("room_id", &self.room_id)
             .field("busy", &self.busy)
             .finish_non_exhaustive()
     }

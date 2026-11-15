@@ -57,7 +57,7 @@ async fn read_ignored_content(client: &Client) -> matrix_sdk::Result<IgnoredUser
         return Ok(IgnoredUserListEventContent::default());
     };
     Ok(raw.deserialize().unwrap_or_else(|err| {
-        tracing::debug!(?err, "could not deserialize ignored user list");
+        tracing::debug!(why = %crate::logsafe::kind(&err), "could not deserialize ignored user list");
         IgnoredUserListEventContent::default()
     }))
 }
@@ -67,7 +67,7 @@ impl IgnoreTracker {
         let initial = match read_ignored_content(&client).await {
             Ok(content) => content,
             Err(err) => {
-                tracing::debug!(?err, "could not read initial ignored user list");
+                tracing::debug!(why = %crate::logsafe::kind(&err), "could not read initial ignored user list");
                 IgnoredUserListEventContent::default()
             }
         };
@@ -297,7 +297,7 @@ impl UserSearcher {
                     .collect(),
                 Err(err) => {
                     // User directory may be disabled on the homeserver; degrade silently.
-                    tracing::debug!(?err, generation, "user directory search failed");
+                    tracing::debug!(why = %crate::logsafe::kind(&err), generation, "user directory search failed");
                     Vec::new()
                 }
             };

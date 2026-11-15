@@ -14,7 +14,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use super::MatrixEvent;
-use super::manage::failed;
+use super::manage::{failed, failed_saying};
 use super::safety::safe_mxc;
 use crate::text::{is_blank, sanitize, sanitize_line};
 
@@ -507,7 +507,11 @@ fn friendly_directory_error(err: &matrix_sdk::Error, server: Option<&str>) -> St
             }
         }
         _ => match server {
-            Some(s) => failed(&format!("search {s}'s room directory"), err),
+            Some(s) => failed_saying(
+                "search another server's room directory",
+                &format!("search {s}'s room directory"),
+                err,
+            ),
             None => failed("search public rooms", err),
         },
     }

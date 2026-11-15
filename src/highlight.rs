@@ -130,11 +130,25 @@ pub fn colour(rich: &mut Rich) {
     }
 }
 
+/// The grammar for what a sender wrote as the language. Some usual names are not the
+/// grammars' own, and some languages without a grammar here read well enough with a
+/// relative's.
+fn syntax_for(lang: &str) -> Option<&'static syntect::parsing::SyntaxReference> {
+    let lang = lang.to_ascii_lowercase();
+    let token = match lang.as_str() {
+        "shell" | "shellscript" | "console" | "terminal" | "fish" => "bash",
+        "ts" | "typescript" | "jsx" | "tsx" | "mjs" => "js",
+        "jsonc" | "json5" => "json",
+        "kotlin" | "kt" => "java",
+        "h" | "hpp" | "cc" | "cxx" => "cpp",
+        other => other,
+    };
+    SYNTAXES.find_syntax_by_token(token)
+}
+
 /// Whether there is a grammar for this language name (and it is not just plain text).
 fn known(lang: &str) -> bool {
-    SYNTAXES
-        .find_syntax_by_token(lang)
-        .is_some_and(|syntax| syntax.name != SYNTAXES.find_syntax_plain_text().name)
+    syntax_for(lang).is_some_and(|syntax| syntax.name != SYNTAXES.find_syntax_plain_text().name)
 }
 
 fn remembered(lang: &str, lines: &[String], started: Instant) -> Option<Arc<Marks>> {
@@ -162,7 +176,7 @@ fn remembered(lang: &str, lines: &[String], started: Instant) -> Option<Arc<Mark
 /// The marks for every line, or `None` when the block stays plain.
 fn marks(lang: &str, lines: &[String], started: Instant) -> Option<Marks> {
     let syntaxes = &*SYNTAXES;
-    let syntax = syntaxes.find_syntax_by_token(lang)?;
+    let syntax = syntax_for(lang)?;
     let mut state = ParseState::new(syntax);
     let mut stack = ScopeStack::new();
     let mut all = Vec::with_capacity(lines.len());
@@ -360,6 +374,43 @@ mod tests {
         );
         assert_eq!(mark_of(&rich, "true"), Some(Syntax::Constant));
         assert_eq!(mark_of(&rich, "# c"), Some(Syntax::Comment));
+    }
+
+    #[test]
+    fn the_usual_names_of_common_languages_are_known() {
+        // What people write after the three backticks, not only the official names.
+        for lang in [
+            "sh",
+            "bash",
+            "zsh",
+            "shell",
+            "console",
+            "rust",
+            "rs",
+            "python",
+            "py",
+            "js",
+            "ts",
+            "typescript",
+            "json",
+            "yaml",
+            "c",
+            "cpp",
+            "go",
+            "java",
+            "html",
+            "css",
+            "sql",
+            "diff",
+            "Bash",
+            "RUST",
+        ] {
+            assert!(known(lang), "{lang}");
+        }
+        // No grammar for these: such blocks stay in the one code colour.
+        for lang in ["nix", "toml", "swift", "dockerfile"] {
+            assert!(!known(lang), "{lang}");
+        }
     }
 
     #[test]

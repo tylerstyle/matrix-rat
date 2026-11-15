@@ -603,7 +603,7 @@ mod tests {
     fn drain(commands: &mut UnboundedReceiver<MatrixCmd>) -> Vec<String> {
         let mut seen = Vec::new();
         while let Some(command) = next(commands) {
-            seen.push(format!("{command:?}"));
+            seen.push(command.describe());
         }
         seen
     }

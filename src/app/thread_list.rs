@@ -466,7 +466,7 @@ mod tests {
                 command,
                 MatrixCmd::Typing { .. } | MatrixCmd::SaveDraft { .. } | MatrixCmd::InThread { .. }
             ) {
-                seen.push(format!("{command:?}"));
+                seen.push(command.describe());
             }
         }
         seen

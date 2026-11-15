@@ -749,7 +749,7 @@ impl App {
                 self.theme_rev += 1;
             }
             Err(err) => {
-                tracing::warn!(theme = name, ?err, "could not load theme");
+                tracing::warn!(theme = name, why = %crate::logsafe::kind_any(&err), "could not load theme");
                 self.show_toast(format!("Could not load theme {name}: {err:#}"));
             }
         }
@@ -865,7 +865,7 @@ impl App {
             return;
         };
         if let Err(err) = crate::config::save_setting(file, key, value) {
-            tracing::warn!(?err, key, "could not save setting");
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), key, "could not save setting");
             self.show_toast(format!("Could not save the setting: {err:#}"));
         }
     }
@@ -876,7 +876,7 @@ impl App {
             return;
         };
         if let Err(err) = crate::config::remove_setting(file, key) {
-            tracing::warn!(?err, key, "could not remove setting");
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), key, "could not remove setting");
             self.show_toast(format!("Could not save the setting: {err:#}"));
         }
     }
@@ -5488,7 +5488,7 @@ mod tests {
     fn drain(commands: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>) -> Vec<String> {
         let mut seen = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            seen.push(format!("{command:?}"));
+            seen.push(command.describe());
         }
         seen
     }
@@ -7180,7 +7180,7 @@ mod tests {
     ) -> Vec<String> {
         let mut seen = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            seen.push(format!("{command:?}"));
+            seen.push(command.describe());
         }
         seen
     }
@@ -7194,7 +7194,7 @@ mod tests {
     #[test]
     fn a_clicked_notification_opens_its_room_like_the_room_list_does() {
         let (mut app, mut commands) = with_worker();
-        assert_eq!(format!("{:?}", clicked("!b")), "NoticeClicked(!b)");
+        assert_eq!(clicked("!b").describe(), "NoticeClicked(!b)");
         // Something half written, and a message selected, in the open room.
         type_text(&mut app, "half a thought");
         app.on_matrix(clicked("!b"));

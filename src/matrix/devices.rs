@@ -563,7 +563,7 @@ async fn list(client: &Client, asked: &mut HashSet<OwnedDeviceId>) -> Result<Ses
         // The store hears of a new device with a later sync; ask for the keys now, so
         // that a session is not shown as having none while they are on their way.
         if let Err(err) = encryption.request_user_identity(user_id).await {
-            tracing::debug!(kind = ?err.client_api_error_kind(), "could not fetch our own keys");
+            tracing::debug!(why = %crate::logsafe::kind(&err), "could not fetch our own keys");
         }
         known = encryption.get_user_devices(user_id).await.ok();
     }
@@ -620,7 +620,7 @@ async fn server_backup(client: &Client) -> ServerBackup {
             ServerBackup::Missing
         }
         Err(err) => {
-            tracing::debug!(kind = ?err.client_api_error_kind(), "could not ask for the key backup");
+            tracing::debug!(why = %crate::logsafe::kind(&err), "could not ask for the key backup");
             ServerBackup::Unknown
         }
     }

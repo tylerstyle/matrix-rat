@@ -48,7 +48,7 @@ impl ThemeWatch {
         if let Some(watcher) = watcher.as_mut() {
             for dir in [paths.config_dir.as_path(), paths.themes_dir().as_path()] {
                 if let Err(err) = watch(watcher, dir) {
-                    tracing::warn!(?err, "themes will not reload by themselves");
+                    tracing::warn!(why = %crate::logsafe::kind_any(&err), "themes will not reload by themselves");
                 }
             }
         }

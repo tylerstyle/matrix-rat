@@ -594,7 +594,7 @@ mod tests {
         let mut last = Vec::new();
         while let Ok(command) = commands.try_recv() {
             if !matches!(command, MatrixCmd::Typing { .. }) {
-                last.push(format!("{command:?}"));
+                last.push(command.describe());
             }
         }
         assert_eq!(last, ["SaveDraft(!a, 3 bytes)", "Shutdown"]);
@@ -761,21 +761,18 @@ mod tests {
             room_id: "!a".to_owned(),
             text: "secret".to_owned(),
         };
-        assert_eq!(format!("{command:?}"), "SaveDraft(!a, 6 bytes)");
-        assert_eq!(
-            format!("{:?}", stored("!a", "secret")),
-            "Draft(!a, 6 bytes)"
-        );
+        assert_eq!(format!("{command:?}"), "SaveDraft(6 bytes)");
+        assert_eq!(format!("{:?}", stored("!a", "secret")), "Draft(6 bytes)");
         let event = MatrixEvent::Draft {
             room_id: "!a".to_owned(),
             thread: Some("$e0".to_owned()),
             text: "secret".to_owned(),
         };
-        assert_eq!(format!("{event:?}"), "Draft(!a, $e0, 6 bytes)");
+        assert_eq!(format!("{event:?}"), "Draft(in a thread, 6 bytes)");
         let command = MatrixCmd::ForgetDrafts {
             room_id: "!a".to_owned(),
             threads: vec!["$e0".to_owned()],
         };
-        assert_eq!(format!("{command:?}"), "ForgetDrafts(!a, 1 threads)");
+        assert_eq!(format!("{command:?}"), "ForgetDrafts(1 threads)");
     }
 }

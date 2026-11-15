@@ -108,11 +108,17 @@ pub fn command_from_env() -> Result<Vec<String>, Failure> {
 
 /// A file holding the draft while the editor has it: owner-only, ending in `.md` (so
 /// that editors pick Markdown highlighting), and gone when this is dropped.
-#[derive(Debug)]
 pub struct TempFile {
     path: PathBuf,
     /// A directory made only for this file, removed with it.
     own_dir: Option<PathBuf>,
+}
+
+/// Hand-written: a path names the user's home or temporary directory.
+impl fmt::Debug for TempFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TempFile(own_dir: {})", self.own_dir.is_some())
+    }
 }
 
 impl TempFile {

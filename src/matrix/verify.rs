@@ -121,7 +121,7 @@ pub struct SasEmoji {
 }
 
 /// Where a verification stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum VerifyStage {
     /// The other side asks to verify; accept or decline.
     Requested,
@@ -152,7 +152,23 @@ impl VerifyStage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Hand-written: the reason for a cancellation can be the other side's own words.
+impl std::fmt::Debug for VerifyStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Requested => f.write_str("Requested"),
+            Self::Waiting => f.write_str("Waiting"),
+            Self::Ready => f.write_str("Ready"),
+            Self::Starting => f.write_str("Starting"),
+            Self::Compare { emoji, .. } => write!(f, "Compare({} emoji)", emoji.len()),
+            Self::Confirmed => f.write_str("Confirmed"),
+            Self::Done => f.write_str("Done"),
+            Self::Cancelled { .. } => f.write_str("Cancelled"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct VerifyUpdate {
     pub flow: u64,
     /// The other side, ready to show: a device name or a user id.
@@ -163,6 +179,18 @@ pub struct VerifyUpdate {
     /// verification began. Otherwise it vouches for the other side.
     pub this_device: bool,
     pub stage: VerifyStage,
+}
+
+/// Hand-written: the other side is named by a device name or a user id.
+impl std::fmt::Debug for VerifyUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifyUpdate")
+            .field("flow", &self.flow)
+            .field("own", &self.own)
+            .field("this_device", &self.this_device)
+            .field("stage", &self.stage)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the user decided, inside a running verification.
@@ -216,7 +244,7 @@ impl std::fmt::Debug for VerifyCmd {
 }
 
 /// How setting up cross-signing went.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SetUpOutcome {
     Done,
     /// The server wants the account password; `rejected` if the one given was wrong.
@@ -224,6 +252,17 @@ pub enum SetUpOutcome {
         rejected: bool,
     },
     Failed(String),
+}
+
+/// Hand-written: the reason for a failure is the SDK's error text.
+impl std::fmt::Debug for SetUpOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Done => f.write_str("Done"),
+            Self::NeedsPassword { rejected } => write!(f, "NeedsPassword(rejected: {rejected})"),
+            Self::Failed(_) => f.write_str("Failed"),
+        }
+    }
 }
 
 // ----- the worker side ----------------------------------------------------------------
@@ -498,7 +537,10 @@ async fn send_queued(client: Client, wake: Arc<Notify>) {
             .timeout(Duration::from_secs(10));
         if let Err(err) = client.send(request).with_request_config(config).await {
             // The queue is sent with the encryption sync's next request all the same.
-            tracing::warn!(%err, "could not hurry the answer to a verification step");
+            tracing::warn!(
+                why = %crate::logsafe::kind(&err),
+                "could not hurry the answer to a verification step"
+            );
         }
     }
 }
@@ -658,7 +700,7 @@ impl Verifier {
                     if let Err(err) = client.encryption().request_user_identity(&sender).await {
                         tracing::warn!(
                             own,
-                            kind = ?err.client_api_error_kind(),
+                            why = %crate::logsafe::kind(&err),
                             "could not fetch the sender's keys"
                         );
                     }
@@ -695,7 +737,7 @@ impl Verifier {
             )));
             self.spawn(async move {
                 if let Err(err) = request.cancel().await {
-                    tracing::warn!(%err, "could not decline a verification request");
+                    tracing::warn!(why = %crate::logsafe::kind(&err), "could not decline a verification request");
                 }
             });
             return;
@@ -757,9 +799,6 @@ impl Verifier {
                 let refresh = self.refresh.clone();
                 self.spawn(async move {
                     let outcome = set_up_cross_signing(&client, password).await;
-                    if let SetUpOutcome::Failed(err) = &outcome {
-                        tracing::warn!(err, "could not set up cross-signing");
-                    }
                     let _ = events.send(MatrixEvent::CrossSigningSetUp(outcome));
                     refresh.notify_one();
                 });
@@ -849,6 +888,9 @@ pub(super) async fn set_up_cross_signing(
 ) -> SetUpOutcome {
     let encryption = client.encryption();
     let failed = |err: matrix_sdk::Error| {
+        // Logged here, while the error is still a value: the text for the user can
+        // name the server and the account.
+        tracing::warn!(why = %crate::logsafe::kind(&err), "could not set up cross-signing");
         SetUpOutcome::Failed(format!("Could not set up encryption: {err}"))
     };
     let first = match &password {
@@ -899,7 +941,7 @@ async fn refresh_own_keys(client: &Client) {
     if let Some(user_id) = client.user_id()
         && let Err(err) = client.encryption().request_user_identity(user_id).await
     {
-        tracing::warn!(%err, "could not fetch our own keys");
+        tracing::warn!(why = %crate::logsafe::kind(&err), "could not fetch our own keys");
     }
 }
 
@@ -977,8 +1019,9 @@ impl Flow {
         self.last.as_ref().is_some_and(VerifyStage::is_final)
     }
 
-    fn fail(&mut self, what: &str, err: impl std::fmt::Display) {
-        tracing::warn!(flow = self.id, %err, "verification: could not {what}");
+    /// The user is told the error in full; the log only gets its kind.
+    fn fail(&mut self, what: &'static str, err: impl std::error::Error + 'static) {
+        tracing::warn!(flow = self.id, why = %crate::logsafe::kind(&err), "verification: could not {what}");
         let _ = self.events.send(MatrixEvent::ActionFailed(format!(
             "Could not {what}: {err}"
         )));
@@ -1108,7 +1151,7 @@ impl Flow {
         if let Err(err) = request.cancel().await {
             // The SDK has marked it cancelled all the same; only the other devices may
             // keep showing it until it times out.
-            tracing::warn!(%err, "could not withdraw a verification request");
+            tracing::warn!(why = %crate::logsafe::kind(&err), "could not withdraw a verification request");
         }
         debug_assert!(request.is_cancelled());
         match self.request(client).await {
@@ -1257,7 +1300,7 @@ impl Flow {
                 // The user has moved on: a failure to tell the other side is only
                 // logged, not shown.
                 if let Err(err) = result {
-                    tracing::warn!(flow = self.id, %err, "could not send the cancellation");
+                    tracing::warn!(flow = self.id, why = %crate::logsafe::kind(&err), "could not send the cancellation");
                 }
                 Ok(())
             }

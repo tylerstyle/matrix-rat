@@ -21,14 +21,25 @@ use crate::upload::{self, Chosen};
 pub type Scope = (String, Option<String>);
 
 /// What a send handed to the worker, to give it back if none of it could be sent.
-#[derive(Debug)]
 struct Handed {
     scope: Scope,
     files: Vec<Chosen>,
     text: String,
 }
 
-#[derive(Debug, Default)]
+/// Hand-written: which room, which files and what text stay out of logs.
+impl std::fmt::Debug for Handed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Handed({} files, {} bytes of text)",
+            self.files.len(),
+            self.text.len()
+        )
+    }
+}
+
+#[derive(Default)]
 pub struct AttachState {
     /// Files waiting to be sent.
     pub(super) pending: HashMap<Scope, Vec<Chosen>>,
@@ -55,6 +66,30 @@ pub struct AttachState {
     pub(super) readings: u64,
     /// A reading for the run loop to start.
     pub(super) paste_request: Option<crate::clipboard::Request>,
+}
+
+/// Hand-written: rooms, file paths and drafts stay out of logs; counts say enough.
+impl std::fmt::Debug for AttachState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachState")
+            .field(
+                "pending",
+                &self.pending.values().map(Vec::len).sum::<usize>(),
+            )
+            .field("stash", &self.stash.len())
+            .field("handed", &self.handed)
+            .field("sends", &self.sends)
+            .field("limit", &self.limit)
+            .field("hidden", &self.hidden)
+            .field("pasted", &self.pasted.len())
+            .field(
+                "reading",
+                &self.reading.as_ref().map(|(reading, _)| reading),
+            )
+            .field("readings", &self.readings)
+            .field("paste_request", &self.paste_request.is_some())
+            .finish()
+    }
 }
 
 impl AttachState {

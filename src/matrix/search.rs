@@ -42,16 +42,10 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// Never logs room names, sender display names, or message snippets.
+/// Never logs ids, room names, sender display names, or message snippets.
 impl fmt::Debug for SearchHit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "SearchHit({}, {}, thread={})",
-            self.room_id,
-            self.event_id,
-            self.thread_root.as_deref().unwrap_or("-")
-        )
+        write!(f, "SearchHit(thread: {})", self.thread_root.is_some())
     }
 }
 
@@ -77,7 +71,7 @@ pub(crate) fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<Stri
             && !joined_room_ids.contains(&name)
             && let Err(err) = std::fs::remove_dir_all(entry.path())
         {
-            tracing::debug!(%err, room = %name, "could not prune stale search index");
+            tracing::debug!(why = %crate::logsafe::kind(&err), "could not prune stale search index");
         }
     }
 }
@@ -208,7 +202,7 @@ async fn index_redecrypted(client: Client) {
                     )
                     .await
                 {
-                    tracing::warn!(%err, %room_id, "failed to index redecrypted events");
+                    tracing::warn!(why = %crate::logsafe::kind(&err), "failed to index redecrypted events");
                     break;
                 }
             }
@@ -327,7 +321,7 @@ async fn run_search(
                         break;
                     }
                 }
-                tracing::debug!(%err, generation, "global message search failed");
+                tracing::debug!(why = %crate::logsafe::kind(&err), generation, "global message search failed");
                 note = Some("Could not search that query".to_owned());
                 break;
             }
@@ -828,9 +822,8 @@ mod tests {
         assert!(!dbg.contains("Top Secret Room"));
         assert!(!dbg.contains("Secret Sender"));
         assert!(!dbg.contains("private message body"));
-        assert!(dbg.contains("!room:example.org"));
-        assert!(dbg.contains("$ev1:example.org"));
-        assert!(dbg.contains("$root:example.org"));
+        assert!(!dbg.contains("example.org"), "{dbg}");
+        assert_eq!(dbg, "SearchHit(thread: true)");
 
         let cmd = MatrixCmd::SearchMessages {
             generation: 7,

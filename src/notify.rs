@@ -308,7 +308,7 @@ impl IconCache {
             state.entries.remove(pos);
         }
         if let Err(err) = ensure_safe_dir(&state.dir) {
-            tracing::debug!(%err, dir = %state.dir.display(), "notification icon directory unavailable");
+            tracing::debug!(why = %crate::logsafe::kind(&err), "notification icon directory unavailable");
             return None;
         }
         let filename = cache_filename(&key);
@@ -317,7 +317,7 @@ impl IconCache {
             let png = match encode_icon_png(icon) {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    tracing::debug!(%err, "could not encode notification icon");
+                    tracing::debug!(why = %crate::logsafe::kind(&err), "could not encode notification icon");
                     return None;
                 }
             };
@@ -331,7 +331,7 @@ impl IconCache {
                 write_private_file(&tmp, &png).and_then(|()| std::fs::rename(&tmp, &path))
             {
                 let _ = std::fs::remove_file(&tmp);
-                tracing::debug!(%err, "could not write notification icon file");
+                tracing::debug!(why = %crate::logsafe::kind(&err), "could not write notification icon file");
                 return None;
             }
         }
@@ -356,12 +356,23 @@ struct DesktopJob {
     click: Option<(String, Clicks)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct PreparedDesktop {
     summary: String,
     body: String,
     urgent: bool,
     icon_path: Option<PathBuf>,
+}
+
+/// Hand-written: who wrote, what, and where the icon is stay out of logs.
+impl std::fmt::Debug for PreparedDesktop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedDesktop")
+            .field("body_bytes", &self.body.len())
+            .field("urgent", &self.urgent)
+            .field("icon", &self.icon_path.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 fn prepare_desktop(job: &DesktopJob) -> PreparedDesktop {
@@ -507,7 +518,7 @@ async fn show_desktop(job: DesktopJob, clickable: &mut Clickable) {
     // Without clicks (the service does not do them, or our own connection to it
     // failed): exactly as before there were any.
     if let Err(err) = notification.show() {
-        tracing::debug!(%err, "could not show a desktop notification");
+        tracing::debug!(why = %crate::logsafe::kind(&err), "could not show a desktop notification");
     }
 }
 
@@ -640,7 +651,7 @@ impl Clickable {
             self.link = match Self::connect(self.address.as_deref()).await {
                 Ok(link) => link,
                 Err(err) => {
-                    tracing::debug!(%err, "no connection for notification clicks");
+                    tracing::debug!(why = %crate::logsafe::kind(&err), "no connection for notification clicks");
                     if timed_out(&err) {
                         self.stuck = Some(Instant::now());
                     }
@@ -684,7 +695,7 @@ impl Clickable {
                 true
             }
             Err(err) => {
-                tracing::debug!(%err, "could not show a notification with an action");
+                tracing::debug!(why = %crate::logsafe::kind(&err), "could not show a notification with an action");
                 if timed_out(&err) {
                     self.stuck = Some(Instant::now());
                 }

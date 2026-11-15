@@ -185,7 +185,7 @@ mod tests {
         let mut seen = Vec::new();
         while let Ok(command) = commands.try_recv() {
             if matches!(command, MatrixCmd::FetchImage { .. }) {
-                seen.push(format!("{command:?}"));
+                seen.push(command.describe());
             }
         }
         seen

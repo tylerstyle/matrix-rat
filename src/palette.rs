@@ -110,14 +110,10 @@ pub struct ForwardTarget {
     pub preview: String,
 }
 
+/// Hand-written: which room, which message and what it says stay out of logs.
 impl std::fmt::Debug for ForwardTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "ForwardTarget({}, {} chars)",
-            self.from_room_id,
-            self.preview.len()
-        )
+        write!(f, "ForwardTarget({} chars)", self.preview.len())
     }
 }
 

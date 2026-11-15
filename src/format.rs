@@ -9,7 +9,7 @@ use matrix_sdk::ruma::events::Mentions;
 use crate::complete::{EMOTE_CLOSE, EMOTE_OPEN, MentionKind, MentionMark, resolve_marks};
 
 /// What to do with a line of input.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Outgoing {
     /// A normal message. `html` is `None` when the text has no formatting.
     Text {
@@ -25,6 +25,32 @@ pub enum Outgoing {
     },
     /// Nothing is sent; show this to the user (unknown command, missing argument).
     Rejected(String),
+}
+
+/// Hand-written: a message is private, and so is whom it mentions.
+impl std::fmt::Debug for Outgoing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (name, plain, html, mentions) = match self {
+            Self::Text {
+                plain,
+                html,
+                mentions,
+            } => ("Text", plain, html, mentions),
+            Self::Emote {
+                plain,
+                html,
+                mentions,
+            } => ("Emote", plain, html, mentions),
+            Self::Rejected(_) => return f.write_str("Rejected"),
+        };
+        write!(
+            f,
+            "{name}({} bytes, html: {}, mentions: {})",
+            plain.len(),
+            html.is_some(),
+            mentions.as_ref().map_or(0, |m| m.user_ids.len())
+        )
+    }
 }
 
 impl PartialEq for Outgoing {

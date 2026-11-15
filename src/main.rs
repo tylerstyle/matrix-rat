@@ -21,6 +21,7 @@ mod keywords;
 mod lineedit;
 mod lock;
 mod logging;
+mod logsafe;
 mod manage;
 mod matrix;
 mod menu;
@@ -115,14 +116,15 @@ fn main() -> Result<()> {
     // Held for the whole run: two instances on one profile would corrupt the SDK stores.
     let _lock = lock::ProfileLock::acquire(&paths)?;
     let _log_guard = logging::init(&paths)?;
-    tracing::info!(profile = %args.profile, version = env!("CARGO_PKG_VERSION"), "starting");
+    // Not the profile's name: it is the name of the log's own directory already.
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let result = runtime.block_on(app::run(&paths, &config, args.demo, args.target));
     if let Err(err) = &result {
-        tracing::error!(?err, "exited with error");
+        tracing::error!(why = %logsafe::kind_any(err), "exited with error");
     }
     result
 }

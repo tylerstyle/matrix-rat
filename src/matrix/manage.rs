@@ -216,75 +216,130 @@ pub enum ManageCmd {
     },
 }
 
-/// Prints which room, never names, topics or who is being written to.
+/// Prints what kind of command it is, never which room, names, topics or who is being
+/// written to.
 impl std::fmt::Debug for ManageCmd {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.shown(false))
+    }
+}
+
+impl ManageCmd {
+    /// The command's name alone, for the log.
+    pub fn name(&self) -> &'static str {
         match self {
-            Self::Join { via, .. } => write!(f, "Join(via {} servers)", via.len()),
-            Self::DirectChat { create, .. } => write!(f, "DirectChat(create: {create})"),
-            Self::Create { alias, .. } => write!(f, "Create(public: {})", alias.is_some()),
-            Self::Leave { room_id } => write!(f, "Leave({room_id})"),
-            Self::Info { room_id } => write!(f, "Info({room_id})"),
-            Self::StopInfo => f.write_str("StopInfo"),
-            Self::Invite { room_id, .. } => write!(f, "Invite({room_id})"),
+            Self::Join { .. } => "Join",
+            Self::DirectChat { .. } => "DirectChat",
+            Self::Create { .. } => "Create",
+            Self::Leave { .. } => "Leave",
+            Self::Info { .. } => "Info",
+            Self::StopInfo => "StopInfo",
+            Self::Invite { .. } => "Invite",
+            Self::Kick { .. } => "Kick",
+            Self::Ban { .. } => "Ban",
+            Self::Unban { .. } => "Unban",
+            Self::SetRole { .. } => "SetRole",
+            Self::SetName { .. } => "SetName",
+            Self::SetOwnName { .. } => "SetOwnName",
+            Self::SetTopic { .. } => "SetTopic",
+            Self::SetFavourite { .. } => "SetFavourite",
+            Self::SetLowPriority { .. } => "SetLowPriority",
+            Self::SetNotify { .. } => "SetNotify",
+            Self::Preview { .. } => "Preview",
+            Self::Knock { .. } => "Knock",
+            Self::AcceptKnock { .. } => "AcceptKnock",
+            Self::DeclineKnock { .. } => "DeclineKnock",
+            Self::BanKnock { .. } => "BanKnock",
+            Self::SetJoinRule { .. } => "SetJoinRule",
+            Self::SetHistoryVisibility { .. } => "SetHistoryVisibility",
+            Self::EnableEncryption { .. } => "EnableEncryption",
+            Self::SetRoomAvatar { .. } => "SetRoomAvatar",
+            Self::RemoveRoomAvatar { .. } => "RemoveRoomAvatar",
+            Self::SetAddresses { .. } => "SetAddresses",
+            Self::CreateLocalAlias { .. } => "CreateLocalAlias",
+            Self::DeleteLocalAlias { .. } => "DeleteLocalAlias",
+            Self::SetDirect { .. } => "SetDirect",
+            Self::SetPermissions { .. } => "SetPermissions",
+        }
+    }
+
+    /// Like `Debug`, with the room's id, for tests to tell commands apart.
+    #[cfg(test)]
+    pub fn describe(&self) -> String {
+        self.shown(true)
+    }
+
+    /// `ids`: with the room's id, which only tests may ask for.
+    pub(super) fn shown(&self, ids: bool) -> String {
+        let room = |room_id: &str| ids.then(|| room_id.to_owned());
+        let reason = |reason: &Option<String>| Some(format!("reason: {}", reason.is_some()));
+        let parts = match self {
+            Self::Join { via, .. } => vec![Some(format!("via {} servers", via.len()))],
+            Self::DirectChat { create, .. } => vec![Some(format!("create: {create}"))],
+            Self::Create { alias, .. } => vec![Some(format!("public: {}", alias.is_some()))],
+            Self::StopInfo => vec![],
+            Self::Leave { room_id }
+            | Self::Info { room_id }
+            | Self::Invite { room_id, .. }
+            | Self::SetName { room_id, .. }
+            | Self::SetOwnName { room_id, .. }
+            | Self::SetTopic { room_id, .. }
+            | Self::AcceptKnock { room_id, .. }
+            | Self::DeclineKnock { room_id, .. }
+            | Self::EnableEncryption { room_id }
+            | Self::SetRoomAvatar { room_id, .. }
+            | Self::RemoveRoomAvatar { room_id }
+            | Self::CreateLocalAlias { room_id, .. }
+            | Self::DeleteLocalAlias { room_id, .. }
+            | Self::SetPermissions { room_id, .. } => vec![room(room_id)],
             Self::Kick {
-                room_id, reason, ..
-            } => write!(f, "Kick({room_id}, reason: {})", reason.is_some()),
-            Self::Ban {
-                room_id, reason, ..
-            } => write!(f, "Ban({room_id}, reason: {})", reason.is_some()),
-            Self::Unban {
-                room_id, reason, ..
-            } => write!(f, "Unban({room_id}, reason: {})", reason.is_some()),
-            Self::SetRole { room_id, level, .. } => write!(f, "SetRole({room_id}, {level})"),
-            Self::SetName { room_id, .. } => write!(f, "SetName({room_id})"),
-            Self::SetOwnName { room_id, .. } => write!(f, "SetOwnName({room_id})"),
-            Self::SetTopic { room_id, .. } => write!(f, "SetTopic({room_id})"),
-            Self::SetFavourite { room_id, on } => write!(f, "SetFavourite({room_id}, {on})"),
-            Self::SetLowPriority { room_id, on } => write!(f, "SetLowPriority({room_id}, {on})"),
-            Self::SetNotify { room_id, level } => write!(f, "SetNotify({room_id}, {level:?})"),
-            Self::Preview { request, via, .. } => {
-                write!(f, "Preview(request {request}, via {} servers)", via.len())
+                room_id, reason: r, ..
             }
+            | Self::Ban {
+                room_id, reason: r, ..
+            }
+            | Self::Unban {
+                room_id, reason: r, ..
+            }
+            | Self::BanKnock {
+                room_id, reason: r, ..
+            } => vec![room(room_id), reason(r)],
+            Self::SetRole { room_id, level, .. } => vec![room(room_id), Some(level.to_string())],
+            Self::SetFavourite { room_id, on } | Self::SetLowPriority { room_id, on } => {
+                vec![room(room_id), Some(on.to_string())]
+            }
+            Self::SetNotify { room_id, level } => vec![room(room_id), Some(format!("{level:?}"))],
+            Self::Preview { request, via, .. } => vec![
+                Some(format!("request {request}")),
+                Some(format!("via {} servers", via.len())),
+            ],
             Self::Knock {
                 request,
                 via,
-                reason,
+                reason: r,
                 ..
-            } => write!(
-                f,
-                "Knock(request {request}, via {} servers, reason: {})",
-                via.len(),
-                reason.is_some()
-            ),
-            Self::AcceptKnock { room_id, .. } => write!(f, "AcceptKnock({room_id})"),
-            Self::DeclineKnock { room_id, .. } => write!(f, "DeclineKnock({room_id})"),
-            Self::BanKnock {
-                room_id, reason, ..
-            } => write!(f, "BanKnock({room_id}, reason: {})", reason.is_some()),
-            Self::SetJoinRule { room_id, rule } => write!(f, "SetJoinRule({room_id}, {rule:?})"),
+            } => vec![
+                Some(format!("request {request}")),
+                Some(format!("via {} servers", via.len())),
+                reason(r),
+            ],
+            Self::SetJoinRule { room_id, rule } => vec![room(room_id), Some(format!("{rule:?}"))],
             Self::SetHistoryVisibility {
                 room_id,
                 visibility,
-            } => write!(f, "SetHistoryVisibility({room_id}, {visibility:?})"),
-            Self::EnableEncryption { room_id } => write!(f, "EnableEncryption({room_id})"),
-            Self::SetRoomAvatar { room_id, .. } => write!(f, "SetRoomAvatar({room_id})"),
-            Self::RemoveRoomAvatar { room_id } => write!(f, "RemoveRoomAvatar({room_id})"),
+            } => vec![room(room_id), Some(format!("{visibility:?}"))],
             Self::SetAddresses {
                 room_id,
                 canonical,
                 alt_aliases,
-            } => write!(
-                f,
-                "SetAddresses({room_id}, main: {}, alt: {})",
-                canonical.is_some(),
-                alt_aliases.len()
-            ),
-            Self::CreateLocalAlias { room_id, .. } => write!(f, "CreateLocalAlias({room_id})"),
-            Self::DeleteLocalAlias { room_id, .. } => write!(f, "DeleteLocalAlias({room_id})"),
-            Self::SetDirect { room_id, direct } => write!(f, "SetDirect({room_id}, {direct})"),
-            Self::SetPermissions { room_id, .. } => write!(f, "SetPermissions({room_id})"),
-        }
+            } => vec![
+                room(room_id),
+                Some(format!("main: {}", canonical.is_some())),
+                Some(format!("alt: {}", alt_aliases.len())),
+            ],
+            Self::SetDirect { room_id, direct } => vec![room(room_id), Some(direct.to_string())],
+        };
+        crate::logsafe::shape(self.name(), parts)
     }
 }
 
@@ -356,15 +411,14 @@ impl std::fmt::Debug for ManageEvent {
                 write!(f, "Opened(request {request}, ok: {})", result.is_ok())
             }
             Self::NoDirectChat { request, .. } => write!(f, "NoDirectChat(request {request})"),
-            Self::Left { room_id, result } => write!(f, "Left({room_id}, ok: {})", result.is_ok()),
-            Self::Done {
-                room_id,
-                change,
-                result,
-            } => write!(f, "Done({room_id}, {change:?}, ok: {})", result.is_ok()),
-            Self::Info { room_id, result } => match result {
-                Ok(details) => write!(f, "Info({room_id}, {details:?})"),
-                Err(_) => write!(f, "Info({room_id}, failed)"),
+            // Which room stays out of logs.
+            Self::Left { result, .. } => write!(f, "Left(ok: {})", result.is_ok()),
+            Self::Done { change, result, .. } => {
+                write!(f, "Done({change:?}, ok: {})", result.is_ok())
+            }
+            Self::Info { result, .. } => match result {
+                Ok(details) => write!(f, "Info({details:?})"),
+                Err(_) => f.write_str("Info(failed)"),
             },
             Self::Preview { request, result } => {
                 write!(f, "Preview(request {request}, ok: {})", result.is_ok())
@@ -773,7 +827,7 @@ impl Manager {
 
     /// Every command runs in a task of its own: none of them may hold up the session.
     pub fn handle(&mut self, command: ManageCmd) {
-        tracing::debug!(?command, "room management");
+        tracing::debug!(command = command.name(), "room management");
         let client = self.client.clone();
         let events = self.events.clone();
         let emit = move |event: ManageEvent| {
@@ -1328,10 +1382,16 @@ pub(super) fn room(client: &Client, room_id: &str) -> Result<Room, String> {
 }
 
 /// "Could not join: …", with the reason in words a person can act on.
-pub(super) fn failed(what: &str, err: &matrix_sdk::Error) -> String {
-    // The error's own text can name people, rooms and servers; its kind says enough.
-    tracing::warn!(kind = ?err.client_api_error_kind(), "could not {what}");
-    format!("Could not {what}: {}", explain(err))
+pub(super) fn failed(what: &'static str, err: &matrix_sdk::Error) -> String {
+    failed_saying(what, what, err)
+}
+
+/// [`failed`] for a `shown` text that names a server or a person: the log gets `what`
+/// instead. The error's own text can name people, rooms and servers; its kind says
+/// enough there.
+pub(super) fn failed_saying(what: &'static str, shown: &str, err: &matrix_sdk::Error) -> String {
+    tracing::warn!(why = %crate::logsafe::kind(err), "could not {what}");
+    format!("Could not {shown}: {}", explain(err))
 }
 
 /// The server's own words, made safe and short.
@@ -1547,7 +1607,10 @@ pub(super) async fn cleanup_left_room(client: &Client, room: &Room) {
     if matches!(room.state(), RoomState::Left | RoomState::Banned)
         && let Err(err) = room.clear_composer_draft(None).await
     {
-        tracing::warn!(?err, "could not remove the draft of a room after leaving");
+        tracing::warn!(
+            why = %crate::logsafe::kind(&err),
+            "could not remove the draft of a room after leaving"
+        );
     }
     // Clear the room's event cache while it still exists in `base_client`: calling
     // `room.forget()` first drops it from `base_client`, causing `event_cache().forget_room()`
@@ -1557,7 +1620,7 @@ pub(super) async fn cleanup_left_room(client: &Client, room: &Room) {
         let _ = client.event_cache().forget_room(room.room_id()).await;
         if let Err(err) = room.forget().await {
             tracing::warn!(
-                kind = ?err.client_api_error_kind(),
+                why = %crate::logsafe::kind(&err),
                 "could not forget the room after leaving"
             );
         }
@@ -1568,7 +1631,7 @@ async fn with_member<F>(
     client: &Client,
     room_id: &str,
     user_id: &str,
-    what: &str,
+    what: &'static str,
     work: F,
 ) -> Result<(), String>
 where
@@ -1829,7 +1892,7 @@ fn present(entries: &[Entry], levels: Option<&RoomPowerLevels>, own: &UserId) ->
 async fn stored_members(room: &Room) -> Result<Vec<Entry>, String> {
     let wanted = RoomMemberships::JOIN | RoomMemberships::INVITE | RoomMemberships::BAN;
     let members = room.members_no_sync(wanted).await.map_err(|err| {
-        tracing::warn!(%err, "could not read the room's members");
+        tracing::warn!(why = %crate::logsafe::kind(&err), "could not read the room's members");
         "The member list could not be read.".to_owned()
     })?;
     Ok(members
@@ -2510,6 +2573,9 @@ mod tests {
             user_id: "@bob:example.org".into(),
         };
         assert!(!format!("{command:?}").contains("bob"));
+        // Not even which room; tests can still ask for that.
+        assert_eq!(format!("{command:?}"), "Invite");
+        assert_eq!(command.describe(), "Invite(!r:example.org)");
         let command = ManageCmd::Join {
             request: 0,
             target: "#secret:example.org".into(),
@@ -2724,9 +2790,14 @@ mod tests {
         manage(ManageCmd::Info {
             room_id: room_id.clone(),
         });
-        // The first answers may come before the sync has brought the room's state.
+        // The first answers may come before the sync has brought the room's state, and
+        // that comes in pieces: the name can be there before the topic.
         let details = info(&mut events, &room_id, |d| {
-            d.name.contains("manage test") && d.members.len() == 1 && d.can_invite
+            d.name.contains("manage test")
+                && !d.topic.is_empty()
+                && d.encrypted == Some(true)
+                && d.members.len() == 1
+                && d.can_invite
         })
         .await;
         assert_eq!(details.name, format!("matrix-rat manage test {tag}"));
@@ -2962,10 +3033,26 @@ mod tests {
         manage(ManageCmd::Info {
             room_id: room_id.clone(),
         });
+        // (An answer from before the leaving may still be on its way, and the client
+        // may know the room for a moment longer: what counts is that the looking
+        // fails in the end.)
+        let mut asked_again = false;
         loop {
-            if let ManageEvent::Info { result, .. } = next_manage(&mut events).await {
-                assert!(result.is_err());
-                break;
+            if let ManageEvent::Info {
+                room_id: about,
+                result,
+            } = next_manage(&mut events).await
+                && about == room_id
+            {
+                if result.is_err() {
+                    break;
+                }
+                assert!(!asked_again, "a forgotten room can still be looked at");
+                asked_again = true;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                manage(ManageCmd::Info {
+                    room_id: room_id.clone(),
+                });
             }
         }
 

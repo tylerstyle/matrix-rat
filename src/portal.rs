@@ -177,7 +177,7 @@ async fn read_initial_scheme(proxy: &Proxy<'static>) -> Option<Option<ColorSchem
         Err(err) if is_missing_service(&err) => return None,
         Err(err) if is_not_found(&err) => return Some(None),
         Err(err) => {
-            tracing::debug!(?err, "portal ReadOne failed; trying Read");
+            tracing::debug!(why = %crate::logsafe::kind(&err), "portal ReadOne failed; trying Read");
         }
     }
     // Settings v1 fallback: `Read` returns a nested variant (`v(v(u))`).
@@ -190,7 +190,7 @@ async fn read_initial_scheme(proxy: &Proxy<'static>) -> Option<Option<ColorSchem
         Err(err) if is_missing_service(&err) => None,
         Err(err) if is_not_found(&err) => Some(None),
         Err(err) => {
-            tracing::debug!(?err, "portal Read failed");
+            tracing::debug!(why = %crate::logsafe::kind(&err), "portal Read failed");
             Some(None)
         }
     }
