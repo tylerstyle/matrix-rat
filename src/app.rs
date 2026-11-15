@@ -2399,8 +2399,9 @@ impl App {
                 self.sidebar.hidden = !self.sidebar.hidden;
                 self.save_setting("sidebar_hidden", self.sidebar.hidden);
                 // The list would fill the window if it kept the focus.
+                self.dragging_splitter = false;
                 if self.sidebar.hidden && self.focus == Pane::Sidebar {
-                    self.focus = Pane::Composer;
+                    self.set_focus(Pane::Composer);
                 }
                 // Pictures are placed by column: everything moves.
                 self.repaint = true;

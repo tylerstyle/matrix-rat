@@ -369,12 +369,21 @@ mod tests {
         assert_eq!(saved.len(), 1);
         assert!(saved[0].2, "opened after saving");
 
-        // From inside the viewer as well.
+        // From inside the viewer as well, where what it says is shown too (the viewer
+        // covers the status line).
         app.saving.clear();
         app.on_event(key(KeyCode::Char('v')));
         assert!(app.images.viewer_open());
         app.on_event(key(KeyCode::Char('O')));
         assert_eq!(saves(&mut commands).len(), 1);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains("Saving cat.png"), "{screen}");
+        assert!(screen.contains("system viewer"), "{screen}");
     }
 
     #[test]

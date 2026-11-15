@@ -218,6 +218,7 @@ pub fn draw_viewer(frame: &mut Frame, app: &mut App, area: Rect) {
         Some(key) => format!(" {key} system viewer · Esc close "),
         None => " Esc close ".to_owned(),
     };
+    let hint_width = crate::text::width(&hint);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(theme.style(Role::OverlayBorder))
@@ -227,6 +228,26 @@ pub fn draw_viewer(frame: &mut Frame, app: &mut App, area: Rect) {
             theme.style(Role::TitleFocused),
         )))
         .title_bottom(Line::from(Span::styled(hint, theme.style(Role::Muted))).right_aligned());
+    // The viewer covers the status line, where a notice would be: a question before a
+    // large download, or how saving went, is said here.
+    let block = match &app.toast {
+        Some((text, _)) => {
+            let room = usize::from(area.width).saturating_sub(hint_width + 8);
+            let notice = truncate(&crate::text::sanitize_line(text), room);
+            if notice.is_empty() {
+                block
+            } else {
+                block.title_bottom(
+                    Line::from(Span::styled(
+                        format!(" {notice} "),
+                        theme.style(Role::Toast),
+                    ))
+                    .left_aligned(),
+                )
+            }
+        }
+        None => block,
+    };
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
