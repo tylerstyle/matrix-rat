@@ -216,12 +216,14 @@ fn order_children(mut children: Vec<ChildEvent>) -> (Vec<ChildEvent>, bool) {
     (children, more)
 }
 
-/// Whether we may change what is in `space`.
+/// Whether we may change what is in `space`. Without power levels in the store, the
+/// rules of a room that has none apply (its creators may), as for the room info.
 async fn may_edit(space: &Room) -> bool {
     space.state() == RoomState::Joined
-        && space.power_levels().await.is_ok_and(|levels| {
-            levels.user_can_send_state(space.own_user_id(), StateEventType::SpaceChild)
-        })
+        && space
+            .power_levels_or_default()
+            .await
+            .user_can_send_state(space.own_user_id(), StateEventType::SpaceChild)
 }
 
 /// What the server says about the rooms of a space: name, and whether it is a space,
@@ -506,32 +508,47 @@ async fn child_content(space: &Room, child: &RoomId) -> Option<SpaceChildEventCo
     event.as_original().map(|event| event.content.clone())
 }
 
-/// The room's own half of the link (`m.space.parent`, not canonical), where we may
-/// set it. The space alone decides what is in it, so this is a courtesy: failing
-/// here is logged, not reported.
+/// The room's `m.space.parent` content naming `space`, if it links to it: one that
+/// was emptied or redacted does not.
+async fn parent_content(room: &Room, space: &RoomId) -> Option<SpaceParentEventContent> {
+    let raw = room
+        .get_state_event_static_for_key::<SpaceParentEventContent, _>(space)
+        .await
+        .ok()
+        .flatten()?;
+    let RawSyncOrStrippedState::Sync(raw) = raw else {
+        return None;
+    };
+    let event = raw.deserialize().ok()?;
+    event.as_original().map(|event| event.content.clone())
+}
+
+/// The room's own half of the link (`m.space.parent`), where we may set it. The
+/// space alone decides what is in it, so this is a courtesy: failing here is logged,
+/// not reported.
 async fn link_parent(room: &Room, space: &Room, own: &UserId, add: bool) {
     if room.state() != RoomState::Joined {
         return;
     }
     let allowed = room
-        .power_levels()
+        .power_levels_or_default()
         .await
-        .is_ok_and(|levels| levels.user_can_send_state(own, StateEventType::SpaceParent));
+        .user_can_send_state(own, StateEventType::SpaceParent);
     if !allowed {
         return;
     }
+    let linked = parent_content(room, space.room_id()).await;
     let result = if add {
-        let content = SpaceParentEventContent::new(route(space, own).await);
+        let mut content = SpaceParentEventContent::new(route(space, own).await);
+        // Whether this is the room's main space is the room's admins' choice: a
+        // link that says so keeps saying it.
+        content.canonical = linked.is_some_and(|link| link.canonical);
         room.send_state_event_for_key(space.room_id(), content)
             .await
             .map(|_| ())
     } else {
         // Only a link that is there is taken back.
-        let linked = room
-            .get_state_event_static_for_key::<SpaceParentEventContent, _>(space.room_id())
-            .await
-            .is_ok_and(|event| event.is_some());
-        if !linked {
+        if linked.is_none() {
             return;
         }
         room.send_state_event_raw(
@@ -569,6 +586,7 @@ mod tests {
     use matrix_sdk::ruma::room::RoomType;
     use matrix_sdk::ruma::serde::Raw;
     use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedRoomId, SpaceChildOrder, UInt};
+    use serde_json::json;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
@@ -690,6 +708,59 @@ mod tests {
             commands[0].describe(),
             "CreateSpace(request 1, public: true)"
         );
+    }
+
+    fn get(client: &Client, id: &str) -> Room {
+        client.get_room(&RoomId::parse(id).unwrap()).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn who_made_a_space_may_change_it_while_its_power_levels_are_not_known_here() {
+        let server = fake::Server::start(json!({ "join": {
+                "!made:localhost": fake::joined(true, vec![]),
+                "!ruled:localhost": fake::joined(true, vec![fake::state(
+                    "m.room.power_levels",
+                    "",
+                    json!({ "users": { "@bob:localhost": 100 }, "state_default": 50 }),
+                )]),
+            } }))
+        .await;
+        let client = fake::client(&server).await;
+        assert!(may_edit(&get(&client, "!made:localhost")).await);
+        // Power levels that leave us out are kept to.
+        assert!(!may_edit(&get(&client, "!ruled:localhost")).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_rooms_link_to_its_space_keeps_being_the_main_one_and_is_not_taken_back_twice() {
+        const SPACE: &str = "!space:localhost";
+        let parent = |content| fake::state("m.space.parent", SPACE, content);
+        let server = fake::Server::start(json!({ "join": {
+                SPACE: fake::joined(true, vec![]),
+                "!main:localhost": fake::joined(false, vec![parent(
+                    json!({ "via": ["localhost"], "canonical": true }),
+                )]),
+                "!emptied:localhost": fake::joined(false, vec![parent(json!({}))]),
+            } }))
+        .await;
+        let client = fake::client(&server).await;
+        let space = get(&client, SPACE);
+        let own = client.user_id().unwrap().to_owned();
+        // Linked again, it is still the room's main space.
+        link_parent(&get(&client, "!main:localhost"), &space, &own, true).await;
+        let sent = server.sent_state("!main:localhost");
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(
+            (sent[0].0.as_str(), sent[0].1.as_str()),
+            ("m.space.parent", SPACE)
+        );
+        assert_eq!(sent[0].2["canonical"], json!(true));
+        // A link that was taken back already is not taken back again; one that is
+        // there is.
+        link_parent(&get(&client, "!emptied:localhost"), &space, &own, false).await;
+        assert!(server.sent_state("!emptied:localhost").is_empty());
+        link_parent(&get(&client, "!main:localhost"), &space, &own, false).await;
+        assert_eq!(server.sent_state("!main:localhost")[1].2, json!({}));
     }
 
     /// A space with one room in it shows up as a space that contains that room.
@@ -960,5 +1031,236 @@ mod tests {
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// A homeserver for the tests of the worker's side of spaces, without a server: it
+/// answers one sync with the rooms it is given and keeps every request it is sent.
+#[cfg(test)]
+pub(super) mod fake {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use matrix_sdk::Client;
+    use matrix_sdk::config::SyncSettings;
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Who the client is signed in as.
+    pub const ME: &str = "@alice:localhost";
+
+    /// A request as the server saw it.
+    #[derive(Clone, Debug)]
+    pub struct Request {
+        pub method: String,
+        /// Without the query.
+        pub path: String,
+        pub body: String,
+    }
+
+    pub struct Server {
+        pub url: String,
+        requests: Arc<Mutex<Vec<Request>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl Server {
+        /// `rooms`: the `rooms` of the sync it answers.
+        pub async fn start(rooms: Value) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let seen = requests.clone();
+            let sync = json!({ "next_batch": "s1", "rooms": rooms }).to_string();
+            let task = tokio::spawn(async move {
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    let seen = seen.clone();
+                    let sync = sync.clone();
+                    tokio::spawn(async move {
+                        let Some(request) = read(&mut stream).await else {
+                            return;
+                        };
+                        seen.lock().unwrap().push(request.clone());
+                        let body = usual(&request, &sync);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            });
+            Self {
+                url,
+                requests,
+                task,
+            }
+        }
+
+        /// What was asked so far, in order.
+        pub fn requests(&self) -> Vec<Request> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        /// The state events sent to the room `room_id`, as type, state key and content.
+        pub fn sent_state(&self, room_id: &str) -> Vec<(String, String, Value)> {
+            let prefix = format!("/_matrix/client/v3/rooms/{room_id}/state/");
+            self.requests()
+                .into_iter()
+                .filter(|request| request.method == "PUT")
+                .filter_map(|request| {
+                    let rest = request.path.strip_prefix(&prefix)?.to_owned();
+                    let (kind, key) = rest.split_once('/').unwrap_or((&rest, ""));
+                    let content = serde_json::from_str(&request.body).unwrap_or(Value::Null);
+                    Some((kind.to_owned(), unescape(key), content))
+                })
+                .collect()
+        }
+    }
+
+    /// One request off the connection, body and all.
+    async fn read(stream: &mut tokio::net::TcpStream) -> Option<Request> {
+        let mut data = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let head_end = loop {
+            if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+            let n = stream.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            data.extend_from_slice(&chunk[..n]);
+        };
+        let head = String::from_utf8_lossy(&data[..head_end]).into_owned();
+        let length = head
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while data.len() < head_end + length {
+            let n = stream.read(&mut chunk).await.ok()?;
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&chunk[..n]);
+        }
+        let mut words = head.lines().next()?.split_whitespace();
+        let method = words.next()?.to_owned();
+        let target = words.next()?;
+        let path = target.split('?').next().unwrap_or(target);
+        Some(Request {
+            method,
+            path: unescape(path),
+            body: String::from_utf8_lossy(&data[head_end..]).into_owned(),
+        })
+    }
+
+    /// `%21` and the like, as the client writes room ids into paths.
+    fn unescape(text: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut at = 0;
+        while at < bytes.len() {
+            let hex = (bytes[at] == b'%')
+                .then(|| text.get(at + 1..at + 3))
+                .flatten()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+            match hex {
+                Some(byte) => {
+                    out.push(byte);
+                    at += 3;
+                }
+                None => {
+                    out.push(bytes[at]);
+                    at += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// What a homeserver says that has nothing to tell.
+    fn usual(request: &Request, sync: &str) -> String {
+        let path = request.path.as_str();
+        if path == "/_matrix/client/versions" {
+            r#"{"versions":["v1.11"]}"#.to_owned()
+        } else if path.ends_with("/sync") {
+            sync.to_owned()
+        } else if path.ends_with("/keys/upload") {
+            r#"{"one_time_key_counts":{}}"#.to_owned()
+        } else if path.ends_with("/keys/query") {
+            r#"{"device_keys":{}}"#.to_owned()
+        } else if request.method == "PUT" && path.contains("/state/") {
+            r#"{"event_id":"$sent"}"#.to_owned()
+        } else {
+            "{}".to_owned()
+        }
+    }
+
+    /// A client signed in as `ME`, synced once.
+    pub async fn client(server: &Server) -> Client {
+        use matrix_sdk::authentication::SessionTokens;
+        use matrix_sdk::authentication::matrix::MatrixSession;
+        let client = Client::builder()
+            .homeserver_url(&server.url)
+            .build()
+            .await
+            .unwrap();
+        let session = matrix_sdk::AuthSession::Matrix(MatrixSession {
+            meta: matrix_sdk::SessionMeta {
+                user_id: ME.try_into().unwrap(),
+                device_id: "FAKE".into(),
+            },
+            tokens: SessionTokens {
+                access_token: "token".into(),
+                refresh_token: None,
+            },
+        });
+        client.restore_session(session).await.unwrap();
+        client.sync_once(SyncSettings::default()).await.unwrap();
+        client
+    }
+
+    /// A state event, sent by `ME` unless `sender` says otherwise.
+    pub fn state(kind: &str, key: &str, content: Value) -> Value {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        json!({
+            "type": kind,
+            "state_key": key,
+            "content": content,
+            "sender": ME,
+            "event_id": format!("$e{n}"),
+            "origin_server_ts": n,
+        })
+    }
+
+    fn create(space: bool, creator: &str) -> Value {
+        let mut content = json!({ "creator": creator, "room_version": "10" });
+        if space {
+            content["type"] = json!("m.space");
+        }
+        content
+    }
+
+    /// A room (or space) we made and are in, with `more` of its state.
+    pub fn joined(space: bool, more: Vec<Value>) -> Value {
+        let mut events = vec![
+            state("m.room.create", "", create(space, ME)),
+            state("m.room.member", ME, json!({ "membership": "join" })),
+        ];
+        events.extend(more);
+        json!({
+            "state": { "events": events },
+            "timeline": { "events": [], "limited": false },
+        })
     }
 }
