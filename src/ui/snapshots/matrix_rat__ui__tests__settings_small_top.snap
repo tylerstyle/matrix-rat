@@ -17,11 +17,11 @@ expression: top
 "│ O  off-t│   Read receipts       ● on                               │        ┃│"
 "│         │   Read markers        ● on                               │        ┃│"
 "│         │   Notifications       ○ off                              │        ┃│"
+"│         │   Do not disturb      ○ off                              │        ┃│"
 "│         │   Download folder     ~/Downloads                        │        ┃│"
 "│         │ Help                                                     │        ┃│"
-"│         │   Key bindings        default                            │        ┃│"
-"│         │ Account                                                  │k 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
-"│         │   Profile             Edit…                            ▼ │─────────╯"
+"│         │   Key bindings        default                            │k 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
+"│         │ Account                                                ▼ │─────────╯"
 "│         │ F3 cycles this, or the active dark/light slot when       │─────────╮"
 "│         │ paired; themes/ files reload live.                       │   📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
 "╰─────────╰─────────────── ↑↓ select · ←→ change · Enter · Esc close ╯─────────╯"
