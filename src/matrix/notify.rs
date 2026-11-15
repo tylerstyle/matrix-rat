@@ -297,7 +297,10 @@ fn describe(event: &AnySyncTimelineEvent) -> String {
         AnySyncMessageLikeEvent::RoomEncrypted(_) => "Encrypted message".to_owned(),
         AnySyncMessageLikeEvent::Sticker(_) => "sent a sticker".to_owned(),
         AnySyncMessageLikeEvent::UnstablePollStart(poll) => match poll.as_original() {
-            Some(poll) => format!("started a poll: {}", poll.content.poll_start().question.text),
+            Some(poll) => format!(
+                "started a poll: {}",
+                poll.content.poll_start().question.text
+            ),
             None => "New activity".to_owned(),
         },
         AnySyncMessageLikeEvent::PollStart(_) => "started a poll".to_owned(),

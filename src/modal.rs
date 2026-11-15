@@ -302,6 +302,8 @@ pub enum Setting {
     Theme,
     SidebarWidth,
     RoomPreviews,
+    /// Previews of the first link of a message, asked of the homeserver.
+    LinkPreviews,
     Mouse,
     TypingNotices,
     ReadReceipts,
@@ -328,13 +330,14 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 19] = [
+    pub const ALL: [Setting; 20] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
         Setting::ThemeLight,
         Setting::SidebarWidth,
         Setting::RoomPreviews,
+        Setting::LinkPreviews,
         Setting::Mouse,
         Setting::TypingNotices,
         Setting::ReadReceipts,
@@ -369,6 +372,7 @@ impl Setting {
             Setting::ThemeLight => "Light theme",
             Setting::SidebarWidth => "Room list width",
             Setting::RoomPreviews => "Room previews",
+            Setting::LinkPreviews => "Link previews",
             Setting::Mouse => "Mouse",
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
@@ -396,6 +400,9 @@ impl Setting {
             Setting::SidebarWidth => "You can also drag the line next to the room list.",
             Setting::RoomPreviews => {
                 "Show the latest message under each room (and larger room pictures)."
+            }
+            Setting::LinkPreviews => {
+                "Under a message, what its first link is about. Your homeserver fetches the link, so it learns it; in encrypted rooms only with \"all rooms\"."
             }
             Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
             Setting::TypingNotices => "Show others when you are typing.",

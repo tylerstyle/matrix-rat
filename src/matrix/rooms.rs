@@ -84,6 +84,7 @@ pub struct Timelines {
     open_tx: UnboundedSender<OpenedTimeline>,
     open_rx: UnboundedReceiver<OpenedTimeline>,
     media: super::media::Media,
+    previews: super::previews::Previews,
     /// Running requests for member lists (for sender names).
     member_fetches: tokio::task::JoinSet<()>,
     /// Set while a command for a thread is handled: the event the thread starts at.
@@ -114,6 +115,7 @@ impl Timelines {
         let (open_tx, open_rx) = unbounded_channel();
         Self {
             media: super::media::Media::new(client.clone(), events.clone()),
+            previews: super::previews::Previews::new(client.clone(), events.clone()),
             member_fetches: tokio::task::JoinSet::new(),
             uploads: super::upload::Uploads::new(client.clone(), events.clone()),
             client,
@@ -778,8 +780,9 @@ impl Timelines {
                         info.mimetype = Some(m);
                     }
                     let body = crate::text::sanitize_line(&name);
-                    let content =
-                        matrix_sdk::ruma::events::sticker::StickerEventContent::new(body, info, mxc);
+                    let content = matrix_sdk::ruma::events::sticker::StickerEventContent::new(
+                        body, info, mxc,
+                    );
                     timeline.send(content.into()).await?;
                     Ok(())
                 })
@@ -1144,6 +1147,7 @@ impl Timelines {
                 Err(err) => self.fail("Could not leave", err),
             },
             MatrixCmd::FetchAvatar { url } => self.media.fetch_avatar(url),
+            MatrixCmd::LinkPreview { url } => self.previews.fetch(url),
             MatrixCmd::FetchImage {
                 key,
                 media,

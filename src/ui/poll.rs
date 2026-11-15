@@ -9,17 +9,14 @@ use ratatui::widgets::Paragraph;
 use super::hit::{HitId, InputTarget};
 use super::modal::{FIELD_LABEL, button, centered, field, popup, row};
 use crate::app::App;
-use crate::modal::{MAX_POLL_ANSWERS, MIN_POLL_ANSWERS, PollFormPopup, PollFormSlot, PollVotePopup};
+use crate::modal::{
+    MAX_POLL_ANSWERS, MIN_POLL_ANSWERS, PollFormPopup, PollFormSlot, PollVotePopup,
+};
 use crate::text::{truncate, width, wrap};
 use crate::theme::Role;
 
 /// Draws the create/edit poll modal (`PollFormPopup`).
-pub(super) fn draw_form(
-    frame: &mut Frame,
-    app: &mut App,
-    area: Rect,
-    form: &mut PollFormPopup,
-) {
+pub(super) fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, form: &mut PollFormPopup) {
     let slots = form.slots();
     // Question + Answers + AddAnswer? + Kind + MaxSelections form the scrollable body;
     // Submit/Cancel buttons and the error/hint line stay pinned below.
@@ -133,7 +130,10 @@ pub(super) fn draw_form(
                 frame.render_widget(
                     Line::from(vec![
                         Span::raw(" ".repeat(FIELD_LABEL.min(r.width as usize))),
-                        Span::styled(truncate(&label, r.width.saturating_sub(FIELD_LABEL as u16) as usize), style),
+                        Span::styled(
+                            truncate(&label, r.width.saturating_sub(FIELD_LABEL as u16) as usize),
+                            style,
+                        ),
                     ]),
                     r,
                 );
@@ -174,11 +174,17 @@ pub(super) fn draw_form(
                 let desc = if form.max_selections <= 1 {
                     "1 (single choice)".to_owned()
                 } else {
-                    format!("{} (up to {} choices)", form.max_selections, form.max_selections)
+                    format!(
+                        "{} (up to {} choices)",
+                        form.max_selections, form.max_selections
+                    )
                 };
                 let mut x = r.x;
                 frame.render_widget(
-                    Line::from(Span::styled(format!("{:<FIELD_LABEL$}", "Choices"), label_style)),
+                    Line::from(Span::styled(
+                        format!("{:<FIELD_LABEL$}", "Choices"),
+                        label_style,
+                    )),
                     Rect::new(x, r.y, (FIELD_LABEL as u16).min(r.width), 1),
                 );
                 x = x.saturating_add(FIELD_LABEL as u16);
@@ -214,10 +220,7 @@ pub(super) fn draw_form(
                         } else {
                             theme.style(Role::Muted)
                         };
-                        frame.render_widget(
-                            Line::from(Span::styled(" + ", plus_style)),
-                            plus_rect,
-                        );
+                        frame.render_widget(Line::from(Span::styled(" + ", plus_style)), plus_rect);
                         app.hits.add(plus_rect, HitId::PollFormMaxStep(1));
                     }
                 }
@@ -261,7 +264,10 @@ pub(super) fn draw_form(
     let note_rect = row(inner, inner.height - 1);
     let (msg, role) = match &form.error {
         Some(err) => (err.as_str(), Role::Error),
-        None => ("2–20 answers · undisclosed hides counts until ended", Role::Muted),
+        None => (
+            "2–20 answers · undisclosed hides counts until ended",
+            Role::Muted,
+        ),
     };
     frame.render_widget(
         Line::from(Span::styled(
@@ -325,7 +331,10 @@ pub(super) fn draw_vote(
     };
     frame.render_widget(
         Line::from(Span::styled(
-            truncate(&format!("{kind_note} · {visibility_note}"), inner.width as usize),
+            truncate(
+                &format!("{kind_note} · {visibility_note}"),
+                inner.width as usize,
+            ),
             theme.style(Role::Muted),
         )),
         row(inner, q_show as u16),
@@ -436,7 +445,10 @@ pub(super) fn draw_vote(
             ),
             Role::Muted,
         ),
-        None => ("Results will show after the poll ends".to_owned(), Role::Muted),
+        None => (
+            "Results will show after the poll ends".to_owned(),
+            Role::Muted,
+        ),
     };
     frame.render_widget(
         Line::from(Span::styled(

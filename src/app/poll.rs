@@ -302,8 +302,7 @@ impl App {
             {
                 form.step_max(1);
             }
-            (KeyCode::Delete, KeyModifiers::CONTROL)
-            | (KeyCode::Backspace, KeyModifiers::ALT) => {
+            (KeyCode::Delete, KeyModifiers::CONTROL) | (KeyCode::Backspace, KeyModifiers::ALT) => {
                 if let PollFormSlot::Answer(i) = slot
                     && form.answers.get(i).is_some_and(|e| e.is_empty())
                 {
@@ -547,10 +546,7 @@ mod tests {
     use crate::config::Config;
     use crate::matrix::MatrixHandle;
 
-    fn test_app() -> (
-        App,
-        tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>,
-    ) {
+    fn test_app() -> (App, tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>) {
         let (handle, rx) = MatrixHandle::for_test();
         let mut app = App::new(&Config::default(), PathBuf::new(), Some(handle));
         app.rooms = vec![crate::model::Room::new(
@@ -574,7 +570,10 @@ mod tests {
             panic!("expected PollForm modal");
         };
         let dbg = format!("{form:?}");
-        assert!(!dbg.contains("Best lunch spot?"), "form debug leaked: {dbg}");
+        assert!(
+            !dbg.contains("Best lunch spot?"),
+            "form debug leaked: {dbg}"
+        );
         assert_eq!(form.question.as_str(), "Best lunch spot?");
         assert_eq!(form.focus, 1);
 
@@ -643,9 +642,7 @@ mod tests {
         edit_form.question.set("Updated lunch?".to_owned());
         app.submit_poll_form();
         match rx.try_recv().expect("EditPoll command") {
-            MatrixCmd::EditPoll {
-                item, question, ..
-            } => {
+            MatrixCmd::EditPoll { item, question, .. } => {
                 assert_eq!(item, ItemRef::Event("$poll1".into()));
                 assert_eq!(question, "Updated lunch?");
             }

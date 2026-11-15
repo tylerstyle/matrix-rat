@@ -12,6 +12,7 @@ mod media;
 mod moderation;
 mod notify;
 mod people;
+mod previews;
 mod receipts;
 mod rooms;
 mod safety;
@@ -253,6 +254,11 @@ pub enum MatrixCmd {
         /// Open it with the desktop's program for it afterwards.
         open: bool,
     },
+    /// Ask the homeserver what a web address is about; answered with
+    /// [`MatrixEvent::LinkPreview`]. Only sent when the user turned link previews on.
+    LinkPreview {
+        url: String,
+    },
     /// Fetch the small picture of a room; answered with [`MatrixEvent::Avatar`].
     FetchAvatar {
         /// Its `mxc://` address.
@@ -436,6 +442,8 @@ impl std::fmt::Debug for MatrixCmd {
             // The source of an encrypted file carries its key.
             Self::FetchImage { full, .. } => write!(f, "FetchImage(full: {full})"),
             Self::FetchAvatar { .. } => f.write_str("FetchAvatar"),
+            // The address is from a message.
+            Self::LinkPreview { .. } => f.write_str("LinkPreview"),
             Self::Verification(command) => write!(f, "Verification({command:?})"),
             Self::SaveFile { open, .. } => write!(f, "SaveFile(open: {open})"),
             Self::OpenThread { room_id, root, .. } => write!(f, "OpenThread({room_id}, {root})"),
@@ -572,6 +580,8 @@ pub struct RoomSummary {
     pub direct: bool,
     /// True when the room's notification mode is `Mute`.
     pub muted: bool,
+    /// Encrypted, or not known to be unencrypted yet.
+    pub encrypted: bool,
 }
 
 impl RoomSummary {
@@ -702,6 +712,12 @@ pub enum MatrixEvent {
         key: String,
         open: bool,
         result: Result<std::path::PathBuf, String>,
+    },
+    /// Outcome of [`MatrixCmd::LinkPreview`]: what the server said about the address
+    /// (`None`: nothing, for whatever reason).
+    LinkPreview {
+        url: String,
+        result: Option<crate::previews::Raw>,
     },
     /// Outcome of [`MatrixCmd::FetchAvatar`].
     Avatar {
@@ -865,6 +881,9 @@ impl std::fmt::Debug for MatrixEvent {
                 write!(f, "Image(full: {full}, ok: {})", result.is_ok())
             }
             Self::Avatar { result, .. } => write!(f, "Avatar(ok: {})", result.is_ok()),
+            Self::LinkPreview { result, .. } => {
+                write!(f, "LinkPreview(found: {})", result.is_some())
+            }
             Self::Security(security) => write!(f, "Security({security:?})"),
             Self::Verification(update) => {
                 write!(f, "Verification({}, {:?})", update.flow, update.stage)
@@ -1937,6 +1956,10 @@ async fn summarize(
                 .map(|alias| crate::text::sanitize_line(alias.as_str())),
             direct,
             muted,
+            encrypted: !matches!(
+                room.encryption_state(),
+                matrix_sdk::EncryptionState::NotEncrypted
+            ),
         });
     }
     summaries

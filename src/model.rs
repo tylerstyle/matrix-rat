@@ -582,6 +582,31 @@ impl Message {
         self.image.as_ref()?.attachment()
     }
 
+    /// The code blocks of the message, in order (empty ones included: their index is
+    /// what the display refers to). Only formatted messages have any: a plain body
+    /// with backticks is shown as it was written.
+    pub fn code_blocks(&self) -> Vec<crate::rich::CodeBlock> {
+        const MARK: &[u8] = b"<pre";
+        let Some(html) = self.html.as_deref() else {
+            return Vec::new();
+        };
+        // Parsing is for messages that have one.
+        if !html
+            .as_bytes()
+            .windows(MARK.len())
+            .any(|window| window.eq_ignore_ascii_case(MARK))
+        {
+            return Vec::new();
+        }
+        crate::rich::from_html(html).code_blocks
+    }
+
+    pub fn has_code(&self) -> bool {
+        self.code_blocks()
+            .iter()
+            .any(|block| !block.text.is_empty())
+    }
+
     pub fn has_spoiler(&self) -> bool {
         const MARK: &[u8] = b"data-mx-spoiler";
         // Attribute names are case-insensitive, like in the parser.
@@ -624,6 +649,9 @@ pub struct Room {
     pub direct: bool,
     /// True when the room's notification mode is `Mute` (excluded from space unread counts).
     pub muted: bool,
+    /// The room is encrypted, or it is not known yet that it is not (a link in it must
+    /// not be given to the homeserver on a guess).
+    pub encrypted: bool,
     /// Power levels and moderation rights for the current user in this room.
     pub power: RoomPower,
     /// Event IDs listed in `m.room.pinned_events` (server order).
@@ -776,6 +804,7 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         alias: None,
         direct: kind == RoomKind::Person,
         muted: false,
+        encrypted: true,
         power: RoomPower::default(),
         pinned_ids: Vec::new(),
     }

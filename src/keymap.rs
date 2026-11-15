@@ -189,6 +189,7 @@ action_table! {
     Action::React => ("react", Context::Timeline, "React with an emoji"),
     Action::Delete => ("delete", Context::Timeline, "Delete message"),
     Action::Copy => ("copy", Context::Timeline, "Copy text"),
+    Action::CopyCode => ("copy_code", Context::Timeline, "Copy code block"),
     Action::Save => ("save", Context::Timeline, "Save file or picture"),
     Action::Open => ("open", Context::Timeline, "Open link, picture or file"),
     Action::OpenThread => ("open_thread", Context::Timeline, "Open the message's thread"),
@@ -204,6 +205,7 @@ action_table! {
     Action::Send => ("send", Context::Composer, "Send"),
     Action::Newline => ("newline", Context::Composer, "Line break"),
     Action::CancelCompose => ("cancel_compose", Context::Composer, "Cancel reply or edit"),
+    Action::ComposeInEditor => ("compose_in_editor", Context::Composer, "Write in $EDITOR"),
     Action::EditLast => ("edit_last", Context::Composer, "Edit your last message"),
 }
 
@@ -590,6 +592,14 @@ pub const DEFAULT: &[Binding] = &[
     bind(Timeline, Char('c'), NONE, Action::Copy, "c", "Copy text"),
     bind(
         Timeline,
+        Char('C'),
+        NONE,
+        Action::CopyCode,
+        "C",
+        "Copy code block",
+    ),
+    bind(
+        Timeline,
         Char('s'),
         NONE,
         Action::Save,
@@ -684,6 +694,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::Newline,
         "Alt-Enter",
         "Line break (fallback)",
+    ),
+    bind(
+        Composer,
+        Char('v'),
+        ALT,
+        Action::ComposeInEditor,
+        "Alt-V",
+        "Write in $EDITOR",
     ),
     // From the first line of the composer, up is into the messages: to look at a
     // picture, open a spoiler, answer. (Editing one's last message from here, as

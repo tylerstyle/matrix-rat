@@ -6,7 +6,7 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::text::{sanitize, width};
+use crate::text::{sanitize, unsafe_char, width};
 
 /// How a piece of text should look. Resolved to colours by the theme at draw time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,12 +38,26 @@ pub struct RichLine {
     pub segments: Vec<Segment>,
     /// Code blocks keep their spacing and are cut, not re-flowed.
     pub preformatted: bool,
+    /// Index into [`Rich::code_blocks`] for the lines of a code block.
+    pub block: Option<usize>,
+}
+
+/// A `<pre>` block's content as the sender wrote it, for copying.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodeBlock {
+    /// The language from `class="language-…"`, if the sender gave one.
+    pub lang: Option<String>,
+    /// The raw content: original indentation and line breaks, without fence lines,
+    /// and without the one newline that ends a block. Sanitised like all message text.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rich {
     pub lines: Vec<RichLine>,
     pub links: Vec<String>,
+    /// Every code block, in order, including empty ones (lines refer to them by index).
+    pub code_blocks: Vec<CodeBlock>,
 }
 
 impl Rich {
@@ -169,9 +183,7 @@ pub fn safe_geo_uri(s: &str) -> bool {
         };
         if name.is_empty()
             || value.is_empty()
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
             || !value
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'~' | b'%'))
@@ -189,8 +201,7 @@ fn find_plain_link(rest: &str) -> Option<(usize, usize)> {
         .min_by_key(|&(pos, _)| pos);
     let is_boundary = |pos: usize| {
         pos == 0
-            || !rest[..pos]
-                .ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+            || !rest[..pos].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == ':')
     };
     let matrix = rest
         .match_indices("matrix:")
@@ -368,6 +379,8 @@ struct Builder {
     /// A list marker waiting for the item's first line.
     marker: Option<String>,
     pre: bool,
+    /// The block being read while `pre` is set, as an index into `rich.code_blocks`.
+    block: Option<usize>,
     /// Depth inside `<mx-reply>`, whose content repeats the quoted message.
     skip: usize,
 }
@@ -412,6 +425,7 @@ impl Builder {
             hanging,
             segments: Vec::new(),
             preformatted: self.pre,
+            block: self.block,
         };
         self.open = true;
     }
@@ -563,6 +577,8 @@ impl Builder {
                 self.block_break();
                 self.pre = true;
                 format.code = true;
+                self.block = Some(self.rich.code_blocks.len());
+                self.rich.code_blocks.push(CodeBlock::default());
             }
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 self.block_break();
@@ -572,7 +588,14 @@ impl Builder {
             "i" | "em" => format.italic = true,
             "u" | "ins" => format.underline = true,
             "s" | "del" | "strike" => format.strike = true,
-            "code" | "tt" => format.code = true,
+            "code" | "tt" => {
+                format.code = true;
+                if let Some(block) = self.block
+                    && let Some(lang) = attribute(attributes, "class").and_then(language)
+                {
+                    self.rich.code_blocks[block].lang.get_or_insert(lang);
+                }
+            }
             "a" => {
                 if let Some(href) = attribute(attributes, "href") {
                     let href = sanitize(&decode_entities(href)).trim().to_owned();
@@ -633,10 +656,32 @@ impl Builder {
                     self.end_line();
                 }
                 self.pre = false;
+                // Whatever the sender's last newline was, it ends the block, it is
+                // not a line of it.
+                if let Some(block) = self.block.take() {
+                    let text = &mut self.rich.code_blocks[block].text;
+                    if text.ends_with('\n') {
+                        text.pop();
+                    }
+                }
             }
             _ => {}
         }
     }
+}
+
+/// The language tag of a `class="language-rust"` attribute: short, and only characters
+/// a language name has, so it is safe to show.
+fn language(class: &str) -> Option<String> {
+    let tag = class
+        .split_whitespace()
+        .find_map(|c| c.strip_prefix("language-"))?;
+    let tag: String = tag.chars().take(24).collect();
+    (!tag.is_empty()
+        && tag
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '+' | '-' | '#' | '.' | '_')))
+    .then_some(tag)
 }
 
 /// Parses a Matrix `formatted_body`.
@@ -650,6 +695,7 @@ pub fn from_html(html: &str) -> Rich {
         lists: Vec::new(),
         marker: None,
         pre: false,
+        block: None,
         skip: 0,
     };
     for token in tokenize(html) {
@@ -668,7 +714,18 @@ pub fn from_html(html: &str) -> Rich {
             }
             Token::Text(text) => {
                 if builder.skip == 0 {
-                    builder.push_text(&sanitize(&decode_entities(text)));
+                    let decoded = decode_entities(text);
+                    // What is copied keeps its tabs (the display turns them into
+                    // spaces); control characters and direction overrides are as
+                    // dangerous in a paste as on screen, and go.
+                    if let Some(block) = builder.block {
+                        builder.rich.code_blocks[block].text.extend(
+                            decoded
+                                .chars()
+                                .filter(|c| matches!(c, '\n' | '\t') || !unsafe_char(*c)),
+                        );
+                    }
+                    builder.push_text(&sanitize(&decoded));
                 }
             }
         }
@@ -685,6 +742,8 @@ pub fn from_html(html: &str) -> Rich {
 pub struct WrappedRow {
     pub prefix: String,
     pub segments: Vec<Segment>,
+    /// The code block this row belongs to, if any.
+    pub block: Option<usize>,
 }
 
 /// Wraps to `max` columns, breaking at word boundaries and keeping each line's prefix.
@@ -696,6 +755,7 @@ pub fn wrap(rich: &Rich, max: usize) -> Vec<WrappedRow> {
         let mut row = WrappedRow {
             prefix: line.prefix.clone(),
             segments: Vec::new(),
+            block: line.block,
         };
         let mut used = 0;
         let next_row = |row: &mut WrappedRow, rows: &mut Vec<WrappedRow>, used: &mut usize| {
@@ -704,6 +764,7 @@ pub fn wrap(rich: &Rich, max: usize) -> Vec<WrappedRow> {
                 WrappedRow {
                     prefix: line.hanging.clone(),
                     segments: Vec::new(),
+                    block: line.block,
                 },
             );
             // A space that fitted before the wrap point is not shown at the row's end.
@@ -852,6 +913,63 @@ mod tests {
         assert_eq!(texts(&rich), ["fn main() {", "    let x = 1;", "}"]);
         assert!(rich.lines.iter().all(|l| l.preformatted));
         assert!(rich.lines[1].segments[0].format.code);
+    }
+
+    #[test]
+    fn code_blocks_are_kept_raw_for_copying() {
+        let rich = from_html(
+            "<p>before</p><pre><code class=\"language-rust\">fn main() {\n    let x = 1;\n\n}\n</code></pre>\
+             <p>between</p><pre>plain &lt;b&gt;\n\tkept</pre><pre><code class=\"language-x y\"></code></pre>",
+        );
+        assert_eq!(rich.code_blocks.len(), 3);
+        // Indentation and the empty line stay; one trailing newline goes.
+        assert_eq!(rich.code_blocks[0].text, "fn main() {\n    let x = 1;\n\n}");
+        assert_eq!(rich.code_blocks[0].lang.as_deref(), Some("rust"));
+        // A tab stays a tab in what is copied, though it is shown as spaces.
+        assert_eq!(rich.code_blocks[1].text, "plain <b>\n\tkept");
+        assert_eq!(rich.code_blocks[1].lang, None);
+        assert!(rich.code_blocks[2].text.is_empty());
+        // Every row of a block says which it is; the text around says nothing.
+        let blocks: Vec<Option<usize>> = rich.lines.iter().map(|l| l.block).collect();
+        assert_eq!(
+            blocks,
+            [
+                None,
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(1),
+                Some(1)
+            ]
+        );
+        // Wrapping keeps it, also for rows cut at the edge.
+        assert_eq!(
+            wrap(&rich, 6)
+                .iter()
+                .filter(|row| row.block == Some(0))
+                .count(),
+            // "fn mai" "n() {" "    le" "t x = " "1;" "" "}"
+            7
+        );
+    }
+
+    #[test]
+    fn code_language_tags_are_checked_and_trailing_newlines_kept_once() {
+        for (class, expected) in [
+            ("language-c++", Some("c++")),
+            ("foo language-py bar", Some("py")),
+            ("language-", None),
+            ("language-a b", Some("a")),
+            ("language-x\u{202e}y", None),
+            ("hljs", None),
+        ] {
+            assert_eq!(language(class).as_deref(), expected, "{class}");
+        }
+        // Only the one newline that ends the block is not content.
+        let rich = from_html("<pre><code>a\n\n</code></pre>");
+        assert_eq!(rich.code_blocks[0].text, "a\n");
     }
 
     #[test]
@@ -1040,9 +1158,8 @@ mod tests {
             ["geo:51.5074,-0.1278;u=35", "https://example.org"]
         );
 
-        let html = from_html(
-            "<a href=\"geo:48.8566,2.3522\">Paris</a> <a href=\"geo:999,0\">Nowhere</a>",
-        );
+        let html =
+            from_html("<a href=\"geo:48.8566,2.3522\">Paris</a> <a href=\"geo:999,0\">Nowhere</a>");
         assert_eq!(html.links, ["geo:48.8566,2.3522"]);
     }
 }

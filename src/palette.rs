@@ -92,6 +92,7 @@ pub struct MessageCaps {
     pub can_forward: bool,
     pub can_user_info: bool,
     pub can_copy: bool,
+    pub can_copy_code: bool,
     pub can_save: bool,
     pub can_open: bool,
     pub can_open_thread: bool,
@@ -143,6 +144,7 @@ pub struct PaletteContext {
     pub read_receipts: bool,
     pub read_markers: bool,
     pub room_previews: bool,
+    pub link_previews: crate::config::LinkPreviews,
     pub notifications: bool,
     pub download_dir: String,
     pub verify_status: &'static str,
@@ -690,6 +692,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::UserInfo => sel.can_user_info,
         Action::OpenPinned => ctx.has_room && !in_pending,
         Action::Copy => sel.can_copy,
+        Action::CopyCode => sel.can_copy_code,
         Action::Save => sel.can_save,
         Action::Open => sel.can_open,
         Action::OpenThread => sel.can_open_thread,
@@ -699,6 +702,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Attach | Action::CreatePoll => {
             ctx.has_room && !in_pending && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
+        Action::ComposeInEditor => ctx.has_room && !in_pending,
         Action::JumpToNewest | Action::JumpToOldest | Action::JumpToUnread => {
             ctx.has_room && ctx.has_messages
         }
@@ -795,6 +799,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::React
                 | Action::Delete
                 | Action::Copy
+                | Action::CopyCode
                 | Action::Save
                 | Action::Open
                 | Action::OpenThread
@@ -813,7 +818,11 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
         ),
         Pane::Composer => matches!(
             action,
-            Action::OpenEmoji | Action::Attach | Action::CreatePoll | Action::FocusRoomFilter
+            Action::OpenEmoji
+                | Action::Attach
+                | Action::CreatePoll
+                | Action::ComposeInEditor
+                | Action::FocusRoomFilter
         ),
     }
 }
@@ -1027,6 +1036,13 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             title: Setting::RoomPreviews.label(),
             hint: Some(switch(ctx.room_previews)),
             aliases: &["toggle room previews", "latest message", "setting"],
+            enabled: true,
+        },
+        SettingItem {
+            target: Target::Action(Action::Setting(Setting::LinkPreviews)),
+            title: Setting::LinkPreviews.label(),
+            hint: Some(ctx.link_previews.label().to_owned()),
+            aliases: &["link preview", "url preview", "website preview", "setting"],
             enabled: true,
         },
         SettingItem {
@@ -1270,6 +1286,7 @@ mod tests {
             read_receipts: true,
             read_markers: true,
             room_previews: true,
+            link_previews: crate::config::LinkPreviews::Off,
             notifications: true,
             download_dir: "~/Downloads".to_owned(),
             verify_status: "unknown",

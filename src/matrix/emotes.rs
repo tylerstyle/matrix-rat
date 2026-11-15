@@ -147,7 +147,8 @@ pub fn is_valid_mxc(url: &str) -> bool {
     };
     !server.is_empty()
         && !media_id.is_empty()
-        && !url.contains(|c: char| c.is_control() || c.is_whitespace() || matches!(c, '<' | '>' | '"'))
+        && !url
+            .contains(|c: char| c.is_control() || c.is_whitespace() || matches!(c, '<' | '>' | '"'))
 }
 
 fn clean_shortcode(raw: &str) -> Option<String> {
@@ -198,7 +199,9 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| sanitize_line(default_name));
     let pack_usage = parse_usage(
-        pack_obj.and_then(|p| p.get("usage")).and_then(Value::as_array),
+        pack_obj
+            .and_then(|p| p.get("usage"))
+            .and_then(Value::as_array),
         (true, true),
     );
 
@@ -213,7 +216,11 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
             let Some(obj) = entry.as_object() else {
                 continue;
             };
-            let Some(url) = obj.get("url").and_then(Value::as_str).filter(|u| is_valid_mxc(u)) else {
+            let Some(url) = obj
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|u| is_valid_mxc(u))
+            else {
                 continue;
             };
             let body = obj
@@ -221,10 +228,8 @@ pub fn parse_pack_json(raw: &Value, default_name: &str, pack_id: &str) -> Option
                 .and_then(Value::as_str)
                 .map(sanitize_line)
                 .filter(|s| !s.is_empty());
-            let (is_emote, is_sticker) = parse_usage(
-                obj.get("usage").and_then(Value::as_array),
-                pack_usage,
-            );
+            let (is_emote, is_sticker) =
+                parse_usage(obj.get("usage").and_then(Value::as_array), pack_usage);
             let info = obj.get("info").and_then(Value::as_object);
             let dimensions = info.and_then(|inf| {
                 let w = u32::try_from(inf.get("w")?.as_u64()?).ok()?;
@@ -352,8 +357,7 @@ impl EmoteManager {
                 if !requested {
                     continue;
                 }
-                let catalog =
-                    load_catalog(&task_client, &task_state, active_room.as_deref()).await;
+                let catalog = load_catalog(&task_client, &task_state, active_room.as_deref()).await;
                 let _ = task_events.send(MatrixEvent::EmotePacks(catalog));
             }
         });
@@ -696,7 +700,10 @@ mod tests {
             Some("mxc://example.org/crab1")
         );
 
-        let dbg = format!("{catalog:?} {:?} {:?}", catalog.packs[0].emojis[0], catalog.packs[0].stickers[0]);
+        let dbg = format!(
+            "{catalog:?} {:?} {:?}",
+            catalog.packs[0].emojis[0], catalog.packs[0].stickers[0]
+        );
         assert!(!dbg.contains("Ferris"), "debug leaked pack name: {dbg}");
         assert!(!dbg.contains("crab1"), "debug leaked mxc url: {dbg}");
         assert!(!dbg.contains("crab_happy"), "debug leaked shortcode: {dbg}");

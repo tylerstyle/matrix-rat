@@ -74,6 +74,8 @@ pub enum Run {
     ReadBy,
     OpenLink,
     CopyLink,
+    /// Copy the code block at this index (among the message's non-empty ones).
+    CopyCode(usize),
     OpenRoom,
     MarkRead,
     MarkUnread,
@@ -397,6 +399,14 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
     if !deleted && !message.body.is_empty() {
         items.push(Item::action(keys, "Copy text", Timeline, Action::Copy));
     }
+    if !deleted && message.has_code() {
+        items.push(Item::action(
+            keys,
+            "Copy code block",
+            Timeline,
+            Action::CopyCode,
+        ));
+    }
     if facts.permalink && on_server {
         items.push(Item::new("Copy link to message", "", Run::CopyPermalink));
     }
@@ -517,6 +527,31 @@ pub fn read_by_items(read_by: &ReadBy) -> Vec<Item> {
         });
     }
     items
+}
+
+/// One entry per non-empty code block: its language tag and first line, with the
+/// number of lines as the hint. Each runs `Run::CopyCode` with the block's index.
+pub fn code_items(blocks: &[crate::rich::CodeBlock]) -> Vec<Item> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| !block.text.is_empty())
+        .map(|(at, block)| {
+            let first = block.text.lines().find(|l| !l.trim().is_empty());
+            let first = sanitize_line(first.unwrap_or("").trim());
+            let label = match &block.lang {
+                Some(lang) => format!("{lang}: {first}"),
+                None => first,
+            };
+            let lines = block.text.lines().count().max(1);
+            let hint = if lines == 1 {
+                "1 line".to_owned()
+            } else {
+                format!("{lines} lines")
+            };
+            Item::new(&truncate(&label, 40), &hint, Run::CopyCode(at))
+        })
+        .collect()
 }
 
 /// The entries for a link in a message.

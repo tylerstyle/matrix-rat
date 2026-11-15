@@ -447,6 +447,7 @@ mod tests {
 
     fn room_summary(id: &str, name: &str, alias: Option<&str>) -> RoomSummary {
         RoomSummary {
+            encrypted: false,
             id: id.into(),
             name: name.into(),
             category: RoomCategory::Room,

@@ -745,6 +745,7 @@ mod tests {
 
     fn summary(id: &str, name: &str) -> crate::matrix::RoomSummary {
         crate::matrix::RoomSummary {
+            encrypted: false,
             id: id.into(),
             name: name.into(),
             category: crate::matrix::RoomCategory::Room,

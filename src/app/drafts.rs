@@ -461,6 +461,7 @@ mod tests {
 
     fn listed(id: &str) -> crate::matrix::RoomSummary {
         crate::matrix::RoomSummary {
+            encrypted: false,
             id: id.to_owned(),
             name: id.to_owned(),
             category: crate::matrix::RoomCategory::Room,

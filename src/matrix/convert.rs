@@ -296,14 +296,13 @@ fn event_message(
                                 info.and_then(|i| i.duration),
                                 None,
                             );
-                            if let Some(thumb_src) =
-                                info.and_then(|i| i.thumbnail_source.clone())
-                            {
-                                let thumb_info =
-                                    info.and_then(|i| i.thumbnail_info.as_deref());
+                            if let Some(thumb_src) = info.and_then(|i| i.thumbnail_source.clone()) {
+                                let thumb_info = info.and_then(|i| i.thumbnail_info.as_deref());
                                 let dimensions = thumb_info
                                     .and_then(|ti| parse_dimensions(ti.width, ti.height))
-                                    .or_else(|| info.and_then(|i| parse_dimensions(i.width, i.height)));
+                                    .or_else(|| {
+                                        info.and_then(|i| parse_dimensions(i.width, i.height))
+                                    });
                                 let size = thumb_info.and_then(|ti| ti.size).map(u64::from);
                                 let name = message
                                     .file
@@ -1007,20 +1006,19 @@ mod tests {
             "1:30"
         );
         // Location formatting respects description + validates geo URIs.
-        let mut loc = LocationMessageEventContent::new(
-            "London".to_owned(),
-            "geo:51.5074,-0.1278".to_owned(),
-        );
+        let mut loc =
+            LocationMessageEventContent::new("London".to_owned(), "geo:51.5074,-0.1278".to_owned());
         loc.location = Some(LocationContent::new("geo:51.5074,-0.1278".to_owned()));
         if let Some(ref mut inner) = loc.location {
             inner.description = Some("Big\u{1b}[31m Ben".to_owned());
         }
-        assert_eq!(format_location(&loc), "📍 Big[31m Ben · geo:51.5074,-0.1278");
-
-        let bad_loc = LocationMessageEventContent::new(
-            "Trap".to_owned(),
-            "javascript:alert(1)".to_owned(),
+        assert_eq!(
+            format_location(&loc),
+            "📍 Big[31m Ben · geo:51.5074,-0.1278"
         );
+
+        let bad_loc =
+            LocationMessageEventContent::new("Trap".to_owned(), "javascript:alert(1)".to_owned());
         assert_eq!(format_location(&bad_loc), "📍 Trap");
     }
 

@@ -36,6 +36,10 @@ pub struct Config {
     pub notification_click_command: String,
     /// Show the latest message under each room in the room list (two lines a room).
     pub room_previews: bool,
+    /// Ask the homeserver for a preview of the first link of a message: "off",
+    /// "unencrypted" (rooms without encryption only) or "all". The server fetches the
+    /// link, so it learns what is linked.
+    pub link_previews: LinkPreviews,
     /// Where saved attachments go. Empty: the desktop's download folder.
     pub download_dir: String,
     /// How pictures are shown: "auto", "halfblocks" or "off".
@@ -90,6 +94,58 @@ pub enum ImageMode {
     Off,
 }
 
+/// In which rooms the homeserver is asked to preview links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkPreviews {
+    /// Never.
+    #[default]
+    Off,
+    /// In rooms that are not encrypted (or not known to be none).
+    Unencrypted,
+    /// Also in encrypted rooms: the homeserver then learns about links that were
+    /// only meant for the people in the room.
+    All,
+}
+
+impl LinkPreviews {
+    pub const ALL: [LinkPreviews; 3] = [Self::Off, Self::Unencrypted, Self::All];
+
+    /// The value in the configuration file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Unencrypted => "unencrypted",
+            Self::All => "all",
+        }
+    }
+
+    /// What the settings menu shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Unencrypted => "unencrypted rooms",
+            Self::All => "all rooms",
+        }
+    }
+
+    /// The next (or previous, going back) of the three, round.
+    pub fn step(self, delta: isize) -> Self {
+        let at = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0) as isize;
+        Self::ALL[(at + delta).rem_euclid(Self::ALL.len() as isize) as usize]
+    }
+
+    /// Whether a room may be asked about. A room whose encryption is not known yet
+    /// counts as encrypted (the caller says so): a link is not given away by guessing.
+    pub fn allows(self, encrypted: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Unencrypted => !encrypted,
+            Self::All => true,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -105,6 +161,7 @@ impl Default for Config {
             notification_preview: true,
             notification_click_command: String::new(),
             room_previews: true,
+            link_previews: LinkPreviews::Off,
             download_dir: String::new(),
             images: ImageMode::Auto,
             secret_store: crate::matrix::SecretStoreMode::File,
@@ -631,6 +688,36 @@ mod tests {
             assert_eq!(config.images, mode);
         }
         assert!(toml::from_str::<Config>("images = \"sixel\"").is_err());
+    }
+
+    #[test]
+    fn link_previews_are_off_unless_asked_for() {
+        assert_eq!(Config::default().link_previews, LinkPreviews::Off);
+        assert_eq!(
+            toml::from_str::<Config>("theme = \"x\"")
+                .unwrap()
+                .link_previews,
+            LinkPreviews::Off
+        );
+        for mode in LinkPreviews::ALL {
+            let config: Config =
+                toml::from_str(&format!("link_previews = \"{}\"", mode.name())).unwrap();
+            assert_eq!(config.link_previews, mode);
+        }
+        assert!(toml::from_str::<Config>("link_previews = \"yes\"").is_err());
+        assert!(toml::from_str::<Config>("link_previews = true").is_err());
+    }
+
+    #[test]
+    fn link_preview_modes_decide_by_encryption_and_step_round() {
+        use LinkPreviews::{All, Off, Unencrypted};
+        assert_eq!(
+            [Off, Unencrypted, All].map(|mode| (mode.allows(false), mode.allows(true))),
+            [(false, false), (true, false), (true, true)]
+        );
+        assert_eq!(Off.step(1), Unencrypted);
+        assert_eq!(All.step(1), Off);
+        assert_eq!(Off.step(-1), All);
     }
 
     #[test]

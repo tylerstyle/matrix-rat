@@ -399,7 +399,9 @@ impl App {
                 MatrixCmd::Edit { item, .. }
                 | MatrixCmd::EditPoll { item, .. }
                 | MatrixCmd::ToggleReaction { item, .. }
-                | MatrixCmd::Redact { item, .. } => matches!(item, ItemRef::Event(id) if id == root),
+                | MatrixCmd::Redact { item, .. } => {
+                    matches!(item, ItemRef::Event(id) if id == root)
+                }
                 MatrixCmd::VotePoll { poll_event_id, .. }
                 | MatrixCmd::EndPoll { poll_event_id, .. } => poll_event_id == root,
                 _ => false,
@@ -903,6 +905,7 @@ mod tests {
         let (mut app, _terminal, _commands) = connected();
         app.open_thread(5);
         app.on_matrix(MatrixEvent::Rooms(vec![RoomSummary {
+            encrypted: false,
             id: "!b".into(),
             name: "Beta".into(),
             category: RoomCategory::Room,

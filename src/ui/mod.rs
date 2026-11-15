@@ -789,7 +789,7 @@ mod tests {
         let last = app.keymap.bindings().last().unwrap().description;
         // When tall enough, everything is there at once; smaller windows scroll.
         app.perform(Action::ToggleHelp);
-        let text = render(&mut app, 100, 34);
+        let text = render(&mut app, 100, 40);
         for binding in app.keymap.bindings() {
             assert!(
                 text.contains(binding.description),
@@ -798,7 +798,8 @@ mod tests {
             );
         }
         assert!(text.contains("Ctrl-Q      Quit"));
-        assert!(!text.contains("scroll"));
+        // (The footer's "wheel scrolls" is not the scroll hint.)
+        assert!(!text.contains("↑↓ scroll"));
         // In smaller windows what does not fit is a few presses away, in both
         // layouts, and the way back as well.
         for (w, h) in [(100, 32), (100, 30), (100, 24), (80, 24), (60, 12)] {

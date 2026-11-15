@@ -998,6 +998,7 @@ mod tests {
             RecoveryStatus::Ready,
         )));
         app.on_matrix(MatrixEvent::Rooms(vec![RoomSummary {
+            encrypted: false,
             id: ROOM.into(),
             name: "Rats".into(),
             category: RoomCategory::Room,

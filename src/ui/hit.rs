@@ -85,6 +85,9 @@ pub enum HitId {
     Image(usize),
     /// The play badge / summary line of an audio, voice, or video message.
     PlayMedia(usize),
+    /// The "copy" label on the first line of a code block: message index and the
+    /// block's index among that message's code blocks.
+    CopyCode(usize, usize),
     /// The thread line under the message at this index.
     Thread(usize),
     /// The quoted-reply row above the message at this index.

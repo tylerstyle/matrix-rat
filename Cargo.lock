@@ -2877,6 +2877,7 @@ dependencies = [
  "ratatui-image",
  "serde",
  "serde_json",
+ "shlex",
  "signal-hook",
  "tokio",
  "toml",

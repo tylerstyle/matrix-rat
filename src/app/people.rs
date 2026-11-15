@@ -1314,6 +1314,7 @@ mod tests {
 
     fn summary(id: &str, name: &str, category: RoomCategory) -> RoomSummary {
         RoomSummary {
+            encrypted: false,
             id: id.into(),
             name: name.into(),
             category,
