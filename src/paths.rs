@@ -7,7 +7,7 @@ use etcetera::{BaseStrategy, choose_base_strategy};
 
 const APP: &str = "matrix-rat";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Paths {
     /// `~/.config/matrix-rat` — config and themes, shared by all profiles.
     pub config_dir: PathBuf,
@@ -18,6 +18,14 @@ pub struct Paths {
     /// `$XDG_RUNTIME_DIR/matrix-rat` (or `~/.local/state/matrix-rat/run`) — pid files used for theme reload signals.
     pub runtime_dir: PathBuf,
     pub profile: String,
+}
+
+/// Hand-written: the folders name the user's home folder, and the profile name is the
+/// user's own choice.
+impl std::fmt::Debug for Paths {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Paths")
+    }
 }
 
 impl Paths {
@@ -110,6 +118,21 @@ fn validate_profile(profile: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_names_no_folder_and_no_profile() {
+        let paths = Paths {
+            config_dir: "/home/alice/.config/matrix-rat".into(),
+            data_dir: "/home/alice/.local/share/matrix-rat/secret-profile".into(),
+            log_dir: "/home/alice/.local/state/matrix-rat/secret-profile".into(),
+            runtime_dir: "/run/user/1000/matrix-rat".into(),
+            profile: "secret-profile".into(),
+        };
+        let shown = format!("{paths:?}");
+        for private in ["alice", "/home", "/run", "secret-profile"] {
+            assert!(!shown.contains(private), "{private} in {shown}");
+        }
+    }
 
     #[test]
     fn profile_names() {

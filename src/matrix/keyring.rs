@@ -400,10 +400,20 @@ pub async fn prepare_passphrase_for_save<K: KeyringBackend>(
 }
 
 /// Real D-Bus `org.freedesktop.secrets` client backed by `zbus`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SecretServiceKeyring {
     timeout: Duration,
     address: Option<String>,
+}
+
+/// Hand-written: a bus address names a path under the user's runtime folder.
+impl std::fmt::Debug for SecretServiceKeyring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretServiceKeyring")
+            .field("timeout", &self.timeout)
+            .field("address", &self.address.is_some())
+            .finish()
+    }
 }
 
 impl Default for SecretServiceKeyring {
@@ -809,6 +819,16 @@ mod tests {
 
     fn sample_key() -> KeyringKey {
         KeyringKey::new("default", "@alice:example.org", "DEV123")
+    }
+
+    #[test]
+    fn the_bus_address_stays_out_of_debug() {
+        let keyring = SecretServiceKeyring::with_address("unix:path=/run/user/1000/bus");
+        let shown = format!("{keyring:?}");
+        assert!(
+            !shown.contains("/run") && shown.contains("address: true"),
+            "{shown}"
+        );
     }
 
     #[tokio::test]
