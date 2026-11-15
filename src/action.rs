@@ -149,6 +149,9 @@ pub enum Action {
     RetryDecryption,
     /// Open profile details for the selected sender or target user.
     UserInfo,
+    /// Show the selected message's details: who sent it and when exactly, its event
+    /// ID, encryption, delivery, who read it, and its source.
+    MessageDetails,
     /// Open the poll creation form for the active room or thread.
     CreatePoll,
     /// Open the sticker picker for the active room or thread.

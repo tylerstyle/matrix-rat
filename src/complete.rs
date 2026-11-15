@@ -12,7 +12,8 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use crate::matrix::EmoteCatalog;
 use crate::text::sanitize_line;
 
-/// Maximum number of completion candidates retained and displayed in the popup.
+/// Maximum number of completion candidates retained and displayed in the popup (slash
+/// commands are all kept).
 pub const MAX_CANDIDATES: usize = 10;
 
 /// What kind of completion trigger is active at the cursor.
@@ -191,8 +192,9 @@ pub struct Context<'a> {
     pub emotes: &'a EmoteCatalog,
 }
 
-/// Slash commands recognised by `crate::format` and `crate::upload`.
-const COMMANDS: &[(&str, &str)] = &[
+/// Slash commands recognised by `crate::format`, `crate::upload` and the app (polls,
+/// stickers and the room commands of `app::commands`).
+pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/me", "Send an action message (* you …)"),
     ("/plain", "Send without Markdown formatting"),
     ("/html", "Send raw HTML formatting"),
@@ -205,6 +207,22 @@ const COMMANDS: &[(&str, &str)] = &[
     ("/sticker", "Send a sticker from your image packs"),
     ("/upload", "Attach and upload a file"),
     ("/file", "Attach and upload a file"),
+    ("/join", "Join or open a room by address or link"),
+    ("/leave", "Leave this room"),
+    ("/invite", "Invite someone to this room"),
+    ("/kick", "Remove someone from this room"),
+    ("/ban", "Ban someone from this room"),
+    ("/unban", "Let a banned person back in"),
+    ("/ignore", "Hide someone's messages"),
+    ("/unignore", "Stop ignoring someone"),
+    ("/nick", "Change your display name"),
+    ("/roomnick", "Change your name in this room"),
+    ("/topic", "Change this room's topic"),
+    ("/roomname", "Rename this room"),
+    ("/dm", "Open a direct chat with someone"),
+    ("/msg", "Open a direct chat with someone"),
+    ("/whois", "Show someone's profile"),
+    ("/help", "Show the keys and what they do"),
 ];
 
 impl Completion {
@@ -390,11 +408,12 @@ fn is_trigger_boundary(before: Option<char>) -> bool {
     }
 }
 
+/// All commands are offered (the popup scrolls): there are few, and a list that
+/// stops short would hide some of them from someone looking for what there is.
 fn match_commands(query: &str) -> Vec<Candidate> {
     let items: Vec<Candidate> = if query.is_empty() {
         COMMANDS
             .iter()
-            .take(MAX_CANDIDATES)
             .map(|&(cmd, desc)| command_candidate(cmd, desc))
             .collect()
     } else {
@@ -424,7 +443,6 @@ fn match_commands(query: &str) -> Vec<Candidate> {
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         scored
             .into_iter()
-            .take(MAX_CANDIDATES)
             .map(|(_, _, &(cmd, desc))| command_candidate(cmd, desc))
             .collect()
     };
@@ -1290,7 +1308,7 @@ mod tests {
         let ctx = test_ctx(&[], &[], &[]);
         let found = find("/", 1, &ctx).unwrap();
         assert_eq!(found.kind, Kind::Command);
-        assert_eq!(found.items.len(), MAX_CANDIDATES);
+        assert_eq!(found.items.len(), COMMANDS.len());
 
         let up = find("/up", 3, &ctx).unwrap();
         assert_eq!(up.items[0].primary, "/upload");

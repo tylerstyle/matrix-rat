@@ -478,6 +478,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         Action::PinMessage,
         Action::ForwardMessage,
         Action::UserInfo,
+        Action::MessageDetails,
         Action::CreatePoll,
         Action::OpenStickers,
     ];
@@ -636,6 +637,19 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
     );
     push_entry(
         out,
+        Target::Action(Action::MessageDetails),
+        Category::Action,
+        "Message details",
+        key_of(Action::MessageDetails),
+        "Message details",
+        &[
+            "details", "source", "json", "event id", "info", "read by", "when",
+        ],
+        action_enabled(Action::MessageDetails, ctx),
+        0,
+    );
+    push_entry(
+        out,
         Target::Action(Action::CreatePoll),
         Category::Action,
         "Start a poll…",
@@ -702,6 +716,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::ForwardMessage => sel.can_forward,
         Action::RetryDecryption => sel.undecryptable,
         Action::UserInfo => sel.can_user_info,
+        Action::MessageDetails => sel.has_selection,
         Action::OpenPinned => ctx.has_room && !in_pending,
         // About the room that room info would show, as in the room's menu.
         Action::OpenThreads => ctx
@@ -829,6 +844,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::ForwardMessage
                 | Action::RetryDecryption
                 | Action::UserInfo
+                | Action::MessageDetails
                 | Action::OpenPinned
                 | Action::OpenThreads
                 | Action::JumpToNewest

@@ -2,7 +2,9 @@
 
 mod attach;
 mod code;
+mod commands;
 mod complete;
+mod details;
 mod devices;
 mod drafts;
 mod emotes;
@@ -1273,6 +1275,7 @@ impl App {
                     | Modal::PollForm(_)
                     | Modal::PollVote(_)
                     | Modal::Stickers(_)
+                    | Modal::Details(_)
                     | Modal::Threads(_)
             )
         ) {
@@ -1563,6 +1566,10 @@ impl App {
     }
 
     fn send(&mut self) {
+        // A room command does what it says (and waits while a message is edited).
+        if self.room_command() {
+            return;
+        }
         // An `/upload` command attaches; with files waiting, Enter sends those. An
         // edit comes first: its text is a message, and files wait until it is done.
         if !matches!(self.compose_mode, ComposeMode::Edit(_))
@@ -1726,6 +1733,22 @@ impl App {
     }
 
     /// Opens the `n`th link of a message in the system browser.
+    /// Opens room `index` of the list, leaving a space that does not hold it, with the
+    /// list's cursor on it.
+    pub(super) fn show_room(&mut self, index: usize) {
+        let Some(room_id) = self.rooms.get(index).map(|room| room.id.clone()) else {
+            return;
+        };
+        if self.space.is_some() && !self.space_rooms.contains(&room_id) {
+            self.select_space(None);
+        }
+        self.open_room(index);
+        if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
+            self.sidebar.cursor = at;
+            self.sidebar.reveal_cursor = true;
+        }
+    }
+
     pub(super) fn find_joined_room(&self, target: &str) -> Option<usize> {
         self.rooms.iter().position(|room| {
             !room.is_pending() && (room.id == target || room.alias.as_deref() == Some(target))
@@ -1769,15 +1792,7 @@ impl App {
             }
             Ok(crate::manage::Address::Room { target, via }) => {
                 if let Some(index) = self.find_joined_room(&target) {
-                    let room_id = self.rooms[index].id.clone();
-                    if self.space.is_some() && !self.space_rooms.contains(&room_id) {
-                        self.select_space(None);
-                    }
-                    self.open_room(index);
-                    if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
-                        self.sidebar.cursor = at;
-                        self.sidebar.reveal_cursor = true;
-                    }
+                    self.show_room(index);
                 } else {
                     self.open_room_preview(&target, via);
                 }
@@ -1899,15 +1914,7 @@ impl App {
             Ok(crate::manage::Address::Room { target, via }) => {
                 if let Some(index) = self.find_joined_room(&target) {
                     self.startup_target = None;
-                    let room_id = self.rooms[index].id.clone();
-                    if self.space.is_some() && !self.space_rooms.contains(&room_id) {
-                        self.select_space(None);
-                    }
-                    self.open_room(index);
-                    if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
-                        self.sidebar.cursor = at;
-                        self.sidebar.reveal_cursor = true;
-                    }
+                    self.show_room(index);
                 } else if self.startup_room_is_missing() {
                     self.startup_target = None;
                     self.open_room_preview(&target, via);
@@ -2654,6 +2661,7 @@ impl App {
                 _ => {}
             },
             Action::UserInfo => self.open_user_info_from_selection(),
+            Action::MessageDetails => self.open_message_details(),
             Action::CreatePoll => self.open_poll_create(""),
             Action::OpenStickers => {
                 self.open_stickers("");
@@ -2774,6 +2782,7 @@ impl App {
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_escape(),
             Some(Modal::UserInfo(_)) => self.escape_user_info(),
             Some(Modal::OwnProfile(_)) => self.escape_own_profile(),
+            Some(Modal::Details(_)) => self.escape_details(),
             Some(Modal::Menu(_)) => self.modal = None,
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 self.devices_click(crate::devices::Click::Cancel);
@@ -2911,6 +2920,7 @@ impl App {
             Some(Modal::PollForm(_)) => self.on_poll_form_key(code, mods),
             Some(Modal::PollVote(_)) => self.on_poll_vote_key(code, mods),
             Some(Modal::Stickers(_)) => self.on_stickers_key(code, mods),
+            Some(Modal::Details(_)) => self.on_details_key(code, mods),
             Some(Modal::Threads(_)) => self.on_threads_key(code, mods),
             None => {}
         }
@@ -3116,7 +3126,12 @@ impl App {
                 room_id,
                 members,
                 can_mention_room,
-            } => self.on_room_members(room_id, members, can_mention_room),
+            } => {
+                // Not one of a session that has ended.
+                if !self.logged_out {
+                    self.on_room_members(room_id, members, can_mention_room);
+                }
+            }
             MatrixEvent::Draft {
                 room_id,
                 thread,
@@ -3159,6 +3174,7 @@ impl App {
                 generation,
                 message,
             } => self.on_directory_error(generation, message),
+            MatrixEvent::Source { request, result } => self.on_event_source(request, result),
             MatrixEvent::RoomPower { room_id, power } => {
                 if let Some(room) = self.rooms.iter_mut().find(|r| r.id == room_id) {
                     room.power = power;
@@ -3650,7 +3666,7 @@ impl App {
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
-            Some(Modal::Pinned(_)) => return,
+            Some(Modal::Pinned(_) | Modal::Details(_)) => return,
             Some(Modal::UserInfo(_)) => return self.on_user_info_paste(first_line),
             Some(Modal::OwnProfile(_)) => return self.on_own_profile_paste(&text, first_line),
             None => {}
@@ -3714,6 +3730,7 @@ impl App {
                                     | Modal::PollForm(_)
                                     | Modal::PollVote(_)
                                     | Modal::Stickers(_)
+                                    | Modal::Details(_)
                                     | Modal::Threads(_)
                             )
                         ) || matches!(
@@ -3916,6 +3933,8 @@ impl App {
                     Some(HitId::PollVoteBtn(true)) => self.submit_poll_vote(),
                     Some(HitId::PollVoteBtn(false)) => self.modal = None,
                     Some(HitId::StickerRow(index)) => self.send_sticker_at(index),
+                    Some(HitId::DetailsFlip) => self.flip_details(),
+                    Some(HitId::DetailsCopy) => self.copy_details(),
                     Some(HitId::ThreadRow(index)) => self.activate_thread_row(index),
                     Some(HitId::ThreadsMore) => self.click_threads_more(),
                     Some(HitId::ThreadsMine) => self.toggle_threads_mine(),
@@ -3954,6 +3973,7 @@ impl App {
                             | Modal::PollForm(_)
                             | Modal::PollVote(_)
                             | Modal::Stickers(_)
+                            | Modal::Details(_)
                             | Modal::Threads(_)
                     )
                 ) =>
@@ -3981,6 +4001,7 @@ impl App {
                         self.scroll_poll_modal(delta);
                     }
                     Some(Modal::Stickers(_)) => self.scroll_stickers(delta),
+                    Some(Modal::Details(_)) => self.scroll_details(delta),
                     Some(Modal::Threads(_)) => self.scroll_threads(delta),
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.

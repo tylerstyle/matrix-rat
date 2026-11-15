@@ -6,6 +6,7 @@ mod app;
 mod complete;
 mod composer;
 mod config;
+mod details;
 mod devices;
 mod editor;
 mod emoji;
