@@ -766,6 +766,11 @@ pub enum MatrixEvent {
     /// The first file of a [`MatrixCmd::SendFiles`] could not be sent, so none was:
     /// the caption and the reply belong to that one. Carries the reason.
     FilesNotSent(String),
+    /// The files of a [`MatrixCmd::SendFiles`] were read and handed to the send queue,
+    /// which keeps its own copy (a later file that could not be was reported on its
+    /// own): none of them is needed on disk any more. Every `SendFiles` is answered by
+    /// this or by [`MatrixEvent::FilesNotSent`].
+    FilesSent,
     /// Joined members and `@room` permission for a room, used for `@` completions.
     RoomMembers {
         room_id: String,
@@ -949,6 +954,7 @@ impl std::fmt::Debug for MatrixEvent {
             Self::UploadLimit(bytes) => write!(f, "UploadLimit({bytes})"),
             // The reason names a file.
             Self::FilesNotSent(_) => f.write_str("FilesNotSent"),
+            Self::FilesSent => f.write_str("FilesSent"),
             // Member display names and user ids are omitted from the log.
             Self::RoomMembers {
                 room_id,

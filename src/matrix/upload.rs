@@ -62,7 +62,8 @@ impl Uploads {
 
     /// Sends `files` in order. The caption and the reply belong to the first: if that
     /// one cannot be sent, none is ([`MatrixEvent::FilesNotSent`]). A later file that
-    /// cannot be read is reported and the rest still goes.
+    /// cannot be read is reported and the rest still goes, and then
+    /// [`MatrixEvent::FilesSent`] says that the files are not needed any more.
     pub fn send(
         &mut self,
         timeline: Arc<Timeline>,
@@ -131,6 +132,7 @@ impl Uploads {
                 caption_mentions = None;
                 reply_to = None;
             }
+            let _ = events.send(MatrixEvent::FilesSent);
         });
     }
 }

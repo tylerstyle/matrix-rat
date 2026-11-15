@@ -38,6 +38,8 @@ pub struct AttachState {
     pub limit: Option<u64>,
     /// The last draw had no room to show the waiting files.
     pub hidden: bool,
+    /// Sends handed to the worker that it has not answered yet.
+    sends_out: usize,
 }
 
 impl AttachState {
@@ -392,6 +394,9 @@ impl App {
             files,
             text: self.composer.text().to_owned(),
         });
+        if self.matrix.is_some() {
+            self.attach.sends_out += 1;
+        }
         self.composer.take();
         self.clear_completion_marks();
         self.compose_mode = ComposeMode::Normal;
@@ -409,6 +414,7 @@ impl App {
     /// caption (and a reply) belonged to, and so sent none: they wait again, and the
     /// text is back if nothing was written in the meantime.
     pub(super) fn on_files_not_sent(&mut self, reason: String) {
+        self.attach.sends_out = self.attach.sends_out.saturating_sub(1);
         if let Some(handed) = self.attach.handed.take() {
             let here = self.attach_scope().as_ref() == Some(&handed.scope);
             let waiting = self.attach.pending.entry(handed.scope).or_default();
@@ -422,6 +428,15 @@ impl App {
             }
         }
         self.show_toast(format!("{reason}. Nothing was sent"));
+    }
+
+    /// The worker has read the files of a send and needs them no more.
+    pub(super) fn on_files_sent(&mut self) {
+        self.attach.sends_out = self.attach.sends_out.saturating_sub(1);
+        if self.attach.sends_out == 0 {
+            // Every send is answered: none can come back any more.
+            self.attach.handed = None;
+        }
     }
 }
 
@@ -1158,5 +1173,21 @@ mod tests {
         assert!(app.attachments().is_empty() && app.composer.is_empty());
         app.open_room(0);
         assert_eq!(app.attachments().len(), 2);
+    }
+
+    #[test]
+    fn files_the_worker_has_taken_are_forgotten() {
+        let scratch = Scratch::new("app-taken");
+        let notes = scratch.file("notes.txt", b"hello");
+        let (mut app, mut commands) = connected();
+        app.on_event(Event::Paste(notes.display().to_string()));
+        type_text(&mut app, "the caption");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(sent(&mut commands).len(), 1);
+        app.on_matrix(MatrixEvent::FilesSent);
+        // Every send is answered: nothing is kept to be given back.
+        app.on_matrix(MatrixEvent::FilesNotSent("late".to_owned()));
+        assert!(app.attachments().is_empty());
+        assert!(app.composer.is_empty());
     }
 }

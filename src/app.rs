@@ -3143,6 +3143,7 @@ impl App {
             MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
             MatrixEvent::UploadLimit(bytes) => self.attach.limit = Some(bytes),
             MatrixEvent::FilesNotSent(reason) => self.on_files_not_sent(reason),
+            MatrixEvent::FilesSent => self.on_files_sent(),
             MatrixEvent::RoomMembers {
                 room_id,
                 members,
