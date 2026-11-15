@@ -133,6 +133,12 @@ pub enum Action {
     OpenPinned,
     /// Forward the selected message to another room.
     ForwardMessage,
+    /// A control of the sessions popup or the key backup popup. `Export` and
+    /// `Import` also open the key backup popup at that form.
+    Devices(crate::devices::Click),
+    /// Look once more for the key of the selected message, which could not be
+    /// decrypted.
+    RetryDecryption,
     /// Open profile details for the selected sender or target user.
     UserInfo,
 }

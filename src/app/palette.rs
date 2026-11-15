@@ -56,6 +56,9 @@ impl App {
                             || matches!(m.item, Some(crate::model::ItemRef::Event(_)))),
                     can_jump_to_reply: m.reply_event.is_some(),
                     failed_retry: self.matrix.is_some() && m.state == SendState::Failed,
+                    undecryptable: self.matrix.is_some()
+                        && m.kind == MsgKind::Undecryptable
+                        && m.utd.is_some(),
                     pinned: m.pinned,
                     can_redact: room.is_some_and(|r| Self::can_redact_message(r, m)),
                     can_pin: room.is_some_and(|r| Self::can_pin_message(r, m)),
@@ -90,6 +93,7 @@ impl App {
             notifications: self.notify_mode != crate::notify::NotifyMode::Off,
             download_dir: crate::files::display(&self.download_dir()),
             verify_status: crate::verify::setting_text(self.verify.security),
+            backup_status: crate::devices::backup_setting_text(self.verify.security),
             ignored_users: self.ignored_users.len(),
             wanted_theme: self.wanted_theme.clone(),
             theme_dark: self.theme_dark.clone(),
@@ -240,6 +244,8 @@ impl App {
             Setting::Profile => self.open_own_profile(),
             Setting::Encryption => self.start_verification(),
             Setting::IgnoredUsers => self.change_setting(Setting::IgnoredUsers, 0),
+            Setting::Sessions => self.open_sessions(),
+            Setting::KeyBackup => self.open_keys(),
             Setting::Logout => {
                 if self.matrix.is_none() {
                     self.show_toast("The demo has no account to log out of");

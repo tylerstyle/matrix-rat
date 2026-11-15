@@ -134,7 +134,7 @@ impl App {
         };
         let password = match &mut popup.password {
             Some(typed) if typed.is_empty() => return None,
-            Some(typed) => Some(typed.take_string()),
+            Some(typed) => Some(typed.take_secret()),
             None => None,
         };
         popup.password_error = None;

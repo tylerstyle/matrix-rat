@@ -731,7 +731,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver: homeserver.to_owned(),
             username: username.to_owned(),
-            password: password.to_owned(),
+            password: password.to_owned().into(),
         });
         let user_id = loop {
             match tokio::time::timeout(Duration::from_secs(60), events.recv())

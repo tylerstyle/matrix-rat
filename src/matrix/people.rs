@@ -944,7 +944,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver: homeserver.clone(),
             username,
-            password,
+            password: password.into(),
         });
         let own_id = recv_until(&mut events, "login", |e| match e {
             MatrixEvent::LoggedIn { user_id } => Some(user_id),

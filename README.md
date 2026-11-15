@@ -25,7 +25,7 @@ notifications and themes that follow your desktop are all there.
 
 | | |
 |---|---|
-| 🔐 **Private by default** | End-to-end encryption, device verification by emoji comparison, recovery key, and warnings on messages that cannot be fully trusted. |
+| 🔐 **Private by default** | End-to-end encryption, device verification by emoji comparison, recovery key, and warnings on messages that cannot be fully trusted. See where your account is logged in and sign sessions out, check your key backup, move message keys between devices in a file, and read why a message could not be decrypted. |
 | 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list (kitty graphics only; coloured initials otherwise). |
 | 💬 **Everything a chat needs** | Replies, edits, reactions, threads, mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
 | 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread to come back to it later (your other clients see that too), or everything as read. |
@@ -116,7 +116,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `d` try decrypting again, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
@@ -150,6 +150,22 @@ them, or change their role / remove / ban them in the current room. Open **Setti
 (`F2`, `Ctrl-P`, or click your name badge on the message box's top border) to update your
 display name or avatar picture (`Tab` completes file paths, or drop an image file onto the
 window), and use **Name in room…** in Room info (`F4`) to set or clear a per-room display name.
+
+**Sessions and keys** live in the settings (`F2`) and the command palette (`Ctrl-P`):
+
+- **Sessions** lists where your account is logged in, with a warning for every session
+  that is not verified. `r` renames one, `v` verifies it by emoji comparison, `Del` signs
+  it out (the server asks for your account password; on servers with single sign-on or an
+  account service, matrix-rat shows that service's page for it instead), `a` shows the
+  addresses the sessions were last seen at.
+- **Key backup** says in plain words what the server has (asked when you open it; if it
+  cannot be asked, that is what it says), whether this device saves its keys to a backup
+  and how far its uploads are, and whether recovery is set up; if this device still
+  needs the recovery key, it can be entered from there. `e` exports all message keys of this device to a file protected
+  by a passphrase, `i` imports such a file (from matrix-rat or Element); drop the file
+  on the window instead of typing its path.
+- A message that could not be decrypted says why. `d` (or "Try decrypting again" in its
+  menu) looks for its key once more.
 
 <div align="center">
 <img src="docs/screenshots/palette.svg" alt="The command palette, filtered by typing" width="860">
@@ -211,7 +227,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `open_pinned`, `jump_to_newest`, `jump_to_oldest`.
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**
@@ -253,6 +269,22 @@ Setting `preset = "vim"` keeps the default keys and adds:
   `notification_click_command` in the config file to the command your desktop offers
   for that, for example `hyprctl dispatch focuswindow class:kitty` on Hyprland or
   `swaymsg '[app_id="kitty"] focus'` on sway.
+- **Key backup and recovery are not created here yet.** matrix-rat uses a backup and a
+  recovery key that exist, and tells you when they are missing; to set them up (or reset
+  them), use Element: Settings → Encryption.
+- **A key file opens your encrypted history** to whoever has it and its passphrase. It is
+  written for you alone (mode 0600), appears under its name only when it is complete,
+  never replaces anything that is there, and a passphrase of fewer than 8 characters is
+  refused. The folder must be on a file system with hard links (not a FAT-formatted
+  stick). Delete the file when it has done its job.
+- **"Verified" in the session list** is checked on this device only when this device is
+  verified itself; until then the list repeats what the server says ("says verified"),
+  and nothing is shown as good news. A session's name is whatever that session (or
+  anyone logged in to the account) set.
+- **Passwords and passphrases** are wiped from matrix-rat's own memory when they have
+  been sent or their field is closed, and are pasted exactly as they are (spaces
+  included). Copies outside its reach remain: your terminal's, and those the Matrix
+  libraries make while a request is on its way.
 - **Logs** are in `~/.local/state/matrix-rat/<profile>/`. At the default level the app
   keeps message text, passwords and keys out of them.
 - **Something stuck?** `Ctrl-Q` quits and `Ctrl-Z` suspends to the shell, also from

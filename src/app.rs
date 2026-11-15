@@ -2,6 +2,7 @@
 
 mod attach;
 mod complete;
+mod devices;
 mod drafts;
 mod files;
 pub mod global_search;
@@ -320,6 +321,8 @@ pub struct App {
     pub(super) dir_search_gen: u64,
     /// Deadline timer start for debounced public room directory searches in `NewPopup`.
     pub(super) dir_search_debounce: Option<std::time::Instant>,
+    /// The account's sessions and the key backup, for their popups.
+    pub devices: crate::devices::DevicesState,
 }
 
 /// Shared 250 ms search debounce window used by directory & user lookups.
@@ -526,6 +529,7 @@ impl App {
             user_search_debounce: None,
             dir_search_gen: 0,
             dir_search_debounce: None,
+            devices: Default::default(),
         }
     }
 
@@ -848,6 +852,10 @@ impl App {
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Profile => self.own_profile_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
+            Setting::Sessions => "Enter to view".to_owned(),
+            Setting::KeyBackup => {
+                crate::devices::backup_setting_text(self.verify.security).to_owned()
+            }
             Setting::IgnoredUsers => match self.ignored_users.len() {
                 0 => "None".to_owned(),
                 1 => "1 user".to_owned(),
@@ -942,6 +950,16 @@ impl App {
             Setting::IgnoredUsers => {
                 if delta == 0 {
                     self.open_ignored_users();
+                }
+            }
+            Setting::Sessions => {
+                if delta == 0 {
+                    self.open_sessions();
+                }
+            }
+            Setting::KeyBackup => {
+                if delta == 0 {
+                    self.open_keys();
                 }
             }
             Setting::Logout => {
@@ -1186,6 +1204,7 @@ impl App {
         self.ignored_users.clear();
         bump_search_gen(&mut self.user_search_gen, &mut self.user_search_debounce);
         bump_search_gen(&mut self.dir_search_gen, &mut self.dir_search_debounce);
+        self.devices = Default::default();
         if let Some(Modal::New(popup)) = &mut self.modal {
             popup.clear_user_search();
             popup.clear_dir_search();
@@ -1198,6 +1217,8 @@ impl App {
                     | Modal::Report(_)
                     | Modal::Pinned(_)
                     | Modal::ReasonConfirm(_)
+                    | Modal::Sessions(_)
+                    | Modal::Keys(_)
                     | Modal::UserInfo(_)
                     | Modal::OwnProfile(_)
             )
@@ -2519,6 +2540,13 @@ impl App {
             Action::PinMessage => self.toggle_pin_message(None),
             Action::OpenPinned => self.open_pinned(),
             Action::ForwardMessage => self.open_forward_picker(None),
+            Action::RetryDecryption => self.retry_decryption(),
+            Action::Devices(click) => match (&self.modal, click) {
+                (Some(Modal::Sessions(_) | Modal::Keys(_)), _) => self.devices_click(click),
+                (_, crate::devices::Click::Export) => self.open_key_export(),
+                (_, crate::devices::Click::Import) => self.open_key_import(),
+                _ => {}
+            },
             Action::UserInfo => self.open_user_info_from_selection(),
             Action::NewRoom
             | Action::RoomInfo
@@ -2567,7 +2595,7 @@ impl App {
             } else {
                 form.busy = Some("Re-authenticating…".to_owned());
                 MatrixCmd::ReauthPassword {
-                    password: form.password.take_string(),
+                    password: form.password.take_secret(),
                 }
             }
         } else if browser {
@@ -2580,7 +2608,7 @@ impl App {
             MatrixCmd::LoginPassword {
                 homeserver: form.homeserver.as_str().to_owned(),
                 username: form.username.as_str().to_owned(),
-                password: form.password.take_string(),
+                password: form.password.take_secret(),
             }
         };
         self.send_matrix(command);
@@ -2596,7 +2624,7 @@ impl App {
         form.busy = true;
         form.error = None;
         // Not kept in the form once it is on its way.
-        let key = form.key.take_string();
+        let key = form.key.take_secret();
         self.send_matrix(MatrixCmd::Recover { key });
     }
 
@@ -2633,6 +2661,9 @@ impl App {
             Some(Modal::UserInfo(_)) => self.escape_user_info(),
             Some(Modal::OwnProfile(_)) => self.escape_own_profile(),
             Some(Modal::Menu(_)) => self.modal = None,
+            Some(Modal::Sessions(_) | Modal::Keys(_)) => {
+                self.devices_click(crate::devices::Click::Cancel);
+            }
             None => {}
         }
     }
@@ -2759,6 +2790,8 @@ impl App {
             Some(Modal::Report(_)) => self.on_report_key(code, mods),
             Some(Modal::Pinned(_)) => self.on_pinned_key(code, mods),
             Some(Modal::ReasonConfirm(_)) => self.on_reason_confirm_key(code, mods),
+            Some(Modal::Sessions(_)) => self.on_sessions_key(code, mods),
+            Some(Modal::Keys(_)) => self.on_keys_key(code, mods),
             Some(Modal::UserInfo(_)) => self.on_user_info_key(code, mods),
             Some(Modal::OwnProfile(_)) => self.on_own_profile_key(code, mods),
             None => {}
@@ -3018,6 +3051,10 @@ impl App {
             } => {
                 self.on_forward_result(to_room_id, to_room_name, result);
             }
+            MatrixEvent::Devices(event) => self.on_devices_event(event),
+            MatrixEvent::DecryptionRetried {
+                event_id, result, ..
+            } => self.on_decryption_retried(&event_id, result),
             MatrixEvent::OwnProfile(profile) => self.on_own_profile(profile),
             MatrixEvent::OwnProfileResult { what, result } => {
                 self.on_own_profile_result(what, result);
@@ -3224,8 +3261,14 @@ impl App {
                 self.update_typing();
                 self.note_draft();
             }
-            Event::Paste(text) => {
-                self.on_paste(&text);
+            Event::Paste(mut text) => {
+                // A secret is taken as it is and our copy of it wiped; everything
+                // else goes the usual way.
+                if self.paste_secret(&text) {
+                    zeroize::Zeroize::zeroize(&mut text);
+                } else {
+                    self.on_paste(&text);
+                }
                 self.update_typing();
                 self.note_draft();
             }
@@ -3471,6 +3514,9 @@ impl App {
             Some(Modal::IgnoredUsers(_)) => return self.on_ignored_users_paste(first_line),
             Some(Modal::Report(_)) => return self.on_report_paste(first_line),
             Some(Modal::ReasonConfirm(_)) => return self.on_reason_confirm_paste(first_line),
+            Some(Modal::Sessions(_) | Modal::Keys(_)) => {
+                return self.on_devices_paste(&text, first_line);
+            }
             Some(Modal::Pinned(_)) => return,
             Some(Modal::UserInfo(_)) => return self.on_user_info_paste(first_line),
             Some(Modal::OwnProfile(_)) => return self.on_own_profile_paste(&text, first_line),
@@ -3541,6 +3587,10 @@ impl App {
                             Some(Modal::OwnProfile(p)) if p.busy.is_none()
                         ) {
                             self.modal = None;
+                        }
+                        if matches!(self.modal, Some(Modal::Sessions(_) | Modal::Keys(_))) {
+                            // Like Esc: one step back, and out from the first page.
+                            self.devices_click(crate::devices::Click::Cancel);
                         }
                         if matches!(self.modal, Some(Modal::Search(_))) {
                             self.close_search();
@@ -3742,6 +3792,7 @@ impl App {
                             | Modal::Keybinds(_)
                             | Modal::IgnoredUsers(_)
                             | Modal::Pinned(_)
+                            | Modal::Sessions(_)
                             | Modal::UserInfo(_)
                     )
                 ) =>
@@ -3759,6 +3810,11 @@ impl App {
                     Some(Modal::Keybinds(editor)) => editor.scroll_by(delta),
                     Some(Modal::IgnoredUsers(_)) => self.scroll_ignored_users(delta),
                     Some(Modal::Pinned(_)) => self.scroll_pinned(delta),
+                    Some(Modal::Sessions(popup)) => {
+                        if matches!(popup.stage, crate::devices::SessionStage::List) {
+                            popup.step(self.devices.sessions(), delta.signum());
+                        }
+                    }
                     Some(Modal::UserInfo(_)) => self.scroll_user_info(delta),
                     _ => {}
                 }
@@ -3832,6 +3888,7 @@ impl App {
 
     fn click_input(&mut self, target: InputTarget, rel_col: usize) {
         match target {
+            InputTarget::Devices(slot) => self.click_devices_field(slot, rel_col),
             InputTarget::Login(slot) => {
                 if let Some(Modal::Login(form)) = &mut self.modal
                     && form.busy.is_none()
@@ -3966,6 +4023,7 @@ impl App {
 
     fn on_tick(&mut self) {
         self.verify_tick();
+        self.devices_watch();
         self.tick_global_search();
         self.release_count_notices(COUNT_NOTICE_WAIT);
         self.save_idle_draft(drafts::IDLE);
@@ -4910,7 +4968,7 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(
             commands.try_recv().unwrap(),
-            MatrixCmd::ReauthPassword { password } if password == "secretpw"
+            MatrixCmd::ReauthPassword { password } if password.as_str() == "secretpw"
         ));
 
         // Failure keeps re-authenticate mode open so the user can retry.
@@ -5914,10 +5972,10 @@ mod tests {
         assert!(app.toast.is_some());
 
         // "Key bindings" opens the key-bindings editor; the backdrop closes popups.
-        app.on_event(key(KeyCode::Up));
-        app.on_event(key(KeyCode::Up));
-        app.on_event(key(KeyCode::Up));
-        app.on_event(key(KeyCode::Up));
+        // (Up from "Log out": ignored users, key backup, sessions, encryption, profile, keys.)
+        for _ in 0..6 {
+            app.on_event(key(KeyCode::Up));
+        }
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::Keybinds(_))) && !app.help_open);
         app.on_event(key(KeyCode::Esc));
@@ -6439,7 +6497,7 @@ mod tests {
         let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
         assert!(sent.iter().any(|c| matches!(
             c,
-            MatrixCmd::ReauthPassword { password } if password == "alpha X"
+            MatrixCmd::ReauthPassword { password } if password.as_str() == "alpha X"
         )));
         match &mut app.modal {
             Some(Modal::Login(form)) => {

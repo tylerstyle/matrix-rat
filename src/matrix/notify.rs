@@ -329,7 +329,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver: homeserver.clone(),
             username,
-            password,
+            password: password.into(),
         });
         // Wait until the room list is there, so the sync is running.
         let synced = async {

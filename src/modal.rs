@@ -321,10 +321,14 @@ pub enum Setting {
     ThemePairing,
     /// Manage users whose messages, previews and invitations are hidden.
     IgnoredUsers,
+    /// The account's sessions (devices): rename, verify, sign out.
+    Sessions,
+    /// Key backup and recovery, and message keys to and from a file.
+    KeyBackup,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 17] = [
+    pub const ALL: [Setting; 19] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -340,6 +344,8 @@ impl Setting {
         Setting::Keys,
         Setting::Profile,
         Setting::Encryption,
+        Setting::Sessions,
+        Setting::KeyBackup,
         Setting::IgnoredUsers,
         Setting::Logout,
     ];
@@ -372,6 +378,8 @@ impl Setting {
             Setting::Keys => "Key bindings",
             Setting::Profile => "Profile",
             Setting::Encryption => "Encryption",
+            Setting::Sessions => "Sessions",
+            Setting::KeyBackup => "Key backup",
             Setting::IgnoredUsers => "Ignored users",
             Setting::Logout => "Log out",
         }
@@ -405,6 +413,12 @@ impl Setting {
             Setting::Profile => "Change your display name and profile picture.",
             Setting::Encryption => {
                 "Verify this device with another of your devices, or see its status."
+            }
+            Setting::Sessions => {
+                "Where your account is logged in: rename, verify or sign out a session."
+            }
+            Setting::KeyBackup => {
+                "Whether your message keys are backed up; recovery key; keys to or from a file."
             }
             Setting::IgnoredUsers => {
                 "View or unignore users whose messages and invitations are hidden."
@@ -896,6 +910,10 @@ pub enum Modal {
     Pinned(PinnedPopup),
     /// Moderation action confirmation with optional reason (redact other's message or ban user).
     ReasonConfirm(ReasonConfirmPopup),
+    /// The account's sessions (devices).
+    Sessions(Box<crate::devices::SessionsPopup>),
+    /// Key backup and recovery; message keys to and from a file.
+    Keys(Box<crate::devices::KeysPopup>),
 }
 
 #[cfg(test)]
@@ -980,7 +998,7 @@ mod tests {
         let command = crate::matrix::MatrixCmd::LoginPassword {
             homeserver: "example.org".into(),
             username: "alice".into(),
-            password: "hunter2".into(),
+            password: String::from("hunter2").into(),
         };
         assert!(!format!("{command:?}").contains("hunter2"));
     }

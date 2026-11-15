@@ -89,7 +89,8 @@ mod tests {
                         username: std::env::var("MATRIX_RAT_TEST_USER")
                             .expect("MATRIX_RAT_TEST_USER"),
                         password: std::env::var("MATRIX_RAT_TEST_PASSWORD")
-                            .expect("MATRIX_RAT_TEST_PASSWORD"),
+                            .expect("MATRIX_RAT_TEST_PASSWORD")
+                            .into(),
                     }),
                     MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
                     MatrixEvent::Rooms(rooms) if opened.is_none() => {

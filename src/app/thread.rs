@@ -410,6 +410,7 @@ impl App {
                 | MatrixCmd::ToggleReaction { .. }
                 | MatrixCmd::Redact { .. }
                 | MatrixCmd::Retry { .. }
+                | MatrixCmd::RetryDecryption { .. }
                 | MatrixCmd::Paginate { .. }
                 | MatrixCmd::PaginateForwards { .. }
                 | MatrixCmd::MarkRead { .. }

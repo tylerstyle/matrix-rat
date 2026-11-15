@@ -5,7 +5,9 @@ use std::ops::Deref;
 use crossterm::event::{KeyCode, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::text::{sanitize_line, width};
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::text::{sanitize_line, unsafe_char, width};
 
 /// Result of applying a key, paste, or pointer action to a [`LineEdit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +58,30 @@ pub struct LineView {
 
 /// State of a single-line text input: UTF-8 text, grapheme-boundary cursor, optional
 /// byte cap, optional secret redaction in `Debug`, and horizontal scroll memory.
+///
+/// # Secret fields
+///
+/// A field made with [`LineEdit::secret`] holds a password, a passphrase or a recovery
+/// key, and looks after the memory it is typed into:
+///
+/// - the text lives in one buffer that is wiped when the field is dropped; when the
+///   text outgrows the buffer it moves to a larger one and the old one is wiped
+///   first, and what a key erases (backspace, delete, clearing) is wiped at once;
+/// - typing and pasting put the characters straight into that buffer, without the
+///   temporary copies the ordinary path makes, and change nothing but control
+///   characters, which are left out: spaces stay as they are, also at the ends;
+/// - [`LineEdit::take_secret`] hands the text out in a `Zeroizing` string, which is
+///   how it travels to the worker.
+///
+/// What this cannot reach, and so does not promise: what is drawn (a secret that is
+/// shown in the clear, as the recovery key is while it is typed, is copied for the
+/// screen like any text; a masked one is drawn as dots); the terminal's own copy of what
+/// was typed or pasted, and the buffers crossterm reads it into (the `String` of a
+/// paste event that reaches the app is wiped by the app, crossterm's parsing buffer
+/// is not); the copy `ruma`'s `Password` makes to put a password into a request, and
+/// the request body built from it; whatever the SDK copies for its own work (it
+/// wipes the passphrase of a key file itself); and memory the operating system has
+/// swapped out or written to a core dump.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct LineEdit {
     text: String,
@@ -65,6 +91,20 @@ pub struct LineEdit {
     secret: bool,
     /// First display column shown in the last rendered viewport (in cells).
     scroll_col: usize,
+}
+
+/// Bytes a secret field has room for from the start.
+const SECRET_ROOM: usize = 256;
+
+/// What was typed into a secret field (a password, a passphrase, a recovery key) is
+/// wiped from memory when the field goes away. What `take_string` handed out is the
+/// taker's to look after.
+impl Drop for LineEdit {
+    fn drop(&mut self) {
+        if self.secret {
+            self.text.zeroize();
+        }
+    }
 }
 
 impl std::fmt::Debug for LineEdit {
@@ -121,10 +161,12 @@ impl LineEdit {
     }
 
     pub fn secret() -> Self {
-        Self {
-            secret: true,
-            ..Self::default()
-        }
+        let mut field = Self::default();
+        field.secret = true;
+        // Room for what is usually typed, so that growing the text does not leave
+        // copies of its beginning behind in memory that was given back.
+        field.text.reserve(SECRET_ROOM);
+        field
     }
 
     pub fn with_max_bytes(mut self, max: usize) -> Self {
@@ -151,7 +193,15 @@ impl LineEdit {
 
     /// Replaces the text (preserving limit and secret settings) and places the cursor at the end.
     pub fn set(&mut self, text: impl Into<String>) {
-        self.text = text.into();
+        if self.secret {
+            // Into the buffer that is there (wiped first), which keeps its room.
+            let new = Zeroizing::new(text.into());
+            self.text.zeroize();
+            self.make_room(new.len());
+            self.text.push_str(&new);
+        } else {
+            self.text = text.into();
+        }
         self.clip_to_limit();
         self.cursor = self.text.len();
         self.scroll_col = 0;
@@ -161,7 +211,70 @@ impl LineEdit {
     pub fn take_string(&mut self) -> String {
         self.cursor = 0;
         self.scroll_col = 0;
-        std::mem::take(&mut self.text)
+        let taken = std::mem::take(&mut self.text);
+        if self.secret {
+            // For what is typed next (a second try at a password).
+            self.text.reserve(SECRET_ROOM);
+        }
+        taken
+    }
+
+    /// Takes a secret out for sending. Wiped when the taker drops it.
+    pub fn take_secret(&mut self) -> Zeroizing<String> {
+        Zeroizing::new(self.take_string())
+    }
+
+    /// Whether this field holds a secret.
+    pub fn is_secret(&self) -> bool {
+        self.secret
+    }
+
+    /// Makes sure `more` bytes fit into a secret's buffer without the allocator moving
+    /// it (which would leave the old copy behind): if they do not, the text moves to
+    /// a new, larger buffer here and the old one is wiped.
+    fn make_room(&mut self, more: usize) {
+        let needed = self.text.len() + more;
+        if needed <= self.text.capacity() {
+            return;
+        }
+        let mut larger = String::with_capacity(needed.max(self.text.capacity() * 2) + SECRET_ROOM);
+        larger.push_str(&self.text);
+        self.text.zeroize();
+        self.text = larger;
+    }
+
+    /// Wipes the part of a secret's buffer that holds no text any more: what was
+    /// just erased from it.
+    fn wipe_erased(&mut self) {
+        if !self.secret {
+            return;
+        }
+        // The buffer itself, not a copy: neither conversion allocates.
+        let mut bytes = std::mem::take(&mut self.text).into_bytes();
+        bytes.spare_capacity_mut().zeroize();
+        self.text = String::from_utf8(bytes).unwrap_or_default();
+    }
+
+    /// The secret way to insert: character by character into the buffer, leaving out
+    /// control characters and nothing else. No copy of `raw` is made.
+    fn insert_secret(&mut self, raw: &str) -> EditOutcome {
+        self.make_room(raw.len());
+        let mut at = self.cursor;
+        for c in raw.chars().filter(|c| !unsafe_char(*c)) {
+            if self
+                .max_bytes
+                .is_some_and(|limit| self.text.len() + c.len_utf8() > limit)
+            {
+                break;
+            }
+            self.text.insert(at, c);
+            at += c.len_utf8();
+        }
+        if at == self.cursor {
+            return EditOutcome::Ignored;
+        }
+        self.cursor = self.snap_cursor(at);
+        EditOutcome::Changed
     }
 
     #[cfg(test)]
@@ -184,6 +297,7 @@ impl LineEdit {
             end = i + g.len();
         }
         self.text.truncate(end);
+        self.wipe_erased();
         self.cursor = self.snap_cursor(self.cursor.min(end));
     }
 
@@ -228,6 +342,9 @@ impl LineEdit {
     /// Inserts sanitized one-line text at the cursor, keeping grapheme clusters whole
     /// and stopping before any configured byte cap.
     pub fn insert(&mut self, raw: &str) -> EditOutcome {
+        if self.secret {
+            return self.insert_secret(raw);
+        }
         let clean = sanitize_line(raw);
         let slice = match self.max_bytes {
             None => clean.as_str(),
@@ -252,10 +369,10 @@ impl LineEdit {
         EditOutcome::Changed
     }
 
-    /// Pastes the first line of `raw`, sanitized to one line.
+    /// Pastes the first line of `raw`, sanitized to one line. (Into a secret field:
+    /// as it is, see the type's documentation.)
     pub fn paste(&mut self, raw: &str) -> EditOutcome {
-        let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-        let first = normalized.lines().next().unwrap_or("");
+        let first = raw.split(['\n', '\r']).next().unwrap_or("");
         self.insert(first)
     }
 
@@ -264,6 +381,7 @@ impl LineEdit {
             return EditOutcome::Ignored;
         }
         self.text.clear();
+        self.wipe_erased();
         self.cursor = 0;
         self.scroll_col = 0;
         EditOutcome::Changed
@@ -275,6 +393,7 @@ impl LineEdit {
         }
         let prev = self.prev_boundary(self.cursor);
         self.text.drain(prev..self.cursor);
+        self.wipe_erased();
         self.cursor = self.snap_cursor(prev);
         EditOutcome::Changed
     }
@@ -285,6 +404,7 @@ impl LineEdit {
         }
         let next = self.next_boundary(self.cursor);
         self.text.drain(self.cursor..next);
+        self.wipe_erased();
         self.cursor = self.snap_cursor(self.cursor);
         EditOutcome::Changed
     }
@@ -298,6 +418,7 @@ impl LineEdit {
             return EditOutcome::Ignored;
         }
         self.text.drain(to..self.cursor);
+        self.wipe_erased();
         self.cursor = self.snap_cursor(to);
         EditOutcome::Changed
     }
@@ -307,6 +428,7 @@ impl LineEdit {
             return EditOutcome::Ignored;
         }
         self.text.truncate(self.cursor);
+        self.wipe_erased();
         EditOutcome::Changed
     }
 
@@ -507,6 +629,106 @@ impl LineEdit {
 
 #[cfg(test)]
 mod tests {
+    /// The whole buffer of a secret field, text and spare room. Only for a field
+    /// whose buffer was written all through before (`set` wipes all of it, which
+    /// does that): spare room is otherwise not to be read.
+    fn buffer(field: &mut super::LineEdit) -> Vec<u8> {
+        let capacity = field.text.capacity();
+        let mut bytes = std::mem::take(&mut field.text).into_bytes();
+        let mut all = bytes.clone();
+        // SAFETY: every byte of the buffer was written by `set` (see above).
+        all.extend(
+            bytes
+                .spare_capacity_mut()
+                .iter()
+                .map(|byte| unsafe { byte.assume_init() }),
+        );
+        assert_eq!(all.len(), capacity);
+        field.text = String::from_utf8(bytes).unwrap();
+        all
+    }
+
+    #[test]
+    fn a_secret_is_pasted_as_it_is_and_typed_without_copies() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut field = super::LineEdit::secret();
+        // Spaces at the ends are part of a passphrase; only the first line counts,
+        // and control characters are left out.
+        field.paste("  correct horse\tbattery \u{1b}[31m staple  \r\nsecond line");
+        assert_eq!(field.as_str(), "  correct horsebattery [31m staple  ");
+        // An ordinary field keeps its ways (tabs become spaces, here).
+        let mut plain = super::LineEdit::new();
+        plain.paste("a\tb\nc");
+        assert_eq!(plain.as_str(), "a    b");
+
+        // What is erased is gone from the buffer at once, not only when the field goes.
+        let mut field = super::LineEdit::secret();
+        field.insert("hunter2");
+        // Fill the spare room with something known first, so that it can be read.
+        let room = field.text.capacity();
+        field.set("x".repeat(room));
+        field.set("hunter2-and-more");
+        let keys = super::EditKeys::FULL;
+        field.handle_key(KeyCode::Backspace, KeyModifiers::NONE, keys);
+        assert_eq!(field.as_str(), "hunter2-and-mor");
+        assert!(buffer(&mut field)[15..].iter().all(|b| *b == 0));
+        field.handle_key(KeyCode::Home, KeyModifiers::NONE, keys);
+        field.handle_key(KeyCode::Delete, KeyModifiers::NONE, keys);
+        assert_eq!(field.as_str(), "unter2-and-mor");
+        assert!(buffer(&mut field)[14..].iter().all(|b| *b == 0));
+        field.handle_key(KeyCode::End, KeyModifiers::NONE, keys);
+        field.handle_key(KeyCode::Char('w'), KeyModifiers::CONTROL, keys);
+        assert_eq!(field.as_str(), "unter2-and-");
+        assert!(buffer(&mut field)[11..].iter().all(|b| *b == 0));
+        field.handle_key(KeyCode::Home, KeyModifiers::NONE, keys);
+        field.handle_key(KeyCode::Right, KeyModifiers::NONE, keys);
+        field.handle_key(KeyCode::Char('k'), KeyModifiers::CONTROL, keys);
+        assert_eq!(field.as_str(), "u");
+        assert!(buffer(&mut field)[1..].iter().all(|b| *b == 0));
+        field.set("again");
+        field.handle_key(KeyCode::Char('u'), KeyModifiers::CONTROL, keys);
+        assert!(field.is_empty());
+        assert!(buffer(&mut field).iter().all(|b| *b == 0));
+        // Emptied by `set`, the room is still there.
+        field.set("");
+        assert!(field.text.capacity() >= super::SECRET_ROOM);
+
+        // Longer than the room: moved by us (the old buffer wiped), still whole.
+        let mut field = super::LineEdit::secret();
+        let long = "p".repeat(super::SECRET_ROOM - 1);
+        field.insert(&long);
+        let before = field.text.capacity();
+        field.insert("assphrase");
+        assert!(field.text.capacity() > before);
+        assert_eq!(field.as_str(), format!("{long}assphrase"));
+        // A byte cap holds for secrets too.
+        let mut capped = super::LineEdit::secret().with_max_bytes(4);
+        capped.paste("abcdef");
+        assert_eq!(capped.as_str(), "abcd");
+        // Handed out wrapped.
+        let taken: zeroize::Zeroizing<String> = field.take_secret();
+        assert!(taken.ends_with("assphrase") && field.is_empty());
+    }
+
+    #[test]
+    fn secret_fields_have_room_from_the_start_and_after_being_emptied() {
+        let mut field = super::LineEdit::secret();
+        assert!(field.text.capacity() >= super::SECRET_ROOM);
+        field.insert("hunter2");
+        let at = field.text.as_ptr();
+        field.insert(" and a good deal more than that");
+        // Typing on did not move the text (and leave a copy behind).
+        assert_eq!(field.text.as_ptr(), at);
+        assert_eq!(
+            field.take_string(),
+            "hunter2 and a good deal more than that"
+        );
+        assert!(field.is_empty() && field.text.capacity() >= super::SECRET_ROOM);
+        assert!(!format!("{field:?}").contains("hunter2"));
+        // An ordinary field is left alone.
+        assert_eq!(super::LineEdit::new().text.capacity(), 0);
+    }
+
     use super::*;
 
     fn key(code: KeyCode) -> (KeyCode, KeyModifiers) {
