@@ -2523,7 +2523,7 @@ fn draw_addresses_subview(
     };
     let can_edit = info.setting_editable(RoomSetting::Addresses);
     let footer = if can_edit {
-        "↑↓ list · Tab focus · m main · u unpublish · Del delete local · Esc back"
+        "↑↓ list · Tab focus · m main · u unpublish · Del delete · Esc back"
     } else {
         "↑↓ list · Read-only · Esc back"
     };

@@ -393,7 +393,9 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             0,
         );
     }
-    if ctx.in_knock {
+    // Without a key of its own by default, so it is not among the bindings below;
+    // given one, that binding provides it and it must not be listed twice.
+    if ctx.in_knock && ctx.keymap.label_for(Action::WithdrawKnock).is_none() {
         push_entry(
             out,
             Target::Action(Action::WithdrawKnock),
@@ -757,6 +759,10 @@ fn action_meta<'a>(
             Cow::Borrowed(description),
             &["pinned messages", "pins", "bookmarks"],
         ),
+        Action::WithdrawKnock => (
+            Cow::Borrowed(description),
+            &["cancel knock", "withdraw request", "leave room"],
+        ),
         Action::Delete => (
             Cow::Borrowed(description),
             &["delete", "redact", "remove message"],
@@ -766,6 +772,9 @@ fn action_meta<'a>(
 }
 
 fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
+    if action == Action::WithdrawKnock {
+        return ctx.in_knock;
+    }
     match ctx.focus {
         Pane::Timeline => matches!(
             action,
@@ -1667,5 +1676,37 @@ mod tests {
             .find(|e| e.target == Target::Space(Some((1, "!fun:x".into()))))
             .unwrap();
         assert_eq!(fun.hint.as_deref(), Some("unread"));
+    }
+
+    #[test]
+    fn withdraw_knock_is_listed_once_whether_bound_or_not() {
+        let count_withdraw = |p: &Palette| -> Vec<(Option<String>, bool, u8)> {
+            p.entries
+                .iter()
+                .filter(|e| e.target == Target::Action(Action::WithdrawKnock))
+                .map(|e| (e.hint.clone(), e.enabled, e.empty_group))
+                .collect()
+        };
+
+        let mut ctx = sample_context();
+        ctx.in_knock = true;
+        assert_eq!(
+            count_withdraw(&Palette::open(ctx.clone())),
+            vec![(None, true, 0)]
+        );
+
+        let (code, mods) = keymap::parse_key(keymap::Context::Global, "F10").unwrap();
+        ctx.keymap
+            .apply_rebind(keymap::Context::Global, Action::WithdrawKnock, code, mods);
+        assert_eq!(
+            count_withdraw(&Palette::open(ctx.clone())),
+            vec![(Some("F10".to_owned()), true, 0)]
+        );
+
+        ctx.in_knock = false;
+        assert_eq!(
+            count_withdraw(&Palette::open(ctx)),
+            vec![(Some("F10".to_owned()), false, 5)]
+        );
     }
 }

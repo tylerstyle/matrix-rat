@@ -656,7 +656,11 @@ impl Verifier {
                 let sender = user_id.clone();
                 self.spawn(async move {
                     if let Err(err) = client.encryption().request_user_identity(&sender).await {
-                        tracing::warn!(%err, "could not fetch the keys of {sender}");
+                        tracing::warn!(
+                            own,
+                            kind = ?err.client_api_error_kind(),
+                            "could not fetch the sender's keys"
+                        );
                     }
                 });
                 let _ = self.events.send(MatrixEvent::ActionFailed(if own {
@@ -680,7 +684,11 @@ impl Verifier {
         }
         if self.busy() {
             // One at a time. Say no rather than leave the sender waiting.
-            tracing::info!(%user_id, "declining a verification request while another one runs");
+            let own = self.client.user_id() == Some(&*user_id);
+            tracing::info!(
+                own,
+                "declining a verification request while another one runs"
+            );
             let _ = self.events.send(MatrixEvent::ActionFailed(format!(
                 "Declined a verification request from {}: another verification is running",
                 sanitize_line(user_id.as_str())
