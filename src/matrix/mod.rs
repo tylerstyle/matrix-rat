@@ -18,6 +18,7 @@ mod rooms;
 mod safety;
 pub(crate) mod search;
 mod session;
+mod source;
 mod spaces;
 mod threads;
 mod upload;
@@ -46,6 +47,7 @@ pub use people::{
 };
 pub use search::SearchHit;
 pub use session::{ReauthKind, ReauthTarget};
+pub use source::{EventSource, SOURCE_MAX, SourceKind};
 pub use spaces::SpaceSummary;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
@@ -352,6 +354,13 @@ pub enum MatrixCmd {
         room_id: String,
         event_id: String,
     },
+    /// The JSON of a message as the timeline holds it, for the message details popup.
+    /// Answered with [`MatrixEvent::Source`].
+    FetchSource {
+        request: u64,
+        room_id: String,
+        item: ItemRef,
+    },
     /// Fetches profile, verification state, and shared rooms for User Info.
     FetchUserProfile {
         request: u64,
@@ -480,6 +489,8 @@ impl std::fmt::Debug for MatrixCmd {
             Self::CancelUserSearch => f.write_str("CancelUserSearch"),
             Self::Devices(command) => write!(f, "Devices({command:?})"),
             Self::RetryDecryption { room_id, .. } => write!(f, "RetryDecryption({room_id})"),
+            // Which message is private too.
+            Self::FetchSource { request, .. } => write!(f, "FetchSource(request {request})"),
             Self::FetchUserProfile {
                 request, room_id, ..
             } => write!(
@@ -813,6 +824,11 @@ pub enum MatrixEvent {
         what: OwnProfileAction,
         result: Result<(), String>,
     },
+    /// Outcome of [`MatrixCmd::FetchSource`].
+    Source {
+        request: u64,
+        result: Result<Box<EventSource>, String>,
+    },
     /// Outcome of [`MatrixCmd::FetchUserProfile`].
     UserProfile {
         request: u64,
@@ -982,6 +998,9 @@ impl std::fmt::Debug for MatrixEvent {
             Self::OwnProfile(profile) => write!(f, "OwnProfile({profile:?})"),
             Self::OwnProfileResult { what, result } => {
                 write!(f, "OwnProfileResult({what:?}, ok: {})", result.is_ok())
+            }
+            Self::Source { request, result } => {
+                write!(f, "Source(request {request}, ok: {})", result.is_ok())
             }
             Self::UserProfile { request, result } => {
                 write!(f, "UserProfile(request {request}, ok: {})", result.is_ok())

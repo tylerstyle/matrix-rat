@@ -154,6 +154,10 @@ pub enum HitId {
     PollVoteBtn(bool),
     /// A row of the sticker picker (index into its filtered list); clicking sends it.
     StickerRow(usize),
+    /// "View source" / "Back to details" in the message details popup.
+    DetailsFlip,
+    /// "Copy event ID" / "Copy JSON" in the message details popup.
+    DetailsCopy,
 }
 
 #[derive(Debug, Default)]

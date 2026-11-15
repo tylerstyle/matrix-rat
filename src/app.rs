@@ -4,6 +4,7 @@ mod attach;
 mod code;
 mod commands;
 mod complete;
+mod details;
 mod devices;
 mod drafts;
 mod emotes;
@@ -1252,6 +1253,7 @@ impl App {
                     | Modal::PollForm(_)
                     | Modal::PollVote(_)
                     | Modal::Stickers(_)
+                    | Modal::Details(_)
             )
         ) {
             self.modal = None;
@@ -2617,6 +2619,7 @@ impl App {
                 _ => {}
             },
             Action::UserInfo => self.open_user_info_from_selection(),
+            Action::MessageDetails => self.open_message_details(),
             Action::CreatePoll => self.open_poll_create(""),
             Action::OpenStickers => {
                 self.open_stickers("");
@@ -2736,6 +2739,7 @@ impl App {
             Some(Modal::New(_) | Modal::RoomInfo(_)) => self.manage_escape(),
             Some(Modal::UserInfo(_)) => self.escape_user_info(),
             Some(Modal::OwnProfile(_)) => self.escape_own_profile(),
+            Some(Modal::Details(_)) => self.escape_details(),
             Some(Modal::Menu(_)) => self.modal = None,
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 self.devices_click(crate::devices::Click::Cancel);
@@ -2873,6 +2877,7 @@ impl App {
             Some(Modal::PollForm(_)) => self.on_poll_form_key(code, mods),
             Some(Modal::PollVote(_)) => self.on_poll_vote_key(code, mods),
             Some(Modal::Stickers(_)) => self.on_stickers_key(code, mods),
+            Some(Modal::Details(_)) => self.on_details_key(code, mods),
             None => {}
         }
     }
@@ -3115,6 +3120,7 @@ impl App {
                 generation,
                 message,
             } => self.on_directory_error(generation, message),
+            MatrixEvent::Source { request, result } => self.on_event_source(request, result),
             MatrixEvent::RoomPower { room_id, power } => {
                 if let Some(room) = self.rooms.iter_mut().find(|r| r.id == room_id) {
                     room.power = power;
@@ -3605,7 +3611,7 @@ impl App {
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
-            Some(Modal::Pinned(_)) => return,
+            Some(Modal::Pinned(_) | Modal::Details(_)) => return,
             Some(Modal::UserInfo(_)) => return self.on_user_info_paste(first_line),
             Some(Modal::OwnProfile(_)) => return self.on_own_profile_paste(&text, first_line),
             None => {}
@@ -3669,6 +3675,7 @@ impl App {
                                     | Modal::PollForm(_)
                                     | Modal::PollVote(_)
                                     | Modal::Stickers(_)
+                                    | Modal::Details(_)
                             )
                         ) || matches!(
                             &self.modal,
@@ -3870,6 +3877,8 @@ impl App {
                     Some(HitId::PollVoteBtn(true)) => self.submit_poll_vote(),
                     Some(HitId::PollVoteBtn(false)) => self.modal = None,
                     Some(HitId::StickerRow(index)) => self.send_sticker_at(index),
+                    Some(HitId::DetailsFlip) => self.flip_details(),
+                    Some(HitId::DetailsCopy) => self.copy_details(),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -3905,6 +3914,7 @@ impl App {
                             | Modal::PollForm(_)
                             | Modal::PollVote(_)
                             | Modal::Stickers(_)
+                            | Modal::Details(_)
                     )
                 ) =>
             {
@@ -3931,6 +3941,7 @@ impl App {
                         self.scroll_poll_modal(delta);
                     }
                     Some(Modal::Stickers(_)) => self.scroll_stickers(delta),
+                    Some(Modal::Details(_)) => self.scroll_details(delta),
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.
                     Some(Modal::Settings(menu)) if menu.editing.is_none() => {

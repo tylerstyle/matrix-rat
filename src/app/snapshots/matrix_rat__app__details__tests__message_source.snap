@@ -1,0 +1,28 @@
+---
+source: src/app/details.rs
+expression: "screen(&mut app, &mut terminal)"
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 #Rats ─────────────────────────────────────────────╮"
+"│ Filter rooms…        ││                                                      │"
+"│ ○ Unread  ○ People   ││                                                      │"
+"│ Rooms                ││                                                      │"
+"│▌╭ Message source ──────────────────────────────────────────────────────────╮ │"
+"│▌│ The event as this device decrypted it (the server holds it encrypted):   │ │"
+"│ │ {                                                                        │ │"
+"│ │   "content": {                                                           │ │"
+"│ │     "body": "message e1",                                                │ │"
+"│ │     "msgtype": "m.text"                                                  │ │"
+"│ │   },                                                                     │ │"
+"│ │   "event_id": "$e1:example.org",                                         │ │"
+"│ │   "origin_server_ts": 1700000000000,                                     │ │"
+"│ │   "sender": "@bob:example.org",                                          │ │"
+"│ │   "type": "m.room.message"                                               │ │"
+"│ │ }                                                                        │ │"
+"│ │                                                                          │ │"
+"│ │  Back to details    Copy JSON                                            │ │"
+"│ ╰────────────────────────── ↑↓ scroll · v details · c copy JSON · Esc back ╯ │"
+"│                      │╰──────────────────────────────────────────────────────╯"
+"│                      │╭ 3 Message ─────────────────────────────────── M  me ─╮"
+"│                      ││ Click here or press Alt-3 to write             📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
+"╰──────────────────────╯╰──────────────────────────────────────────────────────╯"
+" ◌ connecting…  Enter reply  t thread  e edit F1 help  F2 settings  F3 rat-dark "

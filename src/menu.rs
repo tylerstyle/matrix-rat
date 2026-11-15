@@ -476,6 +476,12 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
     if message.sender_id.is_some() {
         items.push(Item::action(keys, "User info", Timeline, Action::UserInfo));
     }
+    items.push(Item::action(
+        keys,
+        "Message details",
+        Timeline,
+        Action::MessageDetails,
+    ));
     if message.own && !sent {
         // Deleting what has not been sent takes it out of the queue.
         items.push(Item::action(keys, "Discard", Timeline, Action::Delete));
@@ -715,6 +721,7 @@ mod tests {
                 "Copy text",
                 "Copy link to message",
                 "Forward…",
+                "Message details",
                 "Report…",
             ]
         );
@@ -735,11 +742,12 @@ mod tests {
                 "Copy text",
                 "Copy link to message",
                 "Forward…",
+                "Message details",
                 "Delete"
             ]
         );
         assert_eq!(items[3].run, Some(Run::Do(Action::Edit)));
-        assert_eq!(items[7].run, Some(Run::Do(Action::Delete)));
+        assert_eq!(items[8].run, Some(Run::Do(Action::Delete)));
     }
 
     #[test]
@@ -883,13 +891,18 @@ mod tests {
         failed.state = SendState::Failed;
         assert_eq!(
             labels(&message_items(&failed, CONNECTED, &keys())),
-            ["Try sending again", "Copy text", "Discard"]
+            [
+                "Try sending again",
+                "Copy text",
+                "Message details",
+                "Discard"
+            ]
         );
         let mut sending = failed.clone();
         sending.state = SendState::Sending;
         assert_eq!(
             labels(&message_items(&sending, CONNECTED, &keys())),
-            ["Copy text", "Discard"]
+            ["Copy text", "Message details", "Discard"]
         );
     }
 
@@ -900,7 +913,7 @@ mod tests {
         deleted.body = "Message deleted".into();
         assert_eq!(
             labels(&message_items(&deleted, CONNECTED, &keys())),
-            ["Copy link to message"]
+            ["Copy link to message", "Message details"]
         );
         let mut locked = text(false);
         locked.kind = MsgKind::Undecryptable;
@@ -926,6 +939,7 @@ mod tests {
                 "Edit",
                 "Copy text",
                 "Forward…",
+                "Message details",
                 "Delete"
             ]
         );
@@ -1133,6 +1147,7 @@ mod tests {
             Action::Reply,
             Action::Copy,
             Action::OpenThread,
+            Action::MessageDetails,
         ] {
             bare.unbind_action(Context::Timeline, action).unwrap();
         }

@@ -1417,6 +1417,9 @@ pub enum Modal {
     PollVote(PollVotePopup),
     /// Pick a sticker from the image packs and send it.
     Stickers(StickerPicker),
+    /// Who sent a message and when, its event ID, encryption, delivery, readers and
+    /// source.
+    Details(Box<crate::details::DetailsPopup>),
 }
 
 #[cfg(test)]

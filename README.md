@@ -123,7 +123,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `C` copy a code block, `d` try decrypting again, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
@@ -175,6 +175,12 @@ you can manage ignored users under **Settings → Ignored users** (`F2`). Where 
 permissions allow, the message menu and Room info also let you pin or delete other members'
 messages with a reason, ban users (`Alt-B`; `Del` on a banned member lifts the ban), and change roles (`Alt-R`); `P` opens
 pinned messages, and `Forward…` copies a message to another room without its reply or thread context.
+
+`i` on a message (or **Message details** in its menu) shows who sent it, when to the
+second (and when it was last edited), its event ID, whether it was encrypted and any doubt
+about who sent it, how far a message of yours got, and who has read up to it. `v` there
+shows its source: the event as the server sent it, or as this device decrypted it, which
+`c` copies.
 
 Click a sender's name, choose **User info** from the message menu (`m` or palette
 `Ctrl-P`), press `Enter` on a member in Room info (`F4`), or open a `matrix.to` user link
@@ -267,7 +273,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**
@@ -275,7 +281,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 Setting `preset = "vim"` keeps the default keys and adds:
 
 - **Room list (`sidebar`)**: `j`/`k` move cursor, `g`/`G` top/bottom, `l` focus messages, `i` focus composer, `/` find in room.
-- **Messages (`timeline`)**: `j`/`k` select newer/older message, `g`/`G` oldest/newest, `h` focus room list, `l`/`i` focus composer, `/` find in room.
+- **Messages (`timeline`)**: `j`/`k` select newer/older message, `g`/`G` oldest/newest, `h` focus room list, `l`/`i` focus composer (so `message_details` has no key there unless you give it one), `/` find in room.
 - **Composer (`composer`)**: `Esc` returns focus to messages (plain letters and symbols always type).
 
 </details>

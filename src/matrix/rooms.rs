@@ -936,6 +936,27 @@ impl Timelines {
                     Err(err) => answer(Err(format!("{err:#}")), event_id),
                 }
             }
+            MatrixCmd::FetchSource {
+                request,
+                room_id,
+                item,
+            } => {
+                let events = self.events.clone();
+                let answer = move |result: Result<super::EventSource, String>| {
+                    let _ = events.send(MatrixEvent::Source {
+                        request,
+                        result: result.map(Box::new),
+                    });
+                };
+                match self.active_timeline(&room_id).await {
+                    Ok((timeline, _)) => {
+                        tokio::spawn(async move {
+                            answer(super::source::fetch(&timeline, &item).await);
+                        });
+                    }
+                    Err(err) => answer(Err(format!("{err:#}"))),
+                }
+            }
             MatrixCmd::Typing { room_id, typing } => {
                 if let Ok(room) = self.room(&room_id) {
                     tokio::spawn(async move {

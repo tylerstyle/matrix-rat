@@ -399,7 +399,8 @@ impl App {
                 MatrixCmd::Edit { item, .. }
                 | MatrixCmd::EditPoll { item, .. }
                 | MatrixCmd::ToggleReaction { item, .. }
-                | MatrixCmd::Redact { item, .. } => {
+                | MatrixCmd::Redact { item, .. }
+                | MatrixCmd::FetchSource { item, .. } => {
                     matches!(item, ItemRef::Event(id) if id == root)
                 }
                 MatrixCmd::VotePoll { poll_event_id, .. }
@@ -423,6 +424,7 @@ impl App {
                 | MatrixCmd::Redact { .. }
                 | MatrixCmd::Retry { .. }
                 | MatrixCmd::RetryDecryption { .. }
+                | MatrixCmd::FetchSource { .. }
                 | MatrixCmd::Paginate { .. }
                 | MatrixCmd::PaginateForwards { .. }
                 | MatrixCmd::MarkRead { .. }

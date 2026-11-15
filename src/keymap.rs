@@ -197,6 +197,7 @@ action_table! {
     Action::PinMessage => ("pin_message", Context::Timeline, "Pin or unpin message"),
     Action::ForwardMessage => ("forward_message", Context::Timeline, "Forward message"),
     Action::UserInfo => ("user_info", Context::Timeline, "User info"),
+    Action::MessageDetails => ("message_details", Context::Timeline, "Message details"),
     Action::CreatePoll => ("create_poll", Context::Global, "Start a poll…"),
     Action::OpenStickers => ("stickers", Context::Global, "Send a sticker…"),
     Action::OpenPinned => ("open_pinned", Context::Timeline, "Pinned messages"),
@@ -655,6 +656,16 @@ pub const DEFAULT: &[Binding] = &[
         Action::ContextMenu,
         "m",
         "Menu for the message",
+    ),
+    // The vim preset takes `i` for the composer; there the details have no key unless
+    // one is given.
+    bind(
+        Timeline,
+        Char('i'),
+        NONE,
+        Action::MessageDetails,
+        "i",
+        "Message details",
     ),
     bind(
         Timeline,

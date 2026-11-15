@@ -183,6 +183,8 @@ fn event_message(
             .map(|t| t.format("%H:%M").to_string())
             .unwrap_or_default(),
         day: when.map(|t| day_label(&t, now)).unwrap_or_default(),
+        sent_at: Some(u64::from(event.timestamp().get())),
+        encrypted: event.encryption_info().is_some() || event.content().is_unable_to_decrypt(),
         own: event.is_own(),
         sender: sender.clone(),
         sender_id: Some(event.sender().to_string()),

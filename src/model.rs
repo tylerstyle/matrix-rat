@@ -106,6 +106,11 @@ pub struct Message {
     pub sender_id: Option<String>,
     pub time: String,
     pub day: String,
+    /// When it was sent, in milliseconds since 1970: as the sender's server says, or
+    /// for a message of ours on its way, when it was queued. `None` for demo data.
+    pub sent_at: Option<u64>,
+    /// It came encrypted, whether or not it could be decrypted.
+    pub encrypted: bool,
     pub body: String,
     pub own: bool,
     pub edited: bool,

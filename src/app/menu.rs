@@ -755,7 +755,8 @@ mod tests {
                 "Reply in thread",
                 "React…",
                 "Copy text",
-                "Forward…"
+                "Forward…",
+                "Message details"
             ]
         );
         // Drawn next to the pointer, with the keys of the keymap, nothing dimmed.
@@ -791,6 +792,7 @@ mod tests {
                 "Edit",
                 "Copy text",
                 "Forward…",
+                "Message details",
                 "Delete"
             ]
         );
@@ -836,7 +838,7 @@ mod tests {
         let count = app.messages().len();
         right_click(&mut app, &mut terminal, "Good to know, thanks.");
         app.on_event(key(KeyCode::Char('d')));
-        assert_eq!(open_menu(&app).selected, 6);
+        assert_eq!(open_menu(&app).selected, 7);
         assert_eq!(app.messages().len(), count);
         // Enter asks, moving away takes the question back, Enter twice deletes.
         app.on_event(key(KeyCode::Enter));
@@ -1064,7 +1066,15 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected(vec![read, failed]);
         sent(&mut commands);
         right_click(&mut app, &mut terminal, "did not make it");
-        assert_eq!(labels(&app), ["Try sending again", "Copy text", "Discard"]);
+        assert_eq!(
+            labels(&app),
+            [
+                "Try sending again",
+                "Copy text",
+                "Message details",
+                "Discard"
+            ]
+        );
         app.on_event(key(KeyCode::Enter));
         assert_eq!(sent(&mut commands), [format!("Retry({ROOM})")]);
         right_click(&mut app, &mut terminal, "did not make it");
@@ -1234,7 +1244,7 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected(vec![first.clone(), sending]);
         sent(&mut commands);
         right_click(&mut app, &mut terminal, "on its way");
-        assert_eq!(labels(&app), ["Copy text", "Discard"]);
+        assert_eq!(labels(&app), ["Copy text", "Message details", "Discard"]);
         // The server confirms it while the menu is open: same id, now an event.
         // The menu, made for something unsent, closes.
         timeline(
@@ -1258,7 +1268,15 @@ mod tests {
         failed.state = SendState::Failed;
         timeline(&mut app, vec![first.clone(), failed]);
         right_click(&mut app, &mut terminal, "did not make it");
-        assert_eq!(labels(&app), ["Try sending again", "Copy text", "Discard"]);
+        assert_eq!(
+            labels(&app),
+            [
+                "Try sending again",
+                "Copy text",
+                "Message details",
+                "Discard"
+            ]
+        );
         let active = app.active;
         app.rooms[active].messages[1] = remote("3", "me", "did not make it");
         app.on_event(key(KeyCode::Enter));
