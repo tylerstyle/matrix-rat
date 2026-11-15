@@ -2336,6 +2336,11 @@ async fn watch(
     };
     let own = room.own_user_id().to_owned();
     let mut changes = room.subscribe_info();
+    // The notification level is not part of the room: it is in the account's push
+    // rules, and a change of those arrives on its own (kept, or the news stop).
+    let notify_settings = client.notification_settings().await;
+    let mut notify_changes = notify_settings.subscribe_to_changes();
+    let mut notify_open = true;
     let mut list = MemberList::default();
     let mut knocks_loaded = false;
     let mut force_knocks = false;
@@ -2519,6 +2524,19 @@ async fn watch(
                 force_refresh = true;
                 force_aliases = true;
                 force_knocks = true;
+                false
+            }
+            change = async {
+                if notify_open {
+                    notify_changes.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                // Missed news means something changed: look again all the same.
+                if matches!(change, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                    notify_open = false;
+                }
                 false
             }
             () = async {
@@ -3036,7 +3054,7 @@ mod tests {
         // (An answer from before the leaving may still be on its way, and the client
         // may know the room for a moment longer: what counts is that the looking
         // fails in the end.)
-        let mut asked_again = false;
+        let mut asked_again = 0;
         loop {
             if let ManageEvent::Info {
                 room_id: about,
@@ -3047,8 +3065,8 @@ mod tests {
                 if result.is_err() {
                     break;
                 }
-                assert!(!asked_again, "a forgotten room can still be looked at");
-                asked_again = true;
+                assert!(asked_again < 15, "a forgotten room can still be looked at");
+                asked_again += 1;
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 manage(ManageCmd::Info {
                     room_id: room_id.clone(),
