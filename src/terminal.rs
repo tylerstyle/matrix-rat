@@ -151,6 +151,17 @@ pub fn release() {
     restore();
 }
 
+/// Takes a wake-up that a dropped `EventStream` left in crossterm's reader.
+///
+/// Dropping the stream wakes the reader so that its thread can end. If that thread was
+/// not reading just then (it rests between events), nobody takes the wake-up, and the
+/// next read with a time limit returns at once with nothing: the cursor position that
+/// `Terminal::clear` asks for was then "not read within a normal duration", and the app
+/// ended after the first use of an editor. A read that waits for nothing takes it.
+pub fn absorb_reader_wake() {
+    let _ = crossterm::event::poll(std::time::Duration::ZERO);
+}
+
 /// Takes the terminal again after [`release`] (or a stop): raw mode, alternate screen,
 /// mouse, paste, focus reports and the keyboard protocol, on a cleared screen.
 pub fn resume(terminal: &mut Tui) -> Result<()> {

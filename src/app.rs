@@ -4285,6 +4285,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             // is dropped, and a new one is read from once we are back.
             drop(std::mem::replace(&mut events, EventStream::new()));
             tokio::time::sleep(Duration::from_millis(50)).await;
+            terminal::absorb_reader_wake();
             terminal::release();
             let dir = paths.runtime_dir.clone();
             // A blocking child: the worker, a task of its own, goes on syncing and its
@@ -4296,6 +4297,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             .unwrap_or(crate::editor::Outcome::Failed(
                 crate::editor::Failure::Launch,
             ));
+            terminal::absorb_reader_wake();
             let resumed = terminal::resume(&mut terminal);
             // The screen was cleared: pictures are sent again when drawn.
             app.images.forget_encoded();
