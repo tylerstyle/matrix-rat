@@ -212,8 +212,8 @@ async fn watch(
     }
 }
 
-/// Runs one request and tells its outcome; after a change, the open popup is sent
-/// the new list.
+/// Runs one request and tells its outcome; the open popup is then sent the list as
+/// it is now.
 async fn answer(
     events: UnboundedSender<MatrixEvent>,
     refresh: Arc<Notify>,
@@ -221,14 +221,13 @@ async fn answer(
     work: impl Future<Output = Result<(), String>>,
 ) {
     let result = work.await;
-    let changed = result.is_ok();
     let _ = events.send(MatrixEvent::Keywords(KeywordsEvent::Done {
         request,
         result,
     }));
-    if changed {
-        refresh.notify_one();
-    }
+    // Also after a failure: a keyword can be added and then fail to be marked as a
+    // mention, and the list must show it for it to be removed.
+    refresh.notify_one();
 }
 
 async fn add(
