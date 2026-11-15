@@ -1116,6 +1116,34 @@ mod tests {
     }
 
     #[test]
+    fn a_click_beside_the_picker_goes_back_to_the_space_as_esc_does() {
+        let (mut app, mut terminal, mut commands) = connected();
+        with_space_info(&mut app, &mut commands, true);
+        select(&mut app, InfoRow::AddChild);
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Palette(_))));
+        screen(&mut app, &mut terminal);
+        sent(&mut commands);
+        app.on_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(info(&app).room_id, SPACE);
+        assert_eq!(described(&mut commands), [format!("Info({SPACE})")]);
+        // On the row it came from, once that is there.
+        answer(
+            &mut app,
+            ManageEvent::Info {
+                room_id: SPACE.into(),
+                result: Ok(Box::new(details(true))),
+            },
+        );
+        assert_eq!(info(&app).current(), Some(InfoRow::AddChild));
+    }
+
+    #[test]
     fn taking_a_room_out_of_a_space_asks_first() {
         let (mut app, mut terminal, mut commands) = connected();
         with_space_info(&mut app, &mut commands, true);

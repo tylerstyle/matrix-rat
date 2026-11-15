@@ -3774,7 +3774,6 @@ impl App {
                             Some(
                                 Modal::Emoji(_)
                                     | Modal::Settings(_)
-                                    | Modal::Palette(_)
                                     | Modal::Keybinds(_)
                                     | Modal::IgnoredUsers(_)
                                     | Modal::Report(_)
@@ -3810,6 +3809,10 @@ impl App {
                             self.close_global_search();
                         }
                         self.close_manage();
+                        // Like Esc: a picker goes back to the room info it came from.
+                        if matches!(self.modal, Some(Modal::Palette(_))) {
+                            self.close_palette();
+                        }
                     }
                     Some(HitId::Field(slot)) => match &mut self.modal {
                         Some(Modal::Login(form)) if form.busy.is_none() => form.focus_slot(slot),
