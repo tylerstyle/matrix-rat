@@ -310,6 +310,8 @@ pub enum Setting {
     /// No notifications for now.
     DoNotDisturb,
     Notifications,
+    /// Words that make a message notify like a mention (push rules on the server).
+    Keywords,
     DownloadDir,
     Keys,
     Encryption,
@@ -332,7 +334,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 21] = [
+    pub const ALL: [Setting; 22] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -346,6 +348,7 @@ impl Setting {
         Setting::ReadMarkers,
         Setting::Notifications,
         Setting::DoNotDisturb,
+        Setting::Keywords,
         Setting::DownloadDir,
         Setting::Keys,
         Setting::Profile,
@@ -382,6 +385,7 @@ impl Setting {
             Setting::ReadMarkers => "Read markers",
             Setting::Notifications => "Notifications",
             Setting::DoNotDisturb => "Do not disturb",
+            Setting::Keywords => "Notification keywords",
             Setting::DownloadDir => "Download folder",
             Setting::Keys => "Key bindings",
             Setting::Profile => "Profile",
@@ -417,6 +421,9 @@ impl Setting {
             }
             Setting::DoNotDisturb => {
                 "No notifications for now. Unread marks and counts go on; the status line shows that it is on."
+            }
+            Setting::Keywords => {
+                "Words that make a message notify you like a mention. Your server keeps them, so your other clients use them too."
             }
             Setting::DownloadDir => {
                 "Where s saves files and pictures. Enter to change; empty for the default."
@@ -1657,6 +1664,8 @@ pub enum Modal {
     Details(Box<crate::details::DetailsPopup>),
     /// The threads of a room.
     Threads(ThreadsPopup),
+    /// The account's notification keywords.
+    Keywords(crate::keywords::KeywordsPopup),
 }
 
 #[cfg(test)]

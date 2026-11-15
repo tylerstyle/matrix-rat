@@ -12,6 +12,7 @@ mod external_editor;
 mod files;
 pub mod global_search;
 mod keybinds;
+mod keywords;
 mod media;
 mod menu;
 mod moderation;
@@ -346,6 +347,8 @@ pub struct App {
     pub(super) dir_search_debounce: Option<std::time::Instant>,
     /// The account's sessions and the key backup, for their popups.
     pub devices: crate::devices::DevicesState,
+    /// The notification keywords popup's watch and requests (and the demo's list).
+    pub keywords: crate::keywords::KeywordsState,
     /// Custom emoji and stickers from image packs.
     pub emotes: emotes::EmoteState,
 }
@@ -572,6 +575,7 @@ impl App {
             dir_search_gen: 0,
             dir_search_debounce: None,
             devices: Default::default(),
+            keywords: Default::default(),
             emotes: Default::default(),
         }
     }
@@ -900,7 +904,7 @@ impl App {
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Profile => self.own_profile_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
-            Setting::Sessions => "Enter to view".to_owned(),
+            Setting::Sessions | Setting::Keywords => "Enter to view".to_owned(),
             Setting::KeyBackup => {
                 crate::devices::backup_setting_text(self.verify.security).to_owned()
             }
@@ -1021,6 +1025,11 @@ impl App {
             Setting::Sessions => {
                 if delta == 0 {
                     self.open_sessions();
+                }
+            }
+            Setting::Keywords => {
+                if delta == 0 {
+                    self.open_keywords();
                 }
             }
             Setting::KeyBackup => {
@@ -1276,6 +1285,8 @@ impl App {
         bump_search_gen(&mut self.user_search_gen, &mut self.user_search_debounce);
         bump_search_gen(&mut self.dir_search_gen, &mut self.dir_search_debounce);
         self.devices = Default::default();
+        // The worker's watch ended with the session.
+        self.keywords.watch = None;
         self.reset_emotes();
         if let Some(Modal::New(popup)) = &mut self.modal {
             popup.clear_user_search();
@@ -1298,6 +1309,7 @@ impl App {
                     | Modal::Stickers(_)
                     | Modal::Details(_)
                     | Modal::Threads(_)
+                    | Modal::Keywords(_)
             )
         ) {
             self.modal = None;
@@ -2808,6 +2820,7 @@ impl App {
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 self.devices_click(crate::devices::Click::Cancel);
             }
+            Some(Modal::Keywords(_)) => self.keywords_escape(),
             None => {}
         }
     }
@@ -2943,6 +2956,7 @@ impl App {
             Some(Modal::Stickers(_)) => self.on_stickers_key(code, mods),
             Some(Modal::Details(_)) => self.on_details_key(code, mods),
             Some(Modal::Threads(_)) => self.on_threads_key(code, mods),
+            Some(Modal::Keywords(_)) => self.on_keywords_key(code, mods),
             None => {}
         }
     }
@@ -3215,6 +3229,7 @@ impl App {
                 self.on_forward_result(to_room_id, to_room_name, result);
             }
             MatrixEvent::Devices(event) => self.on_devices_event(event),
+            MatrixEvent::Keywords(event) => self.on_keywords_event(event),
             MatrixEvent::DecryptionRetried {
                 event_id, result, ..
             } => self.on_decryption_retried(&event_id, result),
@@ -3684,6 +3699,7 @@ impl App {
             Some(Modal::PollVote(_)) => return,
             Some(Modal::Stickers(_)) => return self.on_stickers_paste(first_line),
             Some(Modal::Threads(_)) => return self.on_threads_paste(first_line),
+            Some(Modal::Keywords(_)) => return self.on_keywords_paste(first_line),
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
@@ -3766,6 +3782,10 @@ impl App {
                         if matches!(self.modal, Some(Modal::Sessions(_) | Modal::Keys(_))) {
                             // Like Esc: one step back, and out from the first page.
                             self.devices_click(crate::devices::Click::Cancel);
+                        }
+                        if matches!(self.modal, Some(Modal::Keywords(_))) {
+                            // Like Esc: away from the question, else closed.
+                            self.keywords_escape();
                         }
                         if matches!(self.modal, Some(Modal::Search(_))) {
                             self.close_search();
@@ -3959,6 +3979,8 @@ impl App {
                     Some(HitId::ThreadRow(index)) => self.activate_thread_row(index),
                     Some(HitId::ThreadsMore) => self.click_threads_more(),
                     Some(HitId::ThreadsMine) => self.toggle_threads_mine(),
+                    Some(HitId::KeywordRow(index)) => self.click_keyword_row(index),
+                    Some(HitId::KeywordRemove(index)) => self.remove_keyword(Some(index)),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -3996,6 +4018,7 @@ impl App {
                             | Modal::Stickers(_)
                             | Modal::Details(_)
                             | Modal::Threads(_)
+                            | Modal::Keywords(_)
                     )
                 ) =>
             {
@@ -4024,6 +4047,7 @@ impl App {
                     Some(Modal::Stickers(_)) => self.scroll_stickers(delta),
                     Some(Modal::Details(_)) => self.scroll_details(delta),
                     Some(Modal::Threads(_)) => self.scroll_threads(delta),
+                    Some(Modal::Keywords(_)) => self.scroll_keywords(delta),
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.
                     Some(Modal::Settings(menu)) if menu.editing.is_none() => {
@@ -4102,6 +4126,7 @@ impl App {
     fn click_input(&mut self, target: InputTarget, rel_col: usize) {
         match target {
             InputTarget::Devices(slot) => self.click_devices_field(slot, rel_col),
+            InputTarget::Keyword => self.click_keywords_input(rel_col),
             InputTarget::Login(slot) => {
                 if let Some(Modal::Login(form)) = &mut self.modal
                     && form.busy.is_none()
@@ -4291,6 +4316,7 @@ impl App {
         self.verify_tick();
         self.maybe_open_startup_target();
         self.devices_watch();
+        self.keywords_watch();
         self.tick_global_search();
         self.release_count_notices(COUNT_NOTICE_WAIT);
         self.save_idle_draft(drafts::IDLE);

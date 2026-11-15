@@ -7,6 +7,7 @@ mod directory;
 mod drafts;
 mod emotes;
 mod keyring;
+mod keywords;
 mod manage;
 mod media;
 mod moderation;
@@ -35,6 +36,7 @@ pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
 pub use emotes::{CustomEmoji, EmotePack};
 pub use emotes::{EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
 pub use keyring::SecretStoreMode;
+pub use keywords::{KeywordsCmd, KeywordsEvent, MAX_KEYWORDS, shown_keywords};
 #[cfg(test)]
 pub use manage::RoomSettingsPower;
 pub use manage::{
@@ -348,6 +350,8 @@ pub enum MatrixCmd {
     CancelUserSearch,
     /// The account's sessions, the key backup, and message keys to and from a file.
     Devices(DevicesCmd),
+    /// The account's notification keywords: list, add, remove.
+    Keywords(KeywordsCmd),
     /// Try once more to read a message that could not be decrypted: look for its key
     /// in the key backup and decrypt again. Answered with
     /// [`MatrixEvent::DecryptionRetried`].
@@ -501,6 +505,8 @@ impl std::fmt::Debug for MatrixCmd {
             }
             Self::CancelUserSearch => f.write_str("CancelUserSearch"),
             Self::Devices(command) => write!(f, "Devices({command:?})"),
+            // The inner command prints no keyword.
+            Self::Keywords(command) => write!(f, "Keywords({command:?})"),
             Self::RetryDecryption { room_id, .. } => write!(f, "RetryDecryption({room_id})"),
             // Which message is private too.
             Self::FetchSource { request, .. } => write!(f, "FetchSource(request {request})"),
@@ -834,6 +840,8 @@ pub enum MatrixEvent {
     },
     /// An answer to a [`MatrixCmd::Devices`], or news for the sessions popup.
     Devices(DevicesEvent),
+    /// An answer to a [`MatrixCmd::Keywords`], or the list for the keywords popup.
+    Keywords(KeywordsEvent),
     /// Outcome of [`MatrixCmd::RetryDecryption`]: whether the message can be read
     /// now, or what went wrong.
     DecryptionRetried {
@@ -1018,6 +1026,7 @@ impl std::fmt::Debug for MatrixEvent {
                 to_room_id, result, ..
             } => write!(f, "ForwardResult({to_room_id}, ok: {})", result.is_ok()),
             Self::Devices(event) => write!(f, "Devices({event:?})"),
+            Self::Keywords(event) => write!(f, "Keywords({event:?})"),
             Self::DecryptionRetried {
                 room_id, result, ..
             } => {
@@ -1514,8 +1523,17 @@ impl Worker {
         pin_mut!(space_changes);
         self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
 
-        let mut notify_changes = client.notification_settings().await.subscribe_to_changes();
+        // One instance for the whole session: it hears of changes to the push rules
+        // only while it lives (dropping it removes its listener, and `notify_changes`
+        // would close at once).
+        let notification_settings = client.notification_settings().await;
+        let mut notify_changes = notification_settings.subscribe_to_changes();
         let mut notify_open = true;
+        let mut keywords = keywords::Keywords::new(
+            client.clone(),
+            notification_settings.clone(),
+            self.events.clone(),
+        );
         let mut manager = manage::Manager::new(
             client.clone(),
             self.events.clone(),
@@ -1696,6 +1714,7 @@ impl Worker {
                     Some(MatrixCmd::Verification(command)) => verifier.handle(command).await,
                     Some(MatrixCmd::Manage(command)) => manager.handle(command),
                     Some(MatrixCmd::Devices(command)) => devices.handle(command),
+                    Some(MatrixCmd::Keywords(command)) => keywords.handle(command),
                     Some(MatrixCmd::SearchMessages { generation, query }) => {
                         searcher.start(generation, query);
                     }
@@ -1760,6 +1779,7 @@ impl Worker {
         people_mgr.stop();
         manager.stop();
         devices.stop();
+        keywords.stop();
         emote_mgr.stop();
         searcher.stop();
         user_searcher.stop();

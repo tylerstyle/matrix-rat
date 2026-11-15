@@ -10,6 +10,7 @@ mod help;
 pub mod hit;
 mod image;
 mod keybinds;
+mod keywords;
 mod menu;
 mod modal;
 mod palette;

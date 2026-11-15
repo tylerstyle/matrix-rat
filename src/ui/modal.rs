@@ -53,6 +53,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Stickers(picker) => super::stickers::draw(frame, app, area, picker),
         Modal::Details(details) => super::details::draw(frame, app, area, details),
         Modal::Threads(list) => super::threads::draw(frame, app, area, list),
+        Modal::Keywords(popup) => super::keywords::draw(frame, app, area, popup),
     }
     app.modal = Some(modal);
 }
@@ -171,7 +172,8 @@ pub(super) fn button(frame: &mut Frame, theme: &Theme, rect: Rect, label: &str, 
 }
 
 fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMenu) {
-    const LABEL: u16 = 20;
+    /// Room for the longest label ("Notification keywords") and a space.
+    const LABEL: u16 = 22;
     let visible_settings: Vec<(usize, Setting)> = Setting::ALL
         .into_iter()
         .enumerate()
@@ -185,7 +187,8 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
     // Blank lines between the groups only where there is room for them.
     let airy = area.height >= rows + headings + 6;
     let height = rows + if airy { headings + 1 } else { 0 } + 4;
-    let Some(rect) = centered(area, 60, height) else {
+    // The values keep their room however wide the label column is.
+    let Some(rect) = centered(area, 40 + LABEL, height) else {
         return;
     };
     let inner = popup(
@@ -339,7 +342,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
                 };
                 spans.push(Span::styled(truncate(&value, room), theme.style(role)));
             }
-            Setting::Sessions => spans.push(Span::styled(
+            Setting::Sessions | Setting::Keywords => spans.push(Span::styled(
                 truncate(&value, room),
                 theme.style(Role::Muted),
             )),
