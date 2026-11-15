@@ -671,14 +671,17 @@ async fn web_page(client: &Client, device: &DeviceId) -> Option<String> {
     matches!(url.scheme(), "https" | "http").then(|| url.to_string())
 }
 
-/// Whether the server said that it has no such request (`M_UNRECOGNIZED`, or a bare
-/// 404 or 405), as opposed to refusing it.
+/// Whether the server said that it has no such request (`M_UNRECOGNIZED`, or a 404 or
+/// 405 without a Matrix error code), as opposed to refusing it.
 fn endpoint_gone(err: &HttpError) -> bool {
     if matches!(err.client_api_error_kind(), Some(ErrorKind::Unrecognized)) {
         return true;
     }
-    err.as_client_api_error()
-        .is_some_and(|api| matches!(api.status_code.as_u16(), 404 | 405))
+    // Bare: an answer with a Matrix code of its own (`M_NOT_FOUND` for a session that
+    // is gone already) is a refusal to be shown, not a missing request.
+    err.as_client_api_error().is_some_and(|api| {
+        matches!(api.status_code.as_u16(), 404 | 405) && api.error_kind().is_none()
+    })
 }
 
 /// Signs another session out (`POST /delete_devices`). The server answers the first,
