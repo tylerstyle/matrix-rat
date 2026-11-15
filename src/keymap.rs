@@ -209,6 +209,7 @@ action_table! {
     Action::Newline => ("newline", Context::Composer, "Line break"),
     Action::CancelCompose => ("cancel_compose", Context::Composer, "Cancel reply or edit"),
     Action::ComposeInEditor => ("compose_in_editor", Context::Composer, "Write in $EDITOR"),
+    Action::PastePicture => ("paste_picture", Context::Composer, "Paste picture from clipboard"),
     Action::EditLast => ("edit_last", Context::Composer, "Edit your last message"),
 }
 
@@ -723,6 +724,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::ComposeInEditor,
         "Alt-V",
         "Write in $EDITOR",
+    ),
+    bind(
+        Composer,
+        Char('i'),
+        ALT,
+        Action::PastePicture,
+        "Alt-I",
+        "Paste picture from clipboard",
     ),
     // From the first line of the composer, up is into the messages: to look at a
     // picture, open a spoiler, answer. (Editing one's last message from here, as

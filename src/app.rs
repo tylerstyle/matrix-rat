@@ -17,6 +17,7 @@ mod media;
 mod menu;
 mod moderation;
 mod palette;
+mod paste_picture;
 mod people;
 mod poll;
 mod previews;
@@ -2669,6 +2670,11 @@ impl App {
                     self.begin_attach();
                 }
             }
+            Action::PastePicture => {
+                if self.modal.is_none() {
+                    self.request_paste_picture();
+                }
+            }
             Action::OpenPalette => self.open_palette(),
             Action::OpenRoom(index) => self.open_room(index),
             Action::SelectTheme(index) => {
@@ -3156,7 +3162,8 @@ impl App {
             MatrixEvent::Verification(update) => self.on_verification(update),
             MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
             MatrixEvent::UploadLimit(bytes) => self.attach.limit = Some(bytes),
-            MatrixEvent::FilesNotSent(reason) => self.on_files_not_sent(reason),
+            MatrixEvent::FilesNotSent { send, reason } => self.on_files_not_sent(send, reason),
+            MatrixEvent::FilesSent(send) => self.on_files_sent(send),
             MatrixEvent::RoomMembers {
                 room_id,
                 members,
@@ -4486,6 +4493,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
     // Clicks on desktop notifications come back here, as the room to open.
     let (notice_clicks, mut clicked) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Pictures read from the clipboard come back here.
+    let (pasted, mut pasted_back) = tokio::sync::mpsc::unbounded_channel();
 
     while !app.should_quit {
         if app.suspend_requested {
@@ -4521,6 +4530,23 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             app.images.forget_encoded();
             app.finish_editor(outcome);
             resumed?;
+        }
+        if let Some(request) = app.take_paste_request() {
+            // Off the UI thread: the tool may take its time (up to its limit), and the
+            // picture is decoded to check it. Messages and keys are handled meanwhile.
+            let dir = paths.runtime_dir.clone();
+            let back = pasted.clone();
+            tokio::spawn(async move {
+                let id = request.id;
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::clipboard::paste(&request, &dir, crate::clipboard::run_tool)
+                })
+                .await
+                .unwrap_or(Err(crate::clipboard::Failure::Failed));
+                // Nobody to take it only once the app has ended: then the picture's
+                // file is removed as the answer is dropped.
+                let _ = back.send(crate::clipboard::Done { id, result });
+            });
         }
         terminal::set_mouse(app.mouse)?;
         if std::mem::take(&mut app.repaint) {
@@ -4562,6 +4588,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 }
             } => app.on_matrix(event),
             Some(room_id) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked { room_id }),
+            Some(done) = pasted_back.recv() => app.finish_paste(done),
             _ = theme_watch.changed() => app.reload_theme(),
             scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),

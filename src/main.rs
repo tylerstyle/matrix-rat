@@ -3,6 +3,7 @@
 
 mod action;
 mod app;
+mod clipboard;
 mod complete;
 mod composer;
 mod config;

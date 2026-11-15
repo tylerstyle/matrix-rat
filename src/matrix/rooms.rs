@@ -298,6 +298,17 @@ impl Timelines {
             .send(MatrixEvent::ActionFailed(format!("{what}: {err}")));
     }
 
+    /// A [`MatrixCmd::SendFiles`] that could not even start is answered like one whose
+    /// first file could not be sent: the files go back to the composer, and the app
+    /// knows that they are not being read.
+    fn files_not_sent(&self, send: u64, err: impl std::fmt::Display) {
+        tracing::warn!("files could not be sent");
+        let _ = self.events.send(MatrixEvent::FilesNotSent {
+            send,
+            reason: format!("Could not send: {err}"),
+        });
+    }
+
     /// Runs `work` in the background and reports a failure to the user.
     fn spawn<F>(&self, what: &'static str, work: F)
     where
@@ -1121,6 +1132,7 @@ impl Timelines {
                 self.thread = None;
             }
             MatrixCmd::SendFiles {
+                send,
                 room_id,
                 files,
                 caption,
@@ -1128,11 +1140,11 @@ impl Timelines {
             } => {
                 let reply_to = match reply_to.map(EventId::parse).transpose() {
                     Ok(reply_to) => reply_to,
-                    Err(_) => return self.fail("Could not send", "invalid event id"),
+                    Err(_) => return self.files_not_sent(send, "invalid event id"),
                 };
                 match self.timeline(&room_id).await {
-                    Ok(timeline) => self.uploads.send(timeline, files, caption, reply_to),
-                    Err(err) => self.fail("Could not send", format!("{err:#}")),
+                    Ok(timeline) => self.uploads.send(send, timeline, files, caption, reply_to),
+                    Err(err) => self.files_not_sent(send, format!("{err:#}")),
                 }
             }
             MatrixCmd::FetchMembers { room_id } => {

@@ -62,9 +62,11 @@ impl Uploads {
 
     /// Sends `files` in order. The caption and the reply belong to the first: if that
     /// one cannot be sent, none is ([`MatrixEvent::FilesNotSent`]). A later file that
-    /// cannot be read is reported and the rest still goes.
+    /// cannot be read is reported and the rest still goes, and then
+    /// [`MatrixEvent::FilesSent`] says that the files are not needed any more.
     pub fn send(
         &mut self,
+        send: u64,
         timeline: Arc<Timeline>,
         files: Vec<PathBuf>,
         caption: Option<Outgoing>,
@@ -119,7 +121,7 @@ impl Uploads {
                 match outcome {
                     Ok(()) => {}
                     Err(reason) if n == 0 => {
-                        let _ = events.send(MatrixEvent::FilesNotSent(reason));
+                        let _ = events.send(MatrixEvent::FilesNotSent { send, reason });
                         return;
                     }
                     Err(reason) => {
@@ -131,6 +133,7 @@ impl Uploads {
                 caption_mentions = None;
                 reply_to = None;
             }
+            let _ = events.send(MatrixEvent::FilesSent(send));
         });
     }
 }
@@ -378,7 +381,7 @@ mod tests {
                     | MatrixEvent::Error(err)
                     | MatrixEvent::ActionFailed(err) => panic!("{err}"),
                     MatrixEvent::UploadLimit(bytes) => limit = Some(bytes),
-                    MatrixEvent::FilesNotSent(reason) => refused = Some(reason),
+                    MatrixEvent::FilesNotSent { reason, .. } => refused = Some(reason),
                     MatrixEvent::Rooms(rooms) if room_id.is_none() => {
                         let joined = rooms.iter().find(|r| !r.is_pending());
                         if let Some(room) = joined {
@@ -390,12 +393,14 @@ mod tests {
                             // First a batch whose first file is gone: the caption was
                             // meant for that one, so the second file must not go either.
                             handle.send(MatrixCmd::SendFiles {
+                                send: 0,
                                 room_id: room.id.clone(),
                                 files: vec![root.join("gone.txt"), text_path.clone()],
                                 caption: Some(crate::format::parse("for the file that is gone")),
                                 reply_to: None,
                             });
                             let command = MatrixCmd::SendFiles {
+                                send: 0,
                                 room_id: room.id.clone(),
                                 files: vec![text_path.clone(), picture_path.clone()],
                                 caption: Some(crate::format::parse(&format!("**{caption}**"))),

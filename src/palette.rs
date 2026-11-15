@@ -732,7 +732,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::JumpToReply => sel.can_jump_to_reply,
         Action::CloseThread => ctx.thread_open,
         Action::EditLast => ctx.can_edit_last,
-        Action::Attach | Action::CreatePoll | Action::OpenStickers => {
+        Action::Attach | Action::PastePicture | Action::CreatePoll | Action::OpenStickers => {
             ctx.has_room && !in_pending && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
         Action::ComposeInEditor => ctx.has_room && !in_pending,
@@ -795,6 +795,10 @@ fn action_meta<'a>(
         Action::Attach => (
             Cow::Borrowed(description),
             &["upload", "send file", "attach"],
+        ),
+        Action::PastePicture => (
+            Cow::Borrowed(description),
+            &["paste image", "screenshot", "clipboard", "attach picture"],
         ),
         Action::ToggleHelp => (
             Cow::Borrowed(description),
@@ -859,6 +863,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
             action,
             Action::OpenEmoji
                 | Action::Attach
+                | Action::PastePicture
                 | Action::CreatePoll
                 | Action::OpenStickers
                 | Action::ComposeInEditor

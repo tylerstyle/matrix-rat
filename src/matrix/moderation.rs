@@ -1465,6 +1465,7 @@ mod tests {
             let reply_event_id = reply_msg.event_id().unwrap().to_owned();
 
             handle.send(MatrixCmd::SendFiles {
+                send: 0,
                 room_id: src_room.clone(),
                 files: vec![sample_file.clone()],
                 caption: None,
