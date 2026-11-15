@@ -1560,7 +1560,11 @@ impl App {
         }
         info.wait_for(Pending::Change(Change::Kick), "Removing…");
         let room_id = info.room_id.clone();
-        self.manage(ManageCmd::Kick { room_id, user_id });
+        self.manage(ManageCmd::Kick {
+            room_id,
+            user_id,
+            reason: None,
+        });
     }
 
     /// Del on a member row unbans a banned user or removes a joined/invited member.
@@ -1748,7 +1752,11 @@ impl App {
         }
         info.wait_for(Pending::Change(Change::Unban), "Unbanning…");
         let room_id = info.room_id.clone();
-        self.manage(ManageCmd::Unban { room_id, user_id });
+        self.manage(ManageCmd::Unban {
+            room_id,
+            user_id,
+            reason: None,
+        });
     }
 
     fn open_role_chooser(&mut self) {
@@ -3798,7 +3806,7 @@ mod tests {
         app.on_event(key(KeyCode::Delete));
         assert!(matches!(
             sent(&mut commands).as_slice(),
-            [ManageCmd::Kick { room_id, user_id }]
+            [ManageCmd::Kick { room_id, user_id, reason: None }]
                 if room_id == ROOM && user_id == "@bob:example.org"
         ));
         answer(

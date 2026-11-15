@@ -1234,6 +1234,7 @@ mod tests {
             h_a.send(MatrixCmd::Manage(ManageCmd::Unban {
                 room_id: room_id.clone(),
                 user_id: bob_id.clone(),
+                reason: None,
             }));
             wait_done(&mut ev_a, Change::Unban).await.unwrap();
             wait_info(&h_a, &mut ev_a, &room_id, "bob-unbanned", |d| {

@@ -88,10 +88,11 @@ pub enum ManageCmd {
         room_id: String,
         user_id: String,
     },
-    /// Remove someone from the room.
+    /// Remove someone from the room, with an optional reason.
     Kick {
         room_id: String,
         user_id: String,
+        reason: Option<String>,
     },
     /// Ban someone from the room, with an optional reason.
     Ban {
@@ -99,10 +100,11 @@ pub enum ManageCmd {
         user_id: String,
         reason: Option<String>,
     },
-    /// Unban a previously banned member from the room.
+    /// Unban a previously banned member from the room, with an optional reason.
     Unban {
         room_id: String,
         user_id: String,
+        reason: Option<String>,
     },
     /// Change a member's power level in the room (`0`, `50`, `100`).
     SetRole {
@@ -225,11 +227,15 @@ impl std::fmt::Debug for ManageCmd {
             Self::Info { room_id } => write!(f, "Info({room_id})"),
             Self::StopInfo => f.write_str("StopInfo"),
             Self::Invite { room_id, .. } => write!(f, "Invite({room_id})"),
-            Self::Kick { room_id, .. } => write!(f, "Kick({room_id})"),
+            Self::Kick {
+                room_id, reason, ..
+            } => write!(f, "Kick({room_id}, reason: {})", reason.is_some()),
             Self::Ban {
                 room_id, reason, ..
             } => write!(f, "Ban({room_id}, reason: {})", reason.is_some()),
-            Self::Unban { room_id, .. } => write!(f, "Unban({room_id})"),
+            Self::Unban {
+                room_id, reason, ..
+            } => write!(f, "Unban({room_id}, reason: {})", reason.is_some()),
             Self::SetRole { room_id, level, .. } => write!(f, "SetRole({room_id}, {level})"),
             Self::SetName { room_id, .. } => write!(f, "SetName({room_id})"),
             Self::SetOwnName { room_id, .. } => write!(f, "SetOwnName({room_id})"),
@@ -873,13 +879,18 @@ impl Manager {
                     });
                 });
             }
-            ManageCmd::Kick { room_id, user_id } => {
+            ManageCmd::Kick {
+                room_id,
+                user_id,
+                reason,
+            } => {
+                let clean = clean_reason(reason.as_deref());
                 self.spawn_member_action(
                     room_id,
                     user_id,
                     "remove",
                     Change::Kick,
-                    |r, u| async move { r.kick_user(&u, None).await },
+                    move |r, u| async move { r.kick_user(&u, clean.as_deref()).await },
                 );
             }
             ManageCmd::Ban {
@@ -896,13 +907,18 @@ impl Manager {
                     move |r, u| async move { r.ban_user(&u, clean.as_deref()).await },
                 );
             }
-            ManageCmd::Unban { room_id, user_id } => {
+            ManageCmd::Unban {
+                room_id,
+                user_id,
+                reason,
+            } => {
+                let clean = clean_reason(reason.as_deref());
                 self.spawn_member_action(
                     room_id,
                     user_id,
                     "unban",
                     Change::Unban,
-                    |r, u| async move { r.unban_user(&u, None).await },
+                    move |r, u| async move { r.unban_user(&u, clean.as_deref()).await },
                 );
             }
             ManageCmd::AcceptKnock { room_id, user_id } => {
@@ -1637,6 +1653,8 @@ pub(super) async fn power_for_room(room: &Room) -> RoomPower {
         can_kick: pl.user_can_kick(own),
         can_pin: pl.user_can_send_state(own, StateEventType::RoomPinnedEvents),
         can_change_roles: pl.user_can_send_state(own, StateEventType::RoomPowerLevels),
+        can_rename: pl.user_can_send_state(own, StateEventType::RoomName),
+        can_set_topic: pl.user_can_send_state(own, StateEventType::RoomTopic),
         users_default: i64::from(pl.users_default),
         creators,
         member_levels,
@@ -2920,6 +2938,7 @@ mod tests {
         manage(ManageCmd::Kick {
             room_id: room_id.clone(),
             user_id: bob_id.clone(),
+            reason: None,
         });
         done(&mut events, Change::Kick).await;
         let details = info(&mut events, &room_id, |d| d.members.len() == 1).await;

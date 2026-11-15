@@ -817,6 +817,8 @@ mod tests {
             can_kick: ban,
             can_pin: pin,
             can_change_roles: roles,
+            can_rename: roles,
+            can_set_topic: roles,
             users_default: 0,
             creators: Vec::new(),
             member_levels,
@@ -1099,7 +1101,7 @@ mod tests {
         let sent = drain_cmds(&mut commands);
         assert!(matches!(
             sent.as_slice(),
-            [MatrixCmd::Manage(ManageCmd::Unban { room_id, user_id })]
+            [MatrixCmd::Manage(ManageCmd::Unban { room_id, user_id, reason: None })]
                 if room_id == ROOM_A && user_id == "@eve:example.org"
         ));
     }

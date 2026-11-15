@@ -669,6 +669,10 @@ pub struct RoomPower {
     pub can_kick: bool,
     pub can_pin: bool,
     pub can_change_roles: bool,
+    /// May change the room's name (`m.room.name`).
+    pub can_rename: bool,
+    /// May change the room's topic (`m.room.topic`).
+    pub can_set_topic: bool,
     pub users_default: i64,
     pub creators: Vec<String>,
     pub member_levels: HashMap<String, i64>,
@@ -715,6 +719,8 @@ impl fmt::Debug for RoomPower {
             .field("can_kick", &self.can_kick)
             .field("can_pin", &self.can_pin)
             .field("can_change_roles", &self.can_change_roles)
+            .field("can_rename", &self.can_rename)
+            .field("can_set_topic", &self.can_set_topic)
             .field("users_default", &self.users_default)
             .field("creators", &self.creators.len())
             .field("member_levels", &self.member_levels.len())

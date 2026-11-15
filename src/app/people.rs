@@ -704,7 +704,11 @@ impl App {
                             };
                             let user_id = popup.user_id.clone();
                             popup.wait_for(UserPending::Manage(Change::Kick), "Removing…");
-                            ManageCmd::Kick { room_id, user_id }
+                            ManageCmd::Kick {
+                                room_id,
+                                user_id,
+                                reason: None,
+                            }
                         };
                         self.manage(cmd);
                     }
@@ -750,7 +754,11 @@ impl App {
                             };
                             let user_id = popup.user_id.clone();
                             popup.wait_for(UserPending::Manage(Change::Unban), "Unbanning…");
-                            ManageCmd::Unban { room_id, user_id }
+                            ManageCmd::Unban {
+                                room_id,
+                                user_id,
+                                reason: None,
+                            }
                         };
                         self.manage(cmd);
                     }
