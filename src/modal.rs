@@ -2154,7 +2154,11 @@ mod tests {
         )
         .unwrap();
 
-        let keybinds = crate::keymap::Editor::new(&crate::keymap::Keymap::default());
+        let mut keybinds = crate::keymap::Editor::new(&crate::keymap::Keymap::default());
+        keybinds.feedback = Some((
+            "Could not save /home/alice-secret/.config/matrix-rat/config.toml".into(),
+            true,
+        ));
 
         let ignored = IgnoredUsersPopup::new(&["@alice:secret.example.org".to_owned()]);
 
