@@ -10,7 +10,7 @@
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -111,13 +111,37 @@ pub fn command_from_env() -> Result<Vec<String>, Failure> {
 #[derive(Debug)]
 pub struct TempFile {
     path: PathBuf,
+    /// A directory made only for this file, removed with it.
+    own_dir: Option<PathBuf>,
 }
 
 impl TempFile {
     /// Creates a new file in `dir` (made if need be, owner-only) holding `text`.
-    /// A directory that cannot be used is replaced by the system's temporary one.
+    /// A directory that cannot be used is replaced by a new owner-only one inside the
+    /// system's temporary directory: never that shared directory itself, because editors
+    /// put swap and backup files next to the file they edit.
     pub fn create(dir: &Path, text: &str) -> io::Result<Self> {
-        Self::create_in(dir, text).or_else(|_| Self::create_in(&std::env::temp_dir(), text))
+        Self::create_in(dir, text).or_else(|_| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.subsec_nanos());
+            let own = std::env::temp_dir().join(format!(
+                "matrix-rat-compose-{}-{nanos:x}",
+                std::process::id()
+            ));
+            // Fails if anything is already there, so it is ours and private from the start.
+            fs::DirBuilder::new().mode(0o700).create(&own)?;
+            match Self::create_in(&own, text) {
+                Ok(mut file) => {
+                    file.own_dir = Some(own);
+                    Ok(file)
+                }
+                Err(err) => {
+                    let _ = fs::remove_dir(&own);
+                    Err(err)
+                }
+            }
+        })
     }
 
     fn create_in(dir: &Path, text: &str) -> io::Result<Self> {
@@ -146,7 +170,10 @@ impl TempFile {
             {
                 Ok(mut file) => {
                     // Removed by `Drop` also if writing fails.
-                    let temp = Self { path };
+                    let temp = Self {
+                        path,
+                        own_dir: None,
+                    };
                     file.write_all(text.as_bytes())?;
                     return Ok(temp);
                 }
@@ -165,6 +192,10 @@ impl TempFile {
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+        if let Some(dir) = &self.own_dir {
+            // Only if the editor left nothing else in it.
+            let _ = fs::remove_dir(dir);
+        }
     }
 }
 
@@ -338,8 +369,19 @@ mod tests {
         let file = TempFile::create(&blocker.join("sub"), "x").unwrap();
         assert!(file.path().starts_with(std::env::temp_dir()));
         let path = file.path().to_owned();
+        let own = path.parent().unwrap().to_owned();
+        assert_ne!(
+            own,
+            std::env::temp_dir(),
+            "not in the shared directory itself"
+        );
+        assert_eq!(
+            fs::metadata(&own).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         drop(file);
         assert!(!path.exists());
+        assert!(!own.exists());
     }
 
     #[test]
