@@ -12,6 +12,7 @@ mod emoji;
 mod files;
 mod focus;
 mod format;
+mod highlight;
 mod images;
 mod keymap;
 mod lineedit;

@@ -97,6 +97,13 @@ roles! {
     ScrollbarThumb => "scrollbar_thumb",
     Pill => "pill",
     Code => "code",
+    CodeText => "code_text",
+    CodeKeyword => "code_keyword",
+    CodeString => "code_string",
+    CodeComment => "code_comment",
+    CodeConstant => "code_constant",
+    CodeType => "code_type",
+    CodeFunction => "code_function",
     Link => "link",
     Spoiler => "spoiler",
 }
@@ -424,6 +431,14 @@ fn default_style(role: Role, p: &Palette) -> Style {
         Role::StatusKey => s.fg(p.accent).add_modifier(bold),
         Role::Error => s.fg(p.error),
         Role::Code => s.fg(p.accent),
+        // Code blocks in a known language. Plain code steps back so the marks stand out.
+        Role::CodeText => s.fg(p.fg),
+        Role::CodeKeyword => s.fg(p.primary),
+        Role::CodeString => s.fg(p.success),
+        Role::CodeComment => s.fg(p.muted).add_modifier(Modifier::ITALIC),
+        Role::CodeConstant => s.fg(p.accent),
+        Role::CodeType => s.fg(p.secondary),
+        Role::CodeFunction => s.fg(p.fg).add_modifier(bold),
         Role::Link => s.fg(p.secondary).add_modifier(Modifier::UNDERLINED),
         Role::Spoiler => s.fg(p.muted).bg(p.surface),
     }

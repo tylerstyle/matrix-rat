@@ -13,6 +13,7 @@ use crate::app::App;
 use std::collections::BTreeSet;
 
 use crate::config::LinkPreviews;
+use crate::highlight::Syntax;
 use crate::images::{ImageStore, Slot};
 use crate::model::{Message, MsgKind, Room, RoomKind, SendState, ThreadSummary};
 use crate::previews::{Preview, PreviewStore};
@@ -359,6 +360,7 @@ pub fn build_layout(
                 _ => (text_style, None),
             };
             let mut rich = Rich::of(message.html.as_deref(), body_text);
+            crate::highlight::colour(&mut rich);
             if let (Some(intro), Some(first)) = (intro, rich.lines.first_mut()) {
                 first.segments.insert(
                     0,
@@ -576,6 +578,17 @@ fn styled(segment: &Segment, base: Style, theme: &Theme, reveal: bool) -> (Strin
     let mut style = base;
     if format.code {
         style = style.patch(theme.style(Role::Code));
+    }
+    if let Some(syntax) = format.syntax {
+        style = style.patch(theme.style(match syntax {
+            Syntax::Plain => Role::CodeText,
+            Syntax::Keyword => Role::CodeKeyword,
+            Syntax::String => Role::CodeString,
+            Syntax::Comment => Role::CodeComment,
+            Syntax::Constant => Role::CodeConstant,
+            Syntax::Type => Role::CodeType,
+            Syntax::Function => Role::CodeFunction,
+        }));
     }
     if format.link.is_some() {
         style = style.patch(theme.style(Role::Link));
