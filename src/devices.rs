@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use crate::lineedit::LineEdit;
 use crate::matrix::{
-    BackupStatus, DeviceTrust, RecoveryStatus, Security, ServerBackup, Session, SessionList,
-    SessionTrust,
+    BackupStatus, BackupUpload, DeviceTrust, RecoveryStatus, Security, ServerBackup, Session,
+    SessionList, SessionTrust,
 };
+use crate::model::UtdWhy;
 use crate::text::sanitize_line;
 
 /// The controls of the two popups. Keys and clicks both resolve to these.
@@ -40,15 +41,22 @@ pub struct DevicesState {
     /// `None` until the worker has answered.
     pub list: Option<Result<SessionList, String>>,
     pub backup: ServerBackup,
-    /// The worker has been told that a popup is open.
-    pub watching: bool,
+    pub upload: BackupUpload,
+    /// The number of the watch the worker runs for the open popup. News that quotes
+    /// another number is from a popup that was closed, and dropped.
+    pub watch: Option<u64>,
+    pub next_watch: u64,
     /// Numbers the requests; answers quote theirs back.
     pub next_request: u64,
-    /// The room and the reason of the message "try again" was last asked for.
-    pub retried: Option<(String, crate::model::UtdWhy)>,
+    /// Messages "try again" was asked for and has not been answered: by event id,
+    /// why each could not be decrypted.
+    pub retried: std::collections::HashMap<String, UtdWhy>,
 }
 
 impl DevicesState {
+    /// The most retries that are remembered at a time.
+    pub const RETRIES: usize = 32;
+
     pub fn sessions(&self) -> &[Session] {
         match &self.list {
             Some(Ok(list)) => &list.sessions,
@@ -70,23 +78,38 @@ pub fn label(session: &Session) -> String {
     }
 }
 
-pub fn trust_text(trust: SessionTrust) -> &'static str {
-    match trust {
-        SessionTrust::Verified => "verified",
-        SessionTrust::Unverified => "not verified",
-        SessionTrust::NoKeys => "no encryption keys",
+/// What a row says about a session's keys. With `vouched` this device checked the
+/// signature itself; without, it can only repeat the server.
+pub fn trust_text(trust: SessionTrust, vouched: bool) -> &'static str {
+    match (trust, vouched) {
+        (SessionTrust::Verified, true) => "verified",
+        (SessionTrust::Unverified, true) => "not verified",
+        (SessionTrust::Verified, false) => "says verified",
+        (SessionTrust::Unverified, false) => "says not verified",
+        (SessionTrust::NoKeys, _) => "no encryption keys",
     }
+}
+
+/// How a row's trust is to be read: only what this device checked is good news.
+pub fn trust_tone(trust: SessionTrust, vouched: bool) -> Tone {
+    match (trust, vouched) {
+        (SessionTrust::Verified, true) => Tone::Good,
+        (_, true) => Tone::Warn,
+        (_, false) => Tone::Plain,
+    }
+}
+
+fn unverified(list: &SessionList) -> usize {
+    list.sessions
+        .iter()
+        .filter(|session| session.trust != SessionTrust::Verified)
+        .count()
 }
 
 /// The line above the list: how many sessions the account's identity does not vouch
 /// for. `None` while there is nothing to say.
 pub fn warning(list: &SessionList) -> Option<String> {
-    let unverified = list
-        .sessions
-        .iter()
-        .filter(|session| session.trust != SessionTrust::Verified)
-        .count();
-    match unverified {
+    match unverified(list) {
         0 => None,
         1 => Some(
             "1 session is not verified. If you do not recognise it, sign it out and change \
@@ -97,6 +120,52 @@ pub fn warning(list: &SessionList) -> Option<String> {
             "{n} sessions are not verified. Sign out any you do not recognise, and change \
              your password."
         )),
+    }
+}
+
+/// What stands above the list of sessions. "Verified" is only said (and only then
+/// in a good tone) when this device checked it; otherwise the server's account is
+/// given as that, with the reason.
+pub fn session_lines(list: &SessionList) -> Vec<(Tone, String)> {
+    if list.sessions.is_empty() {
+        return vec![(Tone::Plain, "The server lists no sessions.".to_owned())];
+    }
+    if !list.vouched {
+        let total = list.sessions.len();
+        let claim = match unverified(list) {
+            0 => "The server shows all of them as verified.".to_owned(),
+            1 => "The server shows 1 of them as not verified.".to_owned(),
+            n => format!("The server shows {n} of them as not verified."),
+        };
+        return vec![
+            (
+                Tone::Warn,
+                "This device is not verified, so it cannot check your other sessions. \
+                 Verify it first; until then nothing below is confirmed."
+                    .to_owned(),
+            ),
+            (
+                Tone::Plain,
+                format!(
+                    "{total} {} listed. {claim}",
+                    if total == 1 {
+                        "session is"
+                    } else {
+                        "sessions are"
+                    }
+                ),
+            ),
+        ];
+    }
+    match warning(list) {
+        Some(text) => vec![(Tone::Warn, text)],
+        None => vec![(
+            Tone::Good,
+            match list.sessions.len() {
+                1 => "This is the only session, and it is verified.".to_owned(),
+                n => format!("All {n} sessions are verified."),
+            },
+        )],
     }
 }
 
@@ -410,20 +479,27 @@ pub enum Tone {
     Plain,
 }
 
-/// What the settings menu shows on its key backup row.
-pub fn backup_setting_text(security: Option<Security>) -> &'static str {
+/// What the settings menu shows on its key backup row, and how it is to be read:
+/// a warning only for what needs doing, plain for what is in progress or unknown.
+pub fn backup_setting(security: Option<Security>) -> (&'static str, Tone) {
     let Some(security) = security else {
-        return "unknown";
+        return ("unknown", Tone::Plain);
     };
     match (security.backup, security.recovery) {
-        (_, RecoveryStatus::NeedsKey) => "this device needs the recovery key",
-        (BackupStatus::Enabled, RecoveryStatus::NotSetUp) => "on, but recovery is not set up",
-        (BackupStatus::Enabled, _) => "on",
-        (BackupStatus::Enabling, _) => "turning on…",
-        (BackupStatus::Downloading, _) => "downloading keys…",
-        (BackupStatus::Disabling, _) => "turning off…",
-        (BackupStatus::Inactive, _) => "not in use on this device",
+        (_, RecoveryStatus::NeedsKey) => ("this device needs the recovery key", Tone::Warn),
+        (BackupStatus::Enabled, RecoveryStatus::NotSetUp) => {
+            ("on, but recovery is not set up", Tone::Warn)
+        }
+        (BackupStatus::Enabled, _) => ("on", Tone::Good),
+        (BackupStatus::Enabling, _) => ("turning on…", Tone::Plain),
+        (BackupStatus::Downloading, _) => ("downloading keys…", Tone::Plain),
+        (BackupStatus::Disabling, _) => ("turning off…", Tone::Plain),
+        (BackupStatus::Inactive, _) => ("not in use on this device", Tone::Plain),
     }
+}
+
+pub fn backup_setting_text(security: Option<Security>) -> &'static str {
+    backup_setting(security).0
 }
 
 /// The recovery key can be entered: the account has one and this device still lacks
@@ -455,23 +531,31 @@ fn keys_count(keys: u64) -> String {
 
 /// The state of the key backup and of recovery, in plain words: what there is, what
 /// this device can do with it, and what to do about what is missing.
-pub fn backup_lines(security: Option<Security>, server: ServerBackup) -> Vec<(Tone, String)> {
+///
+/// Three things are known, from three places, and none is taken for another:
+/// `server` is what `GET /room_keys/version` answered just now (`Unknown` when it
+/// did not answer: then nothing is said about the server's side); the backup state
+/// in `security` is this device's own, kept without asking the server; `upload` is
+/// what the SDK reported of its uploads while the popup was open. Which backup this
+/// device uploads to cannot be compared with the server's (matrix-sdk 0.19.1 does
+/// not tell its version), and that is said where it matters.
+pub fn backup_lines(
+    security: Option<Security>,
+    server: &ServerBackup,
+    upload: BackupUpload,
+) -> Vec<(Tone, String)> {
     let Some(security) = security else {
         return vec![(Tone::Plain, "Checking…".to_owned())];
     };
     let mut lines = Vec::new();
-    let using = security.backup == BackupStatus::Enabled;
     // What the server has.
     match server {
-        ServerBackup::Present { keys } if using => lines.push((
-            Tone::Good,
-            format!("Your message keys are backed up on the server ({keys} so far)."),
-        )),
-        ServerBackup::Present { keys } => lines.push((
+        ServerBackup::Present { keys, version } => lines.push((
             Tone::Plain,
             format!(
-                "There is a key backup on the server, holding {}.",
-                keys_count(keys)
+                "The server has a key backup (version {}): {}.",
+                crate::text::truncate(&sanitize_line(version), 16),
+                keys_count(*keys)
             ),
         )),
         ServerBackup::Missing => lines.push((
@@ -479,63 +563,92 @@ pub fn backup_lines(security: Option<Security>, server: ServerBackup) -> Vec<(To
             "There is no key backup on the server: message keys exist only on your devices."
                 .to_owned(),
         )),
-        ServerBackup::Unknown if using => lines.push((
-            Tone::Good,
-            "Your message keys are backed up on the server.".to_owned(),
-        )),
         ServerBackup::Unknown => lines.push((
             Tone::Plain,
-            "The server could not be asked about a key backup just now.".to_owned(),
+            "Could not ask the server whether a key backup is there.".to_owned(),
         )),
     }
     // What this device does with it.
-    let exists = !matches!(server, ServerBackup::Missing);
-    match security.backup {
-        BackupStatus::Enabled => lines.push((
-            Tone::Good,
-            "This device has the backup key: it saves new keys there and can read old ones."
+    match (security.backup, server) {
+        (BackupStatus::Enabled, ServerBackup::Present { .. }) => {
+            lines.push((
+                Tone::Good,
+                "This device has a backup key: it saves new message keys to its backup and \
+                 can read old ones from it."
+                    .to_owned(),
+            ));
+            match upload {
+                BackupUpload::Idle => {
+                    lines.push((Tone::Good, "No keys are waiting to be uploaded.".to_owned()))
+                }
+                BackupUpload::Uploading { done, total } => lines.push((
+                    Tone::Plain,
+                    format!("Uploading keys: {done} of {total} are in the backup so far."),
+                )),
+                BackupUpload::Failed => lines.push((
+                    Tone::Warn,
+                    "The last upload of keys failed. It is tried again by itself.".to_owned(),
+                )),
+                BackupUpload::Unknown => lines.push((
+                    Tone::Plain,
+                    "Whether all keys have been uploaded has not been reported yet.".to_owned(),
+                )),
+            }
+        }
+        (BackupStatus::Enabled, ServerBackup::Unknown) => lines.push((
+            Tone::Plain,
+            "This device is set up to save its message keys to a backup; whether the \
+             server still has that backup could not be checked."
                 .to_owned(),
         )),
-        BackupStatus::Enabling => lines.push((
+        (BackupStatus::Enabled, ServerBackup::Missing) => lines.push((
+            Tone::Warn,
+            "This device still expects a backup to save its keys to. It was probably \
+             deleted from another device; check the key storage in Element."
+                .to_owned(),
+        )),
+        (BackupStatus::Enabling, _) => lines.push((
             Tone::Plain,
             "This device is connecting to the backup…".to_owned(),
         )),
-        BackupStatus::Downloading => lines.push((
+        (BackupStatus::Downloading, _) => lines.push((
             Tone::Plain,
             "This device is downloading keys from the backup…".to_owned(),
         )),
-        BackupStatus::Disabling => {
+        (BackupStatus::Disabling, _) => {
             lines.push((Tone::Plain, "The backup is being turned off…".to_owned()))
         }
-        BackupStatus::Inactive if !exists => lines.push((
+        (BackupStatus::Inactive, ServerBackup::Missing) => lines.push((
             Tone::Plain,
             "matrix-rat cannot create a backup yet: use Element (Settings → Encryption)."
                 .to_owned(),
         )),
-        BackupStatus::Inactive if security.recovery == RecoveryStatus::NeedsKey => lines.push((
-            Tone::Warn,
-            "This device cannot read the backup: enter your recovery key.".to_owned(),
+        (BackupStatus::Inactive, ServerBackup::Unknown) => lines.push((
+            Tone::Plain,
+            "This device is not using a key backup.".to_owned(),
         )),
-        BackupStatus::Inactive if security.device != DeviceTrust::Verified => lines.push((
+        (BackupStatus::Inactive, ServerBackup::Present { .. }) => lines.push((
             Tone::Warn,
-            "This device cannot read the backup: verify it with another of your devices."
-                .to_owned(),
-        )),
-        BackupStatus::Inactive => lines.push((
-            Tone::Warn,
-            "This device is not using the backup. Check the key storage in Element \
-             (Settings → Encryption)."
-                .to_owned(),
+            if security.recovery == RecoveryStatus::NeedsKey {
+                "This device cannot read the backup: enter your recovery key."
+            } else if security.device != DeviceTrust::Verified {
+                "This device cannot read the backup: verify it with another of your devices."
+            } else {
+                "This device is not using the backup. Check the key storage in Element \
+                 (Settings → Encryption)."
+            }
+            .to_owned(),
         )),
     }
     // Recovery: getting at all this from a new device.
+    let said_above =
+        security.backup == BackupStatus::Inactive && matches!(server, ServerBackup::Present { .. });
     match security.recovery {
         RecoveryStatus::Ready => lines.push((
             Tone::Good,
             "Recovery is set up: your recovery key unlocks all this on a new device.".to_owned(),
         )),
-        // Said above already, where the backup is what is missing.
-        RecoveryStatus::NeedsKey if security.backup == BackupStatus::Inactive && exists => {}
+        RecoveryStatus::NeedsKey if said_above => {}
         RecoveryStatus::NeedsKey => lines.push((
             Tone::Warn,
             "This device does not have all of your account's keys: enter your recovery key."
@@ -577,51 +690,123 @@ mod tests {
             .join("\n")
     }
 
+    fn present(keys: u64) -> ServerBackup {
+        ServerBackup::Present {
+            keys,
+            version: "7".into(),
+        }
+    }
+
     #[test]
     fn backup_status_in_plain_words() {
         use BackupStatus as B;
+        use BackupUpload as U;
         use DeviceTrust as D;
         use RecoveryStatus as R;
-        // All is well.
-        let all = backup_lines(
-            Some(security(B::Enabled, R::Ready, D::Verified)),
-            ServerBackup::Present { keys: 1234 },
-        );
+        let well = security(B::Enabled, R::Ready, D::Verified);
+        // All is well, and seen to be: the server has a backup, this device uses one,
+        // and its uploads are through.
         assert_eq!(
-            texts(&all),
-            "Good: Your message keys are backed up on the server (1234 so far).\n\
-             Good: This device has the backup key: it saves new keys there and can read old ones.\n\
+            texts(&backup_lines(Some(well), &present(1234), U::Idle)),
+            "Plain: The server has a key backup (version 7): 1234 message keys.\n\
+             Good: This device has a backup key: it saves new message keys to its backup and \
+             can read old ones from it.\n\
+             Good: No keys are waiting to be uploaded.\n\
              Good: Recovery is set up: your recovery key unlocks all this on a new device."
         );
-        assert_eq!(
-            backup_setting_text(Some(security(B::Enabled, R::Ready, D::Verified))),
-            "on"
+        assert_eq!(backup_setting(Some(well)), ("on", Tone::Good));
+        // Uploads not finished, failed, or not heard of: said, never passed over.
+        let lines = texts(&backup_lines(
+            Some(well),
+            &present(10),
+            U::Uploading { done: 3, total: 40 },
+        ));
+        assert!(
+            lines.contains("Plain: Uploading keys: 3 of 40 are in the backup so far."),
+            "{lines}"
         );
+        assert!(!lines.contains("No keys are waiting"), "{lines}");
+        let lines = texts(&backup_lines(Some(well), &present(10), U::Failed));
+        assert!(
+            lines.contains("Warn: The last upload of keys failed."),
+            "{lines}"
+        );
+        let lines = texts(&backup_lines(Some(well), &present(10), U::Unknown));
+        assert!(
+            lines.contains("Plain: Whether all keys have been uploaded"),
+            "{lines}"
+        );
+        // The server did not answer: nothing good is said about its side, and nothing
+        // is taken to exist.
+        let lines = backup_lines(Some(well), &ServerBackup::Unknown, U::Idle);
+        let text = texts(&lines);
+        assert!(
+            text.starts_with("Plain: Could not ask the server"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Plain: This device is set up to save its message keys to a backup; whether"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            lines.iter().filter(|(tone, _)| *tone == Tone::Good).count(),
+            1,
+            "only recovery, which is known locally: {text}"
+        );
+        // Enabled here, gone there.
+        let text = texts(&backup_lines(Some(well), &ServerBackup::Missing, U::Idle));
+        assert!(
+            text.starts_with("Warn: There is no key backup on the server"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Warn: This device still expects a backup"),
+            "{text}"
+        );
+
         // A new device that has not been given the keys.
         let new = security(B::Inactive, R::NeedsKey, D::Unverified);
         assert_eq!(
-            texts(&backup_lines(Some(new), ServerBackup::Present { keys: 1 })),
-            "Plain: There is a key backup on the server, holding 1 message key.\n\
+            texts(&backup_lines(Some(new), &present(1), U::Unknown)),
+            "Plain: The server has a key backup (version 7): 1 message key.\n\
              Warn: This device cannot read the backup: enter your recovery key."
         );
         assert!(wants_recovery_key(Some(new)));
         assert_eq!(
-            backup_setting_text(Some(new)),
-            "this device needs the recovery key"
+            backup_setting(Some(new)),
+            ("this device needs the recovery key", Tone::Warn)
+        );
+        // The same device while the server cannot be asked: no backup is assumed, and
+        // the recovery key is asked for on its own grounds.
+        let text = texts(&backup_lines(Some(new), &ServerBackup::Unknown, U::Unknown));
+        assert!(!text.contains("cannot read the backup"), "{text}");
+        assert!(
+            text.contains("Plain: This device is not using a key backup."),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("Warn: This device does not have all of your account's keys: enter your recovery key."),
+            "{text}"
         );
         // Backup in use, but one of the other keys is missing here.
         let partial = security(B::Enabled, R::NeedsKey, D::Verified);
-        let lines = backup_lines(Some(partial), ServerBackup::Present { keys: 5 });
+        let text = texts(&backup_lines(Some(partial), &present(5), U::Idle));
         assert!(
-            texts(&lines).ends_with(
+            text.ends_with(
                 "Warn: This device does not have all of your account's keys: enter your \
                  recovery key."
             ),
-            "{lines:?}"
+            "{text}"
         );
         // An account without backup and recovery: say where to get them, offer nothing.
         let bare = security(B::Inactive, R::NotSetUp, D::Verified);
-        let lines = texts(&backup_lines(Some(bare), ServerBackup::Missing));
+        let lines = texts(&backup_lines(
+            Some(bare),
+            &ServerBackup::Missing,
+            U::Unknown,
+        ));
         assert!(
             lines.starts_with("Warn: There is no key backup on the server"),
             "{lines}"
@@ -636,41 +821,48 @@ mod tests {
         );
         assert!(!wants_recovery_key(Some(bare)));
         assert!(no_recovery_key_reason(Some(bare)).contains("no recovery key"));
-        assert_eq!(backup_setting_text(Some(bare)), "not in use on this device");
+        // Not in use, in progress, unknown: nothing to be alarmed about by itself.
+        assert_eq!(
+            backup_setting(Some(bare)),
+            ("not in use on this device", Tone::Plain)
+        );
+        for backup in [B::Enabling, B::Downloading, B::Disabling] {
+            let (_, tone) = backup_setting(Some(security(backup, R::Ready, D::Verified)));
+            assert_eq!(tone, Tone::Plain, "{backup:?}");
+        }
+        assert_eq!(backup_setting(None), ("unknown", Tone::Plain));
+        assert_eq!(
+            backup_setting(Some(security(B::Enabled, R::NotSetUp, D::Verified))).1,
+            Tone::Warn
+        );
         // A backup exists, there is no recovery, and this device is not verified.
         let unverified = security(B::Inactive, R::NotSetUp, D::Unverified);
-        let lines = texts(&backup_lines(
-            Some(unverified),
-            ServerBackup::Present { keys: 9 },
-        ));
+        let lines = texts(&backup_lines(Some(unverified), &present(9), U::Unknown));
         assert!(
             lines.contains("This device cannot read the backup: verify it"),
             "{lines}"
         );
-        // Offline: only what this device knows by itself.
-        let lines = texts(&backup_lines(
-            Some(security(B::Enabled, R::Ready, D::Verified)),
-            ServerBackup::Unknown,
-        ));
-        assert!(
-            lines.starts_with("Good: Your message keys are backed up on the server.\n"),
-            "{lines}"
-        );
         let lines = texts(&backup_lines(
             Some(security(B::Inactive, R::Unknown, D::Unknown)),
-            ServerBackup::Unknown,
+            &ServerBackup::Unknown,
+            U::Unknown,
         ));
-        assert!(
-            lines.starts_with("Plain: The server could not be asked"),
-            "{lines}"
-        );
         assert!(lines.ends_with("Plain: Checking recovery…"), "{lines}");
+        // A version from the server is shown harmless and short.
+        let odd = ServerBackup::Present {
+            keys: 2,
+            version: format!("9\u{1b}[31m{}", "9".repeat(60)),
+        };
+        let text = texts(&backup_lines(Some(well), &odd, U::Idle));
+        assert!(
+            !text.contains('\u{1b}') && text.lines().next().unwrap().len() < 90,
+            "{text}"
+        );
         // Nothing known at all.
         assert_eq!(
-            texts(&backup_lines(None, ServerBackup::Unknown)),
+            texts(&backup_lines(None, &ServerBackup::Unknown, U::Unknown)),
             "Plain: Checking…"
         );
-        assert_eq!(backup_setting_text(None), "unknown");
         assert!(!wants_recovery_key(None));
     }
 
@@ -744,6 +936,58 @@ mod tests {
         // A session without keys cannot be verified, so it counts too.
         list.sessions.push(session("C", SessionTrust::NoKeys));
         assert!(warning(&list).unwrap().starts_with("2 sessions are not"));
+
+        // Checked here: good news may be called that.
+        let all = |sessions: Vec<Session>, vouched| SessionList { sessions, vouched };
+        let verified = || session("A", SessionTrust::Verified);
+        assert_eq!(
+            session_lines(&all(vec![verified(), verified()], true)),
+            [(Tone::Good, "All 2 sessions are verified.".to_owned())]
+        );
+        assert_eq!(session_lines(&list)[0].0, Tone::Warn);
+        assert_eq!(trust_text(SessionTrust::Verified, true), "verified");
+        assert_eq!(trust_tone(SessionTrust::Verified, true), Tone::Good);
+        assert_eq!(trust_tone(SessionTrust::NoKeys, true), Tone::Warn);
+        // Not checked here: the server's word, as that, and nothing in a good tone.
+        for sessions in [
+            vec![verified(), verified()],
+            vec![verified(), session("B", SessionTrust::Unverified)],
+            vec![verified()],
+        ] {
+            let lines = session_lines(&all(sessions, false));
+            assert!(
+                lines.iter().all(|(tone, _)| *tone != Tone::Good),
+                "{lines:?}"
+            );
+            assert!(
+                lines[0].1.starts_with("This device is not verified"),
+                "{lines:?}"
+            );
+            assert!(lines[1].1.contains("The server shows"), "{lines:?}");
+            assert!(
+                !lines.iter().any(|(_, text)| text.contains("are verified.")),
+                "{lines:?}"
+            );
+        }
+        assert_eq!(trust_text(SessionTrust::Verified, false), "says verified");
+        assert_eq!(
+            trust_text(SessionTrust::Unverified, false),
+            "says not verified"
+        );
+        for trust in [
+            SessionTrust::Verified,
+            SessionTrust::Unverified,
+            SessionTrust::NoKeys,
+        ] {
+            assert_eq!(trust_tone(trust, false), Tone::Plain);
+        }
+        // No sessions at all (whatever went wrong): never "all 0 are verified".
+        for vouched in [true, false] {
+            assert_eq!(
+                session_lines(&all(Vec::new(), vouched)),
+                [(Tone::Plain, "The server lists no sessions.".to_owned())]
+            );
+        }
 
         let mut named = session("PHONE", SessionTrust::Verified);
         assert_eq!(label(&named), "PHONE");

@@ -998,7 +998,7 @@ mod tests {
         let command = crate::matrix::MatrixCmd::LoginPassword {
             homeserver: "example.org".into(),
             username: "alice".into(),
-            password: "hunter2".into(),
+            password: String::from("hunter2").into(),
         };
         assert!(!format!("{command:?}").contains("hunter2"));
     }

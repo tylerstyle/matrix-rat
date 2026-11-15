@@ -15,7 +15,7 @@ expression: text
 "│                      ││                                                                          │"
 "│              ╭ Key backup and recovery ───────────────────────────────────────────╮              │"
 "│              │                                                                    │              │"
-"│              │   There is a key backup on the server, holding 1234 message keys.  │              │"
+"│              │   The server has a key backup (version 7): 1234 message keys.      │              │"
 "│              │ ! This device cannot read the backup: enter your recovery key.     │              │"
 "│              │                                                                    │              │"
 "│              │  Enter recovery key    Export keys…    Import keys…    Close       │              │"

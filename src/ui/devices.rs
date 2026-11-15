@@ -10,10 +10,11 @@ use crate::action::Action;
 use crate::app::App;
 use crate::devices::{
     Click, ExportForm, ImportForm, KeysPopup, KeysStage, STATUS_BUTTONS, SessionStage,
-    SessionsPopup, Tone, backup_lines, label, last_seen, trust_text, wants_recovery_key, warning,
+    SessionsPopup, Tone, backup_lines, label, last_seen, session_lines, trust_text, trust_tone,
+    wants_recovery_key,
 };
 use crate::lineedit::LineEdit;
-use crate::matrix::{Session, SessionTrust};
+use crate::matrix::Session;
 use crate::text::{sanitize_line, truncate, width, wrap};
 use crate::theme::Role;
 
@@ -22,6 +23,14 @@ const DIALOG_WIDTH: u16 = 70;
 /// Columns for "no encryption keys", the longest of the trust words.
 const TRUST_COLUMN: usize = 18;
 const DATE_COLUMN: usize = 10;
+
+fn tone_role(tone: Tone) -> Role {
+    match tone {
+        Tone::Good => Role::StatusOk,
+        Tone::Warn => Role::Error,
+        Tone::Plain => Role::Text,
+    }
+}
 
 /// One text field of a dialog.
 struct FieldSpec<'a> {
@@ -275,23 +284,8 @@ fn sessions_list(frame: &mut Frame, app: &mut App, area: Rect, state: &mut Sessi
             &[]
         }
         Some(Ok(list)) => {
-            match warning(list) {
-                Some(text) => head.push((text, Role::Error)),
-                None => head.push((
-                    match list.sessions.len() {
-                        1 => "This is the only session, and it is verified.".to_owned(),
-                        n => format!("All {n} sessions are verified."),
-                    },
-                    Role::StatusOk,
-                )),
-            }
-            if !list.vouched {
-                head.push((
-                    "This device is not verified itself, so it cannot check the others: \
-                     “verified” below is what the server says."
-                        .to_owned(),
-                    Role::Error,
-                ));
+            for (tone, text) in session_lines(list) {
+                head.push((text, tone_role(tone)));
             }
             &list.sessions
         }
@@ -304,6 +298,7 @@ fn sessions_list(frame: &mut Frame, app: &mut App, area: Rect, state: &mut Sessi
                 .map(|part| Line::from(Span::styled(part, theme.style(*role))))
         })
         .collect();
+    let vouched = matches!(&list, Some(Ok(list)) if list.vouched);
     let per = if state.show_addresses { 2 } else { 1 };
     let wanted = (sessions.len().clamp(2, 10) * per) as u16;
     let Some(rect) = centered(area, LIST_WIDTH, head.len() as u16 + wanted + 5) else {
@@ -360,9 +355,10 @@ fn sessions_list(frame: &mut Frame, app: &mut App, area: Rect, state: &mut Sessi
         let name_room = (at.width as usize).saturating_sub(2 + right + width(this));
         let name = truncate(&label(session), name_room);
         let pad = (at.width as usize).saturating_sub(2 + width(&name) + width(this) + right);
-        let trust_role = match session.trust {
-            SessionTrust::Verified => Role::StatusOk,
-            SessionTrust::Unverified | SessionTrust::NoKeys => Role::Error,
+        let trust_role = match trust_tone(session.trust, vouched) {
+            Tone::Good => Role::StatusOk,
+            Tone::Warn => Role::Error,
+            Tone::Plain => Role::Muted,
         };
         let spans = vec![
             Span::styled(
@@ -373,7 +369,7 @@ fn sessions_list(frame: &mut Frame, app: &mut App, area: Rect, state: &mut Sessi
             Span::styled(this, theme.style(Role::StatusOk)),
             Span::raw(" ".repeat(pad + 2)),
             Span::styled(
-                format!("{:<TRUST_COLUMN$}", trust_text(session.trust)),
+                format!("{:<TRUST_COLUMN$}", trust_text(session.trust, vouched)),
                 theme.style(trust_role),
             ),
             Span::raw("  "),
@@ -399,15 +395,6 @@ fn sessions_list(frame: &mut Frame, app: &mut App, area: Rect, state: &mut Sessi
             );
             app.hits.add(below, click);
         }
-    }
-    if matches!(&list, Some(Ok(list)) if list.sessions.is_empty()) {
-        frame.render_widget(
-            Line::from(Span::styled(
-                "The server lists no sessions.",
-                theme.style(Role::Muted),
-            )),
-            row(inner, y),
-        );
     }
     // Buttons for the selected session.
     let at = row(inner, inner.height.saturating_sub(1));
@@ -437,7 +424,7 @@ pub fn draw_keys(frame: &mut Frame, app: &mut App, area: Rect, state: &mut KeysP
     match &mut state.stage {
         KeysStage::Status => {
             let security = app.verify.security;
-            let body = backup_lines(security, app.devices.backup)
+            let body = backup_lines(security, &app.devices.backup, app.devices.upload)
                 .into_iter()
                 .map(|(tone, text)| match tone {
                     Tone::Good => (format!("✓ {text}"), Role::StatusOk),

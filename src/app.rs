@@ -2552,7 +2552,7 @@ impl App {
             } else {
                 form.busy = Some("Re-authenticating…".to_owned());
                 MatrixCmd::ReauthPassword {
-                    password: form.password.take_string(),
+                    password: form.password.take_secret(),
                 }
             }
         } else if browser {
@@ -2565,7 +2565,7 @@ impl App {
             MatrixCmd::LoginPassword {
                 homeserver: form.homeserver.as_str().to_owned(),
                 username: form.username.as_str().to_owned(),
-                password: form.password.take_string(),
+                password: form.password.take_secret(),
             }
         };
         self.send_matrix(command);
@@ -2581,7 +2581,7 @@ impl App {
         form.busy = true;
         form.error = None;
         // Not kept in the form once it is on its way.
-        let key = form.key.take_string();
+        let key = form.key.take_secret();
         self.send_matrix(MatrixCmd::Recover { key });
     }
 
@@ -3004,9 +3004,9 @@ impl App {
                 self.on_forward_result(to_room_id, to_room_name, result);
             }
             MatrixEvent::Devices(event) => self.on_devices_event(event),
-            MatrixEvent::DecryptionRetried { room_id, result } => {
-                self.on_decryption_retried(&room_id, result);
-            }
+            MatrixEvent::DecryptionRetried {
+                event_id, result, ..
+            } => self.on_decryption_retried(&event_id, result),
             MatrixEvent::OwnProfile(profile) => self.on_own_profile(profile),
             MatrixEvent::OwnProfileResult { what, result } => {
                 self.on_own_profile_result(what, result);
@@ -3216,8 +3216,14 @@ impl App {
                 self.update_typing();
                 self.note_draft();
             }
-            Event::Paste(text) => {
-                self.on_paste(&text);
+            Event::Paste(mut text) => {
+                // A secret is taken as it is and our copy of it wiped; everything
+                // else goes the usual way.
+                if self.paste_secret(&text) {
+                    zeroize::Zeroize::zeroize(&mut text);
+                } else {
+                    self.on_paste(&text);
+                }
                 self.update_typing();
                 self.note_draft();
             }
@@ -4912,7 +4918,7 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(
             commands.try_recv().unwrap(),
-            MatrixCmd::ReauthPassword { password } if password == "secretpw"
+            MatrixCmd::ReauthPassword { password } if password.as_str() == "secretpw"
         ));
 
         // Failure keeps re-authenticate mode open so the user can retry.
@@ -6441,7 +6447,7 @@ mod tests {
         let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
         assert!(sent.iter().any(|c| matches!(
             c,
-            MatrixCmd::ReauthPassword { password } if password == "alpha X"
+            MatrixCmd::ReauthPassword { password } if password.as_str() == "alpha X"
         )));
         match &mut app.modal {
             Some(Modal::Login(form)) => {

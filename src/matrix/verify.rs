@@ -45,7 +45,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::{JoinHandle, JoinSet};
 
-use super::{MatrixEvent, RecoveryStatus, recovery_status};
+use super::{MatrixEvent, RecoveryStatus, Secret, recovery_status};
 use crate::text::sanitize_line;
 
 // ----- what the UI sees ---------------------------------------------------------------
@@ -198,7 +198,7 @@ pub enum VerifyCmd {
     /// Create the account's cross-signing keys if it has none. Tried without a
     /// password first; some servers then ask for the account password.
     SetUp {
-        password: Option<String>,
+        password: Option<Secret>,
     },
 }
 
@@ -253,7 +253,9 @@ fn within(now: MilliSecondsSinceUnixEpoch, sent: MilliSecondsSinceUnixEpoch, ms:
 
 /// A message that cannot be decrypted counts as new if it was sent this recently.
 /// Anything older is history (a room being loaded, a backlog after a pause): its key
-/// request may wait the 30 seconds.
+/// request may wait the 30 seconds. The time is the sender's server's, so the window
+/// reaches as far ahead as back ([`within`]): a message stamped up to two minutes
+/// into the future by a clock that runs fast still counts as new.
 const UTD_FRESH_MS: u64 = 2 * 60 * 1000;
 /// Nothing is hurried until the first sync of the session has been through for this
 /// long: what arrives until then is the backlog.
@@ -269,14 +271,17 @@ const WAKE_SESSIONS: usize = 512;
 /// a request. Every limit holds whatever arrives:
 ///
 /// - a megolm session gets one wake at most (the SDK asks for a session's key once,
-///   so a second message of the same session has nothing new to send), whether its
-///   first message was live or history;
+///   so a second message of the same session has nothing new to send), and none if
+///   it was first seen as history: its key was asked for when that was loaded. A
+///   session that was refused only for the reasons below is not counted as seen, so
+///   a later message of it (still new by its own time) can get the wake;
 /// - only messages sent in the last two minutes count, and none before the session's
 ///   first sync has been through for a while;
 /// - at most [`WAKE_BURST`] wakes in a row and one per [`WAKE_EVERY`] in the long run
 ///   (never more than eight in any minute), however many rooms and sessions there
-///   are. A session that came while the ration was used up gets no
-///   wake later: its request goes out with the next wake or the next sync request.
+///   are;
+/// - none while no key request can be waiting: the SDK only asks when another of
+///   this account's devices is verified.
 ///
 /// Only session ids are kept, in memory, and nothing here is logged.
 struct KeyRequestWakes {
@@ -305,20 +310,22 @@ impl KeyRequestWakes {
     }
 
     /// A message of megolm session `session` could not be decrypted; `fresh` if it
-    /// was sent just now. Whether to wake for it.
-    fn allow(&mut self, now: Instant, session: &str, fresh: bool) -> bool {
-        // History counts as seen too: its key was asked for when it was loaded.
+    /// was sent just now, `askable` if the SDK can have queued a request for its key.
+    /// Whether to wake for it.
+    fn allow(&mut self, now: Instant, session: &str, fresh: bool, askable: bool) -> bool {
         if self.seen.iter().any(|seen| seen == session) {
             return false;
         }
-        self.seen.push_back(session.to_owned());
-        if self.seen.len() > WAKE_SESSIONS {
-            self.seen.pop_front();
+        if !fresh {
+            // History: its key was asked for when it was loaded. A later message of
+            // the session has nothing new to send.
+            self.remember(session);
+            return false;
         }
         let settled = self
             .live_since
             .is_some_and(|since| now.saturating_duration_since(since) >= WAKE_SETTLE);
-        if !fresh || !settled {
+        if !settled || !askable {
             return false;
         }
         let earned = now.saturating_duration_since(self.counted).as_secs() / WAKE_EVERY.as_secs();
@@ -339,7 +346,15 @@ impl KeyRequestWakes {
             self.counted = now;
         }
         self.ration -= 1;
+        self.remember(session);
         true
+    }
+
+    fn remember(&mut self, session: &str) {
+        self.seen.push_back(session.to_owned());
+        if self.seen.len() > WAKE_SESSIONS {
+            self.seen.pop_front();
+        }
     }
 }
 
@@ -461,7 +476,7 @@ fn in_room_step(event: &AnySyncMessageLikeEvent, own: Option<&UserId>) -> bool {
 /// The same nudge gets room-key requests on their way: the SDK queues one for our other
 /// devices when a message that came by the room list sync cannot be decrypted
 /// (`OlmMachine::decrypt_room_event_inner` calls `create_outgoing_key_request`, once per
-/// megolm session and only while one of our devices is verified), and it would wait
+/// megolm session and only while another device of ours is verified), and it would wait
 /// for the encryption sync's next request like the answers above. Those wakes are
 /// rationed by [`KeyRequestWakes`].
 async fn send_queued(client: Client, wake: Arc<Notify>) {
@@ -536,6 +551,9 @@ impl Verifier {
         // (handlers get the decrypted event otherwise), and the SDK has queued its
         // request for the key. Only events from sync come here, never loaded history.
         let key_wakes = Arc::new(Mutex::new(KeyRequestWakes::new(Instant::now())));
+        // Whether a key request can be waiting at all; kept by the status watcher.
+        let askable = Arc::new(AtomicBool::new(false));
+        let can_ask = askable.clone();
         let ration = key_wakes.clone();
         let poke = wake.clone();
         let undecrypted = client.add_event_handler(move |ev: OriginalSyncRoomEncryptedEvent| {
@@ -545,9 +563,14 @@ impl Verifier {
                 UTD_FRESH_MS,
             );
             let hurry = megolm_session(&ev.content).is_some_and(|session| {
-                ration
-                    .lock()
-                    .is_ok_and(|mut ration| ration.allow(Instant::now(), session, fresh))
+                ration.lock().is_ok_and(|mut ration| {
+                    ration.allow(
+                        Instant::now(),
+                        session,
+                        fresh,
+                        can_ask.load(Ordering::Relaxed),
+                    )
+                })
             });
             if hurry {
                 poke.notify_one();
@@ -567,6 +590,7 @@ impl Verifier {
             client.clone(),
             events.clone(),
             refresh.clone(),
+            askable,
         ));
         tasks.spawn(send_queued(client.clone(), wake));
         Self {
@@ -813,7 +837,7 @@ impl Drop for Verifier {
 /// MSC3967 allow the first upload without a password; others ask for it.
 pub(super) async fn set_up_cross_signing(
     client: &Client,
-    password: Option<String>,
+    password: Option<Secret>,
 ) -> SetUpOutcome {
     let encryption = client.encryption();
     let failed = |err: matrix_sdk::Error| {
@@ -840,8 +864,10 @@ pub(super) async fn set_up_cross_signing(
     };
     let mut auth = Password::new(
         UserIdentifier::Matrix(MatrixUserIdentifier::new(user_id.to_string())),
-        password,
+        // The request needs a `String` of its own; ours is wiped as it is dropped.
+        password.as_str().to_owned(),
     );
+    drop(password);
     auth.session = info.session.clone();
     match encryption
         .bootstrap_cross_signing(Some(AuthData::Password(auth)))
@@ -1322,6 +1348,24 @@ async fn request_user(client: &Client, user_id: &UserId) -> Result<VerificationR
         .map_err(|err| format!("Could not send the verification request: {err}"))
 }
 
+/// Whether the SDK asks this account's other devices for message keys it lacks: it
+/// does while one of them is verified from here (`should_request_key` in
+/// matrix-sdk-crypto 0.19.1).
+async fn can_ask_for_keys(client: &Client) -> bool {
+    let (Some(user_id), Some(own)) = (client.user_id(), client.device_id()) else {
+        return false;
+    };
+    client
+        .encryption()
+        .get_user_devices(user_id)
+        .await
+        .is_ok_and(|devices| {
+            devices
+                .devices()
+                .any(|device| device.device_id() != own && device.is_verified())
+        })
+}
+
 /// How many devices this account has, and whether another one is cross-signed, so it
 /// can vouch for this one.
 async fn own_devices(client: &Client) -> (usize, bool) {
@@ -1374,6 +1418,7 @@ async fn watch_security(
     client: Client,
     events: UnboundedSender<MatrixEvent>,
     refresh: Arc<Notify>,
+    askable: Arc<AtomicBool>,
 ) {
     let Some(user_id) = client.user_id().map(ToOwned::to_owned) else {
         return;
@@ -1392,6 +1437,7 @@ async fn watch_security(
     let mut last = None;
     loop {
         let now = security(&client, &user_id, &mut checks).await;
+        askable.store(can_ask_for_keys(&client).await, Ordering::Relaxed);
         if last != Some(now) {
             tracing::info!(?now, "encryption status");
             let _ = events.send(MatrixEvent::Security(now));
@@ -1676,21 +1722,28 @@ pub(super) mod tests {
         let start = Instant::now();
         let at = |secs: u64| start + Duration::from_secs(secs);
         let mut wakes = KeyRequestWakes::new(start);
-        // Before the first sync is through, and for a while after: nothing, and what
-        // was seen then is not woken for later either.
-        assert!(!wakes.allow(at(0), "backlog", true));
+        // Before the first sync is through, and for a while after: nothing. But a
+        // session that was only refused for that keeps its chance.
+        assert!(!wakes.allow(at(0), "backlog", true, true));
         wakes.caught_up(at(5));
-        assert!(!wakes.allow(at(6), "early", true));
+        assert!(!wakes.allow(at(6), "early", true, true));
         let live = 5 + WAKE_SETTLE.as_secs();
-        assert!(!wakes.allow(at(live + 1), "backlog", true));
-        assert!(!wakes.allow(at(live + 1), "early", true));
+        assert!(wakes.allow(at(live + 1), "early", true, true));
+        assert!(!wakes.allow(at(live + 1), "early", true, true));
         // History (a room being loaded) never wakes, and marks its session as seen.
-        assert!(!wakes.allow(at(live + 1), "history", false));
-        assert!(!wakes.allow(at(live + 2), "history", true));
+        assert!(!wakes.allow(at(live + 1), "history", false, true));
+        assert!(!wakes.allow(at(live + 2), "history", true, true));
         // A new message of a new session: one wake, and none for the next of it.
-        assert!(wakes.allow(at(live + 2), "a", true));
-        assert!(!wakes.allow(at(live + 2), "a", true));
-        assert!(!wakes.allow(at(live + 600), "a", true));
+        assert!(wakes.allow(at(live + 2), "a", true, true));
+        assert!(!wakes.allow(at(live + 2), "a", true, true));
+        assert!(!wakes.allow(at(live + 600), "a", true, true));
+        // The ration is used up: refused, but not forgotten.
+        assert!(!wakes.allow(at(live + 2), "b", true, true));
+        assert!(wakes.allow(at(live + 2 + WAKE_EVERY.as_secs()), "b", true, true));
+        // No other verified device, so no request can be waiting: nothing is sent,
+        // and the session keeps its chance for when there is one.
+        assert!(!wakes.allow(at(live + 900), "c", true, false));
+        assert!(wakes.allow(at(live + 901), "c", true, true));
 
         // A flood of new sessions: the burst, then one per interval, whatever comes.
         let mut wakes = KeyRequestWakes::new(start);
@@ -1699,20 +1752,35 @@ pub(super) mod tests {
         let mut allowed = 0;
         for n in 0..10_000u64 {
             // Ten new sessions a second, for 1000 seconds.
-            if wakes.allow(at(base + n / 10), &format!("s{n}"), true) {
+            if wakes.allow(at(base + n / 10), &format!("s{n}"), true, true) {
                 allowed += 1;
             }
         }
         let most = u64::from(WAKE_BURST) + 1000 / WAKE_EVERY.as_secs();
         assert!(allowed <= most, "{allowed} wakes, at most {most} expected");
         assert!(allowed >= most - 1, "{allowed} wakes");
+        // The same flood from one session that is refused again and again: no more.
+        let mut wakes = KeyRequestWakes::new(start);
+        wakes.caught_up(start);
+        let mut allowed = 0;
+        for n in 0..10_000u64 {
+            let session = if n % 2 == 0 {
+                "same".to_owned()
+            } else {
+                format!("s{n}")
+            };
+            if wakes.allow(at(base + n / 10), &session, true, true) {
+                allowed += 1;
+            }
+        }
+        assert!(allowed <= most, "{allowed} wakes, at most {most} expected");
         // Never more than the burst within one interval.
         let mut wakes = KeyRequestWakes::new(start);
         wakes.caught_up(start);
         let mut times = Vec::new();
         for n in 0..3_000u64 {
             let now = start + WAKE_SETTLE + Duration::from_millis(n * 100);
-            if wakes.allow(now, &format!("t{n}"), true) {
+            if wakes.allow(now, &format!("t{n}"), true, true) {
                 times.push(now);
             }
         }
@@ -1725,16 +1793,19 @@ pub(super) mod tests {
         // After a quiet time the full burst is back, and no more than that.
         let later = base + 400 + 3600;
         let again = (0..10)
-            .filter(|n| wakes.allow(at(later), &format!("u{n}"), true))
+            .filter(|n| wakes.allow(at(later), &format!("u{n}"), true, true))
             .count();
         assert_eq!(again, WAKE_BURST as usize);
-        // The memory of sessions is bounded.
-        assert!(wakes.seen.len() <= WAKE_SESSIONS);
+        // The memory of sessions is bounded, whatever is seen.
+        for n in 0..(2 * WAKE_SESSIONS) {
+            wakes.allow(at(later), &format!("old{n}"), false, true);
+        }
+        assert_eq!(wakes.seen.len(), WAKE_SESSIONS);
         // The time of the first sync is set once.
         let mut wakes = KeyRequestWakes::new(start);
         wakes.caught_up(at(0));
         wakes.caught_up(at(1000));
-        assert!(wakes.allow(at(WAKE_SETTLE.as_secs()), "x", true));
+        assert!(wakes.allow(at(WAKE_SETTLE.as_secs()), "x", true, true));
     }
 
     #[test]
@@ -1764,12 +1835,20 @@ pub(super) mod tests {
         };
         assert!(within(now, ago(1_000), UTD_FRESH_MS));
         assert!(!within(now, ago(UTD_FRESH_MS), UTD_FRESH_MS));
+        // A clock that runs ahead is allowed for by the same amount.
+        let ahead = |ms: u64| {
+            MilliSecondsSinceUnixEpoch(matrix_sdk::ruma::UInt::new_saturating(
+                u64::from(now.get()) + ms,
+            ))
+        };
+        assert!(within(now, ahead(UTD_FRESH_MS - 1_000), UTD_FRESH_MS));
+        assert!(!within(now, ahead(UTD_FRESH_MS), UTD_FRESH_MS));
     }
 
     #[test]
     fn debug_output_hides_the_password() {
         let command = MatrixCmd::Verification(VerifyCmd::SetUp {
-            password: Some("hunter2".into()),
+            password: Some(String::from("hunter2").into()),
         });
         assert!(!format!("{command:?}").contains("hunter2"));
     }
@@ -1950,7 +2029,7 @@ pub(super) mod tests {
         a.send(MatrixCmd::LoginPassword {
             homeserver: homeserver(),
             username: name.to_owned(),
-            password: password.to_owned(),
+            password: password.to_owned().into(),
         });
         // A new account has no cross-signing until asked for it.
         wait_for(
@@ -1960,7 +2039,7 @@ pub(super) mod tests {
         )
         .await;
         a.send(MatrixCmd::Verification(VerifyCmd::SetUp {
-            password: Some(password.to_owned()),
+            password: Some(password.to_owned().into()),
         }));
         // The two pieces of news may come in either order.
         let (mut set_up, mut verified) = (false, false);
@@ -1987,7 +2066,7 @@ pub(super) mod tests {
         b.send(MatrixCmd::LoginPassword {
             homeserver: homeserver(),
             username: name,
-            password,
+            password: password.into(),
         });
         wait_for(&mut b_events, "B unverified with A present", |e| {
             matches!(e, MatrixEvent::Security(s)
@@ -2095,10 +2174,10 @@ pub(super) mod tests {
         use crate::matrix::{DevicesCmd, DevicesEvent, SessionTrust};
         trace();
         let mut pair = pair("ratchosen").await;
-        pair.a.send(MatrixCmd::Devices(DevicesCmd::Watch(true)));
+        pair.a.send(MatrixCmd::Devices(DevicesCmd::Watch(Some(1))));
         let mut other = None;
         wait_for(&mut pair.a_events, "the other session in the list", |e| {
-            if let MatrixEvent::Devices(DevicesEvent::List(Ok(list))) = e {
+            if let MatrixEvent::Devices(DevicesEvent::List { list: Ok(list), .. }) = e {
                 other = list
                     .sessions
                     .iter()
@@ -2114,9 +2193,9 @@ pub(super) mod tests {
             }));
         pair.finish().await;
         // Asked afresh (the updates so far went by during the verification).
-        pair.a.send(MatrixCmd::Devices(DevicesCmd::Watch(true)));
+        pair.a.send(MatrixCmd::Devices(DevicesCmd::Watch(Some(1))));
         wait_for(&mut pair.a_events, "both sessions verified", |e| {
-            matches!(e, MatrixEvent::Devices(DevicesEvent::List(Ok(list)))
+            matches!(e, MatrixEvent::Devices(DevicesEvent::List { list: Ok(list), .. })
                 if list.sessions.len() == 2
                     && list.sessions.iter().all(|s| s.trust == SessionTrust::Verified))
         })
@@ -2256,7 +2335,7 @@ pub(super) mod tests {
             .expect("login A");
         a.sync_once(SyncSettings::default()).await.expect("sync A");
         assert_eq!(
-            set_up_cross_signing(&a, Some(password.clone())).await,
+            set_up_cross_signing(&a, Some(password.clone().into())).await,
             SetUpOutcome::Done
         );
         a.encryption()
@@ -2301,7 +2380,7 @@ pub(super) mod tests {
         b.send(MatrixCmd::LoginPassword {
             homeserver: homeserver.clone(),
             username: name.clone(),
-            password: password.clone(),
+            password: password.clone().into(),
         });
         let room_id = room.room_id().to_string();
         let mut opened = false;
@@ -2410,7 +2489,7 @@ pub(super) mod tests {
             .await
             .expect("sync");
         assert_eq!(
-            set_up_cross_signing(&client, Some(password)).await,
+            set_up_cross_signing(&client, Some(password.into())).await,
             SetUpOutcome::Done
         );
         let syncing = tokio::spawn({

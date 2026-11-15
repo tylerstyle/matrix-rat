@@ -4,8 +4,10 @@
 //! The worker owns every SDK object here. The UI sees plain data: the list of sessions
 //! while its popup is open, and the outcome of what it asked for.
 
+use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::future::pending;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,6 +15,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use matrix_sdk::config::RequestConfig;
+use matrix_sdk::encryption::backups::UploadState;
 use matrix_sdk::encryption::{KeyExportError, RoomKeyImportError};
 use matrix_sdk::ruma::api::client::backup::get_latest_backup_info;
 use matrix_sdk::ruma::api::client::device::delete_devices;
@@ -90,23 +93,43 @@ impl std::fmt::Debug for SessionList {
 
 /// The backup of message keys, as the server has it (whether or not this device can
 /// use it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ServerBackup {
-    /// Not asked yet, or the server could not be reached.
+    /// Not asked yet, or the server could not be reached: nothing is known.
     #[default]
     Unknown,
     Missing,
     Present {
         /// How many message keys it holds.
         keys: u64,
+        /// Which backup it is. (Which one this device uploads to cannot be compared
+        /// with it: matrix-sdk 0.19.1 keeps its backup version to itself.)
+        version: String,
     },
 }
 
+/// What this device's uploads to the backup are doing, as far as was seen while the
+/// popup was open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackupUpload {
+    /// Nothing was reported yet.
+    #[default]
+    Unknown,
+    /// Nothing waits to be uploaded.
+    Idle,
+    Uploading {
+        done: usize,
+        total: usize,
+    },
+    /// The last upload failed; the SDK tries again later.
+    Failed,
+}
+
 pub enum DevicesCmd {
-    /// The sessions popup (or the key backup popup) opened or closed. While open,
-    /// [`DevicesEvent::List`] and [`DevicesEvent::Backup`] are sent, at once and on
-    /// every change.
-    Watch(bool),
+    /// The sessions popup (or the key backup popup) opened (with a number, which the
+    /// news for it quotes) or closed. While open, [`DevicesEvent::List`] and
+    /// [`DevicesEvent::Backup`] are sent, at once and on every change.
+    Watch(Option<u64>),
     Rename {
         request: u64,
         device_id: String,
@@ -137,7 +160,7 @@ pub enum DevicesCmd {
 impl std::fmt::Debug for DevicesCmd {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Watch(on) => write!(f, "Watch({on})"),
+            Self::Watch(watch) => write!(f, "Watch({watch:?})"),
             Self::Rename { request, .. } => write!(f, "Rename({request})"),
             Self::SignOut {
                 request, password, ..
@@ -178,8 +201,16 @@ impl std::fmt::Debug for SignOutOutcome {
 }
 
 pub enum DevicesEvent {
-    List(Result<SessionList, String>),
-    Backup(ServerBackup),
+    List {
+        /// The [`DevicesCmd::Watch`] this is news for.
+        watch: u64,
+        list: Result<SessionList, String>,
+    },
+    Backup {
+        watch: u64,
+        server: ServerBackup,
+        upload: BackupUpload,
+    },
     Renamed {
         request: u64,
         result: Result<(), String>,
@@ -204,9 +235,23 @@ pub enum DevicesEvent {
 impl std::fmt::Debug for DevicesEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::List(Ok(list)) => write!(f, "List({list:?})"),
-            Self::List(Err(_)) => f.write_str("List(failed)"),
-            Self::Backup(backup) => write!(f, "Backup({backup:?})"),
+            Self::List {
+                watch,
+                list: Ok(list),
+            } => write!(f, "List({watch}, {list:?})"),
+            Self::List { watch, .. } => write!(f, "List({watch}, failed)"),
+            Self::Backup {
+                watch,
+                server,
+                upload,
+            } => {
+                let server = match server {
+                    ServerBackup::Unknown => "unknown",
+                    ServerBackup::Missing => "missing",
+                    ServerBackup::Present { .. } => "present",
+                };
+                write!(f, "Backup({watch}, {server}, {upload:?})")
+            }
             Self::Renamed { request, result } => {
                 write!(f, "Renamed({request}, ok: {})", result.is_ok())
             }
@@ -223,8 +268,9 @@ impl std::fmt::Debug for DevicesEvent {
 
 // ----- the worker side ----------------------------------------------------------------
 
-/// While the popup is open the list is also fetched this often: the server tells
-/// nobody when a session was last seen, or that one is gone.
+/// While the popup is open the list is also fetched this often: nothing tells when a
+/// session was last seen, and a session that was removed elsewhere is only noticed
+/// at once when the SDK reports it by itself (see [`watch`]).
 const POLL: Duration = Duration::from_secs(30);
 
 /// Lives as long as a session.
@@ -270,12 +316,17 @@ impl Devices {
             let _ = events.send(MatrixEvent::Devices(event));
         };
         match command {
-            DevicesCmd::Watch(on) => {
+            DevicesCmd::Watch(watch_id) => {
                 if let Some(old) = self.watcher.take() {
                     old.abort();
                 }
-                if on {
-                    self.watcher = Some(tokio::spawn(watch(client, self.events.clone(), refresh)));
+                if let Some(id) = watch_id {
+                    self.watcher = Some(tokio::spawn(watch(
+                        client,
+                        self.events.clone(),
+                        refresh,
+                        id,
+                    )));
                 }
             }
             DevicesCmd::Rename {
@@ -367,31 +418,61 @@ impl Drop for Devices {
     }
 }
 
-/// Sends the list of sessions and the state of the backup on the server, now and
-/// whenever they may have changed, until it is aborted.
-async fn watch(client: Client, events: UnboundedSender<MatrixEvent>, refresh: Arc<Notify>) {
+/// Sends the list of sessions and the state of the backup, now and whenever they may
+/// have changed, until it is aborted. Everything it sends carries `id`.
+///
+/// What makes it look again: news about this account's devices from the SDK; a
+/// change of the backup's state; a request from this module after it changed
+/// something; and the clock ([`POLL`]). The SDK's device stream has no entry for a
+/// device that was removed: a removal shows there, if at all, as an update that
+/// names no device (`DeviceChanges::deleted` is not passed on), so such an update
+/// makes it look too. A removal that arrives together with other people's device
+/// news is not recognisable and waits for the clock.
+async fn watch(
+    client: Client,
+    events: UnboundedSender<MatrixEvent>,
+    refresh: Arc<Notify>,
+    id: u64,
+) {
     let Some(user_id) = client.user_id().map(ToOwned::to_owned) else {
         return;
     };
     let encryption = client.encryption();
+    let backups = encryption.backups();
     let mut devices = encryption.devices_stream().await.ok().map(Box::pin);
-    let mut backup_states = Box::pin(encryption.backups().state_stream());
+    let mut backup_states = Box::pin(backups.state_stream());
+    let mut uploads = Box::pin(backups.wait_for_steady_state().subscribe_to_progress());
+    // Devices without keys whose keys were asked for: once is enough per opening.
+    let mut asked = HashSet::new();
     let mut last_list = None;
     let mut last_backup = None;
+    let mut server = ServerBackup::Unknown;
+    let mut upload = BackupUpload::Unknown;
+    let mut fetch = true;
     loop {
-        let now = list(&client).await;
-        if last_list.as_ref() != Some(&now) {
-            let _ = events.send(MatrixEvent::Devices(DevicesEvent::List(now.clone())));
-            last_list = Some(now);
+        if fetch {
+            let now = list(&client, &mut asked).await;
+            if last_list.as_ref() != Some(&now) {
+                let _ = events.send(MatrixEvent::Devices(DevicesEvent::List {
+                    watch: id,
+                    list: now.clone(),
+                }));
+                last_list = Some(now);
+            }
+            server = server_backup(&client).await;
         }
-        let now = server_backup(&client).await;
-        if last_backup != Some(now) {
-            let _ = events.send(MatrixEvent::Devices(DevicesEvent::Backup(now)));
+        let now = (server.clone(), upload);
+        if last_backup.as_ref() != Some(&now) {
+            let _ = events.send(MatrixEvent::Devices(DevicesEvent::Backup {
+                watch: id,
+                server: server.clone(),
+                upload,
+            }));
             last_backup = Some(now);
         }
         let poll = tokio::time::sleep(POLL);
         tokio::pin!(poll);
-        loop {
+        fetch = loop {
             tokio::select! {
                 Some(updates) = async {
                     match devices.as_mut() {
@@ -399,23 +480,50 @@ async fn watch(client: Client, events: UnboundedSender<MatrixEvent>, refresh: Ar
                         None => pending().await,
                     }
                 } => {
-                    if updates.new.contains_key(&user_id) || updates.changed.contains_key(&user_id) {
-                        break;
+                    let ours = updates.new.contains_key(&user_id)
+                        || updates.changed.contains_key(&user_id);
+                    let maybe_removal = updates.new.is_empty() && updates.changed.is_empty();
+                    if ours || maybe_removal {
+                        break true;
                     }
                 }
-                Some(_) = backup_states.next() => break,
-                () = refresh.notified() => break,
-                () = &mut poll => break,
+                Some(_) = backup_states.next() => break true,
+                Some(state) = uploads.next() => {
+                    let now = match state {
+                        Ok(UploadState::Idle | UploadState::Done) => BackupUpload::Idle,
+                        Ok(UploadState::Uploading(counts)) => BackupUpload::Uploading {
+                            done: counts.backed_up,
+                            total: counts.total,
+                        },
+                        Ok(UploadState::Error) => BackupUpload::Failed,
+                        // Reports were missed; the next one tells.
+                        Err(_) => upload,
+                    };
+                    if now != upload {
+                        // Finished uploads change the server's count; the steps on
+                        // the way there are only shown.
+                        let finished = now == BackupUpload::Idle;
+                        upload = now;
+                        break finished;
+                    }
+                }
+                () = refresh.notified() => break true,
+                () = &mut poll => break true,
             }
+        };
+        if fetch {
+            // Changes tend to come in groups.
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        // Changes tend to come in groups.
-        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
 /// The account's sessions as the server lists them, each with what the crypto store
-/// knows about its keys.
-async fn list(client: &Client) -> Result<SessionList, String> {
+/// knows about its keys. `asked` remembers the devices whose keys were asked for
+/// because the store had none: each is asked about once, so that a session that
+/// simply has no keys (a bot, a bridge, an old web login) costs one request, not one
+/// per look.
+async fn list(client: &Client, asked: &mut HashSet<OwnedDeviceId>) -> Result<SessionList, String> {
     let (Some(user_id), Some(own)) = (client.user_id(), client.device_id()) else {
         return Err("Not logged in".to_owned());
     };
@@ -425,15 +533,17 @@ async fn list(client: &Client) -> Result<SessionList, String> {
         .map_err(|err| format!("Could not load the sessions: {err}"))?;
     let encryption = client.encryption();
     let mut known = encryption.get_user_devices(user_id).await.ok();
-    let all_known = |known: &Option<matrix_sdk::encryption::identities::UserDevices>| {
-        known.as_ref().is_some_and(|known| {
-            response
-                .devices
-                .iter()
-                .all(|device| known.get(&device.device_id).is_some())
+    let keyless: Vec<OwnedDeviceId> = response
+        .devices
+        .iter()
+        .filter(|device| {
+            known
+                .as_ref()
+                .is_none_or(|known| known.get(&device.device_id).is_none())
         })
-    };
-    if !all_known(&known) {
+        .map(|device| device.device_id.clone())
+        .collect();
+    if keyless.iter().any(|device| !asked.contains(device)) {
         // The store hears of a new device with a later sync; ask for the keys now, so
         // that a session is not shown as having none while they are on their way.
         if let Err(err) = encryption.request_user_identity(user_id).await {
@@ -441,6 +551,7 @@ async fn list(client: &Client) -> Result<SessionList, String> {
         }
         known = encryption.get_user_devices(user_id).await.ok();
     }
+    asked.extend(keyless);
     let vouched = matches!(
         encryption.get_user_identity(user_id).await,
         Ok(Some(identity)) if identity.is_verified()
@@ -487,6 +598,7 @@ async fn server_backup(client: &Client) -> ServerBackup {
     {
         Ok(info) => ServerBackup::Present {
             keys: info.count.into(),
+            version: info.version,
         },
         Err(err) if matches!(err.client_api_error_kind(), Some(ErrorKind::NotFound)) => {
             ServerBackup::Missing
@@ -611,29 +723,157 @@ async fn sign_out(
 
 // ----- room keys to and from a file ---------------------------------------------------
 
-/// Creates the file the keys go into: new (an existing file, or a link, is an
-/// error, never replaced) and readable by nobody but the user from the first moment.
-fn reserve(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
+/// A folder of our own, next to where a key file is to appear, in which the file is
+/// written first. Nobody else can look into it or put anything there (mode 0700), so
+/// the SDK, which is given a path and opens it with `File::create`, cannot be made to
+/// write through a link or into a file of someone else's making. Removed, with what
+/// is in it, when dropped.
+struct Staging {
+    dir: PathBuf,
+    /// The folder as we made it, to see that it was not swapped for another.
+    made: std::fs::File,
+    file: Option<PathBuf>,
 }
 
-/// Whether `path` still is the file we created, and still private.
-fn still_ours(file: &std::fs::File, path: &Path) -> bool {
-    let (Ok(ours), Ok(there)) = (file.metadata(), std::fs::symlink_metadata(path)) else {
-        return false;
-    };
-    there.is_file()
-        && there.dev() == ours.dev()
-        && there.ino() == ours.ino()
-        && there.permissions().mode() & 0o077 == 0
+impl Staging {
+    fn create(parent: &Path) -> std::io::Result<Self> {
+        let mut last = None;
+        for attempt in 0..16u32 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.subsec_nanos());
+            let dir = parent.join(format!(
+                ".matrix-rat-keys-{}-{nanos:09}-{attempt}",
+                std::process::id()
+            ));
+            // Fails if anything is there under that name, a link included.
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {
+                    return match std::fs::File::open(&dir) {
+                        Ok(made) => Ok(Self {
+                            dir,
+                            made,
+                            file: None,
+                        }),
+                        Err(err) => {
+                            let _ = std::fs::remove_dir(&dir);
+                            Err(err)
+                        }
+                    };
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => last = Some(err),
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last.unwrap_or_else(|| std::io::ErrorKind::AlreadyExists.into()))
+    }
+
+    /// Where the file is written before it is published.
+    fn path(&mut self, name: &OsStr) -> PathBuf {
+        let path = self.dir.join(name);
+        self.file = Some(path.clone());
+        path
+    }
+
+    /// The folder is still the one we made: ours, private, and a folder.
+    fn intact(&self) -> bool {
+        let (Ok(made), Ok(there)) = (self.made.metadata(), std::fs::symlink_metadata(&self.dir))
+        else {
+            return false;
+        };
+        there.is_dir()
+            && there.dev() == made.dev()
+            && there.ino() == made.ino()
+            && there.permissions().mode() & 0o077 == 0
+    }
+
+    /// Makes the staged file private and durable and gives it its name at `target`
+    /// with a hard link: that never follows a link at `target`, fails if anything is
+    /// there, and leaves no moment in which `target` holds anything but the finished
+    /// file. Where the file system has no hard links nothing is published.
+    fn publish(&self, target: &Path) -> Result<(), String> {
+        let staged = self
+            .file
+            .as_deref()
+            .ok_or_else(|| "nothing was written".to_owned())?;
+        if !self.intact() {
+            return Err(
+                "The folder the file was being written in was replaced meanwhile. Nothing \
+                 was published; export again."
+                    .to_owned(),
+            );
+        }
+        let write = |err: std::io::Error| format!("Could not write the file: {err}");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(staged)
+            .map_err(write)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(write)?;
+        file.sync_all().map_err(write)?;
+        match std::fs::hard_link(staged, target) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(
+                    "A file with that name exists already. Nothing was written; choose \
+                     another name."
+                        .to_owned(),
+                );
+            }
+            Err(err)
+                if matches!(
+                    err.raw_os_error(),
+                    Some(libc::EPERM | libc::EOPNOTSUPP | libc::ENOSYS | libc::EMLINK)
+                ) =>
+            {
+                return Err(format!(
+                    "That folder's file system cannot give a finished file its name \
+                     safely (no hard links: {err}). Nothing was written; choose a folder \
+                     on another drive."
+                ));
+            }
+            Err(err) => return Err(write(err)),
+        }
+        // The new name is in the folder's own data.
+        if let Some(parent) = target.parent()
+            && let Ok(folder) = std::fs::File::open(folder_of(parent))
+        {
+            let _ = folder.sync_all();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        // Only what is ours: a folder that was swapped is left alone.
+        if !self.intact() {
+            return;
+        }
+        if let Some(file) = &self.file {
+            let _ = std::fs::remove_file(file);
+        }
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+/// The folder a path lies in; for a bare file name, the current one.
+fn folder_of(parent: &Path) -> &Path {
+    if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    }
 }
 
 /// Writes every message key this device has into a new file at `path`, in the format
 /// Element reads and writes, encrypted with `passphrase`. Returns how many.
+///
+/// `Encryption::export_room_keys` is the only way to the keys that matrix-sdk 0.19.1
+/// offers, and it takes a path that it opens itself, later, with `File::create`. So
+/// it is given a path inside a [`Staging`] folder, and the result is published under
+/// the wanted name only when it is complete.
 async fn export_keys(
     client: &Client,
     path: PathBuf,
@@ -642,55 +882,37 @@ async fn export_keys(
     if passphrase.is_empty() {
         return Err("A passphrase is needed".to_owned());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("Could not create the folder: {err}"))?;
-    }
-    let file = reserve(&path).map_err(|err| match err.kind() {
-        std::io::ErrorKind::AlreadyExists => {
+    let Some(name) = path.file_name().map(ToOwned::to_owned) else {
+        return Err("That is not a file name".to_owned());
+    };
+    let parent = folder_of(path.parent().unwrap_or(Path::new(""))).to_owned();
+    std::fs::create_dir_all(&parent)
+        .map_err(|err| format!("Could not create the folder: {err}"))?;
+    // Said again, for certain, when the file is published.
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(
             "A file with that name exists already. Nothing was written; choose another name."
-                .to_owned()
-        }
-        _ => format!("Could not create the file: {err}"),
-    })?;
-    // The SDK opens the path again and writes there (`File::create`): the file we just
-    // made, which keeps its mode. Should something else have taken its place in
-    // between, that is noticed below.
+                .to_owned(),
+        );
+    }
+    let mut staging =
+        Staging::create(&parent).map_err(|err| format!("Could not write in that folder: {err}"))?;
     let count = Arc::new(AtomicUsize::new(0));
     let counted = count.clone();
     let result = client
         .encryption()
-        .export_room_keys(path.clone(), &passphrase, move |_| {
+        .export_room_keys(staging.path(&name), &passphrase, move |_| {
             counted.fetch_add(1, Ordering::Relaxed);
             true
         })
         .await;
     drop(passphrase);
-    let ours = still_ours(&file, &path);
-    let remove = || {
-        if ours {
-            let _ = std::fs::remove_file(&path);
-        }
-    };
-    if let Err(err) = result {
-        remove();
-        return Err(format!("Could not export the keys: {err}"));
-    }
-    if !ours {
-        return Err(
-            "The file was replaced while it was being written. Do not trust it; export again."
-                .to_owned(),
-        );
-    }
+    result.map_err(|err| format!("Could not export the keys: {err}"))?;
     let count = count.load(Ordering::Relaxed);
     if count == 0 {
-        remove();
         return Err("This device has no message keys to export yet".to_owned());
     }
-    if let Err(err) = file.sync_all() {
-        remove();
-        return Err(format!("Could not write the file: {err}"));
-    }
+    staging.publish(&path)?;
     Ok((count, path))
 }
 
@@ -811,10 +1033,21 @@ mod tests {
             trust: SessionTrust::Unverified,
         };
         let events = [
-            MatrixEvent::Devices(DevicesEvent::List(Ok(SessionList {
-                sessions: vec![session.clone()],
-                vouched: true,
-            }))),
+            MatrixEvent::Devices(DevicesEvent::List {
+                watch: 1,
+                list: Ok(SessionList {
+                    sessions: vec![session.clone()],
+                    vouched: true,
+                }),
+            }),
+            MatrixEvent::Devices(DevicesEvent::Backup {
+                watch: 1,
+                server: ServerBackup::Present {
+                    keys: 3,
+                    version: "backup-version-9".into(),
+                },
+                upload: BackupUpload::Idle,
+            }),
             MatrixEvent::Devices(DevicesEvent::Exported {
                 request: 3,
                 result: Ok((7, "/home/someone/keys.txt".into())),
@@ -840,55 +1073,136 @@ mod tests {
             "keys.txt",
             "192.0.2.7",
             "account.example.org",
+            "backup-version-9",
         ] {
             assert!(!text.contains(secret), "{secret} in {text}");
         }
     }
 
-    #[test]
-    fn the_key_file_is_new_private_and_checked() {
-        let dir = std::env::temp_dir().join(format!(
-            "matrix-rat-keyfile-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("matrix-rat-keyfile-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("keys.txt");
-        let file = reserve(&path).unwrap();
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert!(still_ours(&file, &path));
-        // What the SDK does next: open the same path for writing. The mode stays.
-        std::fs::write(&path, b"keys").unwrap();
-        assert!(still_ours(&file, &path));
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        // An existing file is never taken over, and neither is a link to somewhere.
-        let again = reserve(&path).unwrap_err();
-        assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read(&path).unwrap(), b"keys");
+        dir
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// What the SDK does with the path it is given.
+    fn sdk_writes(staging: &mut Staging, name: &str, bytes: &[u8]) {
+        let path = staging.path(OsStr::new(name));
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_key_file_is_staged_in_private_and_published_complete() {
+        let dir = scratch("publish");
+        let target = dir.join("keys.txt");
+        let mut staging = Staging::create(&dir).unwrap();
+        let mode = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .permissions()
+                .mode()
+        };
+        assert_eq!(mode(&staging.dir) & 0o777, 0o700);
+        sdk_writes(&mut staging, "keys.txt", b"keys");
+        // Nothing under the wanted name until it is finished.
+        assert!(!target.exists());
+        staging.publish(&target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"keys");
+        assert_eq!(mode(&target) & 0o777, 0o600);
+        drop(staging);
+        // The staging folder is gone, and the file has one name.
+        assert_eq!(entries(&dir), ["keys.txt"]);
+        assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_key_file_never_replaces_anything_and_failures_leave_nothing() {
+        let dir = scratch("refuse");
+        // An existing file stays as it is.
+        let target = dir.join("keys.txt");
+        std::fs::write(&target, b"mine").unwrap();
+        let mut staging = Staging::create(&dir).unwrap();
+        sdk_writes(&mut staging, "keys.txt", b"keys");
+        let refused = staging.publish(&target).unwrap_err();
+        assert!(refused.contains("exists already"), "{refused}");
+        drop(staging);
+        assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+        assert_eq!(entries(&dir), ["keys.txt"]);
+
+        // A link that points nowhere is not followed, and nothing appears behind it.
         let link = dir.join("link.txt");
         std::os::unix::fs::symlink(dir.join("elsewhere.txt"), &link).unwrap();
-        assert_eq!(
-            reserve(&link).unwrap_err().kind(),
-            std::io::ErrorKind::AlreadyExists
-        );
+        let mut staging = Staging::create(&dir).unwrap();
+        sdk_writes(&mut staging, "link.txt", b"keys");
+        let refused = staging.publish(&link).unwrap_err();
+        assert!(refused.contains("exists already"), "{refused}");
+        drop(staging);
         assert!(!dir.join("elsewhere.txt").exists());
-        // Replaced by another file, or opened up: no longer ours.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(!still_ours(&file, &path));
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(still_ours(&file, &path));
-        std::fs::remove_file(&path).unwrap();
-        std::fs::write(&path, b"other").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(!still_ours(&file, &path));
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(entries(&dir), ["keys.txt", "link.txt"]);
+
+        // Given up before publishing (the export failed): nothing is left.
+        let mut staging = Staging::create(&dir).unwrap();
+        sdk_writes(&mut staging, "other.txt", b"half");
+        drop(staging);
+        assert_eq!(entries(&dir), ["keys.txt", "link.txt"]);
+        // Nothing written at all.
+        let staging = Staging::create(&dir).unwrap();
+        assert!(staging.publish(&dir.join("none.txt")).is_err());
+        drop(staging);
+        assert_eq!(entries(&dir), ["keys.txt", "link.txt"]);
+
+        // The staging folder swapped for another one: not published, not cleaned out.
+        let mut staging = Staging::create(&dir).unwrap();
+        sdk_writes(&mut staging, "swapped.txt", b"keys");
+        let moved = dir.join("moved-away");
+        std::fs::rename(&staging.dir, &moved).unwrap();
+        std::fs::create_dir(&staging.dir).unwrap();
+        std::fs::write(staging.dir.join("swapped.txt"), b"theirs").unwrap();
+        let refused = staging.publish(&dir.join("swapped.txt")).unwrap_err();
+        assert!(refused.contains("replaced"), "{refused}");
+        let theirs = staging.dir.clone();
+        drop(staging);
+        assert!(!dir.join("swapped.txt").exists());
+        assert_eq!(
+            std::fs::read(theirs.join("swapped.txt")).unwrap(),
+            b"theirs"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bare_file_name_means_the_current_folder() {
+        assert_eq!(
+            folder_of(Path::new("keys.txt").parent().unwrap()),
+            Path::new(".")
+        );
+        assert_eq!(
+            folder_of(Path::new("/tmp/keys.txt").parent().unwrap()),
+            Path::new("/tmp")
+        );
+        // And works: staged and published next to where the tests run, then removed.
+        let name = format!("matrix-rat-test-keys-{}.txt", std::process::id());
+        let target = Path::new(&name);
+        let parent = folder_of(target.parent().unwrap());
+        let mut staging = Staging::create(parent).unwrap();
+        sdk_writes(&mut staging, &name, b"keys");
+        staging.publish(target).unwrap();
+        drop(staging);
+        assert_eq!(std::fs::read(target).unwrap(), b"keys");
+        std::fs::remove_file(target).unwrap();
     }
 
     #[test]
@@ -1000,10 +1314,10 @@ mod tests {
         let b = plain_login(&name, &password, "second login").await;
         let b_id = b.device_id().expect("device id").to_string();
 
-        a.send(devices(DevicesCmd::Watch(true)));
+        a.send(devices(DevicesCmd::Watch(Some(1))));
         let mut list = None;
         wait_for(&mut events, "both sessions, with keys", |e| {
-            if let MatrixEvent::Devices(DevicesEvent::List(Ok(now))) = e
+            if let MatrixEvent::Devices(DevicesEvent::List { list: Ok(now), .. }) = e
                 && now.sessions.len() == 2
                 && now
                     .sessions
@@ -1046,7 +1360,7 @@ mod tests {
                         assert_eq!(*result, Ok(()));
                         answered = true;
                     }
-                    MatrixEvent::Devices(DevicesEvent::List(Ok(now))) => {
+                    MatrixEvent::Devices(DevicesEvent::List { list: Ok(now), .. }) => {
                         listed = now.sessions.iter().any(|s| {
                             s.device_id == *device_id && s.name.as_deref() == Some(new.trim())
                         });
@@ -1106,7 +1420,7 @@ mod tests {
         let (mut outcome, mut alone) = (None, false);
         wait_for(&mut events, "the session to be signed out", |e| {
             outcome = outcome.take().or(outcome_of(e, 5));
-            if let MatrixEvent::Devices(DevicesEvent::List(Ok(now))) = e {
+            if let MatrixEvent::Devices(DevicesEvent::List { list: Ok(now), .. }) = e {
                 alone = now.sessions.len() == 1 && now.sessions[0].device_id == own_id;
             }
             outcome.is_some() && alone
@@ -1181,7 +1495,7 @@ mod tests {
         b.send(MatrixCmd::LoginPassword {
             homeserver: homeserver(),
             username: name.clone(),
-            password: password.clone(),
+            password: password.clone().into(),
         });
         let mut opened = false;
         let mut locked = None;
@@ -1210,24 +1524,30 @@ mod tests {
         eprintln!("shown as: {body} ({why:?})");
         assert!(why.is_some(), "a reason is given");
         assert!(body.starts_with("Unable to decrypt"), "{body}");
-        let Some(item @ ItemRef::Event(_)) = item else {
+        let Some(ItemRef::Event(event_id)) = item else {
             panic!("the message has no event id");
         };
 
         // Trying again finds nothing: there is no backup and nobody to ask.
         b.send(MatrixCmd::RetryDecryption {
             room_id: room_id.clone(),
-            item,
+            event_id: event_id.clone(),
         });
         let mut retried = None;
         wait_for(&mut events, "the retry", |e| {
-            if let MatrixEvent::DecryptionRetried { result, .. } = e {
+            if let MatrixEvent::DecryptionRetried {
+                result,
+                event_id: answered,
+                ..
+            } = e
+            {
+                assert_eq!(*answered, event_id);
                 retried = Some(result.clone());
             }
             retried.is_some()
         })
         .await;
-        assert_eq!(retried, Some(Ok(false)));
+        assert_eq!(retried, Some(Ok(crate::matrix::Retried::StillLocked)));
 
         let import = |request, passphrase: &str| {
             b.send(devices(DevicesCmd::ImportKeys {
@@ -1285,6 +1605,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A real export, published the safe way: nothing appears under the wanted name
+    /// until the file is complete; it is private; an existing file, a dangling link
+    /// and a folder at that name are left as they are; and nothing of the staging is
+    /// left behind, whether the export worked or not.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn a_real_export_is_published_complete_private_and_only_once() {
+        trace();
+        let (name, password) = new_account("ratexport").await;
+        let a = plain_login(&name, &password, "first").await;
+        let room = encrypted_room_with(&a, "something worth a key").await;
+        let dir = std::env::temp_dir().join(format!("matrix-rat-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pass = || Zeroizing::new("correct horse".to_owned());
+        let names = |dir: &Path| {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let file = dir.join("keys.txt");
+        let (count, written) = export_keys(&a, file.clone(), pass()).await.expect("export");
+        assert!(count >= 1);
+        assert_eq!(written, file);
+        let meta = std::fs::symlink_metadata(&file).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(meta.nlink(), 1, "the staged name is gone");
+        assert_eq!(names(&dir), ["keys.txt"]);
+        let exported = std::fs::read_to_string(&file).unwrap();
+        assert!(exported.starts_with("-----BEGIN MEGOLM SESSION DATA-----"));
+        assert!(
+            exported
+                .trim_end()
+                .ends_with("-----END MEGOLM SESSION DATA-----")
+        );
+
+        // Something is there already: a file, a link to nowhere, a folder.
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(dir.join("elsewhere.txt"), &link).unwrap();
+        let folder = dir.join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        for taken in [&file, &link, &folder] {
+            let refused = export_keys(&a, taken.clone(), pass())
+                .await
+                .expect_err("the name is taken");
+            assert!(refused.contains("exists already"), "{refused}");
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), exported);
+        assert!(!dir.join("elsewhere.txt").exists());
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(names(&dir), ["folder", "keys.txt", "link.txt"]);
+        assert!(names(&folder).is_empty());
+        // Into a folder that does not exist yet, and a second time under a new name.
+        let deep = dir.join("new").join("keys-2.txt");
+        export_keys(&a, deep.clone(), pass()).await.expect("export");
+        assert_eq!(names(deep.parent().unwrap()), ["keys-2.txt"]);
+        // A folder that cannot be written in: said, and nothing left anywhere.
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let refused = export_keys(&a, locked.join("keys.txt"), pass())
+            .await
+            .expect_err("a folder without write access");
+        assert!(
+            refused.starts_with("Could not write in that folder"),
+            "{refused}"
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(names(&locked).is_empty());
+
+        tidy(a, Some(room)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// The state of the key backup as the popup words it: for an account that has
     /// none, and for one that has a backup and recovery, first on a device that
     /// cannot read it and then, the recovery key entered, on one that can.
@@ -1297,8 +1695,8 @@ mod tests {
             BackupStatus, DeviceTrust, Identity, RecoveryStatus, SetUpOutcome, VerifyCmd,
         };
         trace();
-        let words = |security: Security, server: ServerBackup| -> String {
-            backup_lines(Some(security), server)
+        let words = |security: Security, (server, upload): &(ServerBackup, BackupUpload)| {
+            backup_lines(Some(security), server, *upload)
                 .into_iter()
                 .map(|(_, text)| text)
                 .collect::<Vec<_>>()
@@ -1312,7 +1710,7 @@ mod tests {
         w.send(MatrixCmd::LoginPassword {
             homeserver: homeserver(),
             username: name.clone(),
-            password: password.clone(),
+            password: password.clone().into(),
         });
         wait_for(
             &mut events,
@@ -1321,24 +1719,30 @@ mod tests {
         )
         .await;
         w.send(MatrixCmd::Verification(VerifyCmd::SetUp {
-            password: Some(password.clone()),
+            password: Some(password.clone().into()),
         }));
-        w.send(devices(DevicesCmd::Watch(true)));
+        w.send(devices(DevicesCmd::Watch(Some(1))));
         let (mut security, mut server) = (None, None);
         wait_for(&mut events, "a verified device without backup", |e| {
             match e {
                 MatrixEvent::Security(s) => security = Some(*s),
-                MatrixEvent::Devices(DevicesEvent::Backup(now)) => server = Some(*now),
+                MatrixEvent::Devices(DevicesEvent::Backup {
+                    server: now,
+                    upload,
+                    ..
+                }) => {
+                    server = Some((now.clone(), *upload));
+                }
                 _ => {}
             }
             security.is_some_and(|s| {
                 s.device == DeviceTrust::Verified && s.recovery == RecoveryStatus::NotSetUp
-            }) && server == Some(ServerBackup::Missing)
+            }) && matches!(server, Some((ServerBackup::Missing, _)))
         })
         .await;
         let security = security.unwrap();
         assert_eq!(security.backup, BackupStatus::Inactive);
-        let text = words(security, ServerBackup::Missing);
+        let text = words(security, &server.unwrap());
         eprintln!("without a backup:\n{text}\n");
         assert!(
             text.contains("There is no key backup on the server"),
@@ -1353,7 +1757,7 @@ mod tests {
         let (name, password) = new_account("ratbackup").await;
         let a = plain_login(&name, &password, "first").await;
         assert_eq!(
-            set_up_cross_signing(&a, Some(password.clone())).await,
+            set_up_cross_signing(&a, Some(password.clone().into())).await,
             SetUpOutcome::Done
         );
         let recovery_key = a
@@ -1375,9 +1779,9 @@ mod tests {
         b.send(MatrixCmd::LoginPassword {
             homeserver: homeserver(),
             username: name.clone(),
-            password: password.clone(),
+            password: password.clone().into(),
         });
-        b.send(devices(DevicesCmd::Watch(true)));
+        b.send(devices(DevicesCmd::Watch(Some(1))));
         let (mut security, mut server) = (None::<Security>, None);
         let mut watching = false;
         wait_for(&mut events, "a backup this device cannot read", |e| {
@@ -1385,19 +1789,29 @@ mod tests {
                 // The command sent before the login was dropped with it.
                 MatrixEvent::LoggedIn { .. } if !watching => {
                     watching = true;
-                    b.send(devices(DevicesCmd::Watch(true)));
+                    b.send(devices(DevicesCmd::Watch(Some(1))));
                 }
                 MatrixEvent::Security(s) => security = Some(*s),
-                MatrixEvent::Devices(DevicesEvent::Backup(now)) => server = Some(*now),
+                MatrixEvent::Devices(DevicesEvent::Backup {
+                    server: now,
+                    upload,
+                    ..
+                }) => {
+                    server = Some((now.clone(), *upload));
+                }
                 _ => {}
             }
             security.is_some_and(|s| s.recovery == RecoveryStatus::NeedsKey)
-                && matches!(server, Some(ServerBackup::Present { keys }) if keys >= 1)
+                && matches!(&server, Some((ServerBackup::Present { keys, .. }, _)) if *keys >= 1)
         })
         .await;
-        let (locked, on_server) = (security.unwrap(), server.unwrap());
+        let locked = security.unwrap();
         assert_eq!(locked.backup, BackupStatus::Inactive);
-        let text = words(locked, on_server);
+        let text = words(locked, server.as_ref().unwrap());
+        assert!(
+            text.starts_with("The server has a key backup (version "),
+            "{text}"
+        );
         eprintln!("with a backup, before the recovery key:\n{text}\n");
         assert!(
             text.contains("This device cannot read the backup: enter your recovery key."),
@@ -1405,7 +1819,9 @@ mod tests {
         );
 
         // The recovery key entered (from here: at any time, not only at the start).
-        b.send(MatrixCmd::Recover { key: recovery_key });
+        b.send(MatrixCmd::Recover {
+            key: recovery_key.into(),
+        });
         let mut recovered = false;
         wait_for(&mut events, "the backup to be in use", |e| {
             match e {
@@ -1414,7 +1830,13 @@ mod tests {
                     recovered = true;
                 }
                 MatrixEvent::Security(s) => security = Some(*s),
-                MatrixEvent::Devices(DevicesEvent::Backup(now)) => server = Some(*now),
+                MatrixEvent::Devices(DevicesEvent::Backup {
+                    server: now,
+                    upload,
+                    ..
+                }) => {
+                    server = Some((now.clone(), *upload));
+                }
                 _ => {}
             }
             recovered
@@ -1423,13 +1845,13 @@ mod tests {
                 })
         })
         .await;
-        let text = words(security.unwrap(), server.unwrap());
+        let text = words(security.unwrap(), server.as_ref().unwrap());
         eprintln!("after the recovery key:\n{text}\n");
         assert!(
-            text.starts_with("Your message keys are backed up on the server ("),
+            text.starts_with("The server has a key backup (version "),
             "{text}"
         );
-        assert!(text.contains("This device has the backup key"), "{text}");
+        assert!(text.contains("This device has a backup key"), "{text}");
         assert!(text.contains("Recovery is set up"), "{text}");
 
         log_out(b, events).await;

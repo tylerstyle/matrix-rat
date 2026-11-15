@@ -1268,7 +1268,7 @@ mod tests {
         b.send(MatrixCmd::LoginPassword {
             homeserver: homeserver.clone(),
             username: username.clone(),
-            password: password.clone(),
+            password: password.clone().into(),
         });
         b.send(MatrixCmd::Previews(false));
 

@@ -21,7 +21,8 @@ mod upload;
 mod verify;
 
 pub use devices::{
-    DevicesCmd, DevicesEvent, ServerBackup, Session, SessionList, SessionTrust, SignOutOutcome,
+    BackupUpload, DevicesCmd, DevicesEvent, ServerBackup, Session, SessionList, SessionTrust,
+    SignOutOutcome,
 };
 pub use keyring::SecretStoreMode;
 pub use manage::{
@@ -61,11 +62,16 @@ const ROOM_PAGE: usize = 10_000;
 /// Rooms (from the top of the list) that get a latest-message preview.
 const LATEST_ROOMS: usize = 500;
 
+/// A password, a passphrase or a recovery key on its way to the worker: wiped from
+/// memory when dropped. See [`crate::lineedit::LineEdit`] for what that does not
+/// cover.
+pub type Secret = zeroize::Zeroizing<String>;
+
 pub enum MatrixCmd {
     LoginPassword {
         homeserver: String,
         username: String,
-        password: String,
+        password: Secret,
     },
     /// Log in through the homeserver's web page (OAuth 2.0).
     LoginBrowser {
@@ -73,7 +79,7 @@ pub enum MatrixCmd {
     },
     CancelLogin,
     Recover {
-        key: String,
+        key: Secret,
     },
     /// Start delivering this room's timeline. `generation` comes back with every
     /// update so the UI can drop ones that belong to an earlier open.
@@ -237,7 +243,7 @@ pub enum MatrixCmd {
     Manage(ManageCmd),
     /// Re-authenticate a soft-logged-out session with a password, keeping the existing device id.
     ReauthPassword {
-        password: String,
+        password: Secret,
     },
     /// Re-authenticate a soft-logged-out session via browser, keeping the existing device id.
     ReauthBrowser,
@@ -290,7 +296,7 @@ pub enum MatrixCmd {
     /// [`MatrixEvent::DecryptionRetried`].
     RetryDecryption {
         room_id: String,
-        item: ItemRef,
+        event_id: String,
     },
     /// Fetches profile, verification state, and shared rooms for User Info.
     FetchUserProfile {
@@ -410,6 +416,18 @@ impl std::fmt::Debug for MatrixCmd {
             Self::RemoveOwnAvatar => f.write_str("RemoveOwnAvatar"),
         }
     }
+}
+
+/// What became of a message after [`MatrixCmd::RetryDecryption`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retried {
+    Decrypted,
+    /// Still no key.
+    StillLocked,
+    /// No longer in the timeline as a message of its own: decrypted into an edit or
+    /// a reaction (which show on the message they belong to), or no longer loaded.
+    /// Which of the two cannot be told.
+    Gone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,7 +691,8 @@ pub enum MatrixEvent {
     /// now, or what went wrong.
     DecryptionRetried {
         room_id: String,
-        result: Result<bool, String>,
+        event_id: String,
+        result: Result<Retried, String>,
     },
     /// Synced profile of the logged-in account.
     OwnProfile(OwnProfile),
@@ -827,7 +846,9 @@ impl std::fmt::Debug for MatrixEvent {
                 to_room_id, result, ..
             } => write!(f, "ForwardResult({to_room_id}, ok: {})", result.is_ok()),
             Self::Devices(event) => write!(f, "Devices({event:?})"),
-            Self::DecryptionRetried { room_id, result } => {
+            Self::DecryptionRetried {
+                room_id, result, ..
+            } => {
                 write!(
                     f,
                     "DecryptionRetried({room_id}, {:?})",
@@ -1770,7 +1791,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,
-            password,
+            password: password.into(),
         });
         let text = format!("preview {}", std::process::id());
         let mut sent = false;
@@ -1862,7 +1883,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,
-            password,
+            password: password.into(),
         });
         let (_, rooms) = until_rooms(&mut events).await;
         assert!(!rooms.is_empty());
@@ -1902,7 +1923,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,
-            password,
+            password: password.into(),
         });
 
         let body = format!("integration test {}", std::process::id());
@@ -2134,7 +2155,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver: server.base_url.clone(),
             username: "alice".into(),
-            password: "pw".into(),
+            password: String::from("pw").into(),
         });
 
         // Wait until first sync completes cleanly.
@@ -2201,7 +2222,7 @@ mod tests {
         }
 
         handle.send(MatrixCmd::ReauthPassword {
-            password: "pw".into(),
+            password: String::from("pw").into(),
         });
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -2247,7 +2268,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver: server.base_url.clone(),
             username: "alice".into(),
-            password: "pw".into(),
+            password: String::from("pw").into(),
         });
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -2305,7 +2326,7 @@ mod tests {
         handle2.send(MatrixCmd::LoginPassword {
             homeserver: server2.base_url.clone(),
             username: "alice".into(),
-            password: "pw".into(),
+            password: String::from("pw").into(),
         });
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -2334,7 +2355,7 @@ mod tests {
         .unwrap();
 
         handle2.send(MatrixCmd::ReauthPassword {
-            password: "pw".into(),
+            password: String::from("pw").into(),
         });
         let mut saw_notice = false;
         tokio::time::timeout(Duration::from_secs(15), async {

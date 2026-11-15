@@ -1699,7 +1699,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver: homeserver.clone(),
             username,
-            password,
+            password: password.into(),
         });
         let manage = |command: ManageCmd| handle.send(MatrixCmd::Manage(command));
         let own = loop {
@@ -2248,7 +2248,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,
-            password,
+            password: password.into(),
         });
         loop {
             match events.recv().await.expect("worker stopped") {

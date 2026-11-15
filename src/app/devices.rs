@@ -1,9 +1,6 @@
 //! The app's side of the sessions popup, the key backup popup and "try again" on a
 //! message that could not be decrypted: actions, keys and worker events.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-use zeroize::Zeroizing;
-
 use super::App;
 use crate::devices::{
     Click, ExportForm, ImportForm, KeysStage, Rename, SessionStage, SessionsPopup, SignOut,
@@ -12,11 +9,13 @@ use crate::devices::{
 };
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::{
-    DeviceTrust, DevicesCmd, DevicesEvent, MatrixCmd, SessionTrust, SignOutOutcome, VerifyCmd,
+    DeviceTrust, DevicesCmd, DevicesEvent, MatrixCmd, Retried, SessionTrust, SignOutOutcome,
+    VerifyCmd,
 };
 use crate::modal::{Modal, RecoveryForm};
 use crate::model::{ItemRef, MsgKind};
 use crate::verify::VerifyPopup;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 impl App {
     /// There is an account to ask; says so if not.
@@ -37,7 +36,7 @@ impl App {
             return;
         }
         self.open_modal(Modal::Sessions(Box::default()));
-        self.devices_watch();
+        self.devices_watch_begin();
     }
 
     pub(super) fn open_keys(&mut self) {
@@ -45,7 +44,7 @@ impl App {
             return;
         }
         self.open_modal(Modal::Keys(Box::default()));
-        self.devices_watch();
+        self.devices_watch_begin();
     }
 
     fn open_keys_at(&mut self, click: Click) {
@@ -63,19 +62,26 @@ impl App {
         self.open_keys_at(Click::Import);
     }
 
-    /// Tells the worker whether one of the two popups is open: only then does it keep
-    /// the list of sessions and the state of the backup current. Called when one
-    /// opens, and a few times a second to notice that it closed (popups close in
-    /// many places).
+    /// One of the two popups opened: has the worker keep the list of sessions and
+    /// the state of the backup current, under a new number. Whatever was known from
+    /// an earlier opening is dropped, and so is news that still quotes its number
+    /// (also when the popup was closed and opened again before the worker heard).
+    fn devices_watch_begin(&mut self) {
+        self.devices.next_watch += 1;
+        let watch = self.devices.next_watch;
+        self.devices.watch = Some(watch);
+        self.devices.list = None;
+        self.devices.backup = Default::default();
+        self.devices.upload = Default::default();
+        self.send_matrix(MatrixCmd::Devices(DevicesCmd::Watch(Some(watch))));
+    }
+
+    /// Called a few times a second: tells the worker to stop watching once neither
+    /// popup is open (popups close in many places).
     pub(super) fn devices_watch(&mut self) {
         let open = matches!(self.modal, Some(Modal::Sessions(_) | Modal::Keys(_)));
-        if open != self.devices.watching {
-            self.devices.watching = open;
-            if open {
-                // What was known when a popup was last open is old by now.
-                self.devices.list = None;
-            }
-            self.send_matrix(MatrixCmd::Devices(DevicesCmd::Watch(open)));
+        if !open && self.devices.watch.take().is_some() {
+            self.send_matrix(MatrixCmd::Devices(DevicesCmd::Watch(None)));
         }
     }
 
@@ -234,8 +240,11 @@ impl App {
             return;
         }
         let password = match &mut sign_out.password {
-            Some(typed) if typed.is_empty() => return,
-            Some(typed) => Some(Zeroizing::new(typed.take_string())),
+            Some(typed) if typed.is_empty() => {
+                sign_out.error = Some("Enter your account password.".to_owned());
+                return;
+            }
+            Some(typed) => Some(typed.take_secret()),
             None => None,
         };
         sign_out.request = Some(request);
@@ -288,7 +297,6 @@ impl App {
                     KeyCode::Char('v') if plain => Some(Click::Verify),
                     KeyCode::Char('a') if plain => Some(Click::Addresses),
                     KeyCode::Delete => Some(Click::SignOut),
-                    KeyCode::Char('x') if plain => Some(Click::SignOut),
                     _ => None,
                 }
             }
@@ -391,9 +399,21 @@ impl App {
             form.focus = 0;
             return;
         };
+        if path.is_dir() {
+            form.error = Some("That is a folder. Add the name of the file to write.".to_owned());
+            form.focus = 0;
+            return;
+        }
         if let Err(problem) = check_passphrase(form.passphrase.as_str(), form.again.as_str()) {
             form.error = Some(problem.to_owned());
-            form.focus = if form.passphrase.is_empty() { 1 } else { 2 };
+            // Back to the field that is wrong: the first one, unless only the
+            // repetition differs.
+            form.focus =
+                if check_passphrase(form.passphrase.as_str(), form.passphrase.as_str()).is_err() {
+                    1
+                } else {
+                    2
+                };
             return;
         }
         // The worker refuses too; this saves typing the passphrase for nothing.
@@ -406,8 +426,8 @@ impl App {
             form.focus = 0;
             return;
         }
-        let passphrase = Zeroizing::new(form.passphrase.take_string());
-        drop(Zeroizing::new(form.again.take_string()));
+        let passphrase = form.passphrase.take_secret();
+        drop(form.again.take_secret());
         form.request = Some(request);
         form.error = None;
         self.devices.next_request = request;
@@ -435,17 +455,32 @@ impl App {
             form.focus = 0;
             return;
         };
-        if !std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
-            form.error = Some("There is no such file.".to_owned());
-            form.focus = 0;
-            return;
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(meta) => {
+                form.error = Some(
+                    if meta.is_dir() {
+                        "That is a folder. Name the key file in it."
+                    } else {
+                        "That is not a file."
+                    }
+                    .to_owned(),
+                );
+                form.focus = 0;
+                return;
+            }
+            Err(_) => {
+                form.error = Some("There is no such file.".to_owned());
+                form.focus = 0;
+                return;
+            }
         }
         if form.passphrase.is_empty() {
             form.error = Some("Enter the passphrase the file was exported with.".to_owned());
             form.focus = 1;
             return;
         }
-        let passphrase = Zeroizing::new(form.passphrase.take_string());
+        let passphrase = form.passphrase.take_secret();
         form.request = Some(request);
         form.error = None;
         self.devices.next_request = request;
@@ -583,8 +618,51 @@ impl App {
         }
     }
 
-    /// A paste into one of the two popups. A file dropped on the terminal arrives as
-    /// a paste of its path: in the import form that names the key file.
+    /// A paste into the secret field that has the focus, if one has: a password, a
+    /// passphrase, the recovery key, in whichever popup. It goes in as it came (its
+    /// first line, with every space), not by the way of other pastes, which trim and
+    /// copy. True if it was taken; the caller then wipes its copy of the text.
+    pub(super) fn paste_secret(&mut self, raw: &str) -> bool {
+        let field = match &mut self.modal {
+            Some(Modal::Login(form)) if form.busy.is_none() => {
+                form.field_mut().filter(|field| field.is_secret())
+            }
+            Some(Modal::Recovery(form)) if !form.busy => Some(&mut form.key),
+            Some(Modal::Verify(popup)) if popup.field_focused && popup.has_field(&self.verify) => {
+                popup.password.as_mut()
+            }
+            Some(Modal::Sessions(popup)) => match &mut popup.stage {
+                SessionStage::SignOut(sign_out) if sign_out.typing() => {
+                    sign_out.error = None;
+                    sign_out.password.as_mut()
+                }
+                _ => None,
+            },
+            Some(Modal::Keys(popup)) => match &mut popup.stage {
+                KeysStage::Export(form) if form.request.is_none() && form.focus > 0 => {
+                    form.error = None;
+                    let slot = form.focus;
+                    form.field_mut(slot)
+                }
+                KeysStage::Import(form) if form.request.is_none() && form.focus == 1 => {
+                    form.error = None;
+                    Some(&mut form.passphrase)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(field) = field.filter(|field| field.is_secret()) else {
+            return false;
+        };
+        field.paste(raw);
+        self.dirty = true;
+        true
+    }
+
+    /// A paste into one of the two popups that is not a secret (those go through
+    /// [`App::paste_secret`]). A file dropped on the terminal arrives as a paste of
+    /// its path: in the import form's file field that names the key file.
     pub(super) fn on_devices_paste(&mut self, text: &str, first_line: &str) {
         match &mut self.modal {
             Some(Modal::Sessions(popup)) => match &mut popup.stage {
@@ -593,36 +671,24 @@ impl App {
                         rename.error = None;
                     }
                 }
-                SessionStage::SignOut(sign_out) if sign_out.typing() => {
-                    if let Some(password) = &mut sign_out.password {
-                        password.paste(first_line);
-                    }
-                }
                 _ => {}
             },
             Some(Modal::Keys(popup)) => match &mut popup.stage {
-                KeysStage::Export(form) if form.request.is_none() => {
-                    let slot = form.focus;
-                    if let Some(field) = form.field_mut(slot) {
-                        field.paste(first_line);
-                        form.error = None;
-                    }
+                KeysStage::Export(form) if form.request.is_none() && form.focus == 0 => {
+                    form.path.paste(first_line);
+                    form.error = None;
                 }
-                KeysStage::Import(form) if form.request.is_none() => {
+                KeysStage::Import(form) if form.request.is_none() && form.focus == 0 => {
                     let dropped = crate::upload::dropped_files(text)
                         .filter(|files| files.len() == 1)
                         .and_then(|mut files| files.pop());
                     if let Some(file) = dropped {
                         form.path.set(crate::files::display(&file));
                         form.focus = 1;
-                        form.error = None;
                     } else {
-                        let slot = form.focus;
-                        if let Some(field) = form.field_mut(slot) {
-                            field.paste(first_line);
-                            form.error = None;
-                        }
+                        form.path.paste(first_line);
                     }
+                    form.error = None;
                 }
                 _ => {}
             },
@@ -638,8 +704,14 @@ impl App {
             return;
         }
         match event {
-            DevicesEvent::List(list) => self.devices.list = Some(list),
-            DevicesEvent::Backup(backup) => self.devices.backup = backup,
+            // News for a popup that was closed (and maybe opened again) since.
+            DevicesEvent::List { watch, .. } | DevicesEvent::Backup { watch, .. }
+                if self.devices.watch != Some(watch) => {}
+            DevicesEvent::List { list, .. } => self.devices.list = Some(list),
+            DevicesEvent::Backup { server, upload, .. } => {
+                self.devices.backup = server;
+                self.devices.upload = upload;
+            }
             DevicesEvent::Renamed { request, result } => {
                 let shown = match &mut self.modal {
                     Some(Modal::Sessions(popup)) => match &mut popup.stage {
@@ -793,31 +865,39 @@ impl App {
         let (Some(ItemRef::Event(event_id)), Some(why)) = (&message.item, message.utd) else {
             return self.show_toast("There is nothing to try again here");
         };
-        let item = ItemRef::Event(event_id.clone());
+        let event_id = event_id.clone();
         let Some(room_id) = self.room_id() else {
             return;
         };
         if self.matrix.is_none() || self.logged_out {
             return self.show_toast("Not connected to an account");
         }
-        self.devices.retried = Some((room_id.clone(), why));
-        self.send_matrix(MatrixCmd::RetryDecryption { room_id, item });
+        // Answers name their message; a few may be under way at once.
+        if self.devices.retried.len() >= crate::devices::DevicesState::RETRIES {
+            self.devices.retried.clear();
+        }
+        self.devices.retried.insert(event_id.clone(), why);
+        self.send_matrix(MatrixCmd::RetryDecryption { room_id, event_id });
         self.show_toast("Looking for the key again…");
     }
 
-    pub(super) fn on_decryption_retried(&mut self, room_id: &str, result: Result<bool, String>) {
+    pub(super) fn on_decryption_retried(
+        &mut self,
+        event_id: &str,
+        result: Result<Retried, String>,
+    ) {
         if self.user_id.is_none() || self.logged_out {
             return;
         }
-        let why = self
-            .devices
-            .retried
-            .take_if(|(room, _)| room == room_id)
-            .map(|(_, why)| why);
+        let why = self.devices.retried.remove(event_id);
         match (result, why) {
-            (Ok(true), _) => self.show_toast("Decrypted"),
-            (Ok(false), Some(why)) => self.show_toast(why.advice()),
-            (Ok(false), None) => self.show_toast("Still no key for that message"),
+            (Ok(Retried::Decrypted), _) => self.show_toast("Decrypted"),
+            (Ok(Retried::Gone), _) => self.show_toast(
+                "That message is no longer shown here: it was decrypted into an edit or a \
+                 reaction, or it scrolled out of what is loaded.",
+            ),
+            (Ok(Retried::StillLocked), Some(why)) => self.show_toast(why.advice()),
+            (Ok(Retried::StillLocked), None) => self.show_toast("Still no key for that message"),
             (Err(err), _) => self.show_toast(format!("Could not try again: {err}")),
         }
     }
@@ -837,15 +917,18 @@ mod tests {
     use crate::config::Config;
     use crate::devices::{Click, KeysStage, SessionStage};
     use crate::matrix::{
-        BackupStatus, DeviceTrust, DevicesCmd, DevicesEvent, Identity, MatrixCmd, MatrixEvent,
-        MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary, Security, ServerBackup, Session,
-        SessionList, SessionTrust, SignOutOutcome, VerifyCmd,
+        BackupStatus, BackupUpload, DeviceTrust, DevicesCmd, DevicesEvent, Identity, MatrixCmd,
+        MatrixEvent, MatrixHandle, RecoveryStatus, Retried, RoomCategory, RoomSummary, Security,
+        ServerBackup, Session, SessionList, SessionTrust, SignOutOutcome, VerifyCmd,
     };
     use crate::modal::{Modal, Setting};
     use crate::model::{ItemRef, Message, MsgKind, UtdWhy};
     use crate::ui;
+    use crate::verify::VerifyPopup;
 
     const ROOM: &str = "!room:example.org";
+    /// The message that could not be decrypted.
+    const EVENT: &str = "$ev2:example.org";
     /// Midday, so that the date is the same in (nearly) every time zone.
     const SEEN: u64 = 1_699_963_200_000;
 
@@ -1011,6 +1094,37 @@ mod tests {
         MatrixEvent::Devices(event)
     }
 
+    /// News for the popup that is open.
+    fn listed(app: &App, list: Result<SessionList, String>) -> MatrixEvent {
+        devices(DevicesEvent::List {
+            watch: app.devices.watch.unwrap_or(0),
+            list,
+        })
+    }
+
+    fn backed(app: &App, server: ServerBackup, upload: BackupUpload) -> MatrixEvent {
+        devices(DevicesEvent::Backup {
+            watch: app.devices.watch.unwrap_or(0),
+            server,
+            upload,
+        })
+    }
+
+    fn present(keys: u64) -> ServerBackup {
+        ServerBackup::Present {
+            keys,
+            version: "7".into(),
+        }
+    }
+
+    fn retried(event_id: &str, result: Result<Retried, String>) -> MatrixEvent {
+        MatrixEvent::DecryptionRetried {
+            room_id: ROOM.into(),
+            event_id: event_id.into(),
+            result,
+        }
+    }
+
     /// The sessions popup, open and filled.
     fn with_sessions() -> (App, Terminal<TestBackend>, UnboundedReceiver<MatrixCmd>) {
         let (mut app, terminal, mut commands) = connected();
@@ -1018,9 +1132,9 @@ mod tests {
         app.perform(Action::Setting(Setting::Sessions));
         assert!(matches!(
             drain(&mut commands).as_slice(),
-            [MatrixCmd::Devices(DevicesCmd::Watch(true))]
+            [MatrixCmd::Devices(DevicesCmd::Watch(Some(_)))]
         ));
-        app.on_matrix(devices(DevicesEvent::List(Ok(sessions()))));
+        app.on_matrix(listed(&app, Ok(sessions())));
         (app, terminal, commands)
     }
 
@@ -1054,12 +1168,12 @@ mod tests {
         assert!(matches!(app.modal, Some(Modal::Sessions(_))));
         assert!(matches!(
             drain(&mut commands).as_slice(),
-            [MatrixCmd::Devices(DevicesCmd::Watch(true))]
+            [MatrixCmd::Devices(DevicesCmd::Watch(Some(_)))]
         ));
         let text = screen(&mut app, &mut terminal);
         find(&text, "Loading…");
 
-        app.on_matrix(devices(DevicesEvent::List(Ok(sessions()))));
+        app.on_matrix(listed(&app, Ok(sessions())));
         let text = screen(&mut app, &mut terminal);
         insta::assert_snapshot!("sessions_popup", text);
         find(&text, "2 sessions are not verified.");
@@ -1082,10 +1196,11 @@ mod tests {
         fewer.sessions.remove(2);
         fewer.sessions[1].trust = SessionTrust::Verified;
         fewer.vouched = false;
-        app.on_matrix(devices(DevicesEvent::List(Ok(fewer))));
+        app.on_matrix(listed(&app, Ok(fewer)));
         let text = screen(&mut app, &mut terminal);
-        find(&text, "All 2 sessions are verified.");
-        find(&text, "This device is not verified itself");
+        find(&text, "The server shows all of them as verified.");
+        find(&text, "This device is not verified, so it cannot check");
+        assert!(!text.contains("sessions are verified."), "{text}");
         find(&text, "› Element Android (PHONEDEVICE)");
         // A click selects.
         let (col, row) = find(&text, "matrix-rat on laptop");
@@ -1093,9 +1208,10 @@ mod tests {
         find(&screen(&mut app, &mut terminal), "› matrix-rat on laptop");
 
         // An error instead of a list is shown as such.
-        app.on_matrix(devices(DevicesEvent::List(Err(
-            "Could not load the sessions: offline".into(),
-        ))));
+        app.on_matrix(listed(
+            &app,
+            Err("Could not load the sessions: offline".into()),
+        ));
         find(
             &screen(&mut app, &mut terminal),
             "Could not load the sessions: offline",
@@ -1108,7 +1224,7 @@ mod tests {
         app.on_tick();
         assert!(matches!(
             drain(&mut commands).as_slice(),
-            [MatrixCmd::Devices(DevicesCmd::Watch(false))]
+            [MatrixCmd::Devices(DevicesCmd::Watch(None))]
         ));
         // Opened again, nothing old is shown.
         app.perform(Action::Setting(Setting::Sessions));
@@ -1289,7 +1405,7 @@ mod tests {
     fn ask_to_sign_out(app: &mut App, commands: &mut UnboundedReceiver<MatrixCmd>) -> u64 {
         app.on_event(key(KeyCode::Home));
         app.on_event(key(KeyCode::Down));
-        app.on_event(key(KeyCode::Char('x')));
+        app.on_event(key(KeyCode::Delete));
         app.on_event(key(KeyCode::Tab));
         app.on_event(key(KeyCode::Enter));
         match drain(commands).as_slice() {
@@ -1417,7 +1533,7 @@ mod tests {
         let (mut app, _terminal, mut commands) = with_sessions();
         let mut list = sessions();
         list.sessions[1].trust = SessionTrust::Verified;
-        app.on_matrix(devices(DevicesEvent::List(Ok(list))));
+        app.on_matrix(listed(&app, Ok(list)));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Char('v')));
         assert_eq!(toast(&app), "That session is verified already.");
@@ -1436,7 +1552,7 @@ mod tests {
         // ...an unverified one cannot.
         app.perform(Action::Setting(Setting::Sessions));
         drain(&mut commands);
-        app.on_matrix(devices(DevicesEvent::List(Ok(sessions()))));
+        app.on_matrix(listed(&app, Ok(sessions())));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Char('v')));
         assert!(
@@ -1465,17 +1581,16 @@ mod tests {
         assert!(matches!(app.modal, Some(Modal::Keys(_))));
         assert!(matches!(
             drain(&mut commands).as_slice(),
-            [MatrixCmd::Devices(DevicesCmd::Watch(true))]
+            [MatrixCmd::Devices(DevicesCmd::Watch(Some(_)))]
         ));
-        app.on_matrix(devices(DevicesEvent::Backup(ServerBackup::Present {
-            keys: 1234,
-        })));
+        app.on_matrix(backed(&app, present(1234), BackupUpload::Idle));
         let text = screen(&mut app, &mut terminal);
         insta::assert_snapshot!("keys_popup_ok", text);
         find(
             &text,
-            "Your message keys are backed up on the server (1234 so far).",
+            "The server has a key backup (version 7): 1234 message keys.",
         );
+        find(&text, "No keys are waiting to be uploaded.");
         // Nothing to unlock: the key is not asked for.
         app.on_event(key(KeyCode::Char('k')));
         assert!(on_status(&app));
@@ -1504,13 +1619,13 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         let sent = drain(&mut commands);
         assert!(
-            matches!(sent.as_slice(), [MatrixCmd::Recover { key }] if key == "EsTj 1234"),
+            matches!(sent.as_slice(), [MatrixCmd::Recover { key }] if key.as_str() == "EsTj 1234"),
             "{sent:?}"
         );
         app.on_tick();
         assert!(matches!(
             drain(&mut commands).as_slice(),
-            [MatrixCmd::Devices(DevicesCmd::Watch(false))]
+            [MatrixCmd::Devices(DevicesCmd::Watch(None))]
         ));
 
         // No backup and no recovery: what to do is said, nothing is offered.
@@ -1522,7 +1637,7 @@ mod tests {
             RecoveryStatus::NotSetUp,
         )));
         app.perform(Action::Setting(Setting::KeyBackup));
-        app.on_matrix(devices(DevicesEvent::Backup(ServerBackup::Missing)));
+        app.on_matrix(backed(&app, ServerBackup::Missing, BackupUpload::Unknown));
         let text = screen(&mut app, &mut terminal);
         insta::assert_snapshot!("keys_popup_nothing", text);
         find(&text, "There is no key backup on the server");
@@ -1814,47 +1929,50 @@ mod tests {
         assert!(
             matches!(
                 sent.as_slice(),
-                [MatrixCmd::RetryDecryption { room_id, item: ItemRef::Event(id) }]
-                    if room_id == ROOM && id == "$ev2:example.org"
+                [MatrixCmd::RetryDecryption { room_id, event_id }]
+                    if room_id == ROOM && event_id == EVENT
             ),
             "{sent:?}"
         );
         assert_eq!(toast(&app), "Looking for the key again…");
+        // An answer about some other message is not this one's: no reason is named,
+        // and this one stays waited for.
+        app.on_matrix(retried("$other:example.org", Ok(Retried::StillLocked)));
+        assert_eq!(toast(&app), "Still no key for that message");
         // Still nothing: what would help is said.
-        app.on_matrix(MatrixEvent::DecryptionRetried {
-            room_id: ROOM.into(),
-            result: Ok(false),
-        });
+        app.on_matrix(retried(EVENT, Ok(Retried::StillLocked)));
         assert!(
             toast(&app).contains("Verify this device"),
             "{}",
             toast(&app)
         );
+        assert!(app.devices.retried.is_empty());
         // By key; this time it works.
         app.on_event(key(KeyCode::Char('d')));
         assert!(matches!(
             drain(&mut commands).as_slice(),
             [MatrixCmd::RetryDecryption { .. }]
         ));
-        app.on_matrix(MatrixEvent::DecryptionRetried {
-            room_id: ROOM.into(),
-            result: Ok(true),
-        });
+        app.on_matrix(retried(EVENT, Ok(Retried::Decrypted)));
         assert_eq!(toast(&app), "Decrypted");
-        app.on_matrix(MatrixEvent::DecryptionRetried {
-            room_id: ROOM.into(),
-            result: Err("this message is no longer loaded".into()),
-        });
+        app.on_matrix(retried(
+            EVENT,
+            Err("this message is no longer loaded".into()),
+        ));
         assert_eq!(
             toast(&app),
             "Could not try again: this message is no longer loaded"
         );
-        // An answer nobody waits for names no reason.
-        app.on_matrix(MatrixEvent::DecryptionRetried {
-            room_id: "!other:example.org".into(),
-            result: Ok(false),
-        });
-        assert_eq!(toast(&app), "Still no key for that message");
+        // Gone from the timeline is not called a success.
+        app.on_matrix(retried(EVENT, Ok(Retried::Gone)));
+        assert!(toast(&app).starts_with("That message is no longer shown here"));
+        // What is remembered of retries stays small.
+        for n in 0..100 {
+            app.devices.retried.insert(format!("$e{n}"), UtdWhy::NoKey);
+            app.on_event(key(KeyCode::Char('d')));
+        }
+        assert!(app.devices.retried.len() <= crate::devices::DevicesState::RETRIES + 1);
+        drain(&mut commands);
 
         // A readable message has nothing to try, in the menu or by key.
         app.perform(Action::SelectOlder);
@@ -1867,23 +1985,349 @@ mod tests {
     }
 
     #[test]
+    fn news_for_a_popup_that_was_closed_is_dropped_also_when_it_was_reopened_at_once() {
+        let (mut app, mut terminal, mut commands) = with_sessions();
+        let first = app.devices.watch.unwrap();
+        app.on_matrix(backed(&app, present(5), BackupUpload::Idle));
+        // Closed and opened again before a tick could tell the worker.
+        app.on_event(key(KeyCode::Esc));
+        app.perform(Action::Setting(Setting::KeyBackup));
+        let second = app.devices.watch.unwrap();
+        assert_ne!(first, second);
+        let sent = drain(&mut commands);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [MatrixCmd::Devices(DevicesCmd::Watch(Some(id)))] if *id == second
+            ),
+            "{sent:?}"
+        );
+        // Nothing of the first opening is left: neither the list nor the backup.
+        assert!(app.devices.list.is_none());
+        assert_eq!(app.devices.backup, ServerBackup::Unknown);
+        assert_eq!(app.devices.upload, BackupUpload::Unknown);
+        // The old watcher's last words arrive: not for this popup.
+        app.on_matrix(devices(DevicesEvent::List {
+            watch: first,
+            list: Ok(sessions()),
+        }));
+        app.on_matrix(devices(DevicesEvent::Backup {
+            watch: first,
+            server: present(5),
+            upload: BackupUpload::Idle,
+        }));
+        assert!(app.devices.list.is_none());
+        assert_eq!(app.devices.backup, ServerBackup::Unknown);
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Could not ask the server");
+        assert!(!text.contains("The server has a key backup"));
+        // The new one's are.
+        app.on_matrix(backed(&app, present(6), BackupUpload::Idle));
+        find(
+            &screen(&mut app, &mut terminal),
+            "(version 7): 6 message keys.",
+        );
+        // A tick while it is open sends nothing; closed, one stop.
+        app.on_tick();
+        assert!(drain(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Esc));
+        app.on_tick();
+        app.on_tick();
+        assert!(matches!(
+            drain(&mut commands).as_slice(),
+            [MatrixCmd::Devices(DevicesCmd::Watch(None))]
+        ));
+        // News after closing changes nothing either.
+        app.on_matrix(devices(DevicesEvent::Backup {
+            watch: second,
+            server: ServerBackup::Missing,
+            upload: BackupUpload::Unknown,
+        }));
+        assert_eq!(app.devices.backup, present(6));
+    }
+
+    #[test]
+    fn nothing_is_called_verified_that_this_device_did_not_check() {
+        let (mut app, mut terminal, _commands) = with_sessions();
+        // Not verified itself: the server's word, as that, and no good news.
+        let mut list = sessions();
+        list.vouched = false;
+        list.sessions[1].trust = SessionTrust::Verified;
+        list.sessions.remove(2);
+        app.on_matrix(listed(&app, Ok(list)));
+        let text = screen(&mut app, &mut terminal);
+        insta::assert_snapshot!("sessions_popup_unchecked", text);
+        find(&text, "This device is not verified, so it cannot check");
+        find(
+            &text,
+            "2 sessions are listed. The server shows all of them as verified.",
+        );
+        find(&text, "says verified");
+        assert!(!text.contains("sessions are verified."), "{text}");
+        // Each row gives the server's word as that.
+        assert!(
+            !text.replace("says verified", "").contains(" verified  "),
+            "{text}"
+        );
+        // The list empty (whatever went wrong): no "all 0".
+        for vouched in [true, false] {
+            app.on_matrix(listed(
+                &app,
+                Ok(SessionList {
+                    sessions: Vec::new(),
+                    vouched,
+                }),
+            ));
+            let text = screen(&mut app, &mut terminal);
+            find(&text, "The server lists no sessions.");
+            assert!(
+                !text.contains("All 0") && !text.contains("are verified"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_backup_is_only_called_backed_up_as_far_as_that_was_seen() {
+        let (mut app, mut terminal, _commands) = connected();
+        app.perform(Action::Setting(Setting::KeyBackup));
+        // The server has not answered (yet, or at all): nothing good about its side.
+        let text = screen(&mut app, &mut terminal);
+        insta::assert_snapshot!("keys_popup_unchecked", text);
+        find(&text, "Could not ask the server");
+        find(&text, "whether the");
+        assert!(!text.contains("The server has"), "{text}");
+        // It has one, and uploads are still running, then fail, then are through.
+        app.on_matrix(backed(
+            &app,
+            present(10),
+            BackupUpload::Uploading { done: 3, total: 40 },
+        ));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Uploading keys: 3 of 40 are in the backup so far.");
+        assert!(!text.contains("No keys are waiting"), "{text}");
+        app.on_matrix(backed(&app, present(10), BackupUpload::Failed));
+        find(
+            &screen(&mut app, &mut terminal),
+            "The last upload of keys failed.",
+        );
+        app.on_matrix(backed(&app, present(40), BackupUpload::Idle));
+        find(
+            &screen(&mut app, &mut terminal),
+            "No keys are waiting to be uploaded.",
+        );
+        // Gone from the server while this device still counts on it.
+        app.on_matrix(backed(&app, ServerBackup::Missing, BackupUpload::Idle));
+        find(
+            &screen(&mut app, &mut terminal),
+            "This device still expects a backup",
+        );
+        // The settings row: red for what needs doing, not for what is in progress.
+        app.on_event(key(KeyCode::Esc));
+        let row_style = |app: &mut App, terminal: &mut Terminal<TestBackend>, value: &str| {
+            app.on_event(key(KeyCode::F(2)));
+            let text = screen(app, terminal);
+            let (col, row) = find(&text, value);
+            let style = terminal.backend().buffer()[(col, row)].style();
+            app.on_event(key(KeyCode::Esc));
+            style
+        };
+        let error = app.theme.style(crate::theme::Role::Error);
+        for (backup, recovery, value, red) in [
+            (
+                BackupStatus::Enabling,
+                RecoveryStatus::Ready,
+                "turning on…",
+                false,
+            ),
+            (
+                BackupStatus::Downloading,
+                RecoveryStatus::Ready,
+                "downloading keys…",
+                false,
+            ),
+            (
+                BackupStatus::Inactive,
+                RecoveryStatus::Ready,
+                "not in use on this device",
+                false,
+            ),
+            (BackupStatus::Enabled, RecoveryStatus::Ready, "on  ", false),
+            (
+                BackupStatus::Inactive,
+                RecoveryStatus::NeedsKey,
+                "this device needs the recovery key",
+                true,
+            ),
+        ] {
+            app.on_matrix(MatrixEvent::Security(security(
+                DeviceTrust::Verified,
+                backup,
+                recovery,
+            )));
+            // The recovery prompt that opens by itself is not what is looked at here.
+            if matches!(app.modal, Some(Modal::Recovery(_))) {
+                app.on_event(key(KeyCode::Esc));
+            }
+            let style = row_style(&mut app, &mut terminal, value);
+            assert_eq!(style.fg == error.fg, red, "{value}");
+        }
+    }
+
+    #[test]
+    fn secrets_are_pasted_as_they_are_and_only_into_their_fields() {
+        let dir = scratch("paste");
+        let file = dir.join("element-keys.txt");
+        std::fs::write(&file, b"-----BEGIN MEGOLM SESSION DATA-----").unwrap();
+        let (mut app, mut terminal, mut commands) = connected();
+        drain(&mut commands);
+        // A passphrase with spaces at both ends, pasted: every space counts, as when
+        // it is typed. Only the first line is taken.
+        app.perform(Action::Devices(Click::Export));
+        drain(&mut commands);
+        let target = dir.join("keys.txt");
+        export_form(&mut app).path.set(target.to_str().unwrap());
+        export_form(&mut app).focus = 1;
+        app.on_event(Event::Paste("  correct horse  \nnot this".into()));
+        assert_eq!(
+            export_form(&mut app).passphrase.as_str(),
+            "  correct horse  "
+        );
+        app.on_event(key(KeyCode::Enter));
+        // The repetition without the spaces is a different passphrase.
+        app.on_event(Event::Paste("correct horse".into()));
+        app.on_event(key(KeyCode::Enter));
+        find(
+            &screen(&mut app, &mut terminal),
+            "The two passphrases differ.",
+        );
+        assert_eq!(export_form(&mut app).focus, 2);
+        assert!(drain(&mut commands).is_empty());
+        // A paste clears the error it answers.
+        export_form(&mut app).again.set("");
+        app.on_event(Event::Paste("  correct horse  ".into()));
+        assert!(export_form(&mut app).error.is_none());
+        app.on_event(key(KeyCode::Enter));
+        let sent = drain(&mut commands);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [MatrixCmd::Devices(DevicesCmd::ExportKeys { passphrase, .. })]
+                    if passphrase.as_str() == "  correct horse  "
+            ),
+            "{sent:?}"
+        );
+        // The file field keeps the usual ways: trimmed, one line.
+        app.on_event(key(KeyCode::Esc));
+        app.on_event(key(KeyCode::Char('e')));
+        export_form(&mut app).path.set("");
+        export_form(&mut app).focus = 0;
+        app.on_event(Event::Paste("  /tmp/x.txt  \n".into()));
+        assert_eq!(export_form(&mut app).path.as_str(), "/tmp/x.txt");
+        // Too short: back to the passphrase itself, not to its repetition.
+        export_form(&mut app).path.set(target.to_str().unwrap());
+        retype(&mut app, "short", "short");
+        assert_eq!(export_form(&mut app).focus, 1);
+        // A folder is not a file to write.
+        export_form(&mut app).path.set(dir.to_str().unwrap());
+        retype(&mut app, "correct horse", "correct horse");
+        find(&screen(&mut app, &mut terminal), "That is a folder.");
+        assert_eq!(export_form(&mut app).focus, 0);
+        assert!(drain(&mut commands).is_empty());
+
+        // Import: a file's path pasted into the passphrase field is a passphrase,
+        // not a dropped file.
+        app.on_event(key(KeyCode::Esc));
+        app.on_event(key(KeyCode::Char('i')));
+        import_form(&mut app).focus = 1;
+        let dropped = format!("{}", file.display());
+        app.on_event(Event::Paste(dropped.clone()));
+        assert!(import_form(&mut app).path.is_empty());
+        assert_eq!(import_form(&mut app).passphrase.as_str(), dropped);
+        // A folder is not a key file.
+        import_form(&mut app).path.set(dir.to_str().unwrap());
+        app.on_event(key(KeyCode::Enter));
+        find(&screen(&mut app, &mut terminal), "That is a folder.");
+        assert!(drain(&mut commands).is_empty());
+
+        // The account password, when signing a session out.
+        app.on_event(key(KeyCode::Esc));
+        app.on_event(key(KeyCode::Esc));
+        app.perform(Action::Setting(Setting::Sessions));
+        app.on_matrix(listed(&app, Ok(sessions())));
+        drain(&mut commands);
+        let request = ask_to_sign_out(&mut app, &mut commands);
+        app.on_matrix(devices(DevicesEvent::SignedOut {
+            request,
+            outcome: SignOutOutcome::NeedsPassword,
+        }));
+        // Nothing typed: said, not passed over.
+        app.on_event(key(KeyCode::Enter));
+        find(
+            &screen(&mut app, &mut terminal),
+            "Enter your account password.",
+        );
+        assert!(drain(&mut commands).is_empty());
+        app.on_event(Event::Paste(" pass word \r\n".into()));
+        assert!(sign_out_stage(&app).error.is_none());
+        app.on_event(key(KeyCode::Enter));
+        let sent = drain(&mut commands);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [MatrixCmd::Devices(DevicesCmd::SignOut { password: Some(password), .. })]
+                    if password.as_str() == " pass word "
+            ),
+            "{sent:?}"
+        );
+        // The other secrets go the same way: the login password, the recovery key,
+        // the password for setting up cross-signing.
+        app.modal = Some(Modal::Recovery(crate::modal::RecoveryForm::default()));
+        app.on_event(Event::Paste(" EsTj 1234 ".into()));
+        app.on_event(key(KeyCode::Enter));
+        let sent = drain(&mut commands);
+        assert!(
+            matches!(sent.as_slice(), [MatrixCmd::Recover { key }] if key.as_str() == " EsTj 1234 "),
+            "{sent:?}"
+        );
+        let mut set_up = VerifyPopup::set_up();
+        set_up.password = Some(crate::lineedit::LineEdit::secret());
+        set_up.field_focused = true;
+        app.modal = Some(Modal::Verify(set_up));
+        app.on_event(Event::Paste(" pw ".into()));
+        assert!(matches!(&app.modal, Some(Modal::Verify(popup))
+                if popup.password.as_ref().is_some_and(|typed| typed.as_str() == " pw ")));
+        let mut login = crate::modal::LoginForm::new(None);
+        login.focus = 2;
+        app.modal = Some(Modal::Login(login));
+        app.on_event(Event::Paste(" pw ".into()));
+        // The user name next to it is not a secret and is trimmed as before.
+        if let Some(Modal::Login(form)) = &mut app.modal {
+            assert_eq!(form.password.as_str(), " pw ");
+            form.focus = 1;
+        }
+        app.on_event(Event::Paste(" alice ".into()));
+        assert!(
+            matches!(&app.modal, Some(Modal::Login(form)) if form.username.as_str() == "alice")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn logging_out_closes_the_popups_and_drops_late_news() {
         let (mut app, _terminal, mut commands) = with_sessions();
         assert_eq!(app.devices.sessions().len(), 3);
         app.on_matrix(MatrixEvent::NeedLogin { reason: None });
         assert!(matches!(app.modal, Some(Modal::Login(_))));
         assert!(app.devices.list.is_none());
-        assert!(!app.devices.watching);
-        app.on_matrix(devices(DevicesEvent::List(Ok(sessions()))));
-        app.on_matrix(devices(DevicesEvent::Backup(ServerBackup::Missing)));
+        assert!(app.devices.watch.is_none());
+        app.on_matrix(listed(&app, Ok(sessions())));
+        app.on_matrix(backed(&app, ServerBackup::Missing, BackupUpload::Unknown));
         app.on_matrix(devices(DevicesEvent::SignedOut {
             request: 1,
             outcome: SignOutOutcome::Done,
         }));
-        app.on_matrix(MatrixEvent::DecryptionRetried {
-            room_id: ROOM.into(),
-            result: Ok(true),
-        });
+        app.on_matrix(retried(EVENT, Ok(Retried::Decrypted)));
         assert!(app.devices.list.is_none());
         assert_eq!(app.devices.backup, ServerBackup::Unknown);
         assert_eq!(toast(&app), "");
