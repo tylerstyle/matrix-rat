@@ -16,7 +16,9 @@ use crate::text::{sanitize_line, truncate, width};
 
 /// What a menu is about. Held by identity, never by position: the thing is looked
 /// up again when an entry is run, and the menu closes when it is gone.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Target {
     Message(MessageRef),
     /// A link inside a message.
@@ -40,8 +42,24 @@ pub enum Target {
     },
 }
 
+/// Outside tests: rooms, spaces and links stay out of logs.
+#[cfg(not(test))]
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(message) => f.debug_tuple("Message").field(message).finish(),
+            Self::Link { message, .. } => f.debug_tuple("Link").field(message).finish(),
+            Self::Room { kind, .. } => f.debug_tuple("Room").field(kind).finish(),
+            Self::Composer { .. } => f.write_str("Composer"),
+            Self::Space { id } => write!(f, "Space(narrowed: {})", id.is_some()),
+        }
+    }
+}
+
 /// A message of the open room or thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MessageRef {
     pub room_id: String,
     /// The thread it was shown in (its first message's event id), if any.
@@ -56,6 +74,21 @@ pub struct MessageRef {
     /// The server has it (it has an event id).
     pub on_server: bool,
     pub pinned: bool,
+}
+
+/// Outside tests: the ids of the room, the thread and the message stay out of logs.
+#[cfg(not(test))]
+impl std::fmt::Debug for MessageRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MessageRef")
+            .field("thread", &self.thread.is_some())
+            .field("index", &self.index)
+            .field("state", &self.state)
+            .field("kind", &self.kind)
+            .field("on_server", &self.on_server)
+            .field("pinned", &self.pinned)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MessageRef {
@@ -100,7 +133,7 @@ pub enum Run {
     EndPoll,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Item {
     pub label: String,
     /// The key that does the same, or a detail (the time in "Read by").
@@ -109,6 +142,16 @@ pub struct Item {
     pub run: Option<Run>,
     /// Asks before it runs: the first Enter or click turns the label into this prompt.
     pub confirm: Option<&'static str>,
+}
+
+/// Hand-written: a label can be a person's name (in "Read by"), a hint a time.
+impl std::fmt::Debug for Item {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Item")
+            .field("run", &self.run)
+            .field("confirm", &self.confirm.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Item {
@@ -156,7 +199,7 @@ pub fn key_hint(keys: &Keymap, context: Context, action: Action, first: bool) ->
         .unwrap_or("")
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Menu {
     pub target: Target,
     /// Shown in the top border; may be empty.
@@ -166,6 +209,28 @@ pub struct Menu {
     pub anchor: Anchor,
     /// The entry that was chosen once and asks to be chosen again.
     pub armed: Option<usize>,
+}
+
+/// Hand-written: the title can be a room's or a person's name, and the entries of
+/// "Read by" are people. Of the target only its kind is shown, as `Target` shows
+/// everything in tests.
+impl std::fmt::Debug for Menu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let target = match &self.target {
+            Target::Message(_) => "Message",
+            Target::Link { .. } => "Link",
+            Target::Room { .. } => "Room",
+            Target::Composer { .. } => "Composer",
+            Target::Space { .. } => "Space",
+        };
+        f.debug_struct("Menu")
+            .field("target", &target)
+            .field("items", &self.items)
+            .field("selected", &self.selected)
+            .field("anchor", &self.anchor)
+            .field("armed", &self.armed)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the menu hangs from: the pointer, or the rows of the thing it is about. The
@@ -762,6 +827,80 @@ mod tests {
         can_pin: false,
         can_ban_sender: false,
     };
+
+    #[test]
+    fn a_menu_and_its_entries_keep_names_rooms_links_and_code_out_of_debug() {
+        let message = MessageRef {
+            room_id: "!secret-room:example.org".into(),
+            thread: Some("$secret-root:example.org".into()),
+            id: "$secret-event:example.org".into(),
+            index: 3,
+            state: SendState::Sent,
+            kind: MsgKind::Text,
+            on_server: true,
+            pinned: false,
+        };
+        let read_by = ReadBy {
+            readers: vec![Reader {
+                name: "Alice Secret".into(),
+                time: "14:05".into(),
+            }],
+            total: 1,
+        };
+        let code = [crate::rich::CodeBlock {
+            lang: Some("secretlang".into()),
+            text: "let secret = 1;".into(),
+        }];
+        let menus = [
+            Menu::new(
+                Target::Message(message.clone()),
+                "Read by",
+                read_by_items(&read_by),
+                Anchor::at(0, 0),
+            ),
+            Menu::new(
+                Target::Link {
+                    message,
+                    url: "https://secret.example.org/plans".into(),
+                },
+                "https://secret.example.org/plans",
+                link_items(),
+                Anchor::at(0, 0),
+            ),
+            Menu::new(
+                Target::Room {
+                    id: "!secret-room:example.org".into(),
+                    kind: RoomKind::Favourite,
+                },
+                "Secret Room",
+                code_items(&code),
+                Anchor::at(0, 0),
+            ),
+            Menu::new(
+                Target::Composer {
+                    room_id: "!secret-room:example.org".into(),
+                },
+                "",
+                composer_items(true, true, &keys()),
+                Anchor::at(0, 0),
+            ),
+            Menu::new(
+                Target::Space {
+                    id: Some("!secret-space:example.org".into()),
+                },
+                "Secret Space",
+                space_items(Some(true), &keys()),
+                Anchor::at(0, 0),
+            ),
+        ];
+        for menu in menus {
+            let menu = menu.unwrap();
+            let shown = format!("{menu:?} {:?}", menu.items);
+            for private in ["secret", "Secret", "Alice", "14:05"] {
+                assert!(!shown.contains(private), "{private} in {shown}");
+            }
+        }
+    }
 
     fn file() -> Attachment {
         use matrix_sdk::ruma::events::room::MediaSource;
