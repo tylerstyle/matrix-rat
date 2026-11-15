@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::{App, ComposeMode};
 use crate::action::Pane;
+use crate::clipboard::TempPicture;
 use crate::format::Outgoing;
 use crate::images::human_size;
 use crate::matrix::MatrixCmd;
@@ -38,8 +39,20 @@ pub struct AttachState {
     pub limit: Option<u64>,
     /// The last draw had no room to show the waiting files.
     pub hidden: bool,
-    /// Sends handed to the worker that it has not answered yet.
+    /// Pictures pasted from the clipboard: files of ours, each removed (by being
+    /// dropped) once no chip and no send needs it any more.
+    pub(super) pasted: Vec<TempPicture>,
+    /// Sends handed to the worker that it has not answered yet. It reads the files only
+    /// some time after it was handed them, so no picture of ours goes while one is out.
     sends_out: usize,
+    /// The clipboard is being read for this conversation; the number tells the answer
+    /// from that of a reading given up before.
+    pub(super) reading: Option<(u64, Scope)>,
+    /// Readings asked for so far; kept by `clear`, so that an answer from before a
+    /// logout is never taken for that of a new reading.
+    pub(super) readings: u64,
+    /// A reading for the run loop to start.
+    pub(super) paste_request: Option<crate::clipboard::Request>,
 }
 
 impl AttachState {
@@ -65,10 +78,29 @@ impl AttachState {
     pub fn forget_room(&mut self, room_id: &str) {
         self.pending.retain(|(room, _), _| room != room_id);
         self.stash.retain(|(room, _), _| room != room_id);
+        self.sweep();
     }
 
     pub fn clear(&mut self) {
+        let readings = self.readings;
         *self = Self::default();
+        self.readings = readings;
+    }
+
+    /// Removes the pasted pictures that nothing needs any more: no chip shows them, and
+    /// the worker has answered every send (it may still be about to read one that went).
+    /// Called wherever a chip goes or a send is answered.
+    fn sweep(&mut self) {
+        if self.sends_out > 0 {
+            return;
+        }
+        let pending = &self.pending;
+        self.pasted.retain(|picture| {
+            pending
+                .values()
+                .flatten()
+                .any(|file| file.path == picture.path())
+        });
     }
 }
 
@@ -85,7 +117,7 @@ impl App {
     }
 
     /// Whether files can be attached here; says why not.
-    fn can_attach(&mut self) -> bool {
+    pub(super) fn can_attach(&mut self) -> bool {
         if matches!(self.compose_mode, ComposeMode::Edit(_)) {
             self.show_toast("Finish editing before attaching a file");
             false
@@ -103,7 +135,7 @@ impl App {
 
     /// Adds files to the open room's waiting ones and returns how many were taken.
     /// A refusal is explained.
-    fn attach_files(&mut self, files: Vec<Chosen>) -> usize {
+    pub(super) fn attach_files(&mut self, files: Vec<Chosen>) -> usize {
         let Some(scope) = self.attach_scope() else {
             return 0;
         };
@@ -163,6 +195,7 @@ impl App {
             && index < waiting.len()
         {
             waiting.remove(index);
+            self.attach.sweep();
         }
     }
 
@@ -178,6 +211,7 @@ impl App {
             .pending
             .remove(&scope)
             .is_some_and(|waiting| !waiting.is_empty());
+        self.attach.sweep();
         had_draft || had_files
     }
 
@@ -202,7 +236,7 @@ impl App {
     }
 
     /// The draft that was put aside for an `/upload` command comes back.
-    fn restore_draft(&mut self) {
+    pub(super) fn restore_draft(&mut self) {
         let draft = self
             .attach_scope()
             .and_then(|scope| self.attach.stash.remove(&scope))
@@ -397,6 +431,8 @@ impl App {
         if self.matrix.is_some() {
             self.attach.sends_out += 1;
         }
+        // In the demo a pasted picture has been "sent" now; else it waits for the answer.
+        self.attach.sweep();
         self.composer.take();
         self.clear_completion_marks();
         self.compose_mode = ComposeMode::Normal;
@@ -427,16 +463,20 @@ impl App {
                 self.composer.set_text(&handed.text);
             }
         }
+        // After the files are back: a pasted picture among them stays.
+        self.attach.sweep();
         self.show_toast(format!("{reason}. Nothing was sent"));
     }
 
-    /// The worker has read the files of a send and needs them no more.
+    /// The worker has read the files of a send and needs them no more: pasted pictures
+    /// that no chip shows go, once no other send is out.
     pub(super) fn on_files_sent(&mut self) {
         self.attach.sends_out = self.attach.sends_out.saturating_sub(1);
         if self.attach.sends_out == 0 {
             // Every send is answered: none can come back any more.
             self.attach.handed = None;
         }
+        self.attach.sweep();
     }
 }
 
