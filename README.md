@@ -445,7 +445,8 @@ Setting `preset = "vim"` keeps the default keys and adds:
 - **Custom emoji and stickers** come from image packs: your own, the open room's, and
   those of other rooms you switched on for everywhere (packs are made in another client,
   such as Cinny or FluffyChat). They are loaded the first time something needs them
-  (typing `:` and two letters, the emoji picker, or the sticker picker), not at start.
+  (typing `:` and two letters, the emoji picker, the sticker picker, or a room with a
+  reaction made with a custom emoji), not at start.
   With the kitty graphics protocol, custom emoji in messages and on reactions show as
   small pictures, two columns wide like any emoji. Until a picture has arrived, when it
   cannot be loaded, in other terminals and with pictures off, an emoji shows as its
