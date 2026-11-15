@@ -485,7 +485,8 @@ differentiators and can be reviewed with fake data in days.
     icon in notifications (done, on main).
   - **Later, by demand:** space management, several accounts in one window, QR login, other
     terminals' picture protocols, other systems and prebuilt binaries, languages, export,
-    custom emoji as pictures and in reactions.
+    custom emoji as pictures and in reactions, playing audio and voice messages inside the
+    app instead of in the system's player (asked for by the user on 2026-11-15).
   - **Not planned:** calls (shown as events only), account deactivation, account creation.
 
 - **0.2.0 scope (agreed 2026-11-14, released):** after 0.1.1, five features, each written by one agent

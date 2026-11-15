@@ -465,12 +465,14 @@ fn default_style(role: Role, p: &Palette) -> Style {
         Role::Code => s.fg(p.accent),
         // Code blocks in a known language. Plain code steps back so the marks stand out.
         Role::CodeText => s.fg(p.fg),
-        Role::CodeKeyword => s.fg(p.primary),
+        Role::CodeKeyword => s.fg(p.secondary),
         Role::CodeString => s.fg(p.success),
         Role::CodeComment => s.fg(p.muted).add_modifier(Modifier::ITALIC),
         Role::CodeConstant => s.fg(p.accent),
-        Role::CodeType => s.fg(p.secondary),
-        Role::CodeFunction => s.fg(p.fg).add_modifier(bold),
+        Role::CodeType => s.fg(p.accent).add_modifier(Modifier::ITALIC),
+        // A colour of its own, not bold text: in a shell command the command is
+        // often the only thing there is to mark.
+        Role::CodeFunction => s.fg(p.primary),
         Role::Link => s.fg(p.secondary).add_modifier(Modifier::UNDERLINED),
         Role::Spoiler => s.fg(p.muted).bg(p.surface),
     }
