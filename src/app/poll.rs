@@ -388,6 +388,11 @@ impl App {
         let room_id = form.room_id.clone();
         let editing = form.editing.clone();
         self.modal = None;
+        // The room may have gone from the list while the form was open.
+        if self.room_id().as_deref() != Some(room_id.as_str()) {
+            self.show_toast("That room is not open any more");
+            return;
+        }
 
         if let Some(item) = editing {
             if let Some(messages) = self.messages_mut()

@@ -13,6 +13,23 @@ pub const EMOTICON_PLACEHOLDER: &str = ":?:";
 
 /// A custom emoji as text: its `:shortcode:` from the `alt` or `title` the sender gave,
 /// cleaned like all message text and kept short.
+/// Whether an `<img>` is a custom emoji. The mark for it (`data-mx-emoticon`) does not
+/// survive the SDK's cleaning of received HTML, so a name of the form `:shortcode:` in
+/// `alt` or `title` counts as well: that is how every client writes them.
+pub(crate) fn is_emoticon(attributes: &str) -> bool {
+    attribute(attributes, "data-mx-emoticon").is_some()
+        || ["alt", "title"].into_iter().any(|attr| {
+            attribute(attributes, attr).is_some_and(|raw| {
+                let name = decode_entities(raw);
+                let name = name.trim();
+                name.len() > 2
+                    && name.starts_with(':')
+                    && name.ends_with(':')
+                    && !name[1..name.len() - 1].contains(|c: char| c == ':' || c.is_whitespace())
+            })
+        })
+}
+
 fn emoticon_label(attributes: &str) -> String {
     let name = ["alt", "title"].into_iter().find_map(|attr| {
         let raw = decode_entities(attribute(attributes, attr)?);
@@ -564,7 +581,7 @@ impl Builder {
             // A void element: nothing to close, so no format to keep. Only custom emoji
             // are shown, as text.
             "img" => {
-                if attribute(attributes, "data-mx-emoticon").is_some() {
+                if is_emoticon(attributes) {
                     self.push_piece(&emoticon_label(attributes), &format);
                 }
                 return;
@@ -1212,6 +1229,35 @@ mod tests {
         );
         // The address itself is never shown.
         assert!(!texts(&rich)[0].contains("mxc"));
+    }
+
+    #[test]
+    fn a_custom_emoji_is_known_by_its_name_when_its_mark_was_cleaned_away() {
+        // What the SDK leaves of one: no `data-mx-emoticon`.
+        let rich = from_html(
+            "hello <img src=\"mxc://e.org/x\" alt=\":ratwave:\" title=\":ratwave:\" height=\"32\"> there",
+        );
+        let text: String = rich.lines[0]
+            .segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(text, "hello :ratwave: there");
+        // An ordinary picture in a message is still not shown.
+        for html in [
+            "a <img src=\"mxc://e.org/x\" alt=\"a photo\"> b",
+            "a <img src=\"mxc://e.org/x\" alt=\"::\"> b",
+            "a <img src=\"mxc://e.org/x\" alt=\":two words:\"> b",
+            "a <img src=\"mxc://e.org/x\"> b",
+        ] {
+            let rich = from_html(html);
+            let text: String = rich.lines[0]
+                .segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect();
+            assert_eq!(text, "a b", "{html}");
+        }
     }
 
     #[test]

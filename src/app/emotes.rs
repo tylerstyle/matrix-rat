@@ -182,6 +182,11 @@ impl App {
         };
         let room_id = picker.room_id.clone();
         self.modal = None;
+        // The room may have gone from the list while the picker was open.
+        if self.room_id().as_deref() != Some(room_id.as_str()) {
+            self.show_toast("That room is not open any more");
+            return;
+        }
         self.send_matrix(MatrixCmd::SendSticker {
             room_id,
             name: sticker.name,

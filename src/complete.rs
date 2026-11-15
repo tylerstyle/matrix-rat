@@ -1091,7 +1091,7 @@ fn extract_emoticons(html: &str) -> Vec<(String, String)> {
             continue;
         }
         let attributes = &tag[3..];
-        if crate::rich::attribute(attributes, "data-mx-emoticon").is_none() {
+        if !crate::rich::is_emoticon(attributes) {
             continue;
         }
         let url = crate::rich::attribute(attributes, "src").map(crate::rich::decode_entities);
@@ -1500,10 +1500,15 @@ mod tests {
                     hi <img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blob:\" title=\":blob:\"> \
                     <img data-mx-emoticon src=\"https://evil.example/x\" alt=\":bad:\"> \
                     <img data-mx-emoticon src=\"mxc://example.org/two\" alt=\"two words\"> \
-                    <img src=\"mxc://example.org/pic\" alt=\":pic:\"> <éé> <é";
+                    <img src=\"mxc://example.org/pic\" alt=\"a picture\"> \
+                    <img src=\"mxc://example.org/named\" alt=\":named:\"> <éé> <é";
+        // The last one has lost its mark, as received messages do, and is known by its name.
         assert_eq!(
             marks_from_message(Some(html), None),
-            vec![MentionMark::emoticon("blob", "mxc://example.org/blob")]
+            vec![
+                MentionMark::emoticon("blob", "mxc://example.org/blob"),
+                MentionMark::emoticon("named", "mxc://example.org/named")
+            ]
         );
         let (linked, _) = resolve_marks("hi :blob:", &marks_from_message(Some(html), None));
         assert_eq!(linked, format!("hi {EMOTE_OPEN}0{EMOTE_CLOSE}"));

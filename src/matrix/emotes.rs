@@ -506,6 +506,10 @@ async fn load_room_packs(
     let Some(room) = client.get_room(&room_id) else {
         return Vec::new();
     };
+    // A room the account is not in (any more) is not asked about.
+    if room.state() != matrix_sdk::RoomState::Joined {
+        return Vec::new();
+    }
     let room_name = room.name().unwrap_or_default();
 
     let mut found: Vec<(String, Value)> = Vec::new();

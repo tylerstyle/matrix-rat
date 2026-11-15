@@ -2062,8 +2062,19 @@ impl App {
             ComposeMode::Reply(i) | ComposeMode::Edit(i) => id_at(i),
             ComposeMode::Normal => None,
         };
+        // A reaction with a custom emoji can only be named once the packs are known.
+        let custom_reaction = messages.iter().any(|m| {
+            m.reactions.iter().any(|r| {
+                r.key
+                    .get(..6)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mxc://"))
+            })
+        });
         if let Some(target) = self.messages_mut() {
             *target = messages;
+        }
+        if custom_reaction {
+            self.want_emotes();
         }
         let find = |messages: &[Message], id: Option<String>| {
             id.and_then(|id| messages.iter().position(|m| m.id == id))

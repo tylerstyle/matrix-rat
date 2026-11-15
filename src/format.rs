@@ -346,11 +346,19 @@ fn fill_emotes(html: &str, marks: &[MentionMark]) -> String {
     }
     let mut out = String::with_capacity(html.len() + 64);
     let mut in_tag = false;
+    // Inside code (also the indented kind, which is only known after rendering) a
+    // shortcode stays the text it is.
+    let mut code_depth = 0usize;
     let mut rest = html;
     while let Some(c) = rest.chars().next() {
+        if rest.starts_with("<code") || rest.starts_with("<pre") {
+            code_depth += 1;
+        } else if rest.starts_with("</code") || rest.starts_with("</pre") {
+            code_depth = code_depth.saturating_sub(1);
+        }
         if let Some((code, url, len)) = placeholder_at(rest, marks) {
             let code = escape(code);
-            if in_tag || !crate::matrix::is_valid_mxc(url) {
+            if in_tag || code_depth > 0 || !crate::matrix::is_valid_mxc(url) {
                 out.push_str(&code);
             } else {
                 out.push_str(&format!(
@@ -786,6 +794,18 @@ mod tests {
             };
             assert!(!html.unwrap_or_default().contains("<img"), "{typed}");
         }
+        // An indented code block is only code once the Markdown is rendered.
+        let Outgoing::Text { html, .. } =
+            parse_with_mentions("text\n\n    :blob: in code\n", &marks, false)
+        else {
+            panic!("expected text");
+        };
+        let html = html.unwrap();
+        assert!(html.contains("<code>:blob: in code"), "{html}");
+        assert!(
+            !html.contains("<img") && !html.contains('\u{e000}'),
+            "{html}"
+        );
         // Made a link by the Markdown: the picture cannot go inside the address.
         let Outgoing::Text { html, .. } =
             parse_with_mentions("https://example.org/:blob: ok", &marks, false)
