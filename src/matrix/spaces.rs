@@ -1147,6 +1147,7 @@ pub(super) mod fake {
 
     /// Who the client is signed in as.
     pub const ME: &str = "@alice:localhost";
+    const SOMEONE: &str = "@bob:localhost";
 
     /// A request as the server saw it.
     #[derive(Clone, Debug)]
@@ -1370,6 +1371,27 @@ pub(super) mod fake {
             content["type"] = json!("m.space");
         }
         content
+    }
+
+    /// A room (or space) someone else invited us to.
+    pub fn invited(space: bool) -> Value {
+        json!({ "invite_state": { "events": [
+            stripped("m.room.create", "", SOMEONE, create(space, SOMEONE)),
+            stripped("m.room.member", ME, SOMEONE, json!({ "membership": "invite" })),
+        ] } })
+    }
+
+    /// A room (or space) we asked to join.
+    pub fn knocked(space: bool) -> Value {
+        json!({ "knock_state": { "events": [
+            stripped("m.room.create", "", SOMEONE, create(space, SOMEONE)),
+            stripped("m.room.member", ME, ME, json!({ "membership": "knock" })),
+        ] } })
+    }
+
+    /// State as an invitation or a request to join shows it.
+    fn stripped(kind: &str, key: &str, sender: &str, content: Value) -> Value {
+        json!({ "type": kind, "state_key": key, "sender": sender, "content": content })
     }
 
     /// A room (or space) we were in and are no longer.

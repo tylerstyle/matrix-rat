@@ -2163,8 +2163,9 @@ async fn summarize(
 ) -> Vec<RoomSummary> {
     let mut summaries = Vec::with_capacity(rooms.len());
     for room in rooms {
-        // Spaces get their own navigation later; they are not chats.
-        if room.is_space() {
+        // Spaces we are in have their own navigation, they are not chats; an
+        // invitation to one, or our request to join one, is answered here.
+        if room.is_space() && !matches!(room.state(), RoomState::Invited | RoomState::Knocked) {
             continue;
         }
         let invited = room.state() == RoomState::Invited;
@@ -2293,6 +2294,42 @@ mod tests {
         assert_eq!(
             MatrixEvent::ActionFailed(failed.into()).describe(),
             format!("ActionFailed({failed})")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invitation_to_a_space_is_listed_with_the_rooms_and_a_space_we_are_in_is_not() {
+        use super::spaces::fake;
+        let server = fake::Server::start(serde_json::json!({
+            "join": {
+                "!work:localhost": fake::joined(true, vec![]),
+                "!rats:localhost": fake::joined(false, vec![]),
+            },
+            "invite": { "!club:localhost": fake::invited(true) },
+            "knock": { "!guild:localhost": fake::knocked(true) },
+        }))
+        .await;
+        let client = fake::client(&server).await;
+        let rooms: Vector<RoomListItem> =
+            client.rooms().into_iter().map(RoomListItem::from).collect();
+        // All but one are spaces, as far as the store knows, whatever our membership.
+        let spaces = rooms.iter().filter(|room| room.is_space()).count();
+        assert_eq!((rooms.len(), spaces), (4, 3));
+        let (_ignore, ignored) = tokio::sync::watch::channel(safety::IgnoredSet::default());
+        let mut listed: Vec<(String, RoomCategory)> =
+            summarize(&rooms, &mut Previews::default(), &ignored)
+                .await
+                .into_iter()
+                .map(|room| (room.id, room.category))
+                .collect();
+        listed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            listed,
+            [
+                ("!club:localhost".to_owned(), RoomCategory::Invite),
+                ("!guild:localhost".to_owned(), RoomCategory::Knock),
+                ("!rats:localhost".to_owned(), RoomCategory::Room),
+            ]
         );
     }
 
