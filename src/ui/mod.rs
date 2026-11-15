@@ -1034,12 +1034,14 @@ mod tests {
                 name: "Work".into(),
                 level: 0,
                 rooms: vec!["rust".into(), "bob".into(), "!dm_low:example.org".into()],
+                ..Default::default()
             },
             SpaceSummary {
                 id: "!misc:example.org".into(),
                 name: "Misc".into(),
                 level: 0,
                 rooms: vec!["design".into(), "!quiet:example.org".into()],
+                ..Default::default()
             },
         ];
         app.select_space(Some(0));

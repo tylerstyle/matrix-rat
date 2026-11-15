@@ -75,6 +75,7 @@ impl App {
                 .is_some_and(|index| self.find_link(index, url).is_some()),
             Target::Room { id, kind } => self.find_room(id, *kind).is_some(),
             Target::Composer { room_id } => self.room_id().as_deref() == Some(room_id.as_str()),
+            Target::Space { id } => self.space == *id,
         }
     }
 
@@ -196,7 +197,23 @@ impl App {
             kind: room.kind,
         };
         let title = room.name.clone();
-        let items = menu::room_items(room, &self.keymap);
+        let (in_space, can_add) = self.space_context(&room.id);
+        let spaces = menu::RoomSpaces {
+            can_add,
+            remove_from: in_space.map(|space| space.name),
+        };
+        let items = menu::room_items(room, &spaces, &self.keymap);
+        self.show_menu(target, &title, items, at);
+    }
+
+    /// The menu of the room list's space line.
+    fn open_space_menu(&mut self, at: Anchor) {
+        let selected = self.selected_space().map(|space| space.can_edit);
+        let title = self.space_name().unwrap_or_else(|| "All rooms".to_owned());
+        let items = menu::space_items(selected, &self.keymap);
+        let target = Target::Space {
+            id: self.space.clone(),
+        };
         self.show_menu(target, &title, items, at);
     }
 
@@ -275,6 +292,7 @@ impl App {
                 | HitId::ReplyQuote(index),
             ) => self.open_message_menu(index, at),
             Some(HitId::Room(index)) => self.open_room_menu(index, at),
+            Some(HitId::Do(Action::SpaceNext | Action::SpacePrev)) => self.open_space_menu(at),
             Some(HitId::ComposerText | HitId::Attachment(_) | HitId::Pane(Pane::Composer)) => {
                 self.open_composer_menu(at);
             }
@@ -472,6 +490,15 @@ impl App {
                     _ => {}
                 }
             }
+            Target::Space { id } => {
+                if self.space != id {
+                    self.show_toast("The room list now shows another space");
+                    return;
+                }
+                if let Run::Do(action) = run {
+                    self.perform(action);
+                }
+            }
             Target::Composer { room_id } => {
                 if self.room_id().as_deref() != Some(room_id.as_str()) {
                     return;
@@ -501,7 +528,12 @@ impl App {
             Action::RoomInfo
                 | Action::LeaveRoom
                 | Action::OpenThreads
-                | Action::Manage(Click::Favourite | Click::LowPriority)
+                | Action::Manage(
+                    Click::Favourite
+                        | Click::LowPriority
+                        | Click::AddToSpace
+                        | Click::RemoveFromSpace
+                )
         ) {
             debug_assert!(false, "not a room action of the menu: {action:?}");
             return;
@@ -1201,7 +1233,7 @@ mod tests {
         assert!(!app.rooms[1].bold && !app.rooms[1].marked_unread);
         // An invitation is neither.
         let invite = crate::model::Room::new("!i:example.org", "Invited", RoomKind::Invite);
-        let offered = menu::room_items(&invite, &app.keymap);
+        let offered = menu::room_items(&invite, &menu::RoomSpaces::default(), &app.keymap);
         assert!(offered.iter().all(|item| !item.label.starts_with("Mark")));
         // With previews a room takes two lines; the second belongs to it as well.
         app.room_previews = true;

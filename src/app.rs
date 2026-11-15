@@ -24,6 +24,7 @@ mod previews;
 mod rooms;
 mod safety;
 pub mod search;
+mod spaces;
 mod thread;
 mod thread_list;
 mod unread;
@@ -1552,6 +1553,10 @@ impl App {
         // is that space, else wherever it went. Gone means all rooms.
         let selected = self.space.take();
         let was_at = self.space_at.take();
+        let shown_listed = match &self.modal {
+            Some(Modal::RoomInfo(info)) => self.spaces.iter().any(|s| s.id == info.room_id),
+            _ => false,
+        };
         self.spaces = spaces;
         let at = selected.and_then(|id| {
             was_at
@@ -1562,6 +1567,9 @@ impl App {
         self.set_space(at);
         let last = self.visible_rooms().len().saturating_sub(1);
         self.sidebar.cursor = self.sidebar.cursor.min(last);
+        // First the new selection, which an open room info then follows.
+        self.select_pending_space();
+        self.follow_spaces(shown_listed);
     }
 
     /// Ctrl-↑/↓: opens the neighbouring room in the list, wrapping at the ends, and
@@ -2707,6 +2715,7 @@ impl App {
             }
             Action::NewRoom
             | Action::RoomInfo
+            | Action::SpaceInfo
             | Action::LeaveRoom
             | Action::InviteUser
             | Action::Manage(_) => self.perform_manage(action),
@@ -2802,7 +2811,6 @@ impl App {
             Some(
                 Modal::Emoji(_)
                 | Modal::Settings(_)
-                | Modal::Palette(_)
                 | Modal::Keybinds(_)
                 | Modal::IgnoredUsers(_)
                 | Modal::Report(_)
@@ -2815,6 +2823,7 @@ impl App {
             ) => {
                 self.modal = None;
             }
+            Some(Modal::Palette(_)) => self.close_palette(),
             Some(Modal::Search(_)) => self.close_search(),
             Some(Modal::GlobalSearch(_)) => self.close_global_search(),
             Some(Modal::Verify(_)) => self.verify_escape(),
@@ -4478,6 +4487,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     }
     app.startup_target = target;
     if demo {
+        app.add_demo_space();
         app.maybe_open_startup_target();
     }
     let notify_icons = Arc::new(crate::notify::IconCache::new(paths.notify_icons_dir()));
@@ -6611,6 +6621,7 @@ mod tests {
             name: name.into(),
             level,
             rooms: rooms.iter().map(|r| (*r).to_owned()).collect(),
+            ..Default::default()
         };
         // No spaces: no header line, and the key says so.
         app.on_event(key_mod(KeyCode::Char('s'), KeyModifiers::ALT));
@@ -7239,6 +7250,7 @@ mod tests {
             name: "Space".into(),
             level: 0,
             rooms: vec!["!a".into()],
+            ..Default::default()
         }]));
         app.select_space(Some(0));
         assert!(app.space.is_some());
@@ -8152,6 +8164,7 @@ mod tests {
             name: "Friends".into(),
             level: 0,
             rooms: vec!["!dmfav".into(), "!open".into()],
+            ..Default::default()
         }]));
         app.select_space(Some(0));
         assert_eq!(names(&app), ["Alice", "OpenChannel"]);
@@ -8226,12 +8239,14 @@ mod tests {
                 name: "Work".into(),
                 level: 0,
                 rooms: vec!["!rp".into(), "!rs".into()],
+                ..Default::default()
             },
             SpaceSummary {
                 id: "!team".into(),
                 name: "Team".into(),
                 level: 1,
                 rooms: vec!["!rs".into(), "!rm".into(), "!rsh".into()],
+                ..Default::default()
             },
             // Second top-level space Play shares !rsh and contains marked-unread !rmk.
             SpaceSummary {
@@ -8239,6 +8254,7 @@ mod tests {
                 name: "Play".into(),
                 level: 0,
                 rooms: vec!["!rsh".into(), "!rmk".into()],
+                ..Default::default()
             },
         ]));
 

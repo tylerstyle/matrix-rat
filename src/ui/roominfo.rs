@@ -16,7 +16,9 @@ use crate::manage::{
     BanPrompt, Click, Confirm, InfoPopup, InfoRow, NewPopup, PermAction, RoleChooser, RoomSetting,
     SettingSubview, Stage, address_entries, confirm_keys, notify_label, validate_permissions_draft,
 };
-use crate::matrix::{PreviewMembership, RoomHistory, RoomJoinRule, RoomKnockRequest, RoomMember};
+use crate::matrix::{
+    PreviewMembership, RoomHistory, RoomJoinRule, RoomKnockRequest, RoomMember, SpaceChild,
+};
 use crate::text::{sanitize_line, truncate, width, wrap};
 use crate::theme::{Role, Theme};
 
@@ -67,7 +69,7 @@ fn hit(click: Click) -> HitId {
 pub fn draw_new(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
     match form.stage {
         Stage::Choose => chooser(frame, app, area, form),
-        Stage::Create => create(frame, app, area, form),
+        Stage::Create | Stage::CreateSpace => create(frame, app, area, form),
         Stage::Browse => browse(frame, app, area, form),
         Stage::Preview => preview(frame, app, area, form),
         Stage::Join | Stage::Direct | Stage::Invite => one_field(frame, app, area, form),
@@ -75,7 +77,8 @@ pub fn draw_new(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopu
 }
 
 fn chooser(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
-    let Some(rect) = centered(area, 58, 15) else {
+    let count = Stage::CHOICES.len() as u16;
+    let Some(rect) = centered(area, 58, 3 * count + 3) else {
         return;
     };
     let inner = popup(
@@ -88,10 +91,10 @@ fn chooser(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
     );
     let theme = app.theme.clone();
     // Three rows each where there is room, otherwise packed.
-    let pitch = if inner.height >= 12 { 3 } else { 2 };
+    let pitch = if inner.height >= 3 * count { 3 } else { 2 };
     for (n, stage) in Stage::CHOICES.into_iter().enumerate() {
         let selected = form.choice == n;
-        let top = 1.min(inner.height.saturating_sub(8)) + n as u16 * pitch;
+        let top = 1.min(inner.height.saturating_sub(2 * count)) + n as u16 * pitch;
         let title = row(inner, top);
         let summary = row(inner, top + 1);
         let marker = if selected { "› " } else { "  " };
@@ -902,7 +905,7 @@ fn create(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
                 );
             }
         }
-    } else {
+    } else if form.stage == Stage::Create {
         let (dot, role) = if form.encrypted {
             ("● on", Role::StatusOk)
         } else {
@@ -927,7 +930,11 @@ fn create(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
 
     let buttons = at(NewPopup::BUTTON);
     if !busy && buttons.width > 0 {
-        let label = " Create room ";
+        let label = if form.stage == Stage::CreateSpace {
+            " Create space "
+        } else {
+            " Create room "
+        };
         let w = (width(label) as u16).min(buttons.width);
         let rect = Rect::new(buttons.x, buttons.y, w, 1);
         button(frame, &theme, rect, label, form.focus == NewPopup::BUTTON);
@@ -984,10 +991,17 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
         "Enter info · type to filter · Esc close"
     } else if matches!(current, Some(InfoRow::KnockRequest(_))) {
         "Enter accept · Del decline · Alt-B ban · Esc close"
+    } else if matches!(current, Some(InfoRow::Child(_))) && info.can_edit_children() {
+        "Enter open · Del remove · Esc close"
     } else {
         "↑↓ select · Enter · Esc close"
     };
-    let inner = popup(frame, app, area, rect, "Room info", footer);
+    let title = if info.space {
+        "Space info"
+    } else {
+        "Room info"
+    };
+    let inner = popup(frame, app, area, rect, title, footer);
     let theme = app.theme.clone();
     if inner.width < 8 || inner.height == 0 {
         return;
@@ -1025,8 +1039,9 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
                 };
                 entries.push(fact(&theme, "Address", alias, role, room));
             }
-            entries.push(fact(&theme, "Room ID", room_id.clone(), Role::Text, room));
-            if !info.pending() {
+            let id_label = if info.space { "Space ID" } else { "Room ID" };
+            entries.push(fact(&theme, id_label, room_id.clone(), Role::Text, room));
+            if !info.pending() && !info.space {
                 let (text, role) = match details.encrypted {
                     Some(true) => ("on", Role::StatusOk),
                     Some(false) => ("off · messages here are not encrypted", Role::Text),
@@ -1065,6 +1080,23 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
             entries.push(Entry::Text(Line::default()));
             entries.push(Entry::Text(Line::from(Span::styled(
                 format!("Join requests ({count})"),
+                theme.style(Role::SidebarSection),
+            ))));
+        }
+        if matches!(row, InfoRow::AddChild) {
+            let (count, more) = info
+                .details
+                .as_ref()
+                .and_then(|details| details.space.as_ref())
+                .map_or((0, false), |space| (space.children.len(), space.more));
+            let heading = if more {
+                format!("Rooms (the first {count})")
+            } else {
+                format!("Rooms ({count})")
+            };
+            entries.push(Entry::Text(Line::default()));
+            entries.push(Entry::Text(Line::from(Span::styled(
+                heading,
                 theme.style(Role::SidebarSection),
             ))));
         }
@@ -1251,7 +1283,8 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
         } else {
             ""
         };
-        let (text, role) = status_text(info, current);
+        let joined = info.selected_child().map(|child| app.child_joined(child));
+        let (text, role) = status_text(info, current, joined);
         let space = room.saturating_sub(width(more));
         frame.render_widget(
             Line::from(vec![
@@ -1312,12 +1345,25 @@ fn confirm_prompt(info: &InfoPopup) -> Option<String> {
             "Enter again to start one, Esc to stay · no chat with {} yet; they get an invitation",
             name(user_id)
         ),
+        Confirm::RemoveFromSpace => format!(
+            "Enter again to remove, Esc to keep · {} will no longer list this room",
+            info.in_space
+                .as_ref()
+                .map_or("the space", |space| space.name.as_str())
+        ),
+        Confirm::RemoveChild(room_id) => format!(
+            "Del again to remove, Esc to keep · {} will no longer be in this space",
+            info.children()
+                .iter()
+                .find(|child| child.room_id == *room_id && !child.name.is_empty())
+                .map_or("the room", |child| child.name.as_str())
+        ),
     })
 }
 
 /// The bottom line: what is being asked, what is under way, what went wrong, or what
-/// the selected row is for.
-fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
+/// the selected row is for. `joined`: whether we are in the selected room of a space.
+fn status_text(info: &InfoPopup, current: Option<InfoRow>, joined: Option<bool>) -> (String, Role) {
     // First, always: a question that can be answered must be the thing on screen.
     if let Some(prompt) = confirm_prompt(info) {
         return (crate::text::sanitize_line(&prompt), Role::Error);
@@ -1355,6 +1401,39 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
         Some(InfoRow::Pinned) => "View and jump to pinned messages.",
         Some(InfoRow::Invite) => "Invite someone by user ID.",
         Some(InfoRow::OwnName) => "Set a display name just for this room (clear for default).",
+        Some(InfoRow::AddToSpace) => "Pick one of your spaces to put this room into.",
+        Some(InfoRow::RemoveFromSpace) => {
+            return match &info.in_space {
+                Some(space) if space.can_edit => (
+                    format!("Takes this room out of {}; nobody leaves it.", space.name),
+                    Role::Muted,
+                ),
+                Some(space) => (
+                    format!(
+                        "Read-only: you are not allowed to change the rooms of {}.",
+                        space.name
+                    ),
+                    Role::Muted,
+                ),
+                None => (String::new(), Role::Muted),
+            };
+        }
+        Some(InfoRow::AddChild) => {
+            if info.can_edit_children() {
+                "Pick one of your rooms to put into this space."
+            } else {
+                "Read-only: you are not allowed to add rooms to this space."
+            }
+        }
+        Some(row @ InfoRow::Child(_)) => match info.child(row) {
+            Some(child) => {
+                return (
+                    child_hint(child, joined.unwrap_or(false), info.can_edit_children()),
+                    Role::Muted,
+                );
+            }
+            None => "",
+        },
         Some(InfoRow::Leave) if info.pending() => "",
         Some(InfoRow::Leave) => "Leaving also removes the room and its history from this device.",
         Some(InfoRow::SettingsToggle) => {
@@ -1452,6 +1531,23 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
     (text.to_owned(), Role::Muted)
 }
 
+fn child_hint(child: &SpaceChild, joined: bool, can_edit: bool) -> String {
+    let mut parts = vec![if joined {
+        "Enter: open"
+    } else {
+        "Enter: preview and join"
+    }];
+    if can_edit {
+        parts.push(if child.suggested {
+            "Space: not suggested"
+        } else {
+            "Space: suggested"
+        });
+        parts.push("Del: remove from the space");
+    }
+    parts.join(" · ")
+}
+
 fn member_hint(member: &RoomMember) -> String {
     let mut parts = vec!["Enter: user info"];
     if member.role_editable {
@@ -1524,6 +1620,26 @@ fn info_row(
             app,
             theme,
             req,
+            rect,
+            marker,
+            label_style,
+            selected && !busy,
+        );
+        if hovered && !selected {
+            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
+        }
+        return None;
+    }
+
+    if let Some(child) = info.child(row) {
+        app.hits.add(rect, hit(Click::Select(index)));
+        let can_edit = info.can_edit_children();
+        child_row(
+            frame,
+            app,
+            theme,
+            child,
+            can_edit,
             rect,
             marker,
             label_style,
@@ -1609,6 +1725,9 @@ fn info_row(
         InfoRow::Topic => ("Change topic…", label_style),
         InfoRow::Invite => ("Invite someone…", label_style),
         InfoRow::OwnName => ("Name in room…", label_style),
+        InfoRow::AddToSpace => ("Add to a space…", label_style),
+        InfoRow::RemoveFromSpace => ("Remove from space", label_style),
+        InfoRow::AddChild => ("Add a room…", label_style),
         InfoRow::Leave => (info.leave_label(), theme.style(Role::Error)),
         InfoRow::Setting(setting) => (
             match setting {
@@ -1622,9 +1741,10 @@ fn info_row(
             },
             label_style,
         ),
-        InfoRow::SettingsToggle | InfoRow::KnockRequest(_) | InfoRow::Member(_) => {
-            ("", label_style)
-        }
+        InfoRow::SettingsToggle
+        | InfoRow::KnockRequest(_)
+        | InfoRow::Member(_)
+        | InfoRow::Child(_) => ("", label_style),
     };
     let mut spans = vec![
         marker,
@@ -1634,6 +1754,20 @@ fn info_row(
     let value_x = rect.x + 2 + ACTION_LABEL as u16;
     let space = (rect.width as usize).saturating_sub(2 + ACTION_LABEL);
     match row {
+        InfoRow::RemoveFromSpace => {
+            if let Some(in_space) = &info.in_space {
+                spans.push(Span::styled(
+                    truncate(&in_space.name, space),
+                    theme.style(Role::Text),
+                ));
+            }
+        }
+        InfoRow::AddChild if !info.can_edit_children() => {
+            spans.push(Span::styled(
+                truncate("(read-only)", space),
+                theme.style(Role::Muted),
+            ));
+        }
         InfoRow::OwnName => {
             let name = info
                 .details
@@ -1779,6 +1913,90 @@ fn info_row(
     }
     finish(frame, spans);
     None
+}
+
+/// A room of a space: its name (or id, where nobody could name it), what it is,
+/// and on the selected row what can be done.
+#[expect(clippy::too_many_arguments)]
+fn child_row(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    child: &SpaceChild,
+    can_edit: bool,
+    rect: Rect,
+    marker: Span<'static>,
+    name_style: ratatui::style::Style,
+    with_buttons: bool,
+) {
+    let joined = app.child_joined(child);
+    let room = (rect.width as usize).saturating_sub(2);
+    let mut tags = Vec::new();
+    if child.space {
+        tags.push("space");
+    }
+    if child.suggested {
+        tags.push("suggested");
+    }
+    if !joined {
+        tags.push("not joined");
+    }
+    let mut tag = tags.join(" · ");
+    let mut buttons: Vec<(&str, Click)> = Vec::new();
+    if with_buttons {
+        buttons.push((
+            if joined { " open " } else { " preview " },
+            Click::ChildOpen,
+        ));
+        if can_edit {
+            buttons.push((
+                if child.suggested {
+                    " unsuggest "
+                } else {
+                    " suggest "
+                },
+                Click::ChildSuggest,
+            ));
+            buttons.push((" remove ", Click::ChildRemove));
+        }
+    }
+    let mut buttons_width: usize = buttons.iter().map(|(label, _)| width(label) + 1).sum();
+    let tag_width = width(&tag) + usize::from(!tag.is_empty());
+    // What does not fit gives way: first the tag next to the buttons, then the buttons.
+    if buttons_width + tag_width + 12 > room {
+        if buttons_width > 0 && buttons_width + 12 <= room {
+            tag.clear();
+        } else {
+            buttons.clear();
+            buttons_width = 0;
+            if tag_width + 12 > room {
+                tag.clear();
+            }
+        }
+    }
+    let tag_width = width(&tag) + usize::from(!tag.is_empty());
+    let left = room.saturating_sub(tag_width + buttons_width);
+    let (name, style) = if child.name.is_empty() {
+        (sanitize_line(&child.room_id), theme.style(Role::Muted))
+    } else {
+        (sanitize_line(&child.name), name_style)
+    };
+    let name = fit(&name, left);
+    let role = if child.suggested {
+        Role::StatusKey
+    } else {
+        Role::Muted
+    };
+    let used = 2 + width(&name);
+    let pad = (rect.width as usize).saturating_sub(used + width(&tag) + buttons_width);
+    let spans = vec![
+        marker,
+        Span::styled(name, style),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(tag, theme.style(role)),
+    ];
+    frame.render_widget(Line::from(spans), rect);
+    draw_pill_buttons(frame, app, theme, rect, buttons_width, &buttons);
 }
 
 #[expect(clippy::too_many_arguments)]
