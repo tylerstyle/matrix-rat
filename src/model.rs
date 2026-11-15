@@ -439,6 +439,31 @@ impl Message {
         self.image.as_ref()?.attachment()
     }
 
+    /// The code blocks of the message, in order (empty ones included: their index is
+    /// what the display refers to). Only formatted messages have any: a plain body
+    /// with backticks is shown as it was written.
+    pub fn code_blocks(&self) -> Vec<crate::rich::CodeBlock> {
+        const MARK: &[u8] = b"<pre";
+        let Some(html) = self.html.as_deref() else {
+            return Vec::new();
+        };
+        // Parsing is for messages that have one.
+        if !html
+            .as_bytes()
+            .windows(MARK.len())
+            .any(|window| window.eq_ignore_ascii_case(MARK))
+        {
+            return Vec::new();
+        }
+        crate::rich::from_html(html).code_blocks
+    }
+
+    pub fn has_code(&self) -> bool {
+        self.code_blocks()
+            .iter()
+            .any(|block| !block.text.is_empty())
+    }
+
     pub fn has_spoiler(&self) -> bool {
         const MARK: &[u8] = b"data-mx-spoiler";
         // Attribute names are case-insensitive, like in the parser.

@@ -23,7 +23,7 @@ impl App {
 
     // ----- what a menu is about ------------------------------------------------------
 
-    fn message_ref(&self, index: usize) -> Option<MessageRef> {
+    pub(super) fn message_ref(&self, index: usize) -> Option<MessageRef> {
         let message = self.messages().get(index)?;
         Some(MessageRef {
             room_id: self.room_id()?,
@@ -103,7 +103,13 @@ impl App {
 
     // ----- opening -------------------------------------------------------------------
 
-    fn show_menu(&mut self, target: Target, title: &str, items: Vec<menu::Item>, at: Anchor) {
+    pub(super) fn show_menu(
+        &mut self,
+        target: Target,
+        title: &str,
+        items: Vec<menu::Item>,
+        at: Anchor,
+    ) {
         match Menu::new(target, title, items, at) {
             Some(menu) => self.open_modal(Modal::Menu(menu)),
             None => self.show_toast("Nothing to do here"),
@@ -209,6 +215,18 @@ impl App {
         self.show_menu(target, "", items, at);
     }
 
+    /// Where a menu about the message at `index` hangs: next to the message if it is on
+    /// screen, else in the pane.
+    pub(super) fn message_anchor(&self, index: usize) -> Anchor {
+        match self.hits.rect_of(HitId::Message(index)) {
+            Some(rect) => Anchor::below(rect, 4),
+            None => self
+                .hits
+                .rect_of(HitId::Pane(Pane::Timeline))
+                .map_or(Anchor::at(0, 0), |pane| Anchor::at(pane.x + 5, pane.y + 1)),
+        }
+    }
+
     /// The menu key: the menu of what has the focus, next to it.
     pub(super) fn open_menu_by_key(&mut self) {
         if self.modal.is_some() || self.images.viewer_open() {
@@ -220,14 +238,7 @@ impl App {
                     self.show_toast("No message is selected");
                     return;
                 };
-                // Next to the message if it is on screen, else in the pane.
-                let at = match self.hits.rect_of(HitId::Message(index)) {
-                    Some(rect) => Anchor::below(rect, 4),
-                    None => self
-                        .hits
-                        .rect_of(HitId::Pane(Pane::Timeline))
-                        .map_or(Anchor::at(0, 0), |pane| Anchor::at(pane.x + 5, pane.y + 1)),
-                };
+                let at = self.message_anchor(index);
                 self.open_message_menu(index, at);
             }
             Pane::Sidebar => {
@@ -259,6 +270,7 @@ impl App {
                 | HitId::Reaction(index, _)
                 | HitId::Image(index)
                 | HitId::Thread(index)
+                | HitId::CopyCode(index, _)
                 | HitId::ReplyQuote(index),
             ) => self.open_message_menu(index, at),
             Some(HitId::Room(index)) => self.open_room_menu(index, at),
@@ -399,6 +411,7 @@ impl App {
                 match run {
                     Run::Do(action) => self.perform(action),
                     Run::CopyPermalink => self.copy_permalink(index),
+                    Run::CopyCode(block) => self.copy_code_block(index, block),
                     Run::ReadBy => {
                         let read_by = &self.messages()[index].read_by;
                         let items = menu::read_by_items(read_by);

@@ -79,6 +79,9 @@ pub enum HitId {
     Overlay,
     /// The picture of the message at this index.
     Image(usize),
+    /// The "copy" label on the first line of a code block: message index and the
+    /// block's index among that message's code blocks.
+    CopyCode(usize, usize),
     /// The thread line under the message at this index.
     Thread(usize),
     /// The quoted-reply row above the message at this index.

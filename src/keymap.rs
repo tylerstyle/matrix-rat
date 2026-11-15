@@ -189,6 +189,7 @@ action_table! {
     Action::React => ("react", Context::Timeline, "React with an emoji"),
     Action::Delete => ("delete", Context::Timeline, "Delete message"),
     Action::Copy => ("copy", Context::Timeline, "Copy text"),
+    Action::CopyCode => ("copy_code", Context::Timeline, "Copy code block"),
     Action::Save => ("save", Context::Timeline, "Save file or picture"),
     Action::Open => ("open", Context::Timeline, "Open link, picture or file"),
     Action::OpenThread => ("open_thread", Context::Timeline, "Open the message's thread"),
@@ -587,6 +588,14 @@ pub const DEFAULT: &[Binding] = &[
         "Delete message",
     ),
     bind(Timeline, Char('c'), NONE, Action::Copy, "c", "Copy text"),
+    bind(
+        Timeline,
+        Char('C'),
+        NONE,
+        Action::CopyCode,
+        "C",
+        "Copy code block",
+    ),
     bind(
         Timeline,
         Char('s'),

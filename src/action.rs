@@ -44,6 +44,9 @@ pub enum Action {
     React,
     Delete,
     Copy,
+    /// Copy the content of a fenced code block of the selected message (asks which
+    /// when there are several).
+    CopyCode,
     Open,
     /// Jump to the message the selected one replies to.
     JumpToReply,

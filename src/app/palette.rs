@@ -47,6 +47,7 @@ impl App {
                     has_selection: true,
                     can_edit: m.editable(),
                     can_copy: !m.body.is_empty(),
+                    can_copy_code: m.has_code(),
                     can_save: self.can_save(),
                     can_open: m.image.is_some() || m.file.is_some() || has_links,
                     can_open_thread: !thread_open

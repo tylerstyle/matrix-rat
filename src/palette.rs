@@ -92,6 +92,7 @@ pub struct MessageCaps {
     pub can_forward: bool,
     pub can_user_info: bool,
     pub can_copy: bool,
+    pub can_copy_code: bool,
     pub can_save: bool,
     pub can_open: bool,
     pub can_open_thread: bool,
@@ -678,6 +679,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::UserInfo => sel.can_user_info,
         Action::OpenPinned => ctx.has_room && !in_pending,
         Action::Copy => sel.can_copy,
+        Action::CopyCode => sel.can_copy_code,
         Action::Save => sel.can_save,
         Action::Open => sel.can_open,
         Action::OpenThread => sel.can_open_thread,
@@ -783,6 +785,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::React
                 | Action::Delete
                 | Action::Copy
+                | Action::CopyCode
                 | Action::Save
                 | Action::Open
                 | Action::OpenThread

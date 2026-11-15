@@ -55,6 +55,9 @@ impl Row {
 
 const INDENT: &str = "  ";
 
+/// The label that copies a code block, at the right end of its first line.
+const COPY_LABEL: &str = "copy";
+
 /// "(edited)", "sending" or "not sent", shown after a message's text.
 /// `repeated_shield`: the message before it, from the same sender, carries the same
 /// shield, which is then not said again (in a bridged room every line would say it).
@@ -292,7 +295,14 @@ pub fn build_rows(
                 Vec::new()
             };
             let last = wrapped.len().saturating_sub(1);
+            // The block the previous row belonged to, to find the first row of each.
+            let mut in_block = None;
             for (n, row) in wrapped.drain(..).enumerate() {
+                let first_of = row
+                    .block
+                    .filter(|b| in_block != Some(*b))
+                    .filter(|b| rich.code_blocks.get(*b).is_some_and(|c| !c.text.is_empty()));
+                in_block = row.block;
                 let mut spans = vec![Span::raw(INDENT)];
                 let mut hits = Vec::new();
                 let mut col = INDENT.len();
@@ -315,43 +325,46 @@ pub fn build_rows(
                 }
                 // "(edited)", "sending" and "not sent" go after the text, or on a row of
                 // their own when there is no room left.
-                match marker(message, repeated_shield) {
-                    Some((label, role)) if n == last => {
-                        if col + 1 + width(&label) <= max_width {
-                            spans.push(Span::raw(" "));
-                            spans.push(Span::styled(label, theme.style(role)));
-                            rows.push(Row {
-                                line: Line::from(spans),
-                                msg: Some(i),
-                                source: i,
-                                hits,
-                                image: None,
-                            });
-                        } else {
-                            rows.push(Row {
-                                line: Line::from(spans),
-                                msg: Some(i),
-                                source: i,
-                                hits,
-                                image: None,
-                            });
-                            rows.push(Row::plain(
-                                Line::from(vec![
-                                    Span::raw(INDENT),
-                                    Span::styled(truncate(&label, body_width), theme.style(role)),
-                                ]),
-                                Some(i),
-                            ));
-                        }
+                let mut own_row = None;
+                if n == last
+                    && let Some((label, role)) = marker(message, repeated_shield)
+                {
+                    if col + 1 + width(&label) <= max_width {
+                        spans.push(Span::raw(" "));
+                        col += 1 + width(&label);
+                        spans.push(Span::styled(label, theme.style(role)));
+                    } else {
+                        own_row = Some(Row::plain(
+                            Line::from(vec![
+                                Span::raw(INDENT),
+                                Span::styled(truncate(&label, body_width), theme.style(role)),
+                            ]),
+                            Some(i),
+                        ));
                     }
-                    _ => rows.push(Row {
-                        line: Line::from(spans),
-                        msg: Some(i),
-                        source: i,
-                        hits,
-                        image: None,
-                    }),
                 }
+                // "copy" at the right end of a code block's first line, where it fits.
+                if let Some(block) = first_of {
+                    let label_width = width(COPY_LABEL);
+                    if col + 1 + label_width <= max_width {
+                        let start = max_width - label_width;
+                        spans.push(Span::raw(" ".repeat(start - col)));
+                        spans.push(Span::styled(COPY_LABEL, theme.style(Role::Muted)));
+                        hits.push((
+                            start as u16,
+                            (start + label_width) as u16,
+                            HitId::CopyCode(i, block),
+                        ));
+                    }
+                }
+                rows.push(Row {
+                    line: Line::from(spans),
+                    msg: Some(i),
+                    source: i,
+                    hits,
+                    image: None,
+                });
+                rows.extend(own_row);
             }
 
             // Reaction chips, wrapped onto further rows when they do not fit.
@@ -749,7 +762,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m) | HitId::ReplyQuote(m) | HitId::Sender(m)) if m == msg)
+            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m) | HitId::CopyCode(m, _) | HitId::ReplyQuote(m) | HitId::Sender(m)) if m == msg)
             {
                 frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }

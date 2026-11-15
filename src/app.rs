@@ -1,6 +1,7 @@
 //! Application state, input handling and the event loop.
 
 mod attach;
+mod code;
 mod complete;
 mod devices;
 mod drafts;
@@ -2440,6 +2441,7 @@ impl App {
                     self.show_toast("Nothing to copy");
                 }
             }
+            Action::CopyCode => self.copy_code_of_selected(),
             Action::Open => {
                 self.cancel_pending_jump();
                 let opened = match self.timeline.selected {
@@ -3719,6 +3721,14 @@ impl App {
                         self.jump_to_reply(index);
                     }
                     Some(HitId::Thread(index)) => self.open_thread(index),
+                    Some(HitId::CopyCode(message, block)) => {
+                        self.cancel_pending_jump();
+                        self.set_focus(Pane::Timeline);
+                        if self.selectable(message) {
+                            self.timeline.selected = Some(message);
+                        }
+                        self.copy_code_block(message, block);
+                    }
                     Some(HitId::Attachment(index)) => {
                         self.cancel_pending_jump();
                         self.remove_attachment(index);
