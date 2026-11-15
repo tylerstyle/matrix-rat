@@ -127,6 +127,19 @@ pub enum ManageCmd {
         room_id: String,
         level: NotifyLevel,
     },
+    /// Fetches a preview summary of a room before joining or knocking.
+    Preview {
+        request: u64,
+        target: String,
+        via: Vec<String>,
+    },
+    /// Asks to join a knock-enabled room with an optional reason.
+    Knock {
+        request: u64,
+        target: String,
+        via: Vec<String>,
+        reason: Option<String>,
+    },
 }
 
 /// Prints which room, never names, topics or who is being written to.
@@ -152,6 +165,20 @@ impl std::fmt::Debug for ManageCmd {
             Self::SetFavourite { room_id, on } => write!(f, "SetFavourite({room_id}, {on})"),
             Self::SetLowPriority { room_id, on } => write!(f, "SetLowPriority({room_id}, {on})"),
             Self::SetNotify { room_id, level } => write!(f, "SetNotify({room_id}, {level:?})"),
+            Self::Preview { request, via, .. } => {
+                write!(f, "Preview(request {request}, via {} servers)", via.len())
+            }
+            Self::Knock {
+                request,
+                via,
+                reason,
+                ..
+            } => write!(
+                f,
+                "Knock(request {request}, via {} servers, reason: {})",
+                via.len(),
+                reason.is_some()
+            ),
         }
     }
 }
@@ -194,6 +221,14 @@ pub enum ManageEvent {
         room_id: String,
         result: Result<Box<RoomDetails>, String>,
     },
+    Preview {
+        request: u64,
+        result: Result<Box<super::directory::RoomPreview>, String>,
+    },
+    Knocked {
+        request: u64,
+        result: Result<String, String>,
+    },
 }
 
 impl std::fmt::Debug for ManageEvent {
@@ -213,6 +248,12 @@ impl std::fmt::Debug for ManageEvent {
                 Ok(details) => write!(f, "Info({room_id}, {details:?})"),
                 Err(_) => write!(f, "Info({room_id}, failed)"),
             },
+            Self::Preview { request, result } => {
+                write!(f, "Preview(request {request}, ok: {})", result.is_ok())
+            }
+            Self::Knocked { request, result } => {
+                write!(f, "Knocked(request {request}, ok: {})", result.is_ok())
+            }
         }
     }
 }
@@ -447,6 +488,29 @@ impl Manager {
                 tokio::spawn(async move {
                     let result = leave(&client, &room_id).await;
                     emit(ManageEvent::Left { room_id, result });
+                });
+            }
+            ManageCmd::Preview {
+                request,
+                target,
+                via,
+            } => {
+                tokio::spawn(async move {
+                    let result = super::directory::fetch_preview(&client, &target, via)
+                        .await
+                        .map(Box::new);
+                    emit(ManageEvent::Preview { request, result });
+                });
+            }
+            ManageCmd::Knock {
+                request,
+                target,
+                via,
+                reason,
+            } => {
+                tokio::spawn(async move {
+                    let result = super::directory::knock(&client, &target, via, reason).await;
+                    emit(ManageEvent::Knocked { request, result });
                 });
             }
             ManageCmd::Info { room_id } => {
@@ -910,6 +974,11 @@ async fn leave(client: &Client, room_id: &str) -> Result<(), String> {
     ) {
         room.leave().await.map_err(|err| failed("leave", &err))?;
     }
+    cleanup_left_room(client, &room).await;
+    Ok(())
+}
+
+pub(super) async fn cleanup_left_room(client: &Client, room: &Room) {
     // Forgetting does not remove the room's unsent text from the store. The UI asks
     // for that (with the threads it knows) when the room leaves its list; the room's
     // own draft goes here already, while there still is a room to ask.
@@ -931,7 +1000,6 @@ async fn leave(client: &Client, room_id: &str) -> Result<(), String> {
             );
         }
     }
-    Ok(())
 }
 
 async fn with_member<F>(

@@ -7,6 +7,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomKind {
     Invite,
+    Knock,
     Favourite,
     Person,
     Room,
@@ -14,8 +15,9 @@ pub enum RoomKind {
 }
 
 impl RoomKind {
-    pub const SECTIONS: [RoomKind; 5] = [
+    pub const SECTIONS: [RoomKind; 6] = [
         RoomKind::Invite,
+        RoomKind::Knock,
         RoomKind::Favourite,
         RoomKind::Person,
         RoomKind::Room,
@@ -25,10 +27,23 @@ impl RoomKind {
     pub fn title(self) -> &'static str {
         match self {
             RoomKind::Invite => "Invites",
+            RoomKind::Knock => "Pending knocks",
             RoomKind::Favourite => "Favourites",
             RoomKind::Person => "People",
             RoomKind::Room => "Rooms",
             RoomKind::LowPriority => "Low priority",
+        }
+    }
+
+    pub fn is_pending(self) -> bool {
+        matches!(self, Self::Invite | Self::Knock)
+    }
+
+    /// Toast message shown when trying a member-only action on an unresolved invite or knock.
+    pub fn pending_hint(self) -> &'static str {
+        match self {
+            Self::Knock => "Wait for your join request to be accepted first",
+            _ => "Accept the invitation first",
         }
     }
 }
@@ -490,6 +505,11 @@ fn msg(sender: &str, day: &str, time: &str, body: &str) -> Message {
 }
 
 impl Room {
+    /// Whether this room is an unresolved invitation or outgoing join request.
+    pub fn is_pending(&self) -> bool {
+        self.kind.is_pending()
+    }
+
     /// Whether the room list shows the room as unread, for whatever reason.
     pub fn shows_unread(&self) -> bool {
         self.bold || self.unread > 0 || self.mention || self.marked_unread

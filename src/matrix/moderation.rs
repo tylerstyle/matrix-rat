@@ -1056,9 +1056,7 @@ mod tests {
                 loop {
                     match ev_b.recv().await.expect("worker stopped") {
                         MatrixEvent::Rooms(rooms)
-                            if rooms.iter().any(|r| {
-                                r.id == room_id && r.category != super::super::RoomCategory::Invite
-                            }) =>
+                            if rooms.iter().any(|r| r.id == room_id && !r.is_pending()) =>
                         {
                             break;
                         }

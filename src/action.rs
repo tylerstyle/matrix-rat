@@ -58,6 +58,7 @@ pub enum Action {
     OpenEmoji,
     AcceptInvite,
     DeclineInvite,
+    WithdrawKnock,
     LoginSubmit,
     LoginBrowser,
     RecoverySubmit,

@@ -11,7 +11,7 @@ use crate::action::Pane;
 use crate::lineedit::EditKeys;
 use crate::matrix::{ManageCmd, MatrixCmd};
 use crate::modal::{Modal, PinnedPopup, ReasonConfirmKind, ReasonConfirmPopup};
-use crate::model::{ItemRef, Message, MsgKind, PinnedMessage, ReadBy, Room, RoomKind, SendState};
+use crate::model::{ItemRef, Message, MsgKind, PinnedMessage, ReadBy, Room, SendState};
 use crate::palette::{ForwardTarget, Palette};
 use crate::text::sanitize_line;
 
@@ -269,8 +269,8 @@ impl App {
         let Some(room) = self.room() else {
             return;
         };
-        if room.kind == RoomKind::Invite {
-            self.show_toast("Accept the invitation first");
+        if room.is_pending() {
+            self.show_toast(room.kind.pending_hint());
             return;
         }
         let room_id = room.id.clone();

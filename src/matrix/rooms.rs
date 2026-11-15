@@ -980,10 +980,17 @@ impl Timelines {
                 Err(err) => self.fail("Could not join", err),
             },
             MatrixCmd::Leave { room_id } => match self.room(&room_id) {
-                Ok(room) => self.spawn("Could not leave", async move {
-                    room.leave().await?;
-                    Ok(())
-                }),
+                Ok(room) => {
+                    let client = self.client.clone();
+                    self.spawn("Could not leave", async move {
+                        let was_knocked = room.state() == matrix_sdk::RoomState::Knocked;
+                        room.leave().await?;
+                        if was_knocked {
+                            super::manage::cleanup_left_room(&client, &room).await;
+                        }
+                        Ok(())
+                    });
+                }
                 Err(err) => self.fail("Could not leave", err),
             },
             MatrixCmd::FetchAvatar { url } => self.media.fetch_avatar(url),
@@ -1064,7 +1071,9 @@ impl Timelines {
                 let still_in = self.room(&room_id).is_ok_and(|room| {
                     matches!(
                         room.state(),
-                        matrix_sdk::RoomState::Joined | matrix_sdk::RoomState::Invited
+                        matrix_sdk::RoomState::Joined
+                            | matrix_sdk::RoomState::Invited
+                            | matrix_sdk::RoomState::Knocked
                     )
                 });
                 if !still_in
@@ -1092,6 +1101,9 @@ impl Timelines {
             | MatrixCmd::ReportContent { .. }
             | MatrixCmd::SearchUsers { .. }
             | MatrixCmd::CancelUserSearch
+            | MatrixCmd::SearchDirectory { .. }
+            | MatrixCmd::DirectoryNextPage { .. }
+            | MatrixCmd::CancelDirectorySearch
             | MatrixCmd::FetchUserProfile { .. }
             | MatrixCmd::SetOwnDisplayName { .. }
             | MatrixCmd::SetOwnAvatar { .. }
@@ -1807,7 +1819,7 @@ mod tests {
 
     use crate::complete::MentionMark;
     use crate::format::parse_with_mentions;
-    use crate::matrix::{MatrixCmd, MatrixEvent, RoomCategory, spawn};
+    use crate::matrix::{MatrixCmd, MatrixEvent, spawn};
     use crate::paths::Paths;
 
     /// Alice logs in, fetches room members, mentions Bob, and Bob receives the event with
@@ -1868,10 +1880,7 @@ mod tests {
                 match events.recv().await.expect("worker stopped") {
                     MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
                     MatrixEvent::Rooms(rooms) => {
-                        for listed in rooms
-                            .into_iter()
-                            .filter(|r| r.category != RoomCategory::Invite)
-                        {
+                        for listed in rooms.into_iter().filter(|r| !r.is_pending()) {
                             let Ok(room_id) =
                                 <&matrix_sdk::ruma::RoomId>::try_from(listed.id.as_str())
                             else {
@@ -2036,7 +2045,7 @@ mod tests {
         use matrix_sdk::ruma::events::fully_read::FullyReadEventContent;
         use matrix_sdk::{Client, Room};
 
-        use crate::matrix::{MatrixEvent, RoomCategory, spawn};
+        use crate::matrix::{MatrixEvent, spawn};
         use crate::model::ItemRef;
         use crate::paths::Paths;
 
@@ -2096,7 +2105,7 @@ mod tests {
                             let found = rooms.iter().find(|summary| match room_id {
                                 Some(id) => summary.id == id,
                                 None => {
-                                    summary.category != RoomCategory::Invite
+                                    !summary.is_pending()
                                         && RoomId::parse(&summary.id)
                                             .ok()
                                             .and_then(|id| other.get_room(&id))
@@ -2312,7 +2321,7 @@ mod tests {
                     }
                     MatrixEvent::Rooms(rooms) => {
                         let shared = rooms.iter().find(|summary| {
-                            summary.category != RoomCategory::Invite
+                            !summary.is_pending()
                                 && RoomId::parse(&summary.id)
                                     .ok()
                                     .and_then(|id| other.get_room(&id))

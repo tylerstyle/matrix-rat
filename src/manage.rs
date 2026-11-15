@@ -41,14 +41,6 @@ impl std::fmt::Debug for Address {
 
 /// Formats a room address (`#alias:server` or `!id:server`) and `via` servers as
 /// accepted by the Join input.
-pub fn format_join_target(target: &str, via: &[String]) -> String {
-    if via.is_empty() {
-        target.to_owned()
-    } else {
-        format!("{target} {}", via.join(" "))
-    }
-}
-
 const NOT_AN_ADDRESS: &str =
     "That is not a room address. Use #room:server, !id:server or a matrix.to link.";
 const NOT_A_USER: &str = "A user ID looks like @name:server.";
@@ -336,17 +328,21 @@ pub fn parse_alias_local(input: &str) -> Result<String, String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
-    /// Pick one of the three below.
+    /// Pick one of the ways below.
     Choose,
     Join,
     Direct,
     Create,
+    /// Search the public room directory.
+    Browse,
+    /// Inspect an unjoined room's summary before joining or asking to join.
+    Preview,
     /// Invite someone to the room the popup was opened for.
     Invite,
 }
 
 impl Stage {
-    pub const CHOICES: [Stage; 3] = [Stage::Join, Stage::Direct, Stage::Create];
+    pub const CHOICES: [Stage; 4] = [Stage::Join, Stage::Direct, Stage::Create, Stage::Browse];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -354,6 +350,8 @@ impl Stage {
             Stage::Join => "Join a room",
             Stage::Direct => "Start a direct chat",
             Stage::Create => "Create a room",
+            Stage::Browse => "Browse public rooms",
+            Stage::Preview => "Room preview",
             Stage::Invite => "Invite to this room",
         }
     }
@@ -364,7 +362,32 @@ impl Stage {
             Stage::Join => "By its address or a matrix.to link",
             Stage::Direct => "With one person, by user ID",
             Stage::Create => "Private or public, with a name of your choice",
-            Stage::Choose | Stage::Invite => "",
+            Stage::Browse => "Discover rooms on this or another server",
+            Stage::Choose | Stage::Preview | Stage::Invite => "",
+        }
+    }
+}
+
+/// Action button inside the Room Preview screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewButton {
+    Open,
+    Accept,
+    Withdraw,
+    Join,
+    Knock,
+    Cancel,
+}
+
+impl PreviewButton {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open room",
+            Self::Accept => "Accept invite",
+            Self::Withdraw => "Withdraw request",
+            Self::Join => "Join room",
+            Self::Knock => "Ask to join",
+            Self::Cancel => "Cancel",
         }
     }
 }
@@ -404,7 +427,11 @@ pub enum Click {
     Favourite,
     /// Low priority on or off for the room in question, without a popup.
     LowPriority,
-    /// Room info for the open room, whatever has the focus (its name was clicked).
+    /// Pick a room directory search result.
+    BrowseRow(usize),
+    /// Click a button in the room preview screen.
+    PreviewBtn(usize),
+    /// Open the room info for the open room, whatever has the focus (its name was clicked).
     OpenInfo,
 }
 
@@ -440,6 +467,46 @@ pub struct NewPopup {
     pub user_searching: bool,
     /// Generation of the most recent user search started from this popup.
     pub user_search_gen: Option<u64>,
+    /// Public room directory search filter.
+    pub dir_query: LineEdit,
+    /// Optional server name for public room directory (`None` / blank = own homeserver).
+    pub dir_server: LineEdit,
+    /// Placeholder label for the own homeserver in the directory server field.
+    pub dir_default_server: Option<String>,
+    /// Public rooms returned so far for the active directory search.
+    pub dir_results: Vec<crate::matrix::PublicRoom>,
+    /// Highlighted row inside `dir_results`.
+    pub dir_selected: usize,
+    /// First visible result row in the scrollable directory list.
+    pub dir_scroll: usize,
+    /// Height of the directory list in rows (set by the UI renderer).
+    pub dir_page: usize,
+    /// Keeps `dir_selected` scrolled into view on the next draw.
+    pub dir_reveal: bool,
+    /// Whether another page of directory results exists on the server.
+    pub dir_has_more: bool,
+    /// True while an initial directory search is pending.
+    pub dir_searching: bool,
+    /// True while a pagination batch is pending.
+    pub dir_loading_more: bool,
+    /// Generation of the active directory search.
+    pub dir_search_gen: Option<u64>,
+    /// Directory lookup error shown cleanly instead of hanging.
+    pub dir_error: Option<String>,
+    /// Room ID or alias for the room preview screen.
+    pub preview_target: String,
+    /// Homeservers passed via `via=` for previewing/joining/knocking.
+    pub preview_via: Vec<String>,
+    /// True while `ManageCmd::Preview` is in flight.
+    pub preview_loading: bool,
+    /// Request number matching the pending `ManageEvent::Preview`.
+    pub preview_request: Option<u64>,
+    /// Fetched (or directory-seeded) preview summary.
+    pub preview: Option<crate::matrix::RoomPreview>,
+    /// Optional knock reason entered on the preview screen.
+    pub preview_reason: LineEdit,
+    /// True when the preview was opened from `Browse` so Cancel/Esc returns there.
+    pub preview_from_browse: bool,
 }
 
 /// Hand-written: what is typed here (names, topics, who is being written to) is private.
@@ -459,6 +526,9 @@ impl NewPopup {
     /// The address of a public room, or the encryption switch of a private one.
     pub const EXTRA: usize = 3;
     pub const BUTTON: usize = 4;
+
+    pub const DIR_SEARCH: usize = 0;
+    pub const DIR_SERVER: usize = 1;
 
     pub fn new(stage: Stage) -> Self {
         Self {
@@ -481,6 +551,26 @@ impl NewPopup {
             user_selected: None,
             user_searching: false,
             user_search_gen: None,
+            dir_query: LineEdit::new().with_max_bytes(FIELD_MAX),
+            dir_server: LineEdit::new().with_max_bytes(FIELD_MAX),
+            dir_default_server: None,
+            dir_results: Vec::new(),
+            dir_selected: 0,
+            dir_scroll: 0,
+            dir_page: 8,
+            dir_reveal: false,
+            dir_has_more: false,
+            dir_searching: false,
+            dir_loading_more: false,
+            dir_search_gen: None,
+            dir_error: None,
+            preview_target: String::new(),
+            preview_via: Vec::new(),
+            preview_loading: false,
+            preview_request: None,
+            preview: None,
+            preview_reason: LineEdit::new().with_max_bytes(FIELD_MAX),
+            preview_from_browse: false,
         }
     }
 
@@ -488,6 +578,8 @@ impl NewPopup {
         match self.stage {
             Stage::Choose => Stage::CHOICES.len(),
             Stage::Create => Self::BUTTON + 1,
+            Stage::Browse => 2,
+            Stage::Preview => usize::from(self.preview_has_reason()) + self.preview_buttons().len(),
             Stage::Join | Stage::Direct | Stage::Invite => 1,
         }
     }
@@ -501,6 +593,9 @@ impl NewPopup {
         match (self.stage, slot) {
             (Stage::Join, 0) => Some(&mut self.address),
             (Stage::Direct | Stage::Invite, 0) => Some(&mut self.user),
+            (Stage::Browse, Self::DIR_SEARCH) => Some(&mut self.dir_query),
+            (Stage::Browse, Self::DIR_SERVER) => Some(&mut self.dir_server),
+            (Stage::Preview, 0) if self.preview_has_reason() => Some(&mut self.preview_reason),
             (Stage::Create, Self::NAME) => Some(&mut self.name),
             (Stage::Create, Self::TOPIC) => Some(&mut self.topic),
             (Stage::Create, Self::EXTRA) if self.public => Some(&mut self.alias),
@@ -532,6 +627,11 @@ impl NewPopup {
         self.focus = 0;
         self.error = None;
         self.clear_user_search();
+        if stage != Stage::Preview {
+            self.preview_loading = false;
+            self.preview_request = None;
+            self.preview_from_browse = false;
+        }
     }
 
     pub fn clear_user_search(&mut self) {
@@ -555,6 +655,103 @@ impl NewPopup {
             Some(i) if delta < 0 => Some(i - 1),
             other => other,
         };
+    }
+
+    pub fn clear_dir_search(&mut self) {
+        self.dir_results.clear();
+        self.dir_selected = 0;
+        self.dir_scroll = 0;
+        self.dir_has_more = false;
+        self.dir_searching = false;
+        self.dir_loading_more = false;
+        self.dir_search_gen = None;
+        self.dir_error = None;
+    }
+
+    pub fn step_dir(&mut self, delta: isize) {
+        let len = self.dir_results.len();
+        if len == 0 {
+            self.dir_selected = 0;
+            return;
+        }
+        let next = (self.dir_selected as isize + delta).clamp(0, len as isize - 1) as usize;
+        if next != self.dir_selected {
+            self.dir_selected = next;
+            self.dir_reveal = true;
+        }
+    }
+
+    pub fn scroll_dir(&mut self, lines: isize) {
+        let max = self.dir_results.len().saturating_sub(self.dir_page.max(1));
+        self.dir_scroll = (self.dir_scroll as isize + lines).clamp(0, max as isize) as usize;
+        self.dir_reveal = false;
+    }
+
+    pub fn near_dir_end(&self) -> bool {
+        self.dir_has_more
+            && !self.dir_searching
+            && !self.dir_loading_more
+            && !self.dir_results.is_empty()
+            && self.dir_selected.saturating_add(3) >= self.dir_results.len()
+    }
+
+    pub fn preview_buttons(&self) -> Vec<PreviewButton> {
+        use crate::matrix::PreviewMembership;
+        if let Some(preview) = &self.preview {
+            match preview.membership {
+                PreviewMembership::Joined => {
+                    return vec![PreviewButton::Open, PreviewButton::Cancel];
+                }
+                PreviewMembership::Invited => {
+                    return vec![PreviewButton::Accept, PreviewButton::Cancel];
+                }
+                PreviewMembership::Knocked => {
+                    return vec![PreviewButton::Withdraw, PreviewButton::Cancel];
+                }
+                PreviewMembership::Banned => return vec![PreviewButton::Cancel],
+                PreviewMembership::None => {}
+            }
+            let mut out = Vec::new();
+            if preview.join_rule.can_join() {
+                out.push(PreviewButton::Join);
+            }
+            if preview.join_rule.can_knock() {
+                out.push(PreviewButton::Knock);
+            }
+            out.push(PreviewButton::Cancel);
+            out
+        } else if self.preview_loading {
+            vec![PreviewButton::Cancel]
+        } else {
+            // Preview failed or offline: still let the user attempt a join/knock or cancel.
+            vec![
+                PreviewButton::Join,
+                PreviewButton::Knock,
+                PreviewButton::Cancel,
+            ]
+        }
+    }
+
+    pub fn preview_has_reason(&self) -> bool {
+        self.preview_buttons().contains(&PreviewButton::Knock)
+    }
+
+    pub fn preview_button_at(&self, slot: usize) -> Option<PreviewButton> {
+        let base = usize::from(self.preview_has_reason());
+        slot.checked_sub(base)
+            .and_then(|i| self.preview_buttons().get(i).copied())
+    }
+
+    pub fn default_preview_focus(&self) -> usize {
+        if let Some(pos) = self
+            .preview_buttons()
+            .iter()
+            .position(|b| *b != PreviewButton::Cancel)
+        {
+            usize::from(self.preview_has_reason()) + pos
+        } else {
+            usize::from(self.preview_has_reason())
+        }
     }
 }
 
@@ -802,6 +999,14 @@ impl InfoPopup {
         self.kind == RoomKind::Invite
     }
 
+    pub fn knocked(&self) -> bool {
+        self.kind == RoomKind::Knock
+    }
+
+    pub fn pending(&self) -> bool {
+        self.kind.is_pending()
+    }
+
     pub fn direct(&self) -> bool {
         self.details
             .as_ref()
@@ -812,7 +1017,7 @@ impl InfoPopup {
     /// pass the filter.
     pub fn rows(&self) -> Vec<InfoRow> {
         let mut rows = Vec::new();
-        if !self.invited() {
+        if !self.pending() {
             rows.push(InfoRow::Favourite);
             rows.push(InfoRow::LowPriority);
             rows.push(InfoRow::Pinned);
@@ -1023,6 +1228,8 @@ impl InfoPopup {
     pub fn leave_label(&self) -> &'static str {
         if self.invited() {
             "Decline invitation"
+        } else if self.knocked() {
+            "Withdraw request"
         } else if self.direct() {
             "Leave this chat"
         } else {
@@ -1035,6 +1242,8 @@ impl InfoPopup {
     pub fn leave_confirm(&self) -> &'static str {
         if self.invited() {
             "Enter again to decline, Esc to keep it"
+        } else if self.knocked() {
+            "Enter again to withdraw, Esc to keep waiting"
         } else {
             "Enter again to leave, Esc to stay · this device forgets the room"
         }
@@ -1043,9 +1252,9 @@ impl InfoPopup {
     /// The room list's view of the room changed (an invitation was accepted, say).
     /// Returns whether the details have to be asked for again.
     pub fn set_kind(&mut self, kind: RoomKind) -> bool {
-        let was_invite = self.invited();
+        let was_pending = self.pending();
         self.kind = kind;
-        if was_invite != self.invited() {
+        if was_pending != self.pending() {
             self.confirm = None;
             self.editing = None;
             self.ban_prompt = None;
@@ -1560,6 +1769,9 @@ mod tests {
     fn form_state() {
         let mut form = NewPopup::new(Stage::Choose);
         assert!(!form.single && form.field_mut().is_none());
+        form.step(-1);
+        assert_eq!(form.choice, Stage::CHOICES.len() - 1);
+        assert_eq!(Stage::CHOICES[form.choice], Stage::Browse);
         form.step(-1);
         assert_eq!(form.choice, 2);
         form.go(Stage::CHOICES[form.choice]);

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use super::attach::Scope;
 use super::{App, ComposeMode};
 use crate::matrix::MatrixCmd;
+#[cfg(test)]
 use crate::model::RoomKind;
 
 /// How long nothing must be typed before the draft is saved, so that a crash or a
@@ -36,7 +37,7 @@ impl App {
     /// (the demo stores nothing). Nothing is written "to" an invitation.
     fn draft_scope(&self) -> Option<Scope> {
         self.matrix.as_ref()?;
-        if self.room()?.kind == RoomKind::Invite {
+        if self.room()?.is_pending() {
             return None;
         }
         self.attach_scope()

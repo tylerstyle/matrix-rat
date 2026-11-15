@@ -12,7 +12,9 @@ use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::search::{query_terms, window_snippet};
 use crate::matrix::{DetachedTimeline, MatrixCmd, SearchHit};
 use crate::modal::Modal;
-use crate::model::{ItemRef, Message, MsgKind, RoomKind};
+#[cfg(test)]
+use crate::model::RoomKind;
+use crate::model::{ItemRef, Message, MsgKind};
 
 /// Pause after typing before sending a search query to the index worker.
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -299,7 +301,7 @@ impl App {
         };
         let mut hits = Vec::new();
         for room in &self.rooms {
-            if room.kind == RoomKind::Invite {
+            if room.is_pending() {
                 continue;
             }
             for (idx, msg) in room.messages.iter().enumerate().rev() {
@@ -391,7 +393,7 @@ impl App {
             self.show_toast("That room is no longer available");
             return;
         };
-        if self.rooms[room_index].kind == RoomKind::Invite {
+        if self.rooms[room_index].is_pending() {
             self.show_toast("Join this room before jumping to a message in it");
             return;
         }

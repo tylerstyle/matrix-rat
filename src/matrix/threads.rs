@@ -337,7 +337,7 @@ mod tests {
     #[ignore = "needs a local homeserver"]
     async fn threads_hide_summarize_show_and_send() {
         use crate::format::parse;
-        use crate::matrix::{MatrixCmd, MatrixEvent, RoomCategory, spawn};
+        use crate::matrix::{MatrixCmd, MatrixEvent, spawn};
         use crate::paths::Paths;
         use matrix_sdk::Client;
         use matrix_sdk::config::SyncSettings;
@@ -400,7 +400,7 @@ mod tests {
                     MatrixEvent::Rooms(rooms) => {
                         let wanted = var("MATRIX_RAT_TEST_ROOM");
                         let shared = rooms.iter().find(|summary| {
-                            summary.category != RoomCategory::Invite
+                            !summary.is_pending()
                                 && wanted.as_ref().is_none_or(|id| *id == summary.id)
                                 && RoomId::parse(&summary.id)
                                     .ok()

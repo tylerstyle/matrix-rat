@@ -2,6 +2,7 @@
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
 mod convert;
+mod directory;
 mod drafts;
 mod keyring;
 mod manage;
@@ -19,6 +20,9 @@ mod threads;
 mod upload;
 mod verify;
 
+#[cfg(test)]
+pub use directory::PreviewJoinRule;
+pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
 pub use keyring::SecretStoreMode;
 pub use manage::{
     Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomMember,
@@ -295,6 +299,18 @@ pub enum MatrixCmd {
     },
     /// Clears the account's avatar picture.
     RemoveOwnAvatar,
+    /// Searches the public room directory on this or another server.
+    SearchDirectory {
+        generation: u64,
+        query: String,
+        server: Option<String>,
+    },
+    /// Loads the next page for the active room directory search.
+    DirectoryNextPage {
+        generation: u64,
+    },
+    /// Aborts any in-flight public room directory search.
+    CancelDirectorySearch,
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -393,6 +409,17 @@ impl std::fmt::Debug for MatrixCmd {
             }
             Self::SetOwnAvatar { .. } => f.write_str("SetOwnAvatar"),
             Self::RemoveOwnAvatar => f.write_str("RemoveOwnAvatar"),
+            Self::SearchDirectory {
+                generation, server, ..
+            } => write!(
+                f,
+                "SearchDirectory(generation {generation}, federated: {})",
+                server.as_deref().is_some_and(|s| !s.trim().is_empty())
+            ),
+            Self::DirectoryNextPage { generation } => {
+                write!(f, "DirectoryNextPage(generation {generation})")
+            }
+            Self::CancelDirectorySearch => f.write_str("CancelDirectorySearch"),
         }
     }
 }
@@ -421,10 +448,18 @@ pub enum RecoveryStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomCategory {
     Invite,
+    Knock,
     Favourite,
     Person,
     Room,
     LowPriority,
+}
+
+impl RoomCategory {
+    #[cfg(test)]
+    pub fn is_pending(self) -> bool {
+        matches!(self, Self::Invite | Self::Knock)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,6 +487,13 @@ pub struct RoomSummary {
     pub direct: bool,
     /// True when the room's notification mode is `Mute`.
     pub muted: bool,
+}
+
+impl RoomSummary {
+    #[cfg(test)]
+    pub fn is_pending(&self) -> bool {
+        self.category.is_pending()
+    }
 }
 
 /// A user returned by the homeserver's user directory search.
@@ -664,6 +706,13 @@ pub enum MatrixEvent {
         request: u64,
         result: Result<Box<UserProfile>, String>,
     },
+    /// Outcome of [`MatrixCmd::SearchDirectory`] or [`MatrixCmd::DirectoryNextPage`].
+    DirectoryResults(DirectoryPage),
+    /// Error from [`MatrixCmd::SearchDirectory`] or [`MatrixCmd::DirectoryNextPage`].
+    DirectoryError {
+        generation: u64,
+        message: String,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -809,6 +858,10 @@ impl std::fmt::Debug for MatrixEvent {
             }
             Self::UserProfile { request, result } => {
                 write!(f, "UserProfile(request {request}, ok: {})", result.is_ok())
+            }
+            Self::DirectoryResults(page) => write!(f, "DirectoryResults({page:?})"),
+            Self::DirectoryError { generation, .. } => {
+                write!(f, "DirectoryError(generation {generation})")
             }
         }
     }
@@ -1219,6 +1272,8 @@ impl Worker {
             search::Searcher::new(client.clone(), self.events.clone(), ignored.clone());
         let mut user_searcher =
             safety::UserSearcher::new(client.clone(), self.events.clone(), ignored.clone());
+        let mut dir_searcher =
+            directory::DirectorySearcher::new(client.clone(), self.events.clone());
         sync.start().await;
 
         let room_list = sync
@@ -1457,6 +1512,15 @@ impl Worker {
                     Some(MatrixCmd::RemoveOwnAvatar) => {
                         people_mgr.remove_avatar();
                     }
+                    Some(MatrixCmd::SearchDirectory {
+                        generation,
+                        query,
+                        server,
+                    }) => dir_searcher.start(generation, query, server),
+                    Some(MatrixCmd::DirectoryNextPage { generation }) => {
+                        dir_searcher.next_page(generation);
+                    }
+                    Some(MatrixCmd::CancelDirectorySearch) => dir_searcher.cancel(),
                     Some(command) => timelines.handle(command).await,
                 },
             }
@@ -1468,6 +1532,7 @@ impl Worker {
         manager.stop();
         searcher.stop();
         user_searcher.stop();
+        dir_searcher.stop();
         ignore_tracker.stop();
         timelines.close();
         // Do not hang on exit if the server is unreachable.
@@ -1633,6 +1698,7 @@ async fn summarize(
             continue;
         }
         let invited = room.state() == RoomState::Invited;
+        let knocked = room.state() == RoomState::Knocked;
         if invited
             && let Ok(invite) = room.invite_details().await
             && safety::is_ignored_in(ignored, &invite.inviter_id)
@@ -1643,6 +1709,8 @@ async fn summarize(
         let muted = room.notification_mode().await == Some(RoomNotificationMode::Mute);
         let category = if invited {
             RoomCategory::Invite
+        } else if knocked {
+            RoomCategory::Knock
         } else if room.is_favourite() {
             RoomCategory::Favourite
         } else if room.is_low_priority() {
@@ -1660,9 +1728,9 @@ async fn summarize(
                 .map(|name| name.to_string())
                 .unwrap_or_else(|_| room.room_id().to_string()),
         };
-        // No picture for invitations: fetching one would tell a stranger's server
-        // that the invitation was seen, before the user decided anything.
-        let avatar = if invited {
+        // No picture for invitations or unaccepted knocks: fetching one would tell
+        // a stranger's server that it was seen, before joining.
+        let avatar = if invited || knocked {
             None
         } else if let Some(avatar) = room.avatar_url() {
             Some(avatar)
@@ -1738,7 +1806,7 @@ mod tests {
                 match events.recv().await.expect("worker stopped") {
                     MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
                     MatrixEvent::Rooms(rooms) => {
-                        let joined = rooms.iter().find(|r| r.category != RoomCategory::Invite);
+                        let joined = rooms.iter().find(|r| !r.is_pending());
                         if let Some(room) = joined {
                             if !sent {
                                 sent = true;
@@ -1873,7 +1941,7 @@ mod tests {
                     | MatrixEvent::Error(err)
                     | MatrixEvent::ActionFailed(err) => panic!("{err}"),
                     MatrixEvent::Rooms(rooms) if room_id.is_none() => {
-                        let joined = rooms.iter().find(|r| r.category != RoomCategory::Invite);
+                        let joined = rooms.iter().find(|r| !r.is_pending());
                         if let Some(room) = joined {
                             room_id = Some(room.id.clone());
                             handle.send(MatrixCmd::OpenRoom {

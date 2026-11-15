@@ -231,7 +231,7 @@ fn short(text: &str) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::super::{MatrixCmd, RoomCategory, spawn};
+    use super::super::{MatrixCmd, spawn};
     use super::*;
     use crate::model::{ImageSource, ItemRef, SendState};
     use crate::paths::Paths;
@@ -380,7 +380,7 @@ mod tests {
                     MatrixEvent::UploadLimit(bytes) => limit = Some(bytes),
                     MatrixEvent::FilesNotSent(reason) => refused = Some(reason),
                     MatrixEvent::Rooms(rooms) if room_id.is_none() => {
-                        let joined = rooms.iter().find(|r| r.category != RoomCategory::Invite);
+                        let joined = rooms.iter().find(|r| !r.is_pending());
                         if let Some(room) = joined {
                             room_id = Some(room.id.clone());
                             handle.send(MatrixCmd::OpenRoom {

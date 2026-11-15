@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::hit::{HitId, InputTarget};
+use super::image::avatar_tile;
 use super::modal::{button, centered, field, popup, row};
 use crate::action::Action;
 use crate::app::App;
@@ -15,7 +16,7 @@ use crate::manage::{
     BanPrompt, Click, Confirm, InfoPopup, InfoRow, NewPopup, RoleChooser, Stage, confirm_keys,
     notify_label,
 };
-use crate::matrix::RoomMember;
+use crate::matrix::{PreviewMembership, RoomMember};
 use crate::text::{sanitize_line, truncate, width, wrap};
 use crate::theme::{Role, Theme};
 
@@ -67,12 +68,14 @@ pub fn draw_new(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopu
     match form.stage {
         Stage::Choose => chooser(frame, app, area, form),
         Stage::Create => create(frame, app, area, form),
+        Stage::Browse => browse(frame, app, area, form),
+        Stage::Preview => preview(frame, app, area, form),
         Stage::Join | Stage::Direct | Stage::Invite => one_field(frame, app, area, form),
     }
 }
 
 fn chooser(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
-    let Some(rect) = centered(area, 58, 12) else {
+    let Some(rect) = centered(area, 58, 15) else {
         return;
     };
     let inner = popup(
@@ -85,10 +88,10 @@ fn chooser(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
     );
     let theme = app.theme.clone();
     // Three rows each where there is room, otherwise packed.
-    let pitch = if inner.height >= 9 { 3 } else { 2 };
+    let pitch = if inner.height >= 12 { 3 } else { 2 };
     for (n, stage) in Stage::CHOICES.into_iter().enumerate() {
         let selected = form.choice == n;
-        let top = 1.min(inner.height.saturating_sub(6)) + n as u16 * pitch;
+        let top = 1.min(inner.height.saturating_sub(8)) + n as u16 * pitch;
         let title = row(inner, top);
         let summary = row(inner, top + 1);
         let marker = if selected { "› " } else { "  " };
@@ -144,6 +147,18 @@ fn message(frame: &mut Frame, theme: &Theme, form: &NewPopup, inner: Rect, top: 
 fn footer(form: &NewPopup) -> &'static str {
     if form.busy.is_some() {
         "Esc close"
+    } else if form.stage == Stage::Browse {
+        if form.single {
+            "↑↓ pick · Tab server · Enter preview · Esc close"
+        } else {
+            "↑↓ pick · Tab server · Enter preview · Esc back"
+        }
+    } else if form.stage == Stage::Preview {
+        if form.single && !form.preview_from_browse {
+            "Tab move · Enter confirm · Esc close"
+        } else {
+            "Tab move · Enter confirm · Esc back"
+        }
     } else if matches!(form.stage, Stage::Direct | Stage::Invite) && !form.user_results.is_empty() {
         if form.single {
             "↑↓ pick · Enter · Esc close"
@@ -227,6 +242,441 @@ fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) 
     message(frame, &theme, form, inner, btn_row + 2);
     if let Some(cursor) = cursor {
         frame.set_cursor_position(cursor);
+    }
+}
+
+fn browse(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
+    let Some(rect) = centered(area, 76, 24) else {
+        return;
+    };
+    let inner = popup(frame, app, area, rect, form.stage.title(), footer(form));
+    let theme = app.theme.clone();
+    let busy = form.busy.is_some();
+
+    let search_rect = row(inner, NewPopup::DIR_SEARCH as u16);
+    app.hits
+        .add(search_rect, hit(Click::Slot(NewPopup::DIR_SEARCH)));
+    let (search_cursor, search_val) = field(
+        frame,
+        &theme,
+        search_rect,
+        "Search",
+        &mut form.dir_query,
+        false,
+        !busy && form.focus == NewPopup::DIR_SEARCH,
+    );
+    if !busy {
+        app.hits.add(
+            search_val,
+            HitId::Input(InputTarget::NewField(NewPopup::DIR_SEARCH)),
+        );
+    }
+
+    let server_rect = row(inner, NewPopup::DIR_SERVER as u16);
+    app.hits
+        .add(server_rect, hit(Click::Slot(NewPopup::DIR_SERVER)));
+    let (server_cursor, server_val) = field(
+        frame,
+        &theme,
+        server_rect,
+        "Server",
+        &mut form.dir_server,
+        false,
+        !busy && form.focus == NewPopup::DIR_SERVER,
+    );
+    if !busy {
+        app.hits.add(
+            server_val,
+            HitId::Input(InputTarget::NewField(NewPopup::DIR_SERVER)),
+        );
+    }
+    if form.dir_server.as_str().is_empty()
+        && (busy || form.focus != NewPopup::DIR_SERVER)
+        && let Some(hs) = &form.dir_default_server
+        && server_val.width > 0
+    {
+        let hint = truncate(
+            &format!("this server ({})", sanitize_line(hs)),
+            server_val.width as usize,
+        );
+        frame.render_widget(
+            Line::from(Span::styled(hint, theme.style(Role::Muted))),
+            server_val,
+        );
+    }
+
+    let status_rect = row(inner, 2);
+    let (status, status_role) = if form.dir_searching {
+        ("Searching public rooms…".to_owned(), Role::Muted)
+    } else if let Some(err) = &form.dir_error {
+        (sanitize_line(err), Role::Error)
+    } else if form.dir_results.is_empty() {
+        ("No matching public rooms found.".to_owned(), Role::Muted)
+    } else {
+        let plus = if form.dir_has_more { "+" } else { "" };
+        let more = if form.dir_loading_more {
+            " · loading more…"
+        } else {
+            ""
+        };
+        (
+            format!("{}{} public rooms{more}", form.dir_results.len(), plus),
+            Role::Muted,
+        )
+    };
+    frame.render_widget(
+        Line::from(Span::styled(
+            truncate(&status, status_rect.width as usize),
+            theme.style(status_role),
+        )),
+        status_rect,
+    );
+
+    let list_top = 3u16;
+    let avail = inner.height.saturating_sub(list_top) as usize;
+    let per_page = (avail / 2).max(1);
+    form.dir_page = per_page;
+    let len = form.dir_results.len();
+    if len == 0 {
+        form.dir_selected = 0;
+        form.dir_scroll = 0;
+    } else {
+        if form.dir_selected >= len {
+            form.dir_selected = len - 1;
+        }
+        if std::mem::take(&mut form.dir_reveal) {
+            if form.dir_selected < form.dir_scroll {
+                form.dir_scroll = form.dir_selected;
+            } else if form.dir_selected >= form.dir_scroll + per_page {
+                form.dir_scroll = form.dir_selected + 1 - per_page;
+            }
+        }
+        let max_scroll = len.saturating_sub(per_page);
+        if form.dir_scroll > max_scroll {
+            form.dir_scroll = max_scroll;
+        }
+    }
+
+    for (offset, idx) in (form.dir_scroll..len).take(per_page).enumerate() {
+        let top = list_top + offset as u16 * 2;
+        if top >= inner.height {
+            break;
+        }
+        let r1 = row(inner, top);
+        let r2 = row(inner, top + 1);
+        let entry = &form.dir_results[idx];
+        let selected = idx == form.dir_selected;
+        let hovered = matches!(
+            app.hover,
+            Some(HitId::Do(Action::Manage(Click::BrowseRow(h)))) if h == idx
+        );
+        let marker = if selected { "› " } else { "  " };
+        let clean_name = entry.name.as_deref().map(sanitize_line);
+        let clean_alias = entry.alias.as_deref().map(sanitize_line);
+        let clean_id = sanitize_line(&entry.room_id);
+        let title_str = clean_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(clean_alias.as_deref())
+            .unwrap_or(&clean_id);
+
+        let mut badges: Vec<(&str, Role)> = Vec::new();
+        if entry.joined {
+            badges.push((" [joined]", Role::StatusOk));
+        } else if entry.knock {
+            badges.push((" [ask to join]", Role::Muted));
+        }
+        if entry.world_readable {
+            badges.push((" [world readable]", Role::Muted));
+        }
+        let members_str = format!(" {}m", entry.joined_members);
+        let reserved =
+            width(&members_str) + badges.iter().map(|(b, _)| width(b)).sum::<usize>() + 6; // marker(2) + tile(2) + space(1) + safety(1)
+
+        let title_budget = (r1.width as usize).saturating_sub(reserved).max(4);
+        let title_shown = truncate(title_str, title_budget);
+        let mut used = width(marker) + 3 + width(&title_shown);
+        let alias_extra = clean_alias
+            .as_deref()
+            .filter(|a| *a != title_str && !a.is_empty());
+
+        let name_style = if selected {
+            theme.style(Role::TitleFocused)
+        } else if hovered {
+            theme.style(Role::Hover)
+        } else {
+            theme.style(Role::Text)
+        };
+        let mut spans = vec![
+            Span::styled(marker, theme.style(Role::TitleFocused)),
+            avatar_tile(&theme, &entry.room_id, title_str),
+            Span::raw(" "),
+            Span::styled(title_shown, name_style),
+        ];
+        if let Some(alias) = alias_extra {
+            let room_for_alias =
+                (r1.width as usize).saturating_sub(used + reserved.saturating_sub(6) + 2);
+            if room_for_alias >= 6 {
+                let a = truncate(alias, room_for_alias);
+                used += 1 + width(&a);
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(a, theme.style(Role::Muted)));
+            }
+        }
+        for (badge, role) in badges {
+            if used + width(badge) + width(&members_str) <= r1.width as usize {
+                used += width(badge);
+                spans.push(Span::styled(badge, theme.style(role)));
+            }
+        }
+        let gap = (r1.width as usize).saturating_sub(used + width(&members_str));
+        if gap > 0 {
+            spans.push(Span::raw(" ".repeat(gap)));
+        }
+        spans.push(Span::styled(members_str, theme.style(Role::Muted)));
+        frame.render_widget(Line::from(spans), r1);
+
+        if r2.height > 0 {
+            let clean_topic = entry
+                .topic
+                .as_deref()
+                .map(sanitize_line)
+                .filter(|t| !t.is_empty());
+            let sub = if let Some(topic) = clean_topic {
+                topic
+            } else if alias_extra.is_none() && clean_name.as_deref().is_some_and(|n| !n.is_empty())
+            {
+                clean_id.clone()
+            } else {
+                String::new()
+            };
+            if !sub.is_empty() {
+                let text = format!(
+                    "     {}",
+                    truncate(&sub, r2.width.saturating_sub(5) as usize)
+                );
+                frame.render_widget(Line::from(Span::styled(text, theme.style(Role::Muted))), r2);
+            }
+            if hovered && !selected {
+                frame.buffer_mut().set_style(r2, theme.style(Role::Hover));
+            }
+        }
+        if hovered && !selected {
+            frame.buffer_mut().set_style(r1, theme.style(Role::Hover));
+        }
+        if !busy {
+            app.hits.add(r1, hit(Click::BrowseRow(idx)));
+            if r2.height > 0 {
+                app.hits.add(r2, hit(Click::BrowseRow(idx)));
+            }
+        }
+    }
+
+    if let Some(cursor) = search_cursor.or(server_cursor) {
+        frame.set_cursor_position(cursor);
+    }
+}
+
+fn preview(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
+    let inner_w = area.width.min(66).saturating_sub(4).max(1) as usize;
+    let has_reason = form.preview_has_reason();
+    let msg_text = form
+        .busy
+        .map(str::to_owned)
+        .or_else(|| form.error.as_deref().map(crate::text::sanitize));
+    let msg_lines = msg_text
+        .as_deref()
+        .map_or(0u16, |t| wrap(t, inner_w).len().clamp(1, 3) as u16);
+    let body_rows: u16 = if form.preview_loading {
+        4
+    } else if let Some(p) = &form.preview {
+        let topic_rows = p
+            .topic
+            .as_deref()
+            .map(sanitize_line)
+            .filter(|t| !t.is_empty())
+            .map_or(0u16, |t| wrap(&t, inner_w).len().min(3) as u16 + 1);
+        2 + topic_rows + 6
+    } else {
+        4
+    };
+    let tail_rows = if msg_lines > 0 { 1 + msg_lines } else { 0 };
+    let desired_h = (body_rows + u16::from(has_reason) * 2 + 1 + tail_rows + 2).max(7);
+    let Some(rect) = centered(area, 66, desired_h) else {
+        return;
+    };
+    let inner = popup(frame, app, area, rect, form.stage.title(), footer(form));
+    let theme = app.theme.clone();
+    let busy = form.busy.is_some();
+    let mut y = 0u16;
+
+    if form.preview_loading {
+        let target = truncate(&sanitize_line(&form.preview_target), inner.width as usize);
+        frame.render_widget(
+            Line::from(Span::styled(target, theme.style(Role::TitleFocused))),
+            row(inner, y),
+        );
+        y += 2;
+        frame.render_widget(
+            Line::from(Span::styled(
+                "Loading room preview…",
+                theme.style(Role::Muted),
+            )),
+            row(inner, y),
+        );
+        y += 2;
+    } else if let Some(p) = &form.preview {
+        let clean_name = p.name.as_deref().map(sanitize_line);
+        let clean_alias = p.canonical_alias.as_deref().map(sanitize_line);
+        let clean_id = sanitize_line(&p.room_id);
+        let title_str = clean_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(clean_alias.as_deref())
+            .unwrap_or(&clean_id);
+        let membership_badge = match p.membership {
+            PreviewMembership::Joined => Some((" · already joined", Role::StatusOk)),
+            PreviewMembership::Invited => Some((" · invited", Role::TitleFocused)),
+            PreviewMembership::Knocked => Some((" · request pending", Role::Muted)),
+            PreviewMembership::Banned => Some((" · banned", Role::Error)),
+            PreviewMembership::None => None,
+        };
+        let badge_w = membership_badge.map_or(0, |(b, _)| width(b));
+        let mut head = vec![
+            avatar_tile(&theme, &p.room_id, title_str),
+            Span::raw(" "),
+            Span::styled(
+                truncate(
+                    title_str,
+                    (inner.width as usize).saturating_sub(3 + badge_w),
+                ),
+                theme.style(Role::TitleFocused).add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if let Some((badge, role)) = membership_badge {
+            head.push(Span::styled(badge, theme.style(role)));
+        }
+        frame.render_widget(Line::from(head), row(inner, y));
+        y += 2;
+
+        if let Some(topic) = &p.topic {
+            let clean_topic = sanitize_line(topic);
+            if !clean_topic.is_empty() {
+                let non_topic = 10 + usize::from(has_reason) * 2;
+                let max_topic = (inner.height as usize).saturating_sub(non_topic).min(3);
+                let lines = wrap(&clean_topic, inner.width.max(1) as usize);
+                for line in lines.into_iter().take(max_topic) {
+                    if y + 5 < inner.height {
+                        frame.render_widget(
+                            Line::from(Span::styled(line, theme.style(Role::Muted))),
+                            row(inner, y),
+                        );
+                        y += 1;
+                    }
+                }
+                y += 1;
+            }
+        }
+
+        let join_rule_str = p.join_rule.label();
+        let (enc_str, enc_role) = match p.encrypted {
+            Some(true) => ("on", Role::StatusOk),
+            Some(false) => ("off · not encrypted", Role::Text),
+            None => ("unknown", Role::Muted),
+        };
+        let history_str = if p.world_readable {
+            "world readable (anyone can read)"
+        } else {
+            "members only"
+        };
+        let address = clean_alias
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| clean_id.clone());
+        let facts: [(&str, String, Role); 5] = [
+            ("Address", address, Role::Text),
+            ("Members", p.joined_members.to_string(), Role::Text),
+            ("Join rule", join_rule_str.to_owned(), Role::Text),
+            ("Encryption", enc_str.to_owned(), enc_role),
+            ("History", history_str.to_owned(), Role::Text),
+        ];
+        const LABEL_W: usize = 13;
+        for (label, value, role) in facts {
+            if y + usize::from(form.preview_has_reason()) as u16 * 2 + 2 >= inner.height {
+                break;
+            }
+            let r = row(inner, y);
+            let shown = truncate(&value, (r.width as usize).saturating_sub(LABEL_W));
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(format!("{label:<LABEL_W$}"), theme.style(Role::Muted)),
+                    Span::styled(shown, theme.style(role)),
+                ]),
+                r,
+            );
+            y += 1;
+        }
+        y += 1;
+    } else {
+        let target = truncate(&sanitize_line(&form.preview_target), inner.width as usize);
+        frame.render_widget(
+            Line::from(Span::styled(target, theme.style(Role::TitleFocused))),
+            row(inner, y),
+        );
+        y += 2;
+        frame.render_widget(
+            Line::from(Span::styled(
+                truncate(
+                    "Preview unavailable; you can still try joining or asking to join.",
+                    inner.width as usize,
+                ),
+                theme.style(Role::Muted),
+            )),
+            row(inner, y),
+        );
+        y += 2;
+    }
+
+    let mut cursor = None;
+    if form.preview_has_reason() && y < inner.height {
+        let reason_rect = row(inner, y);
+        app.hits.add(reason_rect, hit(Click::Slot(0)));
+        let (c, val_rect) = field(
+            frame,
+            &theme,
+            reason_rect,
+            "Reason",
+            &mut form.preview_reason,
+            false,
+            !busy && form.focus == 0,
+        );
+        if !busy {
+            app.hits
+                .add(val_rect, HitId::Input(InputTarget::NewField(0)));
+        }
+        cursor = c;
+        y += 2;
+    }
+
+    let btn_row = row(inner, y);
+    if !busy && btn_row.width > 0 {
+        let base = usize::from(form.preview_has_reason());
+        let mut x = btn_row.x;
+        for (idx, btn) in form.preview_buttons().into_iter().enumerate() {
+            let label = btn.label();
+            let w = (width(label) as u16).min(btn_row.right().saturating_sub(x));
+            if w == 0 {
+                break;
+            }
+            let r = Rect::new(x, btn_row.y, w, 1);
+            let focused = form.focus == base + idx;
+            button(frame, &theme, r, label, focused);
+            app.hits.add(r, hit(Click::PreviewBtn(idx)));
+            x = x.saturating_add(w + 2);
+        }
+    }
+    message(frame, &theme, form, inner, y + 2);
+    if let Some(c) = cursor {
+        frame.set_cursor_position(c);
     }
 }
 
@@ -457,7 +907,7 @@ fn create(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
             ("● on", Role::StatusOk)
         } else {
             (
-                "○ off · cannot be switched on by this app later",
+                "○ off · can be turned on in room settings later",
                 Role::Muted,
             )
         };
@@ -566,7 +1016,7 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
                 entries.extend(topic.into_iter().map(|line| Entry::Text(Line::from(line))));
             }
             entries.push(Entry::Text(Line::default()));
-            if !info.invited() {
+            if !info.pending() {
                 let (alias, role) = match &details.alias {
                     Some(alias) => (alias.clone(), Role::Text),
                     None => ("none".to_owned(), Role::Muted),
@@ -574,7 +1024,7 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
                 entries.push(fact(&theme, "Address", alias, role, room));
             }
             entries.push(fact(&theme, "Room ID", room_id.clone(), Role::Text, room));
-            if !info.invited() {
+            if !info.pending() {
                 let (text, role) = match details.encrypted {
                     Some(true) => ("on", Role::StatusOk),
                     Some(false) => ("off · messages here are not encrypted", Role::Text),
@@ -870,7 +1320,7 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
         Some(InfoRow::Pinned) => "View and jump to pinned messages.",
         Some(InfoRow::Invite) => "Invite someone by user ID.",
         Some(InfoRow::OwnName) => "Set a display name just for this room (clear for default).",
-        Some(InfoRow::Leave) if info.invited() => "",
+        Some(InfoRow::Leave) if info.pending() => "",
         Some(InfoRow::Leave) => "Leaving also removes the room and its history from this device.",
         Some(row @ InfoRow::Member(_)) => match info.member(row) {
             Some(member) if member.own => {

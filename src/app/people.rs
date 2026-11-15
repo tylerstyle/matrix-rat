@@ -13,7 +13,7 @@ use crate::matrix::{
     fallback_localpart,
 };
 use crate::modal::Modal;
-use crate::model::{MsgKind, RoomKind};
+use crate::model::MsgKind;
 use crate::people::{
     OwnProfilePopup, UserAction, UserInfoCtx, UserInfoPopup, UserInfoRow, UserPending,
 };
@@ -34,7 +34,7 @@ impl App {
     pub(crate) fn user_info_ctx(&self, user_id: &str) -> UserInfoCtx {
         UserInfoCtx {
             connected: self.matrix.is_some(),
-            can_mention: self.room().is_some_and(|r| r.kind != RoomKind::Invite),
+            can_mention: self.room().is_some_and(|r| !r.is_pending()),
             is_self: self.user_id.as_deref() == Some(user_id),
             ignored: self.ignored_users.contains(user_id),
         }

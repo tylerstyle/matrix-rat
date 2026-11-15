@@ -201,8 +201,8 @@ impl App {
         let target = Target::Composer {
             room_id: room.id.clone(),
         };
-        let can_attach = room.kind != RoomKind::Invite
-            && !matches!(self.compose_mode, super::ComposeMode::Edit(_));
+        let can_attach =
+            !room.is_pending() && !matches!(self.compose_mode, super::ComposeMode::Edit(_));
         let has_draft = !self.composer.is_empty() || !self.attachments().is_empty();
         self.set_focus(Pane::Composer);
         let items = menu::composer_items(can_attach, has_draft, &self.keymap);
