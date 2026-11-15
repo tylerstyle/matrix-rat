@@ -623,11 +623,10 @@ pub struct ReportForm {
     pub error: Option<String>,
 }
 
-/// Hand-written: event IDs, user IDs, names, and reasons stay out of logs.
+/// Hand-written: room, event and user ids, names, and reasons stay out of logs.
 impl std::fmt::Debug for ReportForm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReportForm")
-            .field("room_id", &self.room_id)
             .field("can_ignore", &self.can_ignore)
             .field("also_ignore", &self.also_ignore)
             .field("focus", &self.focus)
@@ -700,10 +699,10 @@ pub struct PinnedPopup {
     pub reveal: bool,
 }
 
+/// Hand-written: which room, its name and the pinned messages stay out of logs.
 impl std::fmt::Debug for PinnedPopup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PinnedPopup")
-            .field("room_id", &self.room_id)
             .field("items", &self.items.len())
             .field("loading", &self.loading)
             .field("can_pin", &self.can_pin)
@@ -1048,15 +1047,15 @@ pub enum ReasonConfirmKind {
     },
 }
 
+/// Hand-written: which room, which message and whom stay out of logs.
 impl std::fmt::Debug for ReasonConfirmKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Redact { room_id, .. } => write!(f, "ReasonConfirmKind::Redact({room_id})"),
-            Self::Ban { room_id, .. } => write!(f, "ReasonConfirmKind::Ban({room_id})"),
-            // Which room and whom stay out of logs.
-            Self::Kick { .. } => f.write_str("ReasonConfirmKind::Kick"),
-            Self::Unban { .. } => f.write_str("ReasonConfirmKind::Unban"),
-        }
+        f.write_str(match self {
+            Self::Redact { .. } => "ReasonConfirmKind::Redact",
+            Self::Ban { .. } => "ReasonConfirmKind::Ban",
+            Self::Kick { .. } => "ReasonConfirmKind::Kick",
+            Self::Unban { .. } => "ReasonConfirmKind::Unban",
+        })
     }
 }
 

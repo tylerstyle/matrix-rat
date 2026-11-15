@@ -42,16 +42,10 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
-/// Never logs room names, sender display names, or message snippets.
+/// Never logs ids, room names, sender display names, or message snippets.
 impl fmt::Debug for SearchHit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "SearchHit({}, {}, thread={})",
-            self.room_id,
-            self.event_id,
-            self.thread_root.as_deref().unwrap_or("-")
-        )
+        write!(f, "SearchHit(thread: {})", self.thread_root.is_some())
     }
 }
 
@@ -828,9 +822,8 @@ mod tests {
         assert!(!dbg.contains("Top Secret Room"));
         assert!(!dbg.contains("Secret Sender"));
         assert!(!dbg.contains("private message body"));
-        assert!(dbg.contains("!room:example.org"));
-        assert!(dbg.contains("$ev1:example.org"));
-        assert!(dbg.contains("$root:example.org"));
+        assert!(!dbg.contains("example.org"), "{dbg}");
+        assert_eq!(dbg, "SearchHit(thread: true)");
 
         let cmd = MatrixCmd::SearchMessages {
             generation: 7,

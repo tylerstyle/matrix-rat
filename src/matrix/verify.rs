@@ -121,7 +121,7 @@ pub struct SasEmoji {
 }
 
 /// Where a verification stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum VerifyStage {
     /// The other side asks to verify; accept or decline.
     Requested,
@@ -152,7 +152,23 @@ impl VerifyStage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Hand-written: the reason for a cancellation can be the other side's own words.
+impl std::fmt::Debug for VerifyStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Requested => f.write_str("Requested"),
+            Self::Waiting => f.write_str("Waiting"),
+            Self::Ready => f.write_str("Ready"),
+            Self::Starting => f.write_str("Starting"),
+            Self::Compare { emoji, .. } => write!(f, "Compare({} emoji)", emoji.len()),
+            Self::Confirmed => f.write_str("Confirmed"),
+            Self::Done => f.write_str("Done"),
+            Self::Cancelled { .. } => f.write_str("Cancelled"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct VerifyUpdate {
     pub flow: u64,
     /// The other side, ready to show: a device name or a user id.
@@ -163,6 +179,18 @@ pub struct VerifyUpdate {
     /// verification began. Otherwise it vouches for the other side.
     pub this_device: bool,
     pub stage: VerifyStage,
+}
+
+/// Hand-written: the other side is named by a device name or a user id.
+impl std::fmt::Debug for VerifyUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifyUpdate")
+            .field("flow", &self.flow)
+            .field("own", &self.own)
+            .field("this_device", &self.this_device)
+            .field("stage", &self.stage)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the user decided, inside a running verification.
@@ -216,7 +244,7 @@ impl std::fmt::Debug for VerifyCmd {
 }
 
 /// How setting up cross-signing went.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum SetUpOutcome {
     Done,
     /// The server wants the account password; `rejected` if the one given was wrong.
@@ -224,6 +252,17 @@ pub enum SetUpOutcome {
         rejected: bool,
     },
     Failed(String),
+}
+
+/// Hand-written: the reason for a failure is the SDK's error text.
+impl std::fmt::Debug for SetUpOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Done => f.write_str("Done"),
+            Self::NeedsPassword { rejected } => write!(f, "NeedsPassword(rejected: {rejected})"),
+            Self::Failed(_) => f.write_str("Failed"),
+        }
+    }
 }
 
 // ----- the worker side ----------------------------------------------------------------

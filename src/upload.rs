@@ -24,12 +24,19 @@ const THUMBNAIL: (u32, u32) = (800, 600);
 const MAX_ENTRIES: usize = 20_000;
 
 /// A file the user picked, as shown in the composer before it is sent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Chosen {
     pub path: PathBuf,
     /// Safe to show.
     pub name: String,
     pub size: u64,
+}
+
+/// Hand-written: the path and the name of a file can say a lot about the user.
+impl std::fmt::Debug for Chosen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Chosen({} bytes)", self.size)
+    }
 }
 
 fn home() -> PathBuf {

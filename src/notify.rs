@@ -356,12 +356,23 @@ struct DesktopJob {
     click: Option<(String, Clicks)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct PreparedDesktop {
     summary: String,
     body: String,
     urgent: bool,
     icon_path: Option<PathBuf>,
+}
+
+/// Hand-written: who wrote, what, and where the icon is stay out of logs.
+impl std::fmt::Debug for PreparedDesktop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedDesktop")
+            .field("body_bytes", &self.body.len())
+            .field("urgent", &self.urgent)
+            .field("icon", &self.icon_path.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 fn prepare_desktop(job: &DesktopJob) -> PreparedDesktop {

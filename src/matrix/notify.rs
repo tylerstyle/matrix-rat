@@ -36,7 +36,7 @@ pub struct Notice {
 /// Hand-written: the text of a message does not belong in a log.
 impl std::fmt::Debug for Notice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Notice({}, highlight: {})", self.room_id, self.highlight)
+        write!(f, "Notice(highlight: {})", self.highlight)
     }
 }
 

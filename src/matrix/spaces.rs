@@ -7,7 +7,7 @@ use matrix_sdk_ui::spaces::SpaceFilter;
 use crate::text::sanitize_line;
 
 /// A space the room list can be narrowed to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SpaceSummary {
     pub id: String,
     pub name: String,
@@ -15,6 +15,18 @@ pub struct SpaceSummary {
     pub level: u8,
     /// Ids of the rooms in it (for a top-level space: directly in it).
     pub rooms: Vec<String>,
+}
+
+/// Hand-written: which space, its name and its rooms stay out of logs.
+impl std::fmt::Debug for SpaceSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SpaceSummary(level {}, {} rooms)",
+            self.level,
+            self.rooms.len()
+        )
+    }
 }
 
 pub fn summarize(filters: &Vector<SpaceFilter>) -> Vec<SpaceSummary> {

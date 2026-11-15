@@ -669,7 +669,7 @@ impl RoomCategory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RoomSummary {
     pub id: String,
     pub name: String,
@@ -696,6 +696,22 @@ pub struct RoomSummary {
     pub muted: bool,
     /// Encrypted, or not known to be unencrypted yet.
     pub encrypted: bool,
+}
+
+/// Hand-written: which room, its name and its latest message stay out of logs.
+impl std::fmt::Debug for RoomSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoomSummary")
+            .field("category", &self.category)
+            .field("notifications", &self.notifications)
+            .field("mention", &self.mention)
+            .field("unread", &self.unread)
+            .field("marked_unread", &self.marked_unread)
+            .field("direct", &self.direct)
+            .field("muted", &self.muted)
+            .field("encrypted", &self.encrypted)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RoomSummary {

@@ -107,12 +107,14 @@ impl Drop for LineEdit {
     }
 }
 
+/// Never prints what was typed: a search, an address or a reason is private too. A
+/// secret does not even show its length.
 impl std::fmt::Debug for LineEdit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.secret {
             f.write_str("LineEdit(\"<redacted>\")")
         } else {
-            f.debug_tuple("LineEdit").field(&self.text).finish()
+            write!(f, "LineEdit({} bytes)", self.text.len())
         }
     }
 }
@@ -934,6 +936,9 @@ mod tests {
         assert_eq!(format!("{s:?}"), "LineEdit(\"<redacted>\")");
         assert!(!format!("{s:?}").contains("pa"));
         assert!(!format!("{s:?}").contains('5'));
+        // What is typed into an ordinary field is private too.
+        let plain = LineEdit::with_text("#secret:example.org");
+        assert_eq!(format!("{plain:?}"), "LineEdit(19 bytes)");
 
         let v = s.view(3, true);
         assert_eq!(v.text, "•••");

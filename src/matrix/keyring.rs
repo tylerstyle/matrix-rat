@@ -45,11 +45,18 @@ pub enum SecretStoreMode {
 }
 
 /// Identifies one account + device entry in the keyring without carrying secrets.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct KeyringKey {
     pub profile: String,
     pub user_id: String,
     pub device_id: String,
+}
+
+/// Hand-written: the account and the device stay out of logs.
+impl std::fmt::Debug for KeyringKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyringKey").finish_non_exhaustive()
+    }
 }
 
 impl KeyringKey {
@@ -88,7 +95,7 @@ impl KeyringKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum KeyringError {
     /// No session bus, SSH session (for auto), service absent, or timed out.
     Unavailable(String),
@@ -108,19 +115,53 @@ impl std::fmt::Display for KeyringError {
 
 impl std::error::Error for KeyringError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Hand-written: the message is the keyring's or the bus's own words, which can name
+/// the bus address; only the variant is printed.
+impl std::fmt::Debug for KeyringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unavailable(_) => "KeyringError::Unavailable",
+            Self::Locked(_) => "KeyringError::Locked",
+            Self::Failed(_) => "KeyringError::Failed",
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedPassphrase {
     pub passphrase: String,
     pub in_keyring: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Hand-written: never prints the passphrase.
+impl std::fmt::Debug for ResolvedPassphrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedPassphrase")
+            .field("in_keyring", &self.in_keyring)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub enum ResolvePassphraseError {
     KeyringLocked(String),
     KeyringUnavailable(String),
     KeyringFailed(String),
     MissingFromKeyring,
     FileStore(String),
+}
+
+/// Hand-written: the messages are error text from the keyring or the file system.
+impl std::fmt::Debug for ResolvePassphraseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::KeyringLocked(_) => "KeyringLocked",
+            Self::KeyringUnavailable(_) => "KeyringUnavailable",
+            Self::KeyringFailed(_) => "KeyringFailed",
+            Self::MissingFromKeyring => "MissingFromKeyring",
+            Self::FileStore(_) => "FileStore",
+        })
+    }
 }
 
 impl ResolvePassphraseError {

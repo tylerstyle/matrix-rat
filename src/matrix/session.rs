@@ -41,7 +41,7 @@ pub enum ReauthKind {
 
 /// Identity and auth kind preserved across a soft logout so logging in again keeps the same
 /// device and local encrypted store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReauthTarget {
     pub homeserver: String,
     pub user_id: String,
@@ -49,6 +49,15 @@ pub struct ReauthTarget {
     pub kind: ReauthKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+}
+
+/// Hand-written: the server, the account and the device stay out of logs.
+impl std::fmt::Debug for ReauthTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReauthTarget")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ReauthTarget {
