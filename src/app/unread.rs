@@ -31,7 +31,9 @@ const WISH_HOLDS: Duration = Duration::from_secs(10);
 const CATCH_UP: Duration = Duration::from_millis(700);
 
 /// Where the SDK's read marker stood in the latest timeline snapshot.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Default, Clone, PartialEq, Eq)]
 enum Marker {
     /// Absent (not loaded yet, above loaded history, or already past all events).
     #[default]
@@ -43,16 +45,42 @@ enum Marker {
     AtEnd,
 }
 
+/// Outside tests: which event stays out of logs.
+#[cfg(not(test))]
+impl std::fmt::Debug for Marker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Missing => "Missing",
+            Self::Before(_) => "Before",
+            Self::AtEnd => "AtEnd",
+        })
+    }
+}
+
 /// An unread message identity so the "new" line can step past a sender that is ignored
 /// while the room is open.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 struct UnreadTarget {
     id: String,
     sender: Option<String>,
 }
 
+/// Outside tests: which message and who sent it stay out of logs.
+#[cfg(not(test))]
+impl std::fmt::Debug for UnreadTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnreadTarget")
+            .field("sender", &self.sender.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The "new" line of the open room.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Default, Clone, PartialEq, Eq)]
 enum Line {
     /// There is none: nothing was unread, or the room has not been asked for.
     #[default]
@@ -73,7 +101,28 @@ enum Line {
     At(Vec<UnreadTarget>),
 }
 
-#[derive(Debug, Default)]
+/// Outside tests: the messages it is above are named by their ids.
+#[cfg(not(test))]
+impl std::fmt::Debug for Line {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("Off"),
+            Self::Waiting {
+                count,
+                marker,
+                early,
+            } => f
+                .debug_struct("Waiting")
+                .field("count", count)
+                .field("marker", marker)
+                .field("early", early)
+                .finish(),
+            Self::At(targets) => f.debug_tuple("At").field(targets).finish(),
+        }
+    }
+}
+
+#[derive(Default)]
 pub struct Unread {
     line: Line,
     /// Per room, the newest message a receipt was sent for from here. The read
@@ -89,6 +138,26 @@ pub struct Unread {
     catching_up: bool,
     /// When that first sync was through.
     caught_up_at: Option<Instant>,
+}
+
+/// Hand-written: rooms and messages are named by their ids. Of the line only its
+/// state is shown, as `Line` shows everything in tests.
+impl std::fmt::Debug for Unread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let line = match &self.line {
+            Line::Off => "Off",
+            Line::Waiting { .. } => "Waiting",
+            Line::At(_) => "At",
+        };
+        f.debug_struct("Unread")
+            .field("line", &line)
+            .field("read", &self.read.len())
+            .field("wishes", &self.wishes.len())
+            .field("pending_mark", &self.pending_mark.is_some())
+            .field("catching_up", &self.catching_up)
+            .field("caught_up_at", &self.caught_up_at.is_some())
+            .finish()
+    }
 }
 
 impl Unread {

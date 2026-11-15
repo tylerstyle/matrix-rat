@@ -19,7 +19,7 @@ use crate::model::RoomKind;
 /// kill loses little.
 pub(super) const IDLE: Duration = Duration::from_secs(3);
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Drafts {
     /// What the store holds per conversation, as far as known: what the worker
     /// reported, or what it was last told to save.
@@ -30,6 +30,18 @@ pub struct Drafts {
     touched: bool,
     /// When the draft last changed, if that has not been dealt with yet.
     changed: Option<Instant>,
+}
+
+/// Hand-written: drafts are what was typed, kept under the ids of rooms and threads.
+impl std::fmt::Debug for Drafts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Drafts")
+            .field("stored", &self.stored.len())
+            .field("seen", &self.seen.is_some())
+            .field("touched", &self.touched)
+            .field("changed", &self.changed.is_some())
+            .finish()
+    }
 }
 
 impl App {
