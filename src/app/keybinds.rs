@@ -252,7 +252,7 @@ impl App {
             clear_all,
             touched,
         ) {
-            tracing::warn!(?err, "could not save key bindings");
+            tracing::warn!(why = %crate::logsafe::kind(&err), "could not save key bindings");
             editor.feedback = Some((format!("Could not save config: {err}"), true));
         }
     }

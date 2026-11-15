@@ -749,7 +749,7 @@ impl App {
                 self.theme_rev += 1;
             }
             Err(err) => {
-                tracing::warn!(theme = name, ?err, "could not load theme");
+                tracing::warn!(theme = name, why = %crate::logsafe::kind_any(&err), "could not load theme");
                 self.show_toast(format!("Could not load theme {name}: {err:#}"));
             }
         }
@@ -865,7 +865,7 @@ impl App {
             return;
         };
         if let Err(err) = crate::config::save_setting(file, key, value) {
-            tracing::warn!(?err, key, "could not save setting");
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), key, "could not save setting");
             self.show_toast(format!("Could not save the setting: {err:#}"));
         }
     }
@@ -876,7 +876,7 @@ impl App {
             return;
         };
         if let Err(err) = crate::config::remove_setting(file, key) {
-            tracing::warn!(?err, key, "could not remove setting");
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), key, "could not remove setting");
             self.show_toast(format!("Could not save the setting: {err:#}"));
         }
     }

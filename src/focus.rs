@@ -36,7 +36,7 @@ pub fn raise_window(command: &str) {
             }
         });
     if let Err(err) = spawned {
-        tracing::debug!(%err, "could not start the window helper");
+        tracing::debug!(why = %crate::logsafe::kind(&err), "could not start the window helper");
     }
 }
 

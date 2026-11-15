@@ -207,14 +207,43 @@ fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore();
-        tracing::error!(%info, "panic");
+        // Where, not what: a panic's message can quote the text it failed on. The
+        // whole message still goes to the terminal, below.
+        match info.location() {
+            Some(at) => tracing::error!(file = place(at.file()), line = at.line(), "panic"),
+            None => tracing::error!("panic"),
+        }
         previous(info);
     }));
 }
 
+/// The file a panic happened in, without the directories before it: the path of a
+/// dependency's file starts with the home directory, and so with the user's name.
+fn place(file: &str) -> &str {
+    if !file.starts_with('/') {
+        return file;
+    }
+    // `…/registry/src/<index>/<crate>-<version>/src/…`: from the crate on.
+    file.split_once("/registry/src/")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map_or_else(|| file.rsplit('/').next().unwrap_or(file), |(_, rest)| rest)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::base64;
+    use super::{base64, place};
+
+    #[test]
+    fn a_panics_place_leaves_out_the_home_directory() {
+        assert_eq!(place("src/app.rs"), "src/app.rs");
+        assert_eq!(
+            place(
+                "/home/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ratatui-0.30.2/src/buffer.rs"
+            ),
+            "ratatui-0.30.2/src/buffer.rs"
+        );
+        assert_eq!(place("/home/alice/elsewhere/lib.rs"), "lib.rs");
+    }
 
     #[test]
     fn base64_pads_correctly() {
