@@ -366,9 +366,11 @@ Setting `preset = "vim"` keeps the default keys and adds:
   from), `Space` marks it suggested or not, `Del` twice takes it out of the space, and
   "Add a room…" picks one of your rooms or spaces to put in. A room's menu, its info
   and `Ctrl-P` offer "Add to a space…" and, while the list is narrowed to a space the
-  room is in, "Remove from" that space. `Ctrl-N` creates a space. Changing what is in a
-  space takes the right to do so there; where you may change the room as well, it names
-  the space as its parent too. The demo (`--demo`) has a space to try all this on.
+  room is in, "Remove from" that space. `Ctrl-N` creates a space; an invitation to one
+  is with the other invitations, and once accepted the space is in the list of spaces.
+  Changing what is in a space takes the right to do so there; where you may change the
+  room as well, it names the space as its parent too. The demo (`--demo`) has a space to
+  try all this on.
 - **Bridged chats** (Signal, WhatsApp…) show a quiet "sent on the sender's behalf" remark:
   the bridge encrypts for the people on the other side.
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
