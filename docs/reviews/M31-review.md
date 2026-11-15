@@ -82,3 +82,50 @@ Today [`LeftRooms::hides`](../../src/matrix/mod.rs#L2151-L2154) only filters `su
 
 - Checked [`src/matrix/manage.rs:2887-2895`](../../src/matrix/manage.rs#L2887-L2895), `3067`, `3097`, and `3156`:
   - Waiting on `!d.topic.is_empty() && d.encrypted == Some(true) && d.members.len() == 1 && d.can_invite && d.can_rename && d.can_set_topic` initially, `d.direct && d.encrypted.is_some()` at `3067`, `d.joined == 2 && d.alias.is_some()` at `3097`, and allowing `asked_again < 2` at `3156` for the forgotten-room `Info` check accurately reflects sliding sync delivering state/account-data/power changes asynchronously across multiple sync cycles rather than atomically.
+
+---
+
+## Re-check (`7a35244..f8c0279`)
+
+Reviewed `34cc0d0..HEAD` (`f8c0279`) on branch `sync-stall` (`7a35244`, `405848d`, `c1706ea`, `5e5e181`, `2d31f71`, and `f8c0279` merging `main` `41d097e`). No builds or tests were run (`hpfury` reported 926 unit tests green; server loops running).
+
+### Verdict
+
+**One concrete merge gap in `spaces` (`space_details` / `edit_space` ignore `left`) plus recommendation to handle cross-restart zombies via a one-shot startup `/joined_rooms` check; all original M31 findings (`1a`, `1b`, §2 consumers, §3 `MOST` + declined invites/knocks, §4 `relist`) are closed cleanly.**
+
+### Status of Original Findings
+
+1. **1a (`DirectChat` / `join` / previews, `405848d`) — Closed:**
+   - [`direct_chat`](../../src/matrix/manage.rs#L1665-L1680) now iterates `client.get_dm_rooms(&user).find(|room| !left.gone(room))`, skipping left zombies while still offering invitations via `client.invited_rooms()`.
+   - [`join`](../../src/matrix/manage.rs#L1637-L1650) (`!left.gone(&room)` so left-looking-joined rooms join for real and call `left.clear` on success), [`directory::map_public_room`](../../src/matrix/directory.rs#L368-L376), and [`directory::fetch_preview`](../../src/matrix/directory.rs#L451-L467) are fixed, and [`LeftRooms::clear`](../../src/matrix/left.rs#L117-L126) notifies `wake` so the list rebuilds immediately.
+2. **1b (Backoff / `due()` wakeup / `since` race, `7a35244` & `2d31f71`) — Closed:**
+   - [`pause`](../../src/matrix/left.rs#L37-L44) backs off `10 s -> 30 s -> 60 s -> 5 min`; [`answered`](../../src/matrix/left.rs#L201-L236) ignores stale `since` timestamps, resets `asking`, leaves `answers` unchanged when `joined == None` (HTTP/timeout failure) so it retries after the same `pause` without a tight error loop, and wakes the loop via `self.wake.notify_one()`.
+   - [`due`](../../src/matrix/left.rs#L262-L274) + [`next_ask`](../../src/matrix/left.rs#L239-L246) + [`woke`](../../src/matrix/left.rs#L250-L256) in [`Worker::run_session`](../../src/matrix/mod.rs#L1884-L1893): verified cancellation safety (`due` only runs `woke` after winning the inner `select!` right before returning to the outer select arm; `Notify` holds one permit across busy arms), no busy loop (`woke` clears `waiting` for `ask_at <= now` and `look` sets `asking = true; waiting = false`), and `left.due()` calls `previews.listen(client, &rooms, left)` plus emits both `Rooms` and `Spaces`.
+3. **2 (Consumers, `c1706ea`) — Closed (except merge gap in `spaces` below):**
+   - `LeftRooms::gone` / `is_left` now guard [`OwnMembers::ensure`](../../src/matrix/notify.rs#L259-L261), [`Previews::listen`](../../src/matrix/mod.rs#L2188), [`notify::notice`](../../src/matrix/notify.rs#L143), [`search::joined_room_ids`](../../src/matrix/search.rs#L82-L89) & [`resolve_hit`](../../src/matrix/search.rs#L400-L405), [`people`](../../src/matrix/people.rs#L452) (`load_own_profile`, `context_room_info`, `collect_shared_rooms`, `find_member_avatar`), [`Timelines::room`](../../src/matrix/rooms.rs#L219-L231), and [`spaces::summarize`](../../src/matrix/spaces.rs#L77-L120).
+   - **Checked `Timelines::room()` across all callers in [`src/matrix/rooms.rs`](../../src/matrix/rooms.rs):** `if room.state() == RoomState::Joined && self.left.gone(&room)` only rejects when `state == Joined` and `!Invited && !Knocked && is_left`. Legitimate actions on `Invited` / `Knocked` (`OpenRoom`, `MatrixCmd::Join`, `MatrixCmd::Leave` decline/withdraw, drafts, etc.) and `Left` / `Banned` (such as `ForgetDrafts` seeing `still_in == false`) are never refused. (Caveat: if an already-cached `Timeline` in `self.cache` is accessed directly after `Leave`, `self.timeline` hits `cache` before `self.room`, though `OpenRoom`, `OpenEvent`, `SaveDraft`, and `list_threads` call `self.room` first.)
+4. **3 (`MOST` eviction nit + declined invites/knocks, `7a35244` & `c1706ea`) — Closed:**
+   - [`mark_at`](../../src/matrix/left.rs#L95-L103) checks `&& !rooms.contains_key(room_id)` before evicting the oldest entry.
+   - [`MatrixCmd::Leave`](../../src/matrix/rooms.rs#L1121-L1139) marks `left.mark(room.room_id())` on declined invites and withdrawn knocks.
+5. **4 (`SetNotify` list update, `5e5e181`) — Closed:**
+   - [`ManageCmd::SetNotify`](../../src/matrix/manage.rs#L1229-L1246) notifies `relist` on `Ok(())`, triggering [`summarize`](../../src/matrix/mod.rs#L1894-L1898) at once.
+
+### Remaining Issues Found
+
+1. **Merge gap (`f8c0279`): [`spaces::space_details`](../../src/matrix/spaces.rs#L269-L292) & [`spaces::edit_space`](../../src/matrix/spaces.rs#L497-L500) do not check `LeftRooms`:**
+   - `space_details` reads `client.get_room(&event.id)` whenever `room.state() != RoomState::Left` and sets `child.joined = room.state() == RoomState::Joined` (and keeps its local name rather than `/hierarchy`'s `named`) without checking `!left.gone(&room)`.
+   - If a space contains a child sub-space `!sub` that was left in this session and came back looking `Joined`, `spaces::summarize` hides `!sub` from `self.spaces`, but `space_details` reports `child.joined = true`. Because [`App::child_joined`](../../src/app/spaces.rs#L40-L47) uses `self.listed_space(&child.room_id).is_some() || child.joined` for spaces, pressing `Enter` on `!sub` in [`App::open_child`](../../src/app/spaces.rs#L230-L245) calls `open_space_info("!sub", ...)` instead of `open_room_preview(...)`, hitting [`ManageCmd::Info`](../../src/matrix/manage.rs#L1006) (`"You are not in this room any more."`) and blocking preview/rejoin from the parent space.
+   - `edit_space` (`SpaceEdit::Add` at [`src/matrix/spaces.rs:497-500`](../../src/matrix/spaces.rs#L497-L500)) also only checks `.filter(|room| room.state() == RoomState::Joined)` without `!left.gone(room)`. Passing `&LeftRooms` into `manage::watch` -> `space_details` and `edit_space` fixes both.
+
+2. **Minor edges (non-blocking if desired, clean to tighten with #1):**
+   - When a late invitation or knock arrives for a left room that is a child of a space, [`entries.next()`](../../src/matrix/mod.rs#L1902-L1914) clears the room from `LeftRooms` inside `left.hides(room)` without re-emitting `MatrixEvent::Spaces`; if `Spaces` was emitted while `left.is_left` hid that child from `summary.rooms` / `summary.children` (`spaces::summarize`), `Spaces` stays stale until a space change occurs (even after accepting via `MatrixCmd::Join`, since `left.clear` finds it already removed).
+   - [`ManageCmd::Info`](../../src/matrix/manage.rs#L1006) checks `self.left.is_left(id)` directly rather than `!left.gone(&room)` (which would reject `Info` on a newly invited/knocked room if `Info` raced ahead of `entries.next()`).
+   - [`MatrixCmd::Join`](../../src/matrix/mod.rs#L2028-L2034) clears `left.clear(room_id)` before `timelines.handle(command)` rather than on `Ok(())` inside `rooms.rs:1115` (unlike `ManageCmd::Join`; fine for `Invited` rooms since `self.room` allows invites, though clearing on `Ok` avoids exposing a phantom room if `Join` failed).
+
+### Assessment of Intentionally Deferred Items
+
+1. **Declined invitation replayed by late sync as `Invited` — keep as-is (do not fix):**
+   - In the Matrix Client-Server spec, stripped state events in `invite_state` are not guaranteed to carry `event_id` or `origin_server_ts`, so a stale in-flight `Invited` replay genuinely cannot be distinguished from an immediate re-invite. Any time-based suppression risks hiding real invitations, and a stale `Invited` row (no joined-room side effects, dismissed by another Decline) is much more benign than a `Joined` zombie.
+2. **`LeftRooms` session-only across restarts — recommend a one-shot startup `/joined_rooms` check for `0.7` (prefer over an on-disk list):**
+   - Because the late sliding-sync answer puts the forgotten room back as `RoomState::Joined` while session 1 is running, the SDK persists that `Joined` zombie into the SQLite store on disk. On restart, sliding sync will never deliver `membership: leave` for a forgotten room, so the zombie reappears in session 2+ (and if the server already rejects `/leave` for a forgotten/non-member room, the user cannot remove it from the UI).
+   - **Recommended approach:** do **not** persist a `LeftRooms` list on disk (avoiding plaintext room IDs at rest or extra encrypted state cleanup on logout/reauth). Instead, snapshot `client.joined_rooms()` *before* `sync.start().await` (so nothing joined in the new session is touched), run one `joined_rooms::v3::Request` once `caught_up` becomes true (silently skipping on error/timeout so offline startup keeps working), and call `left.mark` + wake the list for any snapshot room still locally `Joined` that `/joined_rooms` omits. That reuses `LeftRooms` with zero on-disk metadata and closes the restart zombie cleanly.
