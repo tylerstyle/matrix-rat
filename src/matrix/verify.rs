@@ -114,10 +114,20 @@ impl Default for Security {
 }
 
 /// One of the seven pictures of an emoji comparison.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Tests compare it with `assert_eq!`: there it shows everything, for a failure to be read.
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SasEmoji {
     pub symbol: String,
     pub name: String,
+}
+
+/// Outside tests: what a comparison showed is not for a log.
+#[cfg(not(test))]
+impl std::fmt::Debug for SasEmoji {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SasEmoji")
+    }
 }
 
 /// Where a verification stands.

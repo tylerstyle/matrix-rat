@@ -750,7 +750,7 @@ impl std::fmt::Debug for UserMatch {
 
 /// Metadata attached to [`MatrixEvent::Timeline`] when it shows a detached
 /// slice centered around an older event rather than the live tip.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DetachedTimeline {
     /// Event id the detached slice was centered on.
     pub target_event: String,
@@ -758,6 +758,16 @@ pub struct DetachedTimeline {
     pub thread_root: Option<String>,
     /// Whether forward pagination has already reached the live end.
     pub reached_end: bool,
+}
+
+/// Hand-written: which event and thread stay out of logs.
+impl std::fmt::Debug for DetachedTimeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DetachedTimeline")
+            .field("thread", &self.thread_root.is_some())
+            .field("reached_end", &self.reached_end)
+            .finish_non_exhaustive()
+    }
 }
 
 pub enum MatrixEvent {
