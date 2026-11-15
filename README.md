@@ -116,7 +116,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `d` try decrypting again, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `o` open, `v` view picture, `s` save, `c` copy, `C` copy a code block, `d` try decrypting again, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
@@ -126,6 +126,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
+| `Alt-V` | write the message in your editor (`$VISUAL`, else `$EDITOR`); what you save comes back into the composer, unsent |
 | `F2` / `F3` | settings / next theme |
 | `Ctrl-Q` | quit |
 
@@ -233,8 +234,8 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
-- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
+- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**
 
@@ -251,6 +252,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | Setting | What it does |
 |---|---|
 | `room_previews` | latest message under each room, larger room pictures |
+| `link_previews` | `"off"` (default), `"unencrypted"` or `"all"`: a preview (title and two lines) under messages with a link, for the first link. **Your homeserver fetches the link**, see Good to know |
 | `sidebar_width` | width of the room list (or drag the divider) |
 | `read_receipts`, `read_markers`, `typing_notices` | what others see of you, and what you see of them |
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
@@ -275,6 +277,49 @@ Setting `preset = "vim"` keeps the default keys and adds:
   `notification_click_command` in the config file to the command your desktop offers
   for that, for example `hyprctl dispatch focuswindow class:kitty` on Hyprland or
   `swaymsg '[app_id="kitty"] focus'` on sway.
+- **Link previews** (Settings → Link previews, off by default) show the title and a short
+  description of the *first* link of a message, under it, for the messages that are on
+  screen. They come from your homeserver (`/_matrix/client/v1/media/preview_url`), which
+  means **the homeserver fetches the link: it learns which links you are shown** (and
+  the site learns the homeserver's address, not yours). Hence the choices: "unencrypted
+  rooms" never asks for a message in an encrypted room (or in a room that is not known
+  to be unencrypted yet), so that a link meant for the people in the room is not given
+  to the server; only "all rooms" does. Only `http`/`https` links are asked about, never
+  `matrix.to` or `matrix:` links, never links in messages from users you ignore, in
+  deleted messages or in ones that could not be decrypted. Each address is asked about
+  once per session (failures are remembered too), at most three requests are on their
+  way at once, each with a ten-second limit, and nothing is shown for a server without
+  the feature or with previews turned off, and no error either. What comes back is
+  written by the linked site: it is shown as plain text (control characters and
+  direction marks removed, lengths capped), never as formatting, and there is no image
+  in this version. `o` still opens the link; a preview is part of its message, not
+  something to select.
+- **Writing in your editor** (`Alt-V`, or "Write in $EDITOR" in the command palette): the
+  composer's text goes into a temporary file, matrix-rat gives the terminal to the
+  editor (`$VISUAL`, else `$EDITOR`, split into words like a shell does, so `code --wait`
+  and `emacsclient -t` work; with neither set you get a hint and no guess is made), and
+  when the editor ends the file's text is put into the composer, not sent. The editor
+  must stay until you are done (`code` needs `--wait`; one that returns at once gives
+  back what you had). The file is named `….md`, readable by you only, kept in
+  `$XDG_RUNTIME_DIR/matrix-rat/` (else under your state folder, and in the system's
+  temporary folder if neither can be used), and removed
+  afterwards, also when the editor fails; if the editor fails, or leaves something that
+  is not text, the composer stays as it was. Saving an empty file empties the composer.
+  Names you completed with `@` become plain text (they are sent as such unless completed
+  again); a reply or an edit stays one. Messages that arrive meanwhile wait and appear
+  when the editor closes; matrix-rat keeps syncing in the background. It works the same
+  over SSH and in tmux and in the demo. If you kill matrix-rat while the editor is open,
+  the temporary file stays behind (in that private folder).
+- **Copying code**: a message with fenced code blocks shows a small `copy` at the right
+  end of each block's first line (where the line leaves room for it), and `C` (or "Copy
+  code block" in the message menu and the command palette) copies one block: at once
+  if there is only one, else after you pick it from a list showing each block's language
+  and first line. What is copied is the block's text as the sender wrote it, without the
+  fence lines, with its indentation and tabs, and without the one newline that ends the
+  block; control characters and text-direction marks are dropped. Only formatted
+  messages have blocks (Markdown fences from matrix-rat and other clients, `<pre>` HTML);
+  a plain message that merely contains backticks is shown as written and has none. Like
+  all copying here it goes through the terminal (OSC 52), so the terminal must allow it.
 - **Key backup and recovery are not created here yet.** matrix-rat uses a backup and a
   recovery key that exist, and tells you when they are missing; to set them up (or reset
   them), use Element: Settings → Encryption.

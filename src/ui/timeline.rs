@@ -10,8 +10,12 @@ use super::hit::{Button, HitId};
 use crate::action::Action;
 use crate::action::Pane;
 use crate::app::App;
+use std::collections::BTreeSet;
+
+use crate::config::LinkPreviews;
 use crate::images::{ImageStore, Slot};
 use crate::model::{Message, MsgKind, Room, RoomKind, SendState, ThreadSummary};
+use crate::previews::{Preview, PreviewStore};
 use crate::rich::{self, Format, Rich, Segment};
 use crate::text::{truncate, width, wrap};
 use crate::theme::{Role, Theme};
@@ -55,6 +59,9 @@ impl Row {
 
 const INDENT: &str = "  ";
 
+/// The label that copies a code block, at the right end of its first line.
+const COPY_LABEL: &str = "copy";
+
 /// "(edited)", "sending" or "not sent", shown after a message's text.
 /// `repeated_shield`: the message before it, from the same sender, carries the same
 /// shield, which is then not said again (in a bridged room every line would say it).
@@ -81,8 +88,81 @@ fn marker(message: &Message, repeated_shield: bool) -> Option<(String, Role)> {
     }
 }
 
+/// What decides whether a message gets a link preview under it.
+pub struct PreviewView<'a> {
+    pub store: &'a PreviewStore,
+    pub mode: LinkPreviews,
+    /// The room is encrypted, or not known not to be.
+    pub encrypted: bool,
+    pub ignored: &'a BTreeSet<String>,
+}
+
+/// The rows of a room, and the links that would be previewed if they were known.
+pub struct Layout {
+    pub rows: Vec<Row>,
+    /// Message index and address of the link to ask the homeserver about, for each
+    /// message that has one (whether or not its preview is there yet).
+    pub wants: Vec<(usize, String)>,
+}
+
+/// The address that gets a preview under `message`: its first link, when previews are on
+/// for this room and the message is an ordinary, sent text from someone who is not
+/// ignored (a redacted message, one that could not be decrypted, a picture or a file has
+/// none), and the address is one the server is asked about.
+fn preview_url<'r>(message: &Message, rich: &'r Rich, view: &PreviewView) -> Option<&'r str> {
+    if !view.mode.allows(view.encrypted)
+        || !matches!(message.kind, MsgKind::Text | MsgKind::Emote)
+        || message.state != SendState::Sent
+        || message.image.is_some()
+        || message.file.is_some()
+        || message
+            .sender_id
+            .as_deref()
+            .is_some_and(|id| view.ignored.contains(id))
+    {
+        return None;
+    }
+    let url = rich.links.first()?;
+    crate::previews::eligible(url).then_some(url.as_str())
+}
+
+/// The rows under a message for its link's preview: the title in bold, and up to two
+/// lines of description. Plain text only: it is from whoever wrote the page.
+fn preview_rows(preview: &Preview, msg: usize, body_width: usize, theme: &Theme) -> Vec<Row> {
+    const BAR: &str = "│ ";
+    let room = body_width.saturating_sub(width(BAR)).max(1);
+    let row = |text: String, style: Style| Row {
+        line: Line::from(vec![
+            Span::raw(INDENT),
+            Span::styled(BAR, theme.style(Role::Muted)),
+            Span::styled(text, style),
+        ]),
+        msg: Some(msg),
+        source: msg,
+        hits: Vec::new(),
+        image: None,
+    };
+    let title = Style {
+        fg: theme.style(Role::Text).fg,
+        ..Style::new()
+    }
+    .add_modifier(Modifier::BOLD);
+    let mut rows = vec![row(truncate(&preview.title, room), title)];
+    let mut lines = wrap(&preview.description, room);
+    let more = lines.len() > 2;
+    lines.truncate(2);
+    if more && let Some(last) = lines.last_mut() {
+        *last = truncate(&format!("{last}…"), room);
+    }
+    for line in lines.into_iter().filter(|line| !line.is_empty()) {
+        rows.push(row(line, theme.style(Role::Muted)));
+    }
+    rows
+}
+
 /// Lays out a room's messages. `revealed` is the message whose spoilers are shown;
 /// `images` says how much space each picture gets.
+#[cfg(test)]
 pub fn build_rows(
     room: &Room,
     max_width: usize,
@@ -90,6 +170,19 @@ pub fn build_rows(
     revealed: Option<usize>,
     images: &ImageStore,
 ) -> Vec<Row> {
+    build_layout(room, max_width, theme, revealed, images, None).rows
+}
+
+/// [`build_rows`], with link previews when `previews` says so.
+pub fn build_layout(
+    room: &Room,
+    max_width: usize,
+    theme: &Theme,
+    revealed: Option<usize>,
+    images: &ImageStore,
+    previews: Option<&PreviewView>,
+) -> Layout {
+    let mut wants = Vec::new();
     let body_width = max_width.saturating_sub(INDENT.len()).max(1);
     // Foreground only, so the row's background (selection, hover) shows through.
     let text_style = Style {
@@ -292,7 +385,14 @@ pub fn build_rows(
                 Vec::new()
             };
             let last = wrapped.len().saturating_sub(1);
+            // The block the previous row belonged to, to find the first row of each.
+            let mut in_block = None;
             for (n, row) in wrapped.drain(..).enumerate() {
+                let first_of = row
+                    .block
+                    .filter(|b| in_block != Some(*b))
+                    .filter(|b| rich.code_blocks.get(*b).is_some_and(|c| !c.text.is_empty()));
+                in_block = row.block;
                 let mut spans = vec![Span::raw(INDENT)];
                 let mut hits = Vec::new();
                 let mut col = INDENT.len();
@@ -315,42 +415,55 @@ pub fn build_rows(
                 }
                 // "(edited)", "sending" and "not sent" go after the text, or on a row of
                 // their own when there is no room left.
-                match marker(message, repeated_shield) {
-                    Some((label, role)) if n == last => {
-                        if col + 1 + width(&label) <= max_width {
-                            spans.push(Span::raw(" "));
-                            spans.push(Span::styled(label, theme.style(role)));
-                            rows.push(Row {
-                                line: Line::from(spans),
-                                msg: Some(i),
-                                source: i,
-                                hits,
-                                image: None,
-                            });
-                        } else {
-                            rows.push(Row {
-                                line: Line::from(spans),
-                                msg: Some(i),
-                                source: i,
-                                hits,
-                                image: None,
-                            });
-                            rows.push(Row::plain(
-                                Line::from(vec![
-                                    Span::raw(INDENT),
-                                    Span::styled(truncate(&label, body_width), theme.style(role)),
-                                ]),
-                                Some(i),
-                            ));
-                        }
+                let mut own_row = None;
+                if n == last
+                    && let Some((label, role)) = marker(message, repeated_shield)
+                {
+                    if col + 1 + width(&label) <= max_width {
+                        spans.push(Span::raw(" "));
+                        col += 1 + width(&label);
+                        spans.push(Span::styled(label, theme.style(role)));
+                    } else {
+                        own_row = Some(Row::plain(
+                            Line::from(vec![
+                                Span::raw(INDENT),
+                                Span::styled(truncate(&label, body_width), theme.style(role)),
+                            ]),
+                            Some(i),
+                        ));
                     }
-                    _ => rows.push(Row {
-                        line: Line::from(spans),
-                        msg: Some(i),
-                        source: i,
-                        hits,
-                        image: None,
-                    }),
+                }
+                // "copy" at the right end of a code block's first line, where it fits.
+                if let Some(block) = first_of {
+                    let label_width = width(COPY_LABEL);
+                    if col + 1 + label_width <= max_width {
+                        let start = max_width - label_width;
+                        spans.push(Span::raw(" ".repeat(start - col)));
+                        spans.push(Span::styled(COPY_LABEL, theme.style(Role::Muted)));
+                        hits.push((
+                            start as u16,
+                            (start + label_width) as u16,
+                            HitId::CopyCode(i, block),
+                        ));
+                    }
+                }
+                rows.push(Row {
+                    line: Line::from(spans),
+                    msg: Some(i),
+                    source: i,
+                    hits,
+                    image: None,
+                });
+                rows.extend(own_row);
+            }
+
+            // The first link's preview, under the text.
+            if let Some(view) = previews
+                && let Some(url) = preview_url(message, &rich, view)
+            {
+                wants.push((i, url.to_owned()));
+                if let Some(preview) = view.store.get(url) {
+                    rows.extend(preview_rows(preview, i, body_width, theme));
                 }
             }
 
@@ -404,7 +517,7 @@ pub fn build_rows(
             row.source = i;
         }
     }
-    rows
+    Layout { rows, wants }
 }
 
 /// The line under a message that started a thread: how many replies, and who said
@@ -488,12 +601,30 @@ fn styled(segment: &Segment, base: Style, theme: &Theme, reveal: bool) -> (Strin
     (segment.text.clone(), style)
 }
 
+/// Everything the rows depend on: they are laid out again when any of it changes.
+#[derive(Debug, PartialEq)]
+struct RowKey {
+    room: String,
+    messages: u64,
+    width: usize,
+    /// Changes whenever a theme is (re)loaded, even under the same name.
+    theme: String,
+    revealed: Option<usize>,
+    /// Changes when a picture arrives or fails, which may change its height.
+    images: u64,
+    /// What decides about link previews: one arrives, the mode or the room's encryption
+    /// changes, or a sender is ignored.
+    previews: (u64, LinkPreviews, bool, usize),
+}
+
 /// The laid-out rows of the open room, reused between frames while nothing that
 /// affects them has changed.
 #[derive(Debug)]
 pub struct RowCache {
-    key: (String, u64, usize, String, Option<usize>, u64),
+    key: RowKey,
     rows: Vec<Row>,
+    /// The links to ask the homeserver about (see `Layout::wants`).
+    wants: Vec<(usize, String)>,
     /// What was at the bottom of the view when it was last drawn scrolled up.
     anchor: Option<Anchor>,
 }
@@ -644,28 +775,45 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         .timeline
         .selected
         .filter(|i| room.messages.get(*i).is_some_and(|m| m.has_spoiler()));
-    let key = (
-        room.id.clone(),
-        app.timeline_rev,
-        content.width as usize,
-        // Changes whenever a theme is (re)loaded, even under the same name.
-        app.theme_rev.to_string(),
+    let key = RowKey {
+        room: room.id.clone(),
+        messages: app.timeline_rev,
+        width: content.width as usize,
+        theme: app.theme_rev.to_string(),
         revealed,
-        // Changes when a picture arrives or fails, which may change its height.
-        app.images.layout_rev,
-    );
+        images: app.images.layout_rev,
+        previews: (
+            app.previews.rev,
+            app.link_previews,
+            room.encrypted,
+            app.ignored_users.len(),
+        ),
+    };
     let previous = app.row_cache.take();
     let mut cache = match previous {
         Some(cache) if cache.key == key => cache,
         previous => {
-            let mut rows = build_rows(room, content.width as usize, theme, revealed, &app.images);
+            let view = PreviewView {
+                store: &app.previews,
+                mode: app.link_previews,
+                encrypted: room.encrypted,
+                ignored: &app.ignored_users,
+            };
+            let Layout { mut rows, wants } = build_layout(
+                room,
+                content.width as usize,
+                theme,
+                revealed,
+                &app.images,
+                Some(&view),
+            );
             if app.read_markers {
                 rows = receipts::add(rows, room, content.width as usize, theme);
             }
             // Reading older messages (or paging forwards in a detached view): keep the
             // same bottom row on screen when messages arrive below or change height.
             if let Some(anchor) = previous
-                .filter(|old| old.key.0 == key.0)
+                .filter(|old| old.key.room == key.room)
                 .and_then(|old| old.anchor)
                 && (app.timeline.scroll > 0 || app.timeline.detached)
                 && let Some(at) = room.messages.iter().position(|m| m.id == anchor.id)
@@ -682,6 +830,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             RowCache {
                 key,
                 rows,
+                wants,
                 anchor: None,
             }
         }
@@ -749,7 +898,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m) | HitId::ReplyQuote(m) | HitId::Sender(m)) if m == msg)
+            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::Thread(m) | HitId::CopyCode(m, _) | HitId::ReplyQuote(m) | HitId::Sender(m)) if m == msg)
             {
                 frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }
@@ -797,6 +946,19 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             super::image::draw_inline(frame, &mut app.images, theme, inline);
         }
         n += count;
+    }
+    // Links of the messages that are on screen are asked about (a few at a time, once
+    // each: see `PreviewStore`); the answers lay the rows out again.
+    if app.can_fetch_previews()
+        && !cache.wants.is_empty()
+        && let (Some(first), Some(last)) = (rows.get(top), rows.get(last_visible.wrapping_sub(1)))
+    {
+        let on_screen = first.source..=last.source;
+        for (msg, url) in &cache.wants {
+            if on_screen.contains(msg) {
+                app.previews.request(url);
+            }
+        }
     }
     // Pictures within a page of the view are fetched ahead.
     let near = top.saturating_sub(height)..(top + 2 * height).min(rows.len());

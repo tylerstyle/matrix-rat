@@ -1,9 +1,11 @@
 //! Application state, input handling and the event loop.
 
 mod attach;
+mod code;
 mod complete;
 mod devices;
 mod drafts;
+mod external_editor;
 mod files;
 pub mod global_search;
 mod keybinds;
@@ -12,6 +14,7 @@ mod menu;
 mod moderation;
 mod palette;
 mod people;
+mod previews;
 mod rooms;
 mod safety;
 pub mod search;
@@ -217,6 +220,10 @@ pub struct App {
     detailed_notices: std::collections::HashMap<String, Instant>,
     /// Two lines per room in the room list, the second with the latest message.
     pub room_previews: bool,
+    /// For which rooms the homeserver is asked to preview links (off by default).
+    pub link_previews: crate::config::LinkPreviews,
+    /// What the homeserver said about the links on screen.
+    pub previews: crate::previews::PreviewStore,
     /// The user's spaces, and the one the room list is narrowed to (by id).
     pub spaces: Vec<crate::matrix::SpaceSummary>,
     pub space: Option<String>,
@@ -286,6 +293,8 @@ pub struct App {
     pub screen: Rect,
     pub should_quit: bool,
     pub suspend_requested: bool,
+    /// Set by `Action::ComposeInEditor`: the run loop hands the terminal to the editor.
+    pub editor_request: Option<crate::editor::Request>,
     pub dirty: bool,
     /// Pictures: the cache and the viewer.
     pub images: crate::images::ImageStore,
@@ -391,6 +400,7 @@ impl App {
         app.download_dir = config.download_dir.clone();
         app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
+        app.link_previews = config.link_previews;
         app.notify_mode = config.notifications;
         if config.notifications != crate::notify::NotifyMode::Off {
             app.notify_mode_on = config.notifications;
@@ -471,6 +481,8 @@ impl App {
             count_notices: Vec::new(),
             detailed_notices: Default::default(),
             room_previews: false,
+            link_previews: crate::config::LinkPreviews::Off,
+            previews: crate::previews::PreviewStore::default(),
             spaces: Vec::new(),
             space: None,
             space_at: None,
@@ -511,6 +523,7 @@ impl App {
             screen: Rect::default(),
             should_quit: false,
             suspend_requested: false,
+            editor_request: None,
             dirty: true,
             images: crate::images::ImageStore::new(crate::images::Graphics::halfblocks()),
             threads: Default::default(),
@@ -843,6 +856,7 @@ impl App {
             Setting::ThemeLight => self.theme_light.as_deref().unwrap_or("(unset)").to_owned(),
             Setting::SidebarWidth => self.sidebar.width.to_string(),
             Setting::RoomPreviews => switch(self.room_previews),
+            Setting::LinkPreviews => self.link_previews.label().to_owned(),
             Setting::Mouse => switch(self.mouse),
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
@@ -906,6 +920,12 @@ impl App {
                 self.read_markers = !self.read_markers;
                 self.save_setting("read_markers", self.read_markers);
                 // The rows are laid out afresh.
+                self.timeline_rev += 1;
+            }
+            Setting::LinkPreviews => {
+                self.link_previews = self.link_previews.step(if delta < 0 { -1 } else { 1 });
+                self.save_setting("link_previews", self.link_previews.name());
+                // The rows are laid out afresh (the previews appear or go).
                 self.timeline_rev += 1;
             }
             Setting::RoomPreviews => {
@@ -1192,6 +1212,7 @@ impl App {
         self.saved.clear();
         self.confirm_large = None;
         self.images.clear();
+        self.previews.clear();
         self.attach.clear();
         self.drafts = Default::default();
         self.unread = Default::default();
@@ -1902,6 +1923,7 @@ impl App {
         self.maybe_load_older();
         self.maybe_load_newer();
         self.send_image_requests();
+        self.send_preview_requests();
     }
 
     /// Sends a read receipt, but only for what the user can actually be looking at:
@@ -2440,6 +2462,8 @@ impl App {
                     self.show_toast("Nothing to copy");
                 }
             }
+            Action::CopyCode => self.copy_code_of_selected(),
+            Action::ComposeInEditor => self.request_editor(),
             Action::Open => {
                 self.cancel_pending_jump();
                 let opened = match self.timeline.selected {
@@ -2971,6 +2995,7 @@ impl App {
                 self.images.on_loaded(&key, full, result);
             }
             MatrixEvent::Avatar { url, result } => self.images.on_avatar(&url, result),
+            MatrixEvent::LinkPreview { url, result } => self.on_link_preview(&url, result),
             MatrixEvent::Spaces(_) if self.logged_out => {}
             MatrixEvent::Spaces(spaces) => self.apply_spaces(spaces),
             MatrixEvent::Notice(notice) => {
@@ -3140,6 +3165,7 @@ impl App {
                 room.alias = summary.alias;
                 room.direct = summary.direct;
                 room.muted = summary.muted;
+                room.encrypted = summary.encrypted;
                 room
             })
             .collect();
@@ -3719,6 +3745,14 @@ impl App {
                         self.jump_to_reply(index);
                     }
                     Some(HitId::Thread(index)) => self.open_thread(index),
+                    Some(HitId::CopyCode(message, block)) => {
+                        self.cancel_pending_jump();
+                        self.set_focus(Pane::Timeline);
+                        if self.selectable(message) {
+                            self.timeline.selected = Some(message);
+                        }
+                        self.copy_code_block(message, block);
+                    }
                     Some(HitId::Attachment(index)) => {
                         self.cancel_pending_jump();
                         self.remove_attachment(index);
@@ -4243,6 +4277,32 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             app.flush_images(true);
             terminal::suspend(&mut terminal)?;
             app.dirty = true;
+        }
+        if let Some(request) = app.take_editor_request() {
+            // As for Ctrl-Z: the terminal frees its copies of the pictures now.
+            app.flush_images(true);
+            // Its reader thread would take the keys meant for the editor: the stream
+            // is dropped, and a new one is read from once we are back.
+            drop(std::mem::replace(&mut events, EventStream::new()));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            terminal::absorb_reader_wake();
+            terminal::release();
+            let dir = paths.runtime_dir.clone();
+            // A blocking child: the worker, a task of its own, goes on syncing and its
+            // events wait in their channel.
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::editor::edit(&request, &dir, crate::editor::run_command)
+            })
+            .await
+            .unwrap_or(crate::editor::Outcome::Failed(
+                crate::editor::Failure::Launch,
+            ));
+            terminal::absorb_reader_wake();
+            let resumed = terminal::resume(&mut terminal);
+            // The screen was cleared: pictures are sent again when drawn.
+            app.images.forget_encoded();
+            app.finish_editor(outcome);
+            resumed?;
         }
         terminal::set_mouse(app.mouse)?;
         if std::mem::take(&mut app.repaint) {
@@ -4954,6 +5014,7 @@ mod tests {
 
     fn summary(id: &str, name: &str, category: RoomCategory, notifications: u64) -> RoomSummary {
         RoomSummary {
+            encrypted: false,
             id: id.into(),
             name: name.into(),
             category,
@@ -6064,6 +6125,19 @@ mod tests {
         assert!(app.sidebar_rows().len() > rows);
         app.on_event(key(KeyCode::Enter));
         assert_eq!(app.sidebar_rows().len(), rows);
+        // Link previews: off, unencrypted rooms, all rooms, round; arrows go both ways.
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(app.link_previews, crate::config::LinkPreviews::Off);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.link_previews, crate::config::LinkPreviews::Unencrypted);
+        app.on_event(key(KeyCode::Right));
+        assert_eq!(app.link_previews, crate::config::LinkPreviews::All);
+        app.on_event(key(KeyCode::Right));
+        assert_eq!(app.link_previews, crate::config::LinkPreviews::Off);
+        app.on_event(key(KeyCode::Left));
+        assert_eq!(app.link_previews, crate::config::LinkPreviews::All);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.link_previews, crate::config::LinkPreviews::Off);
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Enter));
         assert!(!app.mouse);

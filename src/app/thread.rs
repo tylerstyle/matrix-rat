@@ -893,6 +893,7 @@ mod tests {
         let (mut app, _terminal, _commands) = connected();
         app.open_thread(5);
         app.on_matrix(MatrixEvent::Rooms(vec![RoomSummary {
+            encrypted: false,
             id: "!b".into(),
             name: "Beta".into(),
             category: RoomCategory::Room,

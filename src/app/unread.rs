@@ -635,6 +635,7 @@ mod tests {
 
     fn listed(id: &str, name: &str) -> RoomSummary {
         RoomSummary {
+            encrypted: false,
             id: id.to_owned(),
             name: name.to_owned(),
             category: RoomCategory::Room,
@@ -653,6 +654,7 @@ mod tests {
 
     fn unread(id: &str, name: &str, count: u64) -> RoomSummary {
         RoomSummary {
+            encrypted: false,
             notifications: count,
             unread: true,
             ..listed(id, name)
@@ -661,6 +663,7 @@ mod tests {
 
     fn marked(id: &str, name: &str) -> RoomSummary {
         RoomSummary {
+            encrypted: false,
             marked_unread: true,
             ..listed(id, name)
         }
