@@ -35,7 +35,7 @@ notifications and themes that follow your desktop are all there.
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
 | 🎨 **Yours to shape** | Twelve built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
-| 🔔 **Notifications** | Desktop notifications with the chat's picture (click one to open its room), or plain ones through the terminal; none for what you are reading right now. |
+| 🔔 **Notifications** | Desktop notifications with the chat's picture (click one to open its room), or plain ones through the terminal; none for what you are reading right now. Keywords of your own count like a mention. |
 
 ## Install
 
@@ -319,6 +319,11 @@ Setting `preset = "vim"` keeps the default keys and adds:
   the bridge encrypts for the people on the other side.
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
   once at start.
+- **Notification keywords** (Settings → Notification keywords, or `Ctrl-P` "keywords")
+  are words that make a message notify you like a mention, with its room marked as
+  such. They are push rules on your homeserver, so Element and your other clients use
+  the same list, and a change made there shows here at once. `Enter` adds what you
+  typed, `Del` twice removes the selected one.
 - **Clicking a desktop notification** opens its room in the matrix-rat that showed it
   (where the notification service supports actions). The terminal window is brought to
   the front on [niri](https://github.com/YaLTeR/niri) by itself; elsewhere, set
