@@ -483,9 +483,16 @@ differentiators and can be reviewed with fake data in days.
     `NO_COLOR` and a high-contrast theme. Owed from 0.5: server tests for polls and
     stickers, a link given at start on a fresh login, the flaky room test, the installed
     icon in notifications (done, on main).
-  - **Later, by demand:** space management, several accounts in one window, QR login, other
-    terminals' picture protocols, other systems and prebuilt binaries, languages, export,
-    custom emoji as pictures and in reactions, playing audio and voice messages inside the
+  - **0.7 (chosen by the user on 2026-11-15 from a ranked list):** (a) a guard against a sync
+    that has stopped delivering updates (seen rarely against the test server: notice it,
+    reconnect, say so); (b) custom emoji as pictures in messages and reactions, and reacting
+    with one; (c) space management (create a space, add and remove rooms); (d) the rest of
+    the debug-output hardening (about 40 derived types); (e) prebuilt binaries on the
+    release page, and what other systems would take. Also asked for: a rundown on picture
+    protocols other than kitty's (given in the conversation; see "Open requests" if it
+    turns into work).
+  - **Later, by demand:** several accounts in one window, QR login, other
+    terminals' picture protocols, languages, export, playing audio and voice messages inside the
     app instead of in the system's player, and "popping out" a chat into a window of its own
     (both asked for by the user on 2026-11-15; a second terminal with `matrix-rat <room link>`
     needs several instances on one profile, which the profile lock forbids today).
