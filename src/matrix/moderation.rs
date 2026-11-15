@@ -330,7 +330,7 @@ async fn build_cached_pinned(
     }
 }
 
-fn format_day_time(ts: MilliSecondsSinceUnixEpoch) -> (String, String) {
+pub(super) fn format_day_time(ts: MilliSecondsSinceUnixEpoch) -> (String, String) {
     let Ok(millis) = i64::try_from(u64::from(ts.get())) else {
         return (String::new(), String::new());
     };
@@ -346,7 +346,7 @@ async fn sender_display_name(room: &Room, user_id: &matrix_sdk::ruma::UserId) ->
     search::cached_sender_name(room, user_id, &mut cache).await
 }
 
-fn is_event_redacted(event: &TimelineEvent) -> bool {
+pub(super) fn is_event_redacted(event: &TimelineEvent) -> bool {
     if let Ok(raw) = serde_json::from_str::<serde_json::Value>(event.raw().json().get())
         && raw
             .get("unsigned")

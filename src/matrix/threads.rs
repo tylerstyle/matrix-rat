@@ -1,12 +1,18 @@
-//! Threads: a timeline that shows one thread, and the line under a message that
-//! started one.
+//! Threads: a timeline that shows one thread, the line under a message that started
+//! one, and the list of a room's threads.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use matrix_sdk::deserialized_responses::TimelineEvent;
+use matrix_sdk::room::ListThreadsOptions;
+use matrix_sdk::ruma::api::client::threads::get_threads::v1::IncludeThreads;
 use matrix_sdk::ruma::events::receipt::{ReceiptThread, ReceiptType};
-use matrix_sdk::ruma::{EventId, MilliSecondsSinceUnixEpoch, UserId};
+use matrix_sdk::ruma::{
+    EventId, MilliSecondsSinceUnixEpoch, OwnedRoomId, OwnedUserId, UInt, UserId,
+};
 use matrix_sdk::{Room, ThreadingSupport};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
@@ -15,8 +21,10 @@ use matrix_sdk_ui::timeline::{
 };
 
 use super::convert::display_name;
-use crate::model::{ItemRef, Message, ThreadSummary};
-use crate::text::{sanitize_line, truncate};
+use super::safety::IgnoredSet;
+use super::{moderation, search};
+use crate::model::{ItemRef, Message, ThreadInfo, ThreadSummary};
+use crate::text::{first_line, sanitize_line, truncate};
 
 /// Replies in threads are shown in their thread only, so they must not count as
 /// unread messages of the room either.
@@ -235,6 +243,193 @@ async fn reply_unread(
         }
     }
     true
+}
+
+/// Threads asked for at a time; more of a page than this is not looked at.
+const LIST_PAGE: u32 = 25;
+/// How long the homeserver has for a page of its thread list.
+const LIST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Longest start of a thread's first message, and longest name, kept for the list.
+const LIST_TEXT: usize = 200;
+const LIST_NAME: usize = 64;
+/// A continuation token longer than this is not one a sane server sends: the list
+/// ends there.
+const LIST_TOKEN: usize = 1024;
+
+/// A page of a room's threads, the answer to [`super::MatrixCmd::ListThreads`].
+pub struct ThreadPage {
+    pub room_id: String,
+    pub generation: u64,
+    /// Newest activity first, as the server orders them.
+    pub threads: Vec<ThreadInfo>,
+    /// Where the list continues; `None` at its end.
+    pub next: Option<String>,
+}
+
+/// Counts only: the room, the threads and the server's token stay out of logs.
+impl std::fmt::Debug for ThreadPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadPage")
+            .field("generation", &self.generation)
+            .field("threads", &self.threads.len())
+            .field("more", &self.next.is_some())
+            .finish()
+    }
+}
+
+/// One page of the room's threads from the homeserver's thread list, starting at
+/// `from` (`None`: the newest). `mine` asks only for threads the user took part in.
+/// The SDK decrypts the first messages of encrypted rooms. Threads started by ignored
+/// users are left out, as their first message is in the room. `None` when the server
+/// has no such list or could not give it; the reason is logged without the server's
+/// words.
+pub async fn list(
+    room: &Room,
+    from: Option<String>,
+    mine: bool,
+    read: &ReadMarks,
+    ignored: &IgnoredSet,
+) -> Option<(Vec<ThreadInfo>, Option<String>)> {
+    let options = ListThreadsOptions {
+        include_threads: if mine {
+            IncludeThreads::Participated
+        } else {
+            IncludeThreads::All
+        },
+        from,
+        limit: Some(UInt::from(LIST_PAGE)),
+    };
+    let roots = match tokio::time::timeout(LIST_TIMEOUT, room.list_threads(options)).await {
+        Ok(Ok(roots)) => roots,
+        Ok(Err(err)) => {
+            let status = err
+                .as_client_api_error()
+                .map(|err| err.status_code.as_u16());
+            tracing::warn!(?status, "the thread list could not be loaded");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!("the thread list took too long");
+            return None;
+        }
+    };
+    let mut names = HashMap::new();
+    let mut threads = Vec::new();
+    for root in roots.chunk.into_iter().take(LIST_PAGE as usize) {
+        if let Some(thread) = describe(room, root, read, ignored, &mut names).await {
+            threads.push(thread);
+        }
+    }
+    let next = roots
+        .prev_batch_token
+        .filter(|token| !token.is_empty() && token.len() <= LIST_TOKEN);
+    Some((threads, next))
+}
+
+/// What the list shows of the thread that starts at `root`.
+async fn describe(
+    room: &Room,
+    root: TimelineEvent,
+    read: &ReadMarks,
+    ignored: &IgnoredSet,
+    names: &mut HashMap<(OwnedRoomId, OwnedUserId), String>,
+) -> Option<ThreadInfo> {
+    let root_id = root.event_id()?.to_owned();
+    let sender = root.sender()?;
+    let own = room.own_user_id();
+    if sender != own && ignored.contains(&sender) {
+        return None;
+    }
+    let mut thread = ThreadInfo {
+        root: root_id.to_string(),
+        sender: short_name(room, &sender, names).await,
+        text: first_message(&root),
+        replies: root.thread_summary.summary().map_or(0, |s| s.num_replies),
+        mine: sender == own || participated(&root),
+        ..ThreadInfo::default()
+    };
+    // Who wrote the newest reply, and when, are readable in encrypted rooms too.
+    if let Some(newest) = root.bundled_latest_thread_event()
+        && let Some(who) = newest.sender()
+        && (who == own || !ignored.contains(&who))
+    {
+        let at = newest.timestamp_raw();
+        thread.latest_when = at.and_then(when);
+        if let (Some(id), Some(at)) = (newest.event_id(), at) {
+            thread.unread = reply_unread(room, &root_id, id, &who, at, read).await;
+        }
+        thread.latest_sender = Some(short_name(room, &who, names).await);
+    }
+    Some(thread)
+}
+
+async fn short_name(
+    room: &Room,
+    user: &UserId,
+    names: &mut HashMap<(OwnedRoomId, OwnedUserId), String>,
+) -> String {
+    truncate(
+        &search::cached_sender_name(room, user, names).await,
+        LIST_NAME,
+    )
+}
+
+/// The first line of the message a thread starts at, or what stands in for it.
+fn first_message(root: &TimelineEvent) -> String {
+    if root.kind.is_utd() {
+        return "Encrypted message".to_owned();
+    }
+    if moderation::is_event_redacted(root) {
+        return "[message deleted]".to_owned();
+    }
+    let line = search::extract_event_text(root, &[])
+        .map(|text| first_line(&text, LIST_TEXT))
+        .unwrap_or_default();
+    if line.is_empty() {
+        "[message]".to_owned()
+    } else {
+        line
+    }
+}
+
+/// Whether the server says the user took part in the thread, in the summary it adds
+/// to the thread's first message.
+fn participated(root: &TimelineEvent) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Unsigned {
+        #[serde(rename = "m.relations")]
+        relations: Option<Relations>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Relations {
+        #[serde(rename = "m.thread")]
+        thread: Option<Bundled>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Bundled {
+        #[serde(default)]
+        current_user_participated: bool,
+    }
+    matches!(
+        root.raw().get_field::<Unsigned>("unsigned"),
+        Ok(Some(Unsigned {
+            relations: Some(Relations {
+                thread: Some(Bundled {
+                    current_user_participated: true
+                })
+            })
+        }))
+    )
+}
+
+/// When something happened, in short: the time if it was today, else the day.
+fn when(at: MilliSecondsSinceUnixEpoch) -> Option<String> {
+    let (day, time) = moderation::format_day_time(at);
+    match day.as_str() {
+        "" => None,
+        "Today" => Some(time),
+        _ => Some(day),
+    }
 }
 
 /// Finishes the messages of a snapshot: marks the threads with unread replies, or,

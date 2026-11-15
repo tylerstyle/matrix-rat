@@ -21,6 +21,7 @@ mod rooms;
 mod safety;
 pub mod search;
 mod thread;
+mod thread_list;
 mod unread;
 mod verify;
 
@@ -1251,6 +1252,7 @@ impl App {
                     | Modal::PollForm(_)
                     | Modal::PollVote(_)
                     | Modal::Stickers(_)
+                    | Modal::Threads(_)
             )
         ) {
             self.modal = None;
@@ -2603,6 +2605,7 @@ impl App {
             Action::MarkAllRead => self.mark_all_read(),
             Action::PinMessage => self.toggle_pin_message(None),
             Action::OpenPinned => self.open_pinned(),
+            Action::OpenThreads => self.open_threads(),
             Action::ForwardMessage => self.open_forward_picker(None),
             Action::RetryDecryption => self.retry_decryption(),
             Action::Devices(click) => match (&self.modal, click) {
@@ -2721,7 +2724,8 @@ impl App {
                 | Modal::ReasonConfirm(_)
                 | Modal::PollForm(_)
                 | Modal::PollVote(_)
-                | Modal::Stickers(_),
+                | Modal::Stickers(_)
+                | Modal::Threads(_),
             ) => {
                 self.modal = None;
             }
@@ -2868,6 +2872,7 @@ impl App {
             Some(Modal::PollForm(_)) => self.on_poll_form_key(code, mods),
             Some(Modal::PollVote(_)) => self.on_poll_vote_key(code, mods),
             Some(Modal::Stickers(_)) => self.on_stickers_key(code, mods),
+            Some(Modal::Threads(_)) => self.on_threads_key(code, mods),
             None => {}
         }
     }
@@ -3095,6 +3100,11 @@ impl App {
             MatrixEvent::IgnoredUsers(users) => self.on_ignored_users_list(users),
             MatrixEvent::EmotePacks(_) if self.logged_out => {}
             MatrixEvent::EmotePacks(catalog) => self.on_emote_packs(catalog),
+            MatrixEvent::Threads(page) => self.on_threads(page),
+            MatrixEvent::ThreadsFailed {
+                room_id,
+                generation,
+            } => self.on_threads_failed(&room_id, generation),
             MatrixEvent::IgnoreResult {
                 user_id,
                 ignored,
@@ -3597,6 +3607,7 @@ impl App {
             Some(Modal::PollForm(_)) => return self.on_poll_form_paste(first_line),
             Some(Modal::PollVote(_)) => return,
             Some(Modal::Stickers(_)) => return self.on_stickers_paste(first_line),
+            Some(Modal::Threads(_)) => return self.on_threads_paste(first_line),
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
@@ -3664,6 +3675,7 @@ impl App {
                                     | Modal::PollForm(_)
                                     | Modal::PollVote(_)
                                     | Modal::Stickers(_)
+                                    | Modal::Threads(_)
                             )
                         ) || matches!(
                             &self.modal,
@@ -3865,6 +3877,9 @@ impl App {
                     Some(HitId::PollVoteBtn(true)) => self.submit_poll_vote(),
                     Some(HitId::PollVoteBtn(false)) => self.modal = None,
                     Some(HitId::StickerRow(index)) => self.send_sticker_at(index),
+                    Some(HitId::ThreadRow(index)) => self.activate_thread_row(index),
+                    Some(HitId::ThreadsMore) => self.click_threads_more(),
+                    Some(HitId::ThreadsMine) => self.toggle_threads_mine(),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -3900,6 +3915,7 @@ impl App {
                             | Modal::PollForm(_)
                             | Modal::PollVote(_)
                             | Modal::Stickers(_)
+                            | Modal::Threads(_)
                     )
                 ) =>
             {
@@ -3926,6 +3942,7 @@ impl App {
                         self.scroll_poll_modal(delta);
                     }
                     Some(Modal::Stickers(_)) => self.scroll_stickers(delta),
+                    Some(Modal::Threads(_)) => self.scroll_threads(delta),
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.
                     Some(Modal::Settings(menu)) if menu.editing.is_none() => {
@@ -4110,6 +4127,7 @@ impl App {
                     picker.filter.place(rel_col, false);
                 }
             }
+            InputTarget::ThreadsFilter => self.click_threads_filter(rel_col),
             InputTarget::ReportReason => {
                 if let Some(Modal::Report(form)) = &mut self.modal {
                     form.focus = ReportForm::REASON;

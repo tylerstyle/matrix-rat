@@ -47,6 +47,7 @@ pub use people::{
 pub use search::SearchHit;
 pub use session::{ReauthKind, ReauthTarget};
 pub use spaces::SpaceSummary;
+pub use threads::ThreadPage;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
     VerifyStage, VerifyUpdate,
@@ -380,6 +381,18 @@ pub enum MatrixCmd {
     },
     /// Aborts any in-flight public room directory search.
     CancelDirectorySearch,
+    /// Asks for a page of the room's threads, newest activity first (the homeserver's
+    /// thread list). Answered with [`MatrixEvent::Threads`] or
+    /// [`MatrixEvent::ThreadsFailed`] for `generation`; a newer request replaces one
+    /// that is still running.
+    ListThreads {
+        room_id: String,
+        /// Where the previous page ended; `None` for the first page.
+        from: Option<String>,
+        /// Only threads the user started or answered in.
+        mine: bool,
+        generation: u64,
+    },
 }
 
 /// Never prints the password or the recovery key, so commands are safe to log.
@@ -503,6 +516,17 @@ impl std::fmt::Debug for MatrixCmd {
                 write!(f, "DirectoryNextPage(generation {generation})")
             }
             Self::CancelDirectorySearch => f.write_str("CancelDirectorySearch"),
+            // Which room is not said; the token is the server's.
+            Self::ListThreads {
+                from,
+                mine,
+                generation,
+                ..
+            } => write!(
+                f,
+                "ListThreads(generation {generation}, more: {}, mine: {mine})",
+                from.is_some()
+            ),
         }
     }
 }
@@ -827,6 +851,14 @@ pub enum MatrixEvent {
     },
     /// Session-cached MSC2545 / Matrix 1.19 custom emoji and sticker packs.
     EmotePacks(EmoteCatalog),
+    /// A page of [`MatrixCmd::ListThreads`].
+    Threads(ThreadPage),
+    /// [`MatrixCmd::ListThreads`] got no answer: the server has no thread list, or
+    /// could not give it.
+    ThreadsFailed {
+        room_id: String,
+        generation: u64,
+    },
 }
 
 /// Hand-written so that message text never ends up in a log.
@@ -991,6 +1023,10 @@ impl std::fmt::Debug for MatrixEvent {
                 write!(f, "DirectoryError(generation {generation})")
             }
             Self::EmotePacks(catalog) => write!(f, "EmotePacks({catalog:?})"),
+            Self::Threads(page) => write!(f, "Threads({page:?})"),
+            Self::ThreadsFailed { generation, .. } => {
+                write!(f, "ThreadsFailed(generation {generation})")
+            }
         }
     }
 }
@@ -1710,7 +1746,7 @@ impl Worker {
         user_searcher.stop();
         dir_searcher.stop();
         ignore_tracker.stop();
-        timelines.close();
+        timelines.stop();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
         token_saver.abort();
