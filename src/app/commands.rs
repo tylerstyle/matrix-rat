@@ -270,7 +270,7 @@ impl App {
         let bare = matches!(typed.command, RoomCommand::Leave | RoomCommand::Help);
         let missing = !bare && typed.arg.is_empty();
         // `/leave #elsewhere` must not leave the open room.
-        let extra = typed.command == RoomCommand::Leave && !typed.arg.is_empty();
+        let extra = bare && !typed.arg.is_empty();
         if missing || extra {
             self.show_toast(typed.command.usage(typed.name));
             return true;
@@ -304,6 +304,10 @@ impl App {
                 Ok(())
             }
             RoomCommand::Invite | RoomCommand::DirectChat => {
+                // Inviting needs a room to invite into; said here, so the draft stays.
+                if typed.command == RoomCommand::Invite {
+                    self.open_room_or_say()?;
+                }
                 let (person, _) = self.named(typed)?;
                 let stage = if typed.command == RoomCommand::Invite {
                     Stage::Invite
