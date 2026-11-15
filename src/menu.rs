@@ -577,7 +577,8 @@ pub fn link_items() -> Vec<Item> {
 pub struct RoomSpaces {
     /// Some space of ours could take the room.
     pub can_add: bool,
-    /// The space the room list is narrowed to, by name, if the room is directly in it.
+    /// The space the room list is narrowed to, by name, if the room is directly in it
+    /// and we may take rooms out of it.
     pub remove_from: Option<String>,
 }
 

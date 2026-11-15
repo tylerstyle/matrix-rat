@@ -1402,6 +1402,65 @@ mod tests {
         assert!(info(&app).confirm.is_none());
     }
 
+    /// What the room's menu and the palette offer for taking Rats out of the space
+    /// the list is narrowed to: the menu's label, and whether the palette's entry
+    /// can be run.
+    fn removal_offered(app: &mut App) -> (Option<String>, Option<bool>) {
+        app.set_focus(Pane::Sidebar);
+        app.sidebar.cursor = app
+            .visible_rooms()
+            .iter()
+            .position(|index| app.rooms[*index].id == RATS)
+            .unwrap();
+        app.perform(Action::ContextMenu);
+        let menu = match &app.modal {
+            Some(Modal::Menu(menu)) => menu
+                .items
+                .iter()
+                .map(|item| item.label.clone())
+                .find(|label| label.starts_with("Remove from")),
+            other => panic!("no menu: {other:?}"),
+        };
+        app.on_event(key(KeyCode::Esc));
+        app.perform(Action::OpenPalette);
+        let palette = match &app.modal {
+            Some(Modal::Palette(palette)) => palette
+                .entries
+                .iter()
+                .find(|entry| entry.title.starts_with("Remove Rats from"))
+                .map(|entry| entry.enabled),
+            other => panic!("no palette: {other:?}"),
+        };
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        (menu, palette)
+    }
+
+    #[test]
+    fn taking_a_room_out_is_only_offered_where_the_space_may_be_changed() {
+        let (mut app, mut terminal, _commands) = connected();
+        // Rats is in both spaces; only Work may be changed.
+        app.on_matrix(MatrixEvent::Spaces(vec![
+            space(SPACE, "Work", &[RATS, OUTSIDE], true),
+            space(FUN, "Fun", &[RATS], false),
+        ]));
+        app.select_space(Some(1));
+        assert_eq!(removal_offered(&mut app), (None, Some(false)));
+        // The room info keeps the row, to say why.
+        app.open_info(app.rooms.iter().position(|room| room.id == RATS), None);
+        select(&mut app, InfoRow::RemoveFromSpace);
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Fun (read-only)");
+        find(&text, "Read-only: you are not allowed to change the rooms");
+        app.on_event(key(KeyCode::Esc));
+
+        app.select_space(Some(0));
+        assert_eq!(
+            removal_offered(&mut app),
+            (Some("Remove from Work…".to_owned()), Some(true))
+        );
+    }
+
     #[test]
     fn the_space_line_and_the_palette_lead_to_the_space() {
         let (mut app, mut terminal, mut commands) = connected();

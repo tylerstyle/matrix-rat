@@ -1756,10 +1756,15 @@ fn info_row(
     match row {
         InfoRow::RemoveFromSpace => {
             if let Some(in_space) = &info.in_space {
-                spans.push(Span::styled(
-                    truncate(&in_space.name, space),
-                    theme.style(Role::Text),
-                ));
+                // A space we may not change says so on the row, as "Add a room…" does.
+                let (tag, role) = if in_space.can_edit {
+                    ("", Role::Text)
+                } else {
+                    (" (read-only)", Role::Muted)
+                };
+                let name = truncate(&in_space.name, space.saturating_sub(width(tag)));
+                spans.push(Span::styled(name, theme.style(role)));
+                spans.push(Span::styled(truncate(tag, space), theme.style(Role::Muted)));
             }
         }
         InfoRow::AddChild if !info.can_edit_children() => {

@@ -1216,12 +1216,12 @@ fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             in_room && facts.can_add_room,
         ),
     ];
-    if let Some((space, _)) = &facts.selected {
+    if let Some((space, can_edit)) = &facts.selected {
         spaces.push((
             Action::Manage(Click::RemoveFromSpace),
             format!("Remove {name} from {}…", crate::text::truncate(space, 30)),
             &["take out of the space", "space"],
-            in_room && facts.in_selected,
+            in_room && facts.in_selected && *can_edit,
         ));
     }
     for (action, title, aliases, enabled) in spaces {

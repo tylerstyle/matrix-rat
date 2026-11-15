@@ -200,7 +200,10 @@ impl App {
         let (in_space, can_add) = self.space_context(&room.id);
         let spaces = menu::RoomSpaces {
             can_add,
-            remove_from: in_space.map(|space| space.name),
+            // Only a space we may change: the room info says why the others are not.
+            remove_from: in_space
+                .filter(|space| space.can_edit)
+                .map(|space| space.name),
         };
         let items = menu::room_items(room, &spaces, &self.keymap);
         self.show_menu(target, &title, items, at);
