@@ -1800,6 +1800,9 @@ impl Worker {
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
         token_saver.abort();
+        // Waited for: a save that is running must not write the session file again
+        // after the session was forgotten.
+        let _ = token_saver.await;
         // Once more on the way out, in case a refresh happened during the shutdown.
         if matches!(end, SessionEnd::Shutdown)
             && let Err(err) = session::save_tokens(&self.paths, client, passphrase, in_keyring)

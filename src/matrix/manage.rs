@@ -2724,9 +2724,14 @@ mod tests {
         manage(ManageCmd::Info {
             room_id: room_id.clone(),
         });
-        // The first answers may come before the sync has brought the room's state.
+        // The first answers may come before the sync has brought the room's state, and
+        // that comes in pieces: the name can be there before the topic.
         let details = info(&mut events, &room_id, |d| {
-            d.name.contains("manage test") && d.members.len() == 1 && d.can_invite
+            d.name.contains("manage test")
+                && !d.topic.is_empty()
+                && d.encrypted == Some(true)
+                && d.members.len() == 1
+                && d.can_invite
         })
         .await;
         assert_eq!(details.name, format!("matrix-rat manage test {tag}"));
@@ -2962,10 +2967,26 @@ mod tests {
         manage(ManageCmd::Info {
             room_id: room_id.clone(),
         });
+        // (An answer from before the leaving may still be on its way, and the client
+        // may know the room for a moment longer: what counts is that the looking
+        // fails in the end.)
+        let mut asked_again = false;
         loop {
-            if let ManageEvent::Info { result, .. } = next_manage(&mut events).await {
-                assert!(result.is_err());
-                break;
+            if let ManageEvent::Info {
+                room_id: about,
+                result,
+            } = next_manage(&mut events).await
+                && about == room_id
+            {
+                if result.is_err() {
+                    break;
+                }
+                assert!(!asked_again, "a forgotten room can still be looked at");
+                asked_again = true;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                manage(ManageCmd::Info {
+                    room_id: room_id.clone(),
+                });
             }
         }
 
