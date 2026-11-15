@@ -234,7 +234,7 @@ struct Run {
     first_row: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EmojiPicker {
     /// Index and id of the message to react to; `None` inserts into the draft.
     pub react_to: Option<(usize, String)>,
@@ -252,6 +252,21 @@ pub struct EmojiPicker {
     pub rows: usize,
     /// Ask the next draw to bring the selection into view.
     pub reveal: bool,
+}
+
+/// Hand-written: the id of the message reacted to, what was typed and the custom
+/// emoji's names and addresses stay out of logs.
+impl std::fmt::Debug for EmojiPicker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmojiPicker")
+            .field("reaction", &self.react_to.is_some())
+            .field("query_bytes", &self.query.len())
+            .field("custom", &self.custom.len())
+            .field("results", &self.results.len())
+            .field("selected", &self.selected)
+            .field("scroll", &self.scroll)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for EmojiPicker {
@@ -2011,13 +2026,13 @@ mod tests {
         picker.set_custom(&EmoteCatalog::default());
         assert!(picker.custom.is_empty());
         assert!(picker.results.iter().all(|p| matches!(p, Pick::Unicode(_))));
-        // Nothing of them in a log.
+        // Nothing of them in a log, nor the message reacted to, nor what was typed.
         picker.set_custom(&catalog);
-        let debug = format!("{picker:?}");
-        assert!(
-            !debug.contains("example.org") && !debug.contains("blobcat"),
-            "{debug}"
-        );
+        picker.set_query("partyb".into());
+        let debug = format!("{picker:?} {:?}", Modal::Emoji(picker.clone()));
+        for secret in ["example.org", "blob", "Blobs", "$m", "partyb"] {
+            assert!(!debug.contains(secret), "{secret} leaked in {debug}");
+        }
     }
 
     #[test]
