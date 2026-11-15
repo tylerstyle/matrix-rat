@@ -881,4 +881,133 @@ mod tests {
     async fn threads_open(room: &Room, root: &str) -> Timeline {
         open(room, root).await.expect("thread timeline")
     }
+
+    /// The homeserver's thread list, through the worker: a fresh room with two threads,
+    /// listed newest activity first, also when only the user's own are asked for.
+    /// `cargo test thread_list -- --ignored` against a local homeserver (user alice
+    /// unless `MATRIX_RAT_TEST_USER` says otherwise).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver (scripts/dev-homeserver.sh)"]
+    async fn the_thread_list_shows_two_threads_newest_activity_first() {
+        use matrix_sdk::Client;
+        use matrix_sdk::ruma::api::client::room::create_room::v3::Request as CreateRoom;
+        use matrix_sdk::ruma::events::relation::Thread;
+        use matrix_sdk::ruma::events::room::message::{Relation, RoomMessageEventContent};
+        use std::time::Duration;
+
+        use crate::matrix::{MatrixCmd, MatrixEvent, ThreadPage, spawn};
+        use crate::paths::Paths;
+
+        let var = |name: &str| std::env::var(name).ok();
+        let homeserver =
+            var("MATRIX_RAT_TEST_HOMESERVER").unwrap_or_else(|| "http://127.0.0.1:6167".into());
+        let user = var("MATRIX_RAT_TEST_USER").unwrap_or_else(|| "alice".into());
+        let password = var("MATRIX_RAT_TEST_PASSWORD").unwrap_or_else(|| "alicepass".into());
+
+        // A room of its own, with two threads written by a plain client: the second
+        // one's replies are the newest.
+        let setup = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .expect("client");
+        setup
+            .matrix_auth()
+            .login_username(&user, &password)
+            .await
+            .expect("login of the setup client");
+        let room = setup
+            .create_room(CreateRoom::new())
+            .await
+            .expect("create room");
+        let room_id = room.room_id().to_string();
+        let stamp = std::process::id();
+        let text = |what: &str| format!("thread list test {stamp}: {what}");
+        let send = |body: String, root: Option<matrix_sdk::ruma::OwnedEventId>| {
+            let room = room.clone();
+            async move {
+                let mut content = RoomMessageEventContent::text_plain(body);
+                if let Some(root) = root {
+                    content.relates_to = Some(Relation::Thread(Thread::plain(root.clone(), root)));
+                }
+                room.send(content).await.expect("send").response.event_id
+            }
+        };
+        let first = send(text("first"), None).await;
+        send(text("an answer to the first"), Some(first.clone())).await;
+        let second = send(text("second"), None).await;
+        send(text("an answer to the second"), Some(second.clone())).await;
+        send(text("another answer to the second"), Some(second.clone())).await;
+        let _ = setup.matrix_auth().logout().await;
+
+        let root_dir =
+            std::env::temp_dir().join(format!("matrix-rat-thread-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root_dir);
+        let paths = Paths {
+            config_dir: root_dir.join("config"),
+            data_dir: root_dir.join("data"),
+            log_dir: root_dir.join("log"),
+            runtime_dir: root_dir.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username: user,
+            password: password.into(),
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == room_id) => return,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the room did not show up");
+
+        for (generation, mine) in [(1, false), (2, true)] {
+            handle.send(MatrixCmd::ListThreads {
+                room_id: room_id.clone(),
+                from: None,
+                mine,
+                generation,
+            });
+            let page: ThreadPage = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    match events.recv().await.expect("worker stopped") {
+                        MatrixEvent::ThreadsFailed { .. } => panic!("the thread list failed"),
+                        MatrixEvent::Threads(page) if page.generation == generation => {
+                            return page;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("no thread list");
+            assert_eq!(page.room_id, room_id);
+            let roots: Vec<&str> = page.threads.iter().map(|t| t.root.as_str()).collect();
+            assert_eq!(roots, [second.as_str(), first.as_str()], "mine: {mine}");
+            let (newest, oldest) = (&page.threads[0], &page.threads[1]);
+            assert_eq!(newest.text, text("second"));
+            assert_eq!(newest.replies, 2);
+            assert_eq!(oldest.text, text("first"));
+            assert_eq!(oldest.replies, 1);
+            for thread in &page.threads {
+                // All by the user: theirs, with nothing unread.
+                assert!(thread.mine && !thread.unread, "{thread:?}");
+                assert!(thread.latest_sender.is_some() && thread.latest_when.is_some());
+                assert!(!thread.sender.is_empty());
+            }
+            assert!(page.next.is_none());
+        }
+
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root_dir);
+    }
 }
