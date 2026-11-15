@@ -117,6 +117,58 @@ impl std::fmt::Debug for ForwardTarget {
     }
 }
 
+/// What the palette picks a room for when it is used as a room picker.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Pick {
+    /// Forward a message there.
+    Forward(ForwardTarget),
+}
+
+/// Hand-written: which rooms, and what they are called, stay out of logs.
+impl std::fmt::Debug for Pick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Forward(target) => write!(f, "Pick::Forward({target:?})"),
+        }
+    }
+}
+
+impl Pick {
+    /// Title, footer and the placeholder of the search line.
+    pub fn texts(&self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Forward(_) => (
+                "Forward to room",
+                "↑↓ move · Enter forward · Esc cancel",
+                "type a room name…",
+            ),
+        }
+    }
+
+    /// What the pick is about, for the line under the search: a label and a name.
+    pub fn about(&self) -> (&'static str, &str) {
+        match self {
+            Self::Forward(target) => ("Message: ", &target.preview),
+        }
+    }
+}
+
+/// One room (or space) a picker offers.
+#[derive(Clone)]
+pub struct PickItem {
+    pub id: String,
+    pub name: String,
+    pub hint: Option<String>,
+    pub category: Category,
+}
+
+/// Hand-written: which room and its name stay out of logs.
+impl std::fmt::Debug for PickItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PickItem({:?})", self.category)
+    }
+}
+
 /// Snapshot of application state used to construct palette entries and availability.
 #[derive(Debug, Clone)]
 pub struct PaletteContext {
@@ -180,8 +232,8 @@ pub struct Palette {
     pub rows: usize,
     /// Keeps keyboard selection in view on the next draw.
     pub reveal: bool,
-    /// When `Some`, the palette picks a target room to forward the message to.
-    pub forward: Option<ForwardTarget>,
+    /// When `Some`, the palette picks a room for this.
+    pub pick: Option<Pick>,
 }
 
 impl Palette {
@@ -203,7 +255,7 @@ impl Palette {
             scroll: 0,
             rows: 10,
             reveal: false,
-            forward: None,
+            pick: None,
         };
         palette.refilter();
         palette
@@ -211,21 +263,38 @@ impl Palette {
 
     /// Opens the palette as a room picker for forwarding `target`.
     pub fn open_forward(rooms: &[RoomItem], target: ForwardTarget) -> Self {
+        let items: Vec<PickItem> = rooms
+            .iter()
+            .map(|room| PickItem {
+                id: room.id.clone(),
+                name: room.name.clone(),
+                hint: (room.id == target.from_room_id).then(|| "current".to_owned()),
+                category: Category::Room,
+            })
+            .collect();
+        Self::open_pick(&items, Pick::Forward(target))
+    }
+
+    /// Opens the palette as a picker of `items` for `pick`. Entries with a hint (the
+    /// room a message comes from) go last.
+    pub fn open_pick(items: &[PickItem], pick: Pick) -> Self {
+        let verb = match &pick {
+            Pick::Forward(_) => "forward",
+        };
         let mut entries = Vec::new();
-        for room in rooms {
-            let is_source = room.id == target.from_room_id;
-            let hint = is_source.then(|| "current".to_owned());
-            let alias = format!("forward {}", room.name);
+        for item in items {
+            let alias = format!("{verb} {}", item.name);
+            let last = matches!(pick, Pick::Forward(_)) && item.hint.is_some();
             push_entry(
                 &mut entries,
-                Target::Room(room.id.clone()),
-                Category::Room,
-                room.name.clone(),
-                hint,
-                room.name.clone(),
+                Target::Room(item.id.clone()),
+                item.category,
+                item.name.clone(),
+                item.hint.clone(),
+                item.name.clone(),
                 &[&alias],
                 true,
-                if is_source { 1 } else { 0 },
+                u8::from(last),
             );
         }
         let mut palette = Self {
@@ -236,7 +305,7 @@ impl Palette {
             scroll: 0,
             rows: 10,
             reveal: false,
-            forward: Some(target),
+            pick: Some(pick),
         };
         palette.refilter();
         palette

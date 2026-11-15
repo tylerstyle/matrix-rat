@@ -7,7 +7,7 @@ use crate::action::Action;
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::modal::{Modal, Setting, SettingsMenu};
 use crate::model::{MsgKind, RoomKind, SendState};
-use crate::palette::{MessageCaps, Palette, PaletteContext, RoomItem, SpaceItem, Target};
+use crate::palette::{MessageCaps, Palette, PaletteContext, Pick, RoomItem, SpaceItem, Target};
 use crate::theme::Theme;
 
 impl App {
@@ -167,14 +167,14 @@ impl App {
     }
 
     pub(super) fn run_palette_at(&mut self, filtered_index: usize) {
-        let (entry, forward) = match &mut self.modal {
+        let (entry, pick) = match &mut self.modal {
             Some(Modal::Palette(palette)) => {
                 let entry = palette.entry_at(filtered_index).cloned();
-                let forward = entry
+                let pick = entry
                     .as_ref()
                     .filter(|e| e.enabled && matches!(e.target, Target::Room(_)))
-                    .and_then(|_| palette.forward.take());
-                (entry, forward)
+                    .and_then(|_| palette.pick.take());
+                (entry, pick)
             }
             _ => (None, None),
         };
@@ -190,7 +190,7 @@ impl App {
         match entry.target {
             Target::Action(action) => self.perform(action),
             Target::Room(room_id) => {
-                if let Some(target) = forward {
+                if let Some(Pick::Forward(target)) = pick {
                     self.forward_to_room(target, room_id);
                 } else if let Some(index) = self.rooms.iter().position(|r| r.id == room_id) {
                     self.perform(Action::OpenRoom(index));
