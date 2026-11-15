@@ -107,6 +107,7 @@ fn main() -> Result<()> {
     }
     paths.create_dirs()?;
     let config = config::Config::load(&paths.config_file())?;
+    notify::set_app_icon(config.notification_icon);
 
     // Held for the whole run: two instances on one profile would corrupt the SDK stores.
     let _lock = lock::ProfileLock::acquire(&paths)?;
