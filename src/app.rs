@@ -1873,6 +1873,9 @@ impl App {
                 || !self.rooms_received
                 || self.modal.is_some())
         {
+            // The wait for a missing room does not run behind a login or another
+            // popup: it starts again when the way is clear.
+            self.startup_missing_since = None;
             return;
         }
         let parsed = crate::manage::parse_address(raw);
@@ -7754,6 +7757,18 @@ mod tests {
         assert!(app.modal.is_none());
         assert_eq!(app.room_id().as_deref(), Some("!late:example.org"));
         drain(&mut commands);
+
+        // A popup in the way stops the wait; it starts again afterwards.
+        app.startup_target = Some("!behind:example.org".into());
+        app.startup_missing_since = None;
+        app.on_tick();
+        assert!(app.startup_missing_since.is_some());
+        app.perform(Action::OpenEmoji);
+        assert!(app.modal.is_some());
+        app.on_tick();
+        assert!(app.startup_missing_since.is_none());
+        app.modal = None;
+        app.startup_target = None;
 
         // A room that never arrives is previewed once the wait is over.
         app.startup_target = Some("!never:example.org".into());
