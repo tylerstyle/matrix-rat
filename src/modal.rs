@@ -222,6 +222,14 @@ pub enum Pick {
     Custom(usize),
 }
 
+/// A result of the emoji picker as what it is rather than where it is among the
+/// results, which change when packs arrive.
+#[derive(Clone, PartialEq, Eq)]
+enum Chosen {
+    Unicode(&'static Emoji),
+    Custom { shortcode: String, url: String },
+}
+
 /// Results of one kind in a row of their own: the picker's grid is made of these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Run {
@@ -302,11 +310,38 @@ impl EmojiPicker {
     }
 
     /// Offers the custom emoji of `catalog` too. Only filters again when they changed.
+    /// Packs that arrive while the picker is open leave the selection on the emoji it
+    /// was on, at the same height in the grid, when that one is still offered.
     pub fn set_custom(&mut self, catalog: &EmoteCatalog) {
         let custom: Vec<CustomEmoji> = catalog.emojis().cloned().collect();
-        if custom != self.custom {
-            self.custom = custom;
-            self.refilter();
+        if custom == self.custom {
+            return;
+        }
+        let chosen = self.selected().and_then(|pick| self.chosen(pick));
+        let (selected, scroll, goal) = (self.selected, self.scroll, self.goal);
+        self.custom = custom;
+        self.refilter();
+        let found = chosen.and_then(|chosen| {
+            self.results
+                .iter()
+                .position(|&pick| self.chosen(pick).as_ref() == Some(&chosen))
+        });
+        // One that is gone leaves the selection where it was, as far as the results go.
+        self.selected = found.unwrap_or(selected.min(self.results.len().saturating_sub(1)));
+        self.scroll = scroll;
+        self.goal = goal;
+        self.reveal = true;
+    }
+
+    /// A result as what it is rather than where: for finding it again among new
+    /// results.
+    fn chosen(&self, pick: Pick) -> Option<Chosen> {
+        match pick {
+            Pick::Unicode(emoji) => Some(Chosen::Unicode(emoji)),
+            Pick::Custom(at) => self.custom.get(at).map(|custom| Chosen::Custom {
+                shortcode: custom.shortcode.clone(),
+                url: custom.url.clone(),
+            }),
         }
     }
 
@@ -2036,6 +2071,50 @@ mod tests {
         for secret in ["example.org", "blob", "Blobs", "$m", "partyb"] {
             assert!(!debug.contains(secret), "{secret} leaked in {debug}");
         }
+    }
+
+    #[test]
+    fn packs_arriving_while_the_picker_is_open_leave_the_selection_on_its_emoji() {
+        let emoji = |code: &str| CustomEmoji {
+            shortcode: code.into(),
+            url: format!("mxc://example.org/{code}"),
+            body: None,
+            pack_name: "Blobs".into(),
+        };
+        let pack = |codes: &[&str]| crate::matrix::EmotePack {
+            id: "user".into(),
+            name: "Blobs".into(),
+            emojis: codes.iter().map(|code| emoji(code)).collect(),
+            stickers: Vec::new(),
+        };
+        // For the draft, where custom emoji come first: scrolled down to an emoji.
+        let mut picker = EmojiPicker::default();
+        picker.step_rows(5);
+        picker.step(3);
+        picker.scroll = 4;
+        let before = picker.selected();
+        picker.set_custom(&EmoteCatalog {
+            packs: vec![pack(&["blob", "blobcat", "partyblob", "blobwave"])],
+        });
+        assert_eq!(picker.selected(), before);
+        assert_eq!(picker.scroll, 4);
+
+        // A custom emoji stays selected as another pack comes in before it.
+        picker.selected = 1;
+        let blobcat = picker.custom_at(1).unwrap().clone();
+        picker.set_custom(&EmoteCatalog {
+            packs: vec![
+                pack(&["ratwave", "ratparty"]),
+                pack(&["blob", "blobcat", "partyblob", "blobwave"]),
+            ],
+        });
+        assert_eq!(picker.custom_at(picker.selected), Some(&blobcat));
+        assert_eq!(picker.scroll, 4);
+        // One that is gone leaves the selection where it was.
+        picker.set_custom(&EmoteCatalog {
+            packs: vec![pack(&["ratwave", "ratparty", "blob"])],
+        });
+        assert_eq!(picker.selected, 3);
     }
 
     #[test]

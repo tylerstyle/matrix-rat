@@ -69,7 +69,12 @@ impl App {
         }
     }
 
-    pub(super) fn on_emote_packs(&mut self, catalog: EmoteCatalog) {
+    /// Packs loaded for `room_id`. Those of a room left while they were on their way
+    /// are dropped: the packs of the room open now follow.
+    pub(super) fn on_emote_packs(&mut self, room_id: Option<String>, catalog: EmoteCatalog) {
+        if !self.emotes.requested || room_id != self.emotes.room {
+            return;
+        }
         self.emotes.loaded = true;
         if catalog != self.emotes.catalog {
             self.emotes.catalog = catalog;
@@ -282,6 +287,14 @@ mod tests {
         }
     }
 
+    /// The packs of the account and of `room`, as the worker sends them.
+    fn packs(room: &str, catalog: EmoteCatalog) -> MatrixEvent {
+        MatrixEvent::EmotePacks {
+            room_id: Some(room.into()),
+            catalog,
+        }
+    }
+
     #[test]
     fn the_sticker_picker_asks_for_the_packs_once_and_sends_the_chosen_sticker() {
         let (mut app, mut commands) = logged_in();
@@ -295,7 +308,7 @@ mod tests {
             [MatrixCmd::EnsureEmotePacks { room_id: Some(room) }] if room == ROOM
         ));
 
-        app.on_matrix(MatrixEvent::EmotePacks(catalog()));
+        app.on_matrix(packs(ROOM, catalog()));
         let Some(Modal::Stickers(picker)) = &app.modal else {
             panic!("still open");
         };
@@ -348,20 +361,20 @@ mod tests {
         assert_eq!(sticker_command_argument("hello /sticker"), None);
 
         let (mut app, mut commands) = logged_in();
-        app.on_matrix(MatrixEvent::EmotePacks(catalog()));
         app.composer.set_text("/sticker happy");
         app.on_event(key(KeyCode::Enter));
+        assert!(
+            sent(&mut commands)
+                .iter()
+                .any(|c| matches!(c, MatrixCmd::EnsureEmotePacks { .. }))
+        );
+        app.on_matrix(packs(ROOM, catalog()));
         let Some(Modal::Stickers(picker)) = &app.modal else {
             panic!("the sticker picker is open");
         };
         assert_eq!(picker.filter.as_str(), "happy");
         assert_eq!(picker.filtered.len(), 1);
         assert_eq!(app.composer.text(), "");
-        assert!(
-            sent(&mut commands)
-                .iter()
-                .any(|c| matches!(c, MatrixCmd::EnsureEmotePacks { .. }))
-        );
 
         // Packs in use: another room's packs are asked for when it is opened.
         app.on_event(key(KeyCode::Esc));
@@ -370,6 +383,24 @@ mod tests {
             c,
             MatrixCmd::EnsureEmotePacks { room_id: Some(room) } if room == "!other:example.org"
         )));
+        // Those of the room left behind, still on their way then, are not taken for
+        // them: the picker waits for the right ones.
+        assert!(app.open_stickers(""));
+        let rats = EmoteCatalog {
+            packs: catalog().packs[1..].to_vec(),
+        };
+        app.on_matrix(packs(ROOM, rats));
+        let Some(Modal::Stickers(picker)) = &app.modal else {
+            panic!("the sticker picker is open");
+        };
+        assert!(picker.loading);
+        assert_eq!(app.emotes.catalog, catalog());
+        app.on_matrix(packs("!other:example.org", EmoteCatalog::default()));
+        let Some(Modal::Stickers(picker)) = &app.modal else {
+            panic!("the sticker picker is open");
+        };
+        assert!(!picker.loading);
+        assert!(picker.filtered.is_empty());
     }
 
     #[test]
@@ -416,7 +447,7 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, MatrixCmd::EnsureEmotePacks { .. }))
         );
-        app.on_matrix(MatrixEvent::EmotePacks(catalog()));
+        app.on_matrix(packs(ROOM, catalog()));
         typed(&mut app, query);
         (app, commands)
     }
@@ -463,6 +494,53 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_two_packs_name_differently_reacts_by_the_name_that_was_chosen() {
+        let (mut app, mut commands) = logged_in();
+        app.rooms[0].messages[0].item = Some(crate::model::ItemRef::Event("$ev".into()));
+        app.timeline.selected = Some(0);
+        app.perform(Action::React);
+        let mut shared = catalog();
+        shared.packs[1].emojis.push(CustomEmoji {
+            shortcode: "kitty".into(),
+            url: "mxc://example.org/blobcat".into(),
+            body: None,
+            pack_name: "Rats".into(),
+        });
+        app.on_matrix(packs(ROOM, shared));
+        typed(&mut app, "kitty");
+        app.on_event(key(KeyCode::Enter));
+        let sent_now = reactions(&mut commands);
+        assert!(
+            matches!(
+                sent_now.as_slice(),
+                [MatrixCmd::ToggleReaction { key, shortcode: Some(code), .. }]
+                    if key == "mxc://example.org/blobcat" && code == "kitty"
+            ),
+            "{sent_now:?}"
+        );
+
+        // A chip whose key came with spaces around it still goes by the packs' name,
+        // and is taken back by exactly its key.
+        app.toggle_reaction(0, " mxc://example.org/blobcat ");
+        let sent_now = reactions(&mut commands);
+        assert!(
+            matches!(
+                sent_now.as_slice(),
+                [MatrixCmd::ToggleReaction { key, shortcode: Some(code), .. }]
+                    if key == " mxc://example.org/blobcat " && code == "blobcat"
+            ),
+            "{sent_now:?}"
+        );
+    }
+
+    #[test]
+    fn logging_out_closes_the_emoji_picker() {
+        let (mut app, _commands) = picked(true, "blob");
+        app.reset_session();
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
     fn a_custom_emoji_chosen_for_the_draft_is_sent_as_its_picture() {
         let (mut app, _commands) = picked(false, "blobcat");
         app.on_event(key(KeyCode::Enter));
@@ -483,7 +561,7 @@ mod tests {
         let (mut app, _commands) = logged_in();
         app.composer.set_text("hello");
         app.perform(Action::OpenEmoji);
-        app.on_matrix(MatrixEvent::EmotePacks(catalog()));
+        app.on_matrix(packs(ROOM, catalog()));
         typed(&mut app, "blobcat");
         app.on_event(key(KeyCode::Enter));
         assert_eq!(app.composer.text(), "hello :blobcat: ");

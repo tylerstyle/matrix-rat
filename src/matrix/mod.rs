@@ -982,8 +982,13 @@ pub enum MatrixEvent {
         generation: u64,
         message: String,
     },
-    /// Session-cached MSC2545 / Matrix 1.19 custom emoji and sticker packs.
-    EmotePacks(EmoteCatalog),
+    /// Session-cached MSC2545 / Matrix 1.19 custom emoji and sticker packs: the
+    /// account's, and those of `room_id` (the room they were loaded for, which the UI
+    /// may have left by the time they arrive).
+    EmotePacks {
+        room_id: Option<String>,
+        catalog: EmoteCatalog,
+    },
     /// A page of [`MatrixCmd::ListThreads`].
     Threads(ThreadPage),
     /// [`MatrixCmd::ListThreads`] got no answer: the server has no thread list, or
@@ -1222,7 +1227,16 @@ impl MatrixEvent {
             ),
             Self::DirectoryResults(page) => ("DirectoryResults", vec![Some(format!("{page:?}"))]),
             Self::DirectoryError { generation: g, .. } => ("DirectoryError", vec![generation(g)]),
-            Self::EmotePacks(catalog) => ("EmotePacks", vec![Some(format!("{catalog:?}"))]),
+            Self::EmotePacks { room_id, catalog } => (
+                "EmotePacks",
+                vec![
+                    match room_id {
+                        Some(room_id) => id(room_id),
+                        None => Some("no room".to_owned()),
+                    },
+                    Some(format!("{catalog:?}")),
+                ],
+            ),
             Self::Threads(page) => ("Threads", vec![Some(format!("{page:?}"))]),
             Self::ThreadsFailed { generation: g, .. } => ("ThreadsFailed", vec![generation(g)]),
         };
@@ -2272,6 +2286,23 @@ mod tests {
         assert_eq!(
             MatrixEvent::ActionFailed(failed.into()).describe(),
             format!("ActionFailed({failed})")
+        );
+        let packs = |room_id: Option<&str>| MatrixEvent::EmotePacks {
+            room_id: room_id.map(str::to_owned),
+            catalog: EmoteCatalog::default(),
+        };
+        let event = packs(Some("!room:example.org"));
+        assert_eq!(
+            format!("{event:?}"),
+            "EmotePacks(EmoteCatalog { packs: 0 })"
+        );
+        assert_eq!(
+            event.describe(),
+            "EmotePacks(!room:example.org, EmoteCatalog { packs: 0 })"
+        );
+        assert_eq!(
+            format!("{:?}", packs(None)),
+            "EmotePacks(no room, EmoteCatalog { packs: 0 })"
         );
     }
 

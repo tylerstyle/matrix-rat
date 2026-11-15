@@ -1308,6 +1308,7 @@ impl App {
                     | Modal::PollForm(_)
                     | Modal::PollVote(_)
                     | Modal::Stickers(_)
+                    | Modal::Emoji(_)
                     | Modal::Details(_)
                     | Modal::Threads(_)
                     | Modal::Keywords(_)
@@ -2254,14 +2255,22 @@ impl App {
     }
 
     fn toggle_reaction(&mut self, msg: usize, key: &str) {
+        // A custom emoji goes by its address; its name goes along for other clients to
+        // show where they do not know the picture. The key itself is sent as it is: an
+        // own reaction is taken back by exactly its key.
+        let address = key.trim();
+        let shortcode = crate::matrix::is_valid_mxc(address)
+            .then(|| self.emotes.catalog.shortcode_for_url(address))
+            .flatten()
+            .map(str::to_owned);
+        self.toggle_reaction_named(msg, key, shortcode);
+    }
+
+    /// [`App::toggle_reaction`] with the name of the custom emoji `key` is the address
+    /// of, as it was chosen: two packs may name the same picture differently.
+    fn toggle_reaction_named(&mut self, msg: usize, key: &str, shortcode: Option<String>) {
         if self.matrix.is_some() {
             let item = self.messages().get(msg).and_then(|m| m.item.clone());
-            // A custom emoji goes by its address; its name goes along for other
-            // clients to show where they do not know the picture.
-            let shortcode = crate::matrix::is_valid_mxc(key)
-                .then(|| self.emotes.catalog.shortcode_for_url(key))
-                .flatten()
-                .map(str::to_owned);
             if let (Some(item), Some(room_id)) = (item, self.room_id()) {
                 self.send_matrix(MatrixCmd::ToggleReaction {
                     room_id,
@@ -2865,10 +2874,11 @@ impl App {
             }
             return;
         };
-        // A custom emoji reacts by its address (see `toggle_reaction`).
-        let key = match (pick, custom) {
-            (Pick::Custom(_), Some(custom)) => custom.url,
-            (Pick::Unicode(emoji), _) => emoji.as_str().to_owned(),
+        // A custom emoji reacts by its address, with the name it was chosen by (see
+        // `toggle_reaction`).
+        let (key, shortcode) = match (pick, custom) {
+            (Pick::Custom(_), Some(custom)) => (custom.url, Some(custom.shortcode)),
+            (Pick::Unicode(emoji), _) => (emoji.as_str().to_owned(), None),
             (Pick::Custom(_), None) => return,
         };
         // The message may have moved while the picker was open.
@@ -2878,7 +2888,7 @@ impl App {
             self.messages().iter().position(|m| m.id == id)
         };
         if let Some(index) = index {
-            self.toggle_reaction(index, &key);
+            self.toggle_reaction_named(index, &key, shortcode);
         }
     }
 
@@ -3247,8 +3257,8 @@ impl App {
                 note,
             } => self.on_search_results(generation, hits, done, note),
             MatrixEvent::IgnoredUsers(users) => self.on_ignored_users_list(users),
-            MatrixEvent::EmotePacks(_) if self.logged_out => {}
-            MatrixEvent::EmotePacks(catalog) => self.on_emote_packs(catalog),
+            MatrixEvent::EmotePacks { .. } if self.logged_out => {}
+            MatrixEvent::EmotePacks { room_id, catalog } => self.on_emote_packs(room_id, catalog),
             MatrixEvent::Threads(page) => self.on_threads(page),
             MatrixEvent::ThreadsFailed {
                 room_id,
