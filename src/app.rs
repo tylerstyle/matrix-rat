@@ -106,6 +106,8 @@ pub struct SidebarState {
     /// Session-only quick filter: only show direct chats (plus the open room).
     pub people_only: bool,
     pub width: u16,
+    /// Put away by the user: one pane fills the window, the list when it has the focus.
+    pub hidden: bool,
     pub scroll: usize,
     pub reveal_cursor: bool,
 }
@@ -417,6 +419,7 @@ impl App {
         app.theme_names = Theme::available(&themes_dir);
         app.themes_dir = themes_dir;
         app.sidebar.width = config.sidebar_width;
+        app.sidebar.hidden = config.sidebar_hidden;
         app.typing_notices = config.typing_notices;
         app.read_receipts = config.read_receipts;
         app.do_not_disturb = config.do_not_disturb;
@@ -2392,6 +2395,17 @@ impl App {
                 self.help_open = !self.help_open;
                 self.help_scroll = 0;
             }
+            Action::ToggleSidebar => {
+                self.sidebar.hidden = !self.sidebar.hidden;
+                self.save_setting("sidebar_hidden", self.sidebar.hidden);
+                // The list would fill the window if it kept the focus.
+                self.dragging_splitter = false;
+                if self.sidebar.hidden && self.focus == Pane::Sidebar {
+                    self.set_focus(Pane::Composer);
+                }
+                // Pictures are placed by column: everything moves.
+                self.repaint = true;
+            }
             Action::CycleTheme => {
                 self.step_theme(1);
             }
@@ -2573,6 +2587,12 @@ impl App {
                 }
             }
             Action::CopyCode => self.copy_code_of_selected(),
+            Action::OpenExternal => {
+                self.cancel_pending_jump();
+                if !self.save_attachment_for(true, Action::OpenExternal) {
+                    self.show_toast("Nothing here to open in another program");
+                }
+            }
             Action::ComposeInEditor => self.request_editor(),
             Action::Open => {
                 self.cancel_pending_jump();

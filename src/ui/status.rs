@@ -2,7 +2,6 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
-use super::NARROW_WIDTH;
 use super::hit::{Button, HitId};
 use crate::action::{Action, Pane};
 use crate::app::App;
@@ -107,7 +106,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         use Action as A;
         let mut hints: Vec<(String, &str, Option<Action>)> = Vec::new();
-        if app.screen.width < NARROW_WIDTH && app.focus != Pane::Sidebar {
+        if super::one_pane(app, app.screen.width) && app.focus != Pane::Sidebar {
             // The room list is hidden at this width; this is the mouse's way to it.
             hints.push(("☰".to_owned(), "rooms", Some(A::Focus(Pane::Sidebar))));
         }

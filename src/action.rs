@@ -27,6 +27,9 @@ pub enum Action {
     FocusRoomFilter,
     ToggleHelp,
     CycleTheme,
+    /// Hide the room list, or show it again: one pane fills the window, as it does
+    /// by itself in a narrow one.
+    ToggleSidebar,
     /// Esc: close, cancel or step back, whichever applies.
     Back,
     PageUp,
@@ -48,6 +51,9 @@ pub enum Action {
     /// when there are several).
     CopyCode,
     Open,
+    /// Save the selected picture or file and hand it to the desktop's program for it
+    /// (for a picture: the system's viewer instead of the one in here).
+    OpenExternal,
     /// Jump to the message the selected one replies to.
     JumpToReply,
 

@@ -59,8 +59,9 @@ impl App {
             return false;
         };
         if !self.images.enabled() {
-            self.show_toast("Pictures are turned off in the configuration");
-            return true;
+            // No pictures in here: the system's viewer shows it instead.
+            self.timeline.selected = Some(index);
+            return self.save_attachment(true);
         }
         self.cancel_pending_jump();
         self.help_open = false;
@@ -100,6 +101,16 @@ impl App {
         {
             if !self.save_attachment(false) {
                 self.show_toast("This picture cannot be saved");
+            }
+            return;
+        }
+        if self.keymap.lookup(
+            crate::keymap::Context::Timeline,
+            crossterm::event::KeyEvent::new(code, mods),
+        ) == Some(crate::action::Action::OpenExternal)
+        {
+            if !self.save_attachment_for(true, crate::action::Action::OpenExternal) {
+                self.show_toast("This picture cannot be opened in another program");
             }
             return;
         }
@@ -320,7 +331,8 @@ mod tests {
         assert_eq!(cells.last().unwrap().1 as usize + 1, caption);
         assert!(!screen(&terminal).contains("cat.png"));
 
-        // Off: the file name and the caption as text, nothing fetched, nothing to view.
+        // Off: the file name and the caption as text, nothing fetched, no viewer in here;
+        // opening hands the picture to the system's viewer instead.
         let (mut app, mut terminal, mut commands) = app_with(Graphics::off(), vec![message]);
         assert_eq!(
             row_of(&terminal, "cat.png") + 1,
@@ -331,8 +343,19 @@ mod tests {
         app.on_event(key(KeyCode::Char('o')));
         frame(&mut app, &mut terminal);
         assert!(!app.images.viewer_open());
-        assert!(screen(&terminal).contains("Pictures are turned off"));
-        assert!(fetches(&mut commands).is_empty());
+        assert!(screen(&terminal).contains("Saving cat.png"));
+        let sent: Vec<MatrixCmd> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            sent.iter()
+                .any(|command| matches!(command, MatrixCmd::SaveFile { open: true, .. })),
+            "the picture is saved and opened"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|command| matches!(command, MatrixCmd::FetchImage { .. })),
+            "nothing is fetched to be drawn in here"
+        );
     }
 
     #[test]

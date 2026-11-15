@@ -34,7 +34,7 @@ notifications and themes that follow your desktop are all there.
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, or `Alt-I` for the picture in the clipboard; `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
-| 📐 **Fits any window** | Below 60 columns the room list steps aside and one pane fills the window: the chat while you read and write, the room list when you go to it (`Alt-1`, `Alt-←`, or `Ctrl-K`). Popups scroll and keep their hints on small terminals, so it stays usable in a narrow split or a phone-sized SSH session. |
+| 📐 **Fits any window** | Below 60 columns the room list steps aside and one pane fills the window: the chat while you read and write, the room list when you go to it (`Alt-1`, `Alt-←`, or `Ctrl-K`). Popups scroll and keep their hints on small terminals, so it stays usable in a narrow split or a phone-sized SSH session. `Ctrl-B` puts the room list away the same way in a window of any size. |
 | 🎨 **Yours to shape** | Twelve built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
 | 🔔 **Notifications** | Desktop notifications with the chat's picture (click one to open its room), or plain ones through the terminal; none for what you are reading right now. Keywords of your own count like a mention. |
 
@@ -124,7 +124,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-U` | jump to the first unread message (the "new" line) |
@@ -136,6 +136,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
 | `Alt-I` | attach the picture in the clipboard (a screenshot, a picture copied in the browser); needs `wl-clipboard` on Wayland or `xclip` on X11 |
 | `Alt-V` | write the message in your editor (`$VISUAL`, else `$EDITOR`); what you save comes back into the composer, unsent |
+| `Ctrl-B` | hide the room list, or show it again (while hidden, going to it with `Alt-1` or `Ctrl-K` shows it in place of the chat) |
 | `F2` / `F3` | settings / next theme |
 | `Ctrl-Q` | quit |
 
@@ -345,6 +346,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `link_previews` | `"off"` (default), `"unencrypted"` or `"all"`: a preview (title and two lines) under messages with a link, for the first link. **Your homeserver fetches the link**, see Good to know |
 | `do_not_disturb` | `true`: no notifications for now. The switch "Do not disturb" in the settings and the command palette (type `dnd`) changes it; the status line says when it is on |
 | `notification_icon` | the program's icon in desktop notifications: `"color"` (default), `"outline"` (a line drawing in one colour) or `"generic"` (the desktop's own new-message icon). matrix-rat's icons are used when they are installed (the Nix package does that, see [`assets/`](assets/README.md)), else the desktop's own |
+| `sidebar_hidden` | `true`: the room list is put away (`Ctrl-B` changes it) |
 | `sidebar_width` | width of the room list (or drag the divider) |
 | `read_receipts`, `read_markers`, `typing_notices` | what others see of you, and what you see of them |
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
