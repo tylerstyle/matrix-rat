@@ -106,6 +106,11 @@ pub struct Message {
     pub sender_id: Option<String>,
     pub time: String,
     pub day: String,
+    /// When it was sent, in milliseconds since 1970: as the sender's server says, or
+    /// for a message of ours on its way, when it was queued. `None` for demo data.
+    pub sent_at: Option<u64>,
+    /// It came encrypted, whether or not it could be decrypted.
+    pub encrypted: bool,
     pub body: String,
     pub own: bool,
     pub edited: bool,
@@ -669,6 +674,10 @@ pub struct RoomPower {
     pub can_kick: bool,
     pub can_pin: bool,
     pub can_change_roles: bool,
+    /// May change the room's name (`m.room.name`).
+    pub can_rename: bool,
+    /// May change the room's topic (`m.room.topic`).
+    pub can_set_topic: bool,
     pub users_default: i64,
     pub creators: Vec<String>,
     pub member_levels: HashMap<String, i64>,
@@ -701,6 +710,16 @@ impl RoomPower {
     pub fn can_ban_user(&self, own_user_id: Option<&str>, target_user_id: &str) -> bool {
         self.can_ban && own_user_id != Some(target_user_id) && self.outranks(target_user_id)
     }
+
+    /// Whether the current user can remove `target_user_id` from the room right now.
+    pub fn can_kick_user(&self, own_user_id: Option<&str>, target_user_id: &str) -> bool {
+        self.can_kick && own_user_id != Some(target_user_id) && self.outranks(target_user_id)
+    }
+
+    /// Whether the current user can lift the ban on `target_user_id` right now.
+    pub fn can_unban_user(&self, own_user_id: Option<&str>, target_user_id: &str) -> bool {
+        self.can_unban && own_user_id != Some(target_user_id) && self.outranks(target_user_id)
+    }
 }
 
 /// Counts and flags only: never puts user IDs in logs.
@@ -715,6 +734,8 @@ impl fmt::Debug for RoomPower {
             .field("can_kick", &self.can_kick)
             .field("can_pin", &self.can_pin)
             .field("can_change_roles", &self.can_change_roles)
+            .field("can_rename", &self.can_rename)
+            .field("can_set_topic", &self.can_set_topic)
             .field("users_default", &self.users_default)
             .field("creators", &self.creators.len())
             .field("member_levels", &self.member_levels.len())

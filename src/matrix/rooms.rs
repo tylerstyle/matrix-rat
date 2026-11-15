@@ -172,13 +172,16 @@ impl Timelines {
         {
             task.abort();
         }
-        self.member_fetches.abort_all();
+        // The member lists being loaded are left to finish: the UI asks for a room's
+        // list right before it opens the room (which closes the one before), asks once,
+        // and files the answer under its room.
     }
 
     /// At the end of the session: closes the timelines, and stops a request for the
     /// threads popup too (which, unlike them, is not bound to the open room).
     pub fn stop(&mut self) {
         self.close();
+        self.member_fetches.abort_all();
         if let Some(task) = self.thread_lister.take() {
             task.abort();
         }
@@ -952,6 +955,27 @@ impl Timelines {
                         });
                     }
                     Err(err) => answer(Err(format!("{err:#}")), event_id),
+                }
+            }
+            MatrixCmd::FetchSource {
+                request,
+                room_id,
+                item,
+            } => {
+                let events = self.events.clone();
+                let answer = move |result: Result<super::EventSource, String>| {
+                    let _ = events.send(MatrixEvent::Source {
+                        request,
+                        result: result.map(Box::new),
+                    });
+                };
+                match self.active_timeline(&room_id).await {
+                    Ok((timeline, _)) => {
+                        tokio::spawn(async move {
+                            answer(super::source::fetch(&timeline, &item).await);
+                        });
+                    }
+                    Err(err) => answer(Err(format!("{err:#}"))),
                 }
             }
             MatrixCmd::Typing { room_id, typing } => {
@@ -2274,13 +2298,14 @@ mod tests {
         .expect("timed out finding a shared room between alice and bob");
         let room_id = bob_room.room_id().to_string();
 
-        // Alice opens the room and requests members; Bob should appear in RoomMembers.
+        // Alice asks for the members and opens the room, in the order the UI does it
+        // when switching rooms: opening must not stop the list from being loaded.
+        handle.send(MatrixCmd::FetchMembers {
+            room_id: room_id.clone(),
+        });
         handle.send(MatrixCmd::OpenRoom {
             room_id: room_id.clone(),
             generation: 1,
-        });
-        handle.send(MatrixCmd::FetchMembers {
-            room_id: room_id.clone(),
         });
         let bob_member = tokio::time::timeout(Duration::from_secs(30), async {
             loop {

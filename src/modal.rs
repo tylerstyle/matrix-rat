@@ -1027,6 +1027,18 @@ pub enum ReasonConfirmKind {
         user_id: String,
         user_name: String,
     },
+    /// Remove a member from the room (the `/kick` command).
+    Kick {
+        room_id: String,
+        user_id: String,
+        user_name: String,
+    },
+    /// Let a banned user back in (the `/unban` command).
+    Unban {
+        room_id: String,
+        user_id: String,
+        user_name: String,
+    },
 }
 
 impl std::fmt::Debug for ReasonConfirmKind {
@@ -1034,6 +1046,9 @@ impl std::fmt::Debug for ReasonConfirmKind {
         match self {
             Self::Redact { room_id, .. } => write!(f, "ReasonConfirmKind::Redact({room_id})"),
             Self::Ban { room_id, .. } => write!(f, "ReasonConfirmKind::Ban({room_id})"),
+            // Which room and whom stay out of logs.
+            Self::Kick { .. } => f.write_str("ReasonConfirmKind::Kick"),
+            Self::Unban { .. } => f.write_str("ReasonConfirmKind::Unban"),
         }
     }
 }
@@ -1091,6 +1106,36 @@ impl ReasonConfirmPopup {
             reason: LineEdit::new().with_max_bytes(Self::REASON_MAX_BYTES),
             focus: Self::REASON,
         }
+    }
+
+    pub fn kick(room_id: String, user_id: String, user_name: String) -> Self {
+        Self {
+            kind: ReasonConfirmKind::Kick {
+                room_id,
+                user_id,
+                user_name,
+            },
+            reason: LineEdit::new().with_max_bytes(Self::REASON_MAX_BYTES),
+            focus: Self::REASON,
+        }
+    }
+
+    pub fn unban(room_id: String, user_id: String, user_name: String) -> Self {
+        Self {
+            kind: ReasonConfirmKind::Unban {
+                room_id,
+                user_id,
+                user_name,
+            },
+            reason: LineEdit::new().with_max_bytes(Self::REASON_MAX_BYTES),
+            focus: Self::REASON,
+        }
+    }
+
+    /// The same question with `reason` already filled in (typed after a command).
+    pub fn with_reason(mut self, reason: &str) -> Self {
+        self.reason.set(reason);
+        self
     }
 
     pub fn step(&mut self, delta: isize) {
@@ -1607,6 +1652,9 @@ pub enum Modal {
     PollVote(PollVotePopup),
     /// Pick a sticker from the image packs and send it.
     Stickers(StickerPicker),
+    /// Who sent a message and when, its event ID, encryption, delivery, readers and
+    /// source.
+    Details(Box<crate::details::DetailsPopup>),
     /// The threads of a room.
     Threads(ThreadsPopup),
 }
@@ -1782,8 +1830,22 @@ mod tests {
             "Bob".into(),
         );
         ban.reason.set("private ban reason");
+        let kick = ReasonConfirmPopup::kick(
+            "!room123:example.org".into(),
+            "@bob:example.org".into(),
+            "Bob".into(),
+        )
+        .with_reason("private kick reason");
+        let unban = ReasonConfirmPopup::unban(
+            "!room123:example.org".into(),
+            "@bob:example.org".into(),
+            "Bob".into(),
+        );
 
-        let debug = format!("{pinned:?} {:?} {redact:?} {ban:?}", pinned.items[0]);
+        let debug = format!(
+            "{pinned:?} {:?} {redact:?} {ban:?} {kick:?} {unban:?}",
+            pinned.items[0]
+        );
         for secret in [
             "Secret",
             "$ev1",
@@ -1797,6 +1859,7 @@ mod tests {
             "follow-up",
             "top secret",
             "private ban",
+            "private kick",
         ] {
             assert!(!debug.contains(secret), "{secret} leaked in {debug}");
         }

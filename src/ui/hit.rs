@@ -156,6 +156,10 @@ pub enum HitId {
     PollVoteBtn(bool),
     /// A row of the sticker picker (index into its filtered list); clicking sends it.
     StickerRow(usize),
+    /// "View source" / "Back to details" in the message details popup.
+    DetailsFlip,
+    /// "Copy event ID" / "Copy JSON" in the message details popup.
+    DetailsCopy,
     /// A thread in the threads popup (index into what it shows); clicking opens it.
     ThreadRow(usize),
     /// The row after the threads in the threads popup that loads more of them.
