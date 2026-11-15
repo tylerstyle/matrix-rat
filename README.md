@@ -82,6 +82,21 @@ nix-env -if .                 # or install into your profile
 ```
 Hype it, like it, use it and when traction hits critical, we'll go to nixpkgs.
 
+**A ready-made binary** (Linux on x86-64 or ARM64, glibc 2.35 or newer, which means
+Ubuntu 22.04, Debian 12, Fedora 36 and later): releases from 0.7.0 on carry a
+`matrix-rat-<version>-<target>.tar.gz` and its `.sha256` on the
+[releases page](https://github.com/tylerstyle/matrix-rat/releases).
+
+```sh
+sha256sum -c matrix-rat-*.tar.gz.sha256    # the file is the one that was built
+tar -xzf matrix-rat-*.tar.gz
+install -Dm755 matrix-rat-*/matrix-rat ~/.local/bin/matrix-rat
+```
+
+The archive also holds the launcher entry and the icon (`share/`), to copy if you want
+them: see [`assets/`](assets/README.md). The binaries are built by the workflow in
+`.github/workflows/release-binaries.yml` from the tagged source.
+
 **With Cargo** (Rust 1.96 or newer, plus a C compiler, `make`, `cmake` and `perl`):
 
 ```sh
