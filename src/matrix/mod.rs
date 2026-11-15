@@ -1632,7 +1632,7 @@ impl Worker {
         let mut user_searcher =
             safety::UserSearcher::new(client.clone(), self.events.clone(), ignored.clone());
         let mut dir_searcher =
-            directory::DirectorySearcher::new(client.clone(), self.events.clone());
+            directory::DirectorySearcher::new(client.clone(), self.events.clone(), left.clone());
         sync.start().await;
 
         let room_list = sync

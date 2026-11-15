@@ -849,7 +849,7 @@ impl Manager {
             } => {
                 let left = self.left.clone();
                 tokio::spawn(async move {
-                    let result = join(&client, &target, &via).await;
+                    let result = join(&client, &left, &target, &via).await;
                     // Joined (again): no longer a room that was left.
                     if let Ok(room_id) = &result
                         && let Ok(room_id) = <&RoomId>::try_from(room_id.as_str())
@@ -864,8 +864,9 @@ impl Manager {
                 user_id,
                 create,
             } => {
+                let left = self.left.clone();
                 tokio::spawn(async move {
-                    emit(match direct_chat(&client, &user_id, create).await {
+                    emit(match direct_chat(&client, &left, &user_id, create).await {
                         Ok(Some(room_id)) => ManageEvent::Opened {
                             request,
                             result: Ok(room_id),
@@ -909,8 +910,9 @@ impl Manager {
                 target,
                 via,
             } => {
+                let left = self.left.clone();
                 tokio::spawn(async move {
-                    let result = super::directory::fetch_preview(&client, &target, via)
+                    let result = super::directory::fetch_preview(&client, &left, &target, via)
                         .await
                         .map(Box::new);
                     emit(ManageEvent::Preview { request, result });
@@ -1492,7 +1494,12 @@ fn explain_notify(err: &NotificationSettingsError) -> &'static str {
     }
 }
 
-async fn join(client: &Client, target: &str, via: &[String]) -> Result<String, String> {
+async fn join(
+    client: &Client,
+    left: &super::left::LeftRooms,
+    target: &str,
+    via: &[String],
+) -> Result<String, String> {
     let not_an_address = || "Could not join: that is not a room address.".to_owned();
     let target = RoomOrAliasId::parse(target).map_err(|_| not_an_address())?;
     let names = via_names(via);
@@ -1502,7 +1509,8 @@ async fn join(client: &Client, target: &str, via: &[String]) -> Result<String, S
             via.push(server);
         }
     }
-    // Where does it lead? A room we are in already is simply shown.
+    // Where does it lead? A room we are in already is simply shown. (Not one left here,
+    // which can look joined while it is not, see `super::left`: that is joined for real.)
     let room_id = match <&RoomId>::try_from(&*target) {
         Ok(room_id) => room_id.to_owned(),
         Err(alias) => {
@@ -1520,7 +1528,7 @@ async fn join(client: &Client, target: &str, via: &[String]) -> Result<String, S
     };
     if client
         .get_room(&room_id)
-        .is_some_and(|room| room.state() == RoomState::Joined)
+        .is_some_and(|room| room.state() == RoomState::Joined && !left.gone(&room))
     {
         return Ok(room_id.to_string());
     }
@@ -1548,6 +1556,7 @@ fn via_names(via: &[String]) -> Vec<&str> {
 /// to be made.
 async fn direct_chat(
     client: &Client,
+    left: &super::left::LeftRooms,
     user_id: &str,
     create: bool,
 ) -> Result<Option<String>, String> {
@@ -1556,11 +1565,14 @@ async fn direct_chat(
     if client.user_id() == Some(&*user) {
         return Err("That is your own user ID.".to_owned());
     }
-    if let Some(existing) = client.get_dm_room(&user) {
+    // Not a chat left here: it can look joined while it is not (see `super::left`), and
+    // is kept out of the list, so opening it would wait for nothing. A new one is made.
+    if let Some(existing) = client.get_dm_rooms(&user).find(|room| !left.gone(room)) {
         return Ok(Some(existing.room_id().to_string()));
     }
     // A chat they have invited us to is the chat with them as well: opening it (where
-    // it can be accepted) beats making a second one.
+    // it can be accepted) beats making a second one. (An invitation is never gone: it
+    // is news, even for a room that was left before.)
     for invited in client.invited_rooms() {
         let marked = invited
             .direct_targets()
@@ -2634,10 +2646,82 @@ async fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::left::LeftRooms;
+    use crate::matrix::left::testing::{BOB, Server};
     use crate::matrix::{MatrixCmd, spawn};
     use crate::paths::Paths;
     use matrix_sdk::config::SyncSettings;
+    use matrix_sdk::ruma::room_id;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    #[tokio::test]
+    async fn a_chat_left_here_is_not_taken_for_the_chat_with_that_person() {
+        let chat = room_id!("!chat:localhost");
+        let client = Server {
+            joined: vec![chat.as_str()],
+            direct: vec![chat.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let left = LeftRooms::default();
+        assert_eq!(
+            direct_chat(&client, &left, BOB, false).await,
+            Ok(Some(chat.to_string()))
+        );
+        // Left, and looking joined still: there is no chat with Bob (and one would be
+        // made, were it asked for).
+        left.mark(chat);
+        assert_eq!(direct_chat(&client, &left, BOB, false).await, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn an_invitation_to_a_chat_left_before_is_the_chat_with_that_person() {
+        let chat = room_id!("!asked:localhost");
+        let client = Server {
+            invited: vec![chat.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let left = LeftRooms::default();
+        left.mark(chat);
+        assert_eq!(
+            direct_chat(&client, &left, BOB, false).await,
+            Ok(Some(chat.to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_room_left_here_is_joined_for_real() {
+        let room = room_id!("!again:localhost");
+        let server = Server {
+            joined: vec![room.as_str()],
+            ..Server::default()
+        };
+        let seen = server.seen.clone();
+        let client = server.client().await;
+        let asked_to_join = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.contains("/join/"))
+        };
+        let left = LeftRooms::default();
+        // In it: simply shown.
+        assert_eq!(
+            join(&client, &left, room.as_str(), &[]).await,
+            Ok(room.to_string())
+        );
+        assert!(!asked_to_join());
+        // Left here, though it looks joined: the server is asked.
+        left.mark(room);
+        assert_eq!(
+            join(&client, &left, room.as_str(), &[]).await,
+            Ok(room.to_string())
+        );
+        assert!(asked_to_join());
+    }
 
     #[test]
     fn roles_come_from_power_levels() {

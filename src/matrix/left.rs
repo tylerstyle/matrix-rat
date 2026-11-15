@@ -115,8 +115,13 @@ impl LeftRooms {
 
     /// The user is joining this room (again): it is a room like any other.
     pub fn clear(&self, room_id: &RoomId) {
-        if let Ok(mut rooms) = self.rooms.lock() {
-            rooms.remove(room_id);
+        let removed = self
+            .rooms
+            .lock()
+            .is_ok_and(|mut rooms| rooms.remove(room_id).is_some());
+        // The list may have been made while the join was on its way, without the room.
+        if removed {
+            self.wake.notify_one();
         }
     }
 
@@ -285,7 +290,7 @@ async fn server_says_joined(client: &Client, room_id: &RoomId) -> Option<bool> {
 /// what it asks later is answered from the same few things.
 #[cfg(test)]
 pub(super) mod testing {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use matrix_sdk::authentication::matrix::MatrixSession;
     use matrix_sdk::config::SyncSettings;
@@ -315,6 +320,8 @@ pub(super) mod testing {
         pub server_joined: Vec<&'static str>,
         /// What a request for a single event gets.
         pub event: Option<Value>,
+        /// The paths asked for, in order.
+        pub seen: Arc<Mutex<Vec<String>>>,
     }
 
     impl Server {
@@ -383,6 +390,9 @@ pub(super) mod testing {
             }
             let path = head.split_whitespace().nth(1).unwrap_or("/");
             let path = path.split('?').next().unwrap_or(path);
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push(path.to_owned());
+            }
             let body = self.body_for(path).to_string();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -400,6 +410,9 @@ pub(super) mod testing {
                 json!({ "joined_rooms": self.server_joined })
             } else if path.contains("/event/") {
                 self.event.clone().unwrap_or_else(|| json!({}))
+            } else if let Some(target) = path.split("/join/").nth(1) {
+                // Any room can be joined.
+                json!({ "room_id": target.replace("%21", "!").replace("%3A", ":") })
             } else {
                 json!({})
             }
@@ -509,6 +522,20 @@ mod tests {
         // Nothing of a room is in the debug output.
         left.mark(room);
         assert_eq!(format!("{left:?}"), "LeftRooms(1)");
+    }
+
+    #[tokio::test]
+    async fn joining_a_room_left_here_again_makes_the_list_again() {
+        let left = LeftRooms::default();
+        let room = room_id!("!back:example.org");
+        left.clear(room);
+        let woken = tokio::time::timeout(Duration::from_millis(50), left.due()).await;
+        assert!(woken.is_err(), "nothing to make the list again for");
+        left.mark(room);
+        left.clear(room);
+        tokio::time::timeout(Duration::from_secs(5), left.due())
+            .await
+            .expect("the list is made again with the room in it");
     }
 
     #[test]

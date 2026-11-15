@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use super::MatrixEvent;
+use super::left::LeftRooms;
 use super::manage::{failed, failed_saying};
 use super::safety::safe_mxc;
 use crate::text::{is_blank, sanitize, sanitize_line};
@@ -159,16 +160,22 @@ impl fmt::Debug for RoomPreview {
 pub(super) struct DirectorySearcher {
     client: Client,
     events: mpsc::UnboundedSender<MatrixEvent>,
+    left: LeftRooms,
     current: Option<(u64, Arc<Mutex<RoomDirectorySearch>>)>,
     server_label: Option<String>,
     task: Option<JoinHandle<()>>,
 }
 
 impl DirectorySearcher {
-    pub(super) fn new(client: Client, events: mpsc::UnboundedSender<MatrixEvent>) -> Self {
+    pub(super) fn new(
+        client: Client,
+        events: mpsc::UnboundedSender<MatrixEvent>,
+        left: LeftRooms,
+    ) -> Self {
         Self {
             client,
             events,
+            left,
             current: None,
             server_label: None,
             task: None,
@@ -195,6 +202,7 @@ impl DirectorySearcher {
         let server_label = self.server_label.clone();
         let client = self.client.clone();
         let events = self.events.clone();
+        let left = self.left.clone();
         let filter = clean_query(&query);
 
         self.task = Some(tokio::spawn(async move {
@@ -204,8 +212,10 @@ impl DirectorySearcher {
                     .search(filter, DIRECTORY_PAGE_SIZE, via_server)
                     .await?;
                 let (items, _) = guard.results();
-                let rooms: Vec<PublicRoom> =
-                    items.iter().map(|d| map_public_room(&client, d)).collect();
+                let rooms: Vec<PublicRoom> = items
+                    .iter()
+                    .map(|d| map_public_room(&client, &left, d))
+                    .collect();
                 Ok::<_, matrix_sdk::Error>(DirectoryPage {
                     generation,
                     append: false,
@@ -233,6 +243,7 @@ impl DirectorySearcher {
         let server_label = self.server_label.clone();
         let client = self.client.clone();
         let events = self.events.clone();
+        let left = self.left.clone();
 
         self.task = Some(tokio::spawn(async move {
             let outcome = tokio::time::timeout(DIRECTORY_TIMEOUT, async move {
@@ -251,7 +262,7 @@ impl DirectorySearcher {
                 let rooms: Vec<PublicRoom> = items
                     .iter()
                     .skip(before)
-                    .map(|d| map_public_room(&client, d))
+                    .map(|d| map_public_room(&client, &left, d))
                     .collect();
                 Ok(DirectoryPage {
                     generation,
@@ -354,10 +365,11 @@ fn clean_multiline_opt(raw: Option<&str>, limit: usize) -> Option<String> {
     Some(truncated)
 }
 
-fn map_public_room(client: &Client, desc: &RoomDescription) -> PublicRoom {
+fn map_public_room(client: &Client, left: &LeftRooms, desc: &RoomDescription) -> PublicRoom {
+    // A room left here can look joined while it is not (see `super::left`).
     let joined = client
         .get_room(&desc.room_id)
-        .is_some_and(|r| r.state() == RoomState::Joined);
+        .is_some_and(|r| r.state() == RoomState::Joined && !left.gone(&r));
     PublicRoom {
         room_id: desc.room_id.to_string(),
         name: clean_text_opt(desc.name.as_deref(), 120),
@@ -404,6 +416,7 @@ fn parse_via(via: &[String]) -> Vec<OwnedServerName> {
 
 pub(super) async fn fetch_preview(
     client: &Client,
+    left: &LeftRooms,
     target: &str,
     via: Vec<String>,
 ) -> Result<RoomPreview, String> {
@@ -432,7 +445,11 @@ pub(super) async fn fetch_preview(
 
     let preview = preview_res.map_err(|err| friendly_preview_error(&err))?;
 
-    let local_room = client.get_room(&preview.room_id);
+    // A room left here can look joined while it is not (see `super::left`): what is
+    // known of it here is stale, and the server's word counts.
+    let local_room = client
+        .get_room(&preview.room_id)
+        .filter(|room| !left.gone(room));
     let local_state = local_room.as_ref().map(|r| r.state());
     let membership = match local_state {
         Some(RoomState::Joined | RoomState::Invited | RoomState::Knocked | RoomState::Banned) => {
@@ -540,6 +557,39 @@ fn friendly_knock_error(err: &matrix_sdk::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::left::testing::Server;
+    use matrix_sdk::ruma::room_id;
+
+    #[tokio::test]
+    async fn a_room_left_here_is_not_shown_as_joined() {
+        let room = room_id!("!public:localhost");
+        let client = Server {
+            joined: vec![room.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let found = RoomDescription {
+            room_id: room.to_owned(),
+            name: None,
+            topic: None,
+            alias: None,
+            avatar_url: None,
+            join_rule: JoinRuleKind::Public,
+            is_world_readable: false,
+            joined_members: 2,
+        };
+        let left = LeftRooms::default();
+        assert!(map_public_room(&client, &left, &found).joined);
+        let preview = fetch_preview(&client, &left, room.as_str(), Vec::new()).await;
+        assert_eq!(preview.unwrap().membership, PreviewMembership::Joined);
+        // Left, and looking joined still: the server's word counts (and this one does
+        // not know the room).
+        left.mark(room);
+        assert!(!map_public_room(&client, &left, &found).joined);
+        let preview = fetch_preview(&client, &left, room.as_str(), Vec::new()).await;
+        assert_eq!(preview.unwrap().membership, PreviewMembership::None);
+    }
 
     #[test]
     fn validate_server_accepts_hosts_and_ports_and_rejects_urls_or_whitespace() {
