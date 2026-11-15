@@ -25,7 +25,8 @@ pub use directory::PreviewJoinRule;
 pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
 pub use keyring::SecretStoreMode;
 pub use manage::{
-    Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomMember,
+    Change, ManageCmd, ManageEvent, MemberRole, NotifyLevel, RoomDetails, RoomKnockRequest,
+    RoomMember,
 };
 pub use notify::Notice;
 pub use people::{

@@ -1042,13 +1042,17 @@ impl App {
             KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) => {
                 self.remove_or_unban_member()
             }
+            KeyCode::Delete if matches!(row, Some(InfoRow::KnockRequest(_))) => {
+                self.decline_knock()
+            }
             KeyCode::Char('i')
                 if mods == KeyModifiers::ALT && matches!(row, Some(InfoRow::Member(_))) =>
             {
                 self.toggle_ignore_member();
             }
             KeyCode::Char('b')
-                if mods == KeyModifiers::ALT && matches!(row, Some(InfoRow::Member(_))) =>
+                if mods == KeyModifiers::ALT
+                    && matches!(row, Some(InfoRow::Member(_) | InfoRow::KnockRequest(_))) =>
             {
                 self.open_ban_prompt();
             }
@@ -1061,7 +1065,7 @@ impl App {
                 let keys = EditKeys {
                     arrows: row != Some(InfoRow::Notify),
                     home_end: false,
-                    delete: !matches!(row, Some(InfoRow::Member(_))),
+                    delete: !matches!(row, Some(InfoRow::Member(_) | InfoRow::KnockRequest(_))),
                     kill_to_end: true,
                 };
                 info.apply_filter(|f| f.handle_key(code, mods, keys));
@@ -1163,6 +1167,9 @@ impl App {
             Click::MemberRole => self.open_role_chooser(),
             Click::RoleOption(index) => self.pick_role_option(index),
             Click::MemberIgnore => self.toggle_ignore_member(),
+            Click::KnockAccept => self.accept_knock(),
+            Click::KnockDecline => self.decline_knock(),
+            Click::KnockBan => self.open_ban_prompt(),
             Click::Favourite => self.toggle_room_tag(false),
             Click::LowPriority => self.toggle_room_tag(true),
             // The name above the messages is the open room's, wherever the focus is.
@@ -1310,6 +1317,7 @@ impl App {
                 }
                 (ManageCmd::Leave { room_id }, Pending::Leave, "Leaving…")
             }
+            InfoRow::KnockRequest(_) => return self.accept_knock(),
             InfoRow::Member(_) => {
                 return self.open_user_info_from_room_member(row);
             }
@@ -1410,6 +1418,72 @@ impl App {
         }
     }
 
+    fn accept_knock(&mut self) {
+        let connected = self.matrix.is_some();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || info.editing.is_some() {
+            return;
+        }
+        info.error = None;
+        info.confirm = None;
+        info.ban_prompt = None;
+        info.role_chooser = None;
+        let Some(req) = info.selected_knock_request().cloned() else {
+            return;
+        };
+        if !req.acceptable {
+            info.error = Some("You are not allowed to accept this request.".to_owned());
+            return;
+        }
+        if !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        info.wait_for(Pending::Change(Change::AcceptKnock), "Accepting…");
+        let room_id = info.room_id.clone();
+        self.manage(ManageCmd::AcceptKnock {
+            room_id,
+            user_id: req.user_id,
+        });
+    }
+
+    /// Del on an incoming knock request: asks first, declines on the second press.
+    fn decline_knock(&mut self) {
+        let connected = self.matrix.is_some();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || info.editing.is_some() {
+            return;
+        }
+        info.error = None;
+        info.ban_prompt = None;
+        info.role_chooser = None;
+        let Some(req) = info.selected_knock_request().cloned() else {
+            return;
+        };
+        if !req.declinable {
+            info.confirm = None;
+            info.error = Some("You are not allowed to decline this request.".to_owned());
+            return;
+        }
+        let user_id = req.user_id;
+        if info.confirm != Some(Confirm::DeclineKnock(user_id.clone())) {
+            info.confirm = Some(Confirm::DeclineKnock(user_id));
+            return;
+        }
+        info.confirm = None;
+        if !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        info.wait_for(Pending::Change(Change::DeclineKnock), "Declining…");
+        let room_id = info.room_id.clone();
+        self.manage(ManageCmd::DeclineKnock { room_id, user_id });
+    }
+
     fn open_ban_prompt(&mut self) {
         let Some(Modal::RoomInfo(info)) = &mut self.modal else {
             return;
@@ -1420,25 +1494,27 @@ impl App {
         info.error = None;
         info.confirm = None;
         info.role_chooser = None;
-        let Some(member) = info.selected_member().cloned() else {
-            return;
-        };
-        if !member.bannable {
-            info.error = Some(if member.own {
-                "You cannot ban yourself.".to_owned()
-            } else if member.banned {
-                "This user is already banned.".to_owned()
-            } else {
-                "You are not allowed to ban this member.".to_owned()
-            });
-            return;
+        if let Some(member) = info.selected_member().cloned() {
+            if !member.bannable {
+                info.error = Some(if member.own {
+                    "You cannot ban yourself.".to_owned()
+                } else if member.banned {
+                    "This user is already banned.".to_owned()
+                } else {
+                    "You are not allowed to ban this member.".to_owned()
+                });
+                return;
+            }
+            let name = display_user_label(&member.name, &member.user_id);
+            info.ban_prompt = Some(BanPrompt::new(member.user_id, name));
+        } else if let Some(req) = info.selected_knock_request().cloned() {
+            if !req.bannable {
+                info.error = Some("You are not allowed to ban this user.".to_owned());
+                return;
+            }
+            let name = display_user_label(&req.name, &req.user_id);
+            info.ban_prompt = Some(BanPrompt::for_knock(req.user_id, name));
         }
-        let name = if member.name.is_empty() {
-            member.user_id.clone()
-        } else {
-            sanitize_line(&member.name)
-        };
-        info.ban_prompt = Some(BanPrompt::new(member.user_id, name));
     }
 
     fn submit_ban_prompt(&mut self) {
@@ -1458,13 +1534,28 @@ impl App {
             (!trimmed.is_empty()).then_some(trimmed)
         };
         info.error = None;
-        info.wait_for(Pending::Change(Change::Ban), "Banning…");
         let room_id = info.room_id.clone();
-        self.manage(ManageCmd::Ban {
-            room_id,
-            user_id: prompt.user_id,
-            reason,
-        });
+        let (change, cmd) = if prompt.knock {
+            (
+                Change::BanKnock,
+                ManageCmd::BanKnock {
+                    room_id,
+                    user_id: prompt.user_id,
+                    reason,
+                },
+            )
+        } else {
+            (
+                Change::Ban,
+                ManageCmd::Ban {
+                    room_id,
+                    user_id: prompt.user_id,
+                    reason,
+                },
+            )
+        };
+        info.wait_for(Pending::Change(change), "Banning…");
+        self.manage(cmd);
     }
 
     fn unban_member(&mut self) {
@@ -1870,6 +1961,9 @@ impl App {
             Change::Ban => "Banned from the room",
             Change::Unban => "Unbanned",
             Change::SetRole => "Role updated",
+            Change::AcceptKnock => "Join request accepted",
+            Change::DeclineKnock => "Join request declined",
+            Change::BanKnock => "Declined and banned",
             Change::Name => "Room renamed",
             Change::OwnName => "Name in room updated",
             Change::Topic => "Topic changed",
@@ -2028,6 +2122,14 @@ fn demo_details(room: &crate::model::Room) -> RoomDetails {
         can_invite: false,
         members,
         ..RoomDetails::default()
+    }
+}
+
+fn display_user_label(name: &str, user_id: &str) -> String {
+    if name.is_empty() {
+        user_id.to_owned()
+    } else {
+        sanitize_line(name)
     }
 }
 
@@ -4538,5 +4640,129 @@ mod tests {
                 PreviewButton::Cancel
             ]
         );
+    }
+
+    #[test]
+    fn room_info_incoming_knock_requests_and_permissions() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.open_room(0);
+        app.on_event(key(KeyCode::F(4)));
+        all_commands(&mut commands);
+
+        let carol = "@carol:example.org";
+        let dave = "@dave:example.org";
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(RoomDetails {
+                name: "Rats".into(),
+                joined: 1,
+                knock_requests: vec![
+                    crate::matrix::RoomKnockRequest {
+                        user_id: carol.into(),
+                        name: "Carol".into(),
+                        reason: Some("let me in".into()),
+                        acceptable: true,
+                        declinable: true,
+                        bannable: true,
+                    },
+                    crate::matrix::RoomKnockRequest {
+                        user_id: dave.into(),
+                        name: "Dave".into(),
+                        reason: None,
+                        acceptable: true,
+                        declinable: false,
+                        bannable: false,
+                    },
+                ],
+                members: vec![member("me", MemberRole::Admin, false)],
+                ..RoomDetails::default()
+            })),
+        }));
+
+        if let Some(Modal::RoomInfo(info)) = &mut app.modal {
+            info.select(InfoRow::KnockRequest(0));
+        }
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Join requests (2)");
+        find(&text, "Carol");
+        find(&text, "let me in");
+        find(&text, "Dave");
+        let accept_at = find(&text, " accept ");
+        find(&text, " decline ");
+        find(&text, " ban ");
+
+        // Clicking `accept` pill sends AcceptKnock and waits.
+        app.on_event(click(accept_at.0 + 1, accept_at.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::AcceptKnock { room_id, user_id }]
+                if room_id == ROOM && user_id == carol
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::AcceptKnock,
+            result: Ok(()),
+        }));
+
+        // Del asks to confirm declining on first press, then sends DeclineKnock on second.
+        app.on_event(key(KeyCode::Delete));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Del again to decline");
+        app.on_event(key(KeyCode::Delete));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::DeclineKnock { room_id, user_id }]
+                if room_id == ROOM && user_id == carol
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::DeclineKnock,
+            result: Ok(()),
+        }));
+
+        // Alt-B opens BanPrompt and sends BanKnock with optional reason.
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::ALT,
+        )));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Ban Carol");
+        type_text(&mut app, "spam");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::BanKnock { room_id, user_id, reason: Some(r) }]
+                if room_id == ROOM && user_id == carol && r == "spam"
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::BanKnock,
+            result: Ok(()),
+        }));
+
+        // Dave only has `acceptable: true`: Del and Alt-B show permission errors cleanly.
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(info(&app).current(), Some(InfoRow::KnockRequest(1)));
+        app.on_event(key(KeyCode::Delete));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "not allowed to decline");
+
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::ALT,
+        )));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "not allowed to ban");
+
+        // Enter on Dave accepts his request.
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::AcceptKnock { room_id, user_id }]
+                if room_id == ROOM && user_id == dave
+        ));
     }
 }

@@ -1,10 +1,13 @@
 //! Room management: joining, creating, leaving, inviting, and the details of a room
 //! (members, roles, what we may do there).
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::{Stream, StreamExt};
 use matrix_sdk::notification_settings::RoomNotificationMode;
+use matrix_sdk::room::knock_requests::KnockRequest;
 use matrix_sdk::ruma::api::client::membership::get_member_events;
 use matrix_sdk::ruma::api::client::room::create_room::v3::{Request as CreateRequest, RoomPreset};
 use matrix_sdk::ruma::api::error::{ErrorBody, ErrorKind};
@@ -15,7 +18,7 @@ use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, UserPowerLevel};
 use matrix_sdk::ruma::{
-    Int, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId, ServerName,
+    Int, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId, ServerName, UInt,
     UserId,
 };
 use matrix_sdk::{Client, NotificationSettingsError, Room, RoomMemberships, RoomState};
@@ -140,6 +143,22 @@ pub enum ManageCmd {
         via: Vec<String>,
         reason: Option<String>,
     },
+    /// Accept an incoming knock request by inviting the user.
+    AcceptKnock {
+        room_id: String,
+        user_id: String,
+    },
+    /// Decline an incoming knock request.
+    DeclineKnock {
+        room_id: String,
+        user_id: String,
+    },
+    /// Decline an incoming knock request and ban the user, with an optional reason.
+    BanKnock {
+        room_id: String,
+        user_id: String,
+        reason: Option<String>,
+    },
 }
 
 /// Prints which room, never names, topics or who is being written to.
@@ -179,6 +198,11 @@ impl std::fmt::Debug for ManageCmd {
                 via.len(),
                 reason.is_some()
             ),
+            Self::AcceptKnock { room_id, .. } => write!(f, "AcceptKnock({room_id})"),
+            Self::DeclineKnock { room_id, .. } => write!(f, "DeclineKnock({room_id})"),
+            Self::BanKnock {
+                room_id, reason, ..
+            } => write!(f, "BanKnock({room_id}, reason: {})", reason.is_some()),
         }
     }
 }
@@ -191,6 +215,9 @@ pub enum Change {
     Ban,
     Unban,
     SetRole,
+    AcceptKnock,
+    DeclineKnock,
+    BanKnock,
     Name,
     OwnName,
     Topic,
@@ -303,6 +330,33 @@ pub struct RoomMember {
     pub role_editable: bool,
 }
 
+/// An incoming request to join this room (`m.room.member` with `knock` membership).
+/// All text is sanitized for display.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct RoomKnockRequest {
+    pub user_id: String,
+    /// Display name, or the first part of the user id.
+    pub name: String,
+    pub reason: Option<String>,
+    /// Whether we may invite this user (accept the request).
+    pub acceptable: bool,
+    /// Whether we may kick this user (decline the request).
+    pub declinable: bool,
+    /// Whether we may ban this user (decline and ban).
+    pub bannable: bool,
+}
+
+impl std::fmt::Debug for RoomKnockRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoomKnockRequest")
+            .field("has_reason", &self.reason.is_some())
+            .field("acceptable", &self.acceptable)
+            .field("declinable", &self.declinable)
+            .field("bannable", &self.bannable)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Everything the room info view shows. All text is safe to put on the screen.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct RoomDetails {
@@ -327,6 +381,8 @@ pub struct RoomDetails {
     pub own_is_creator: bool,
     /// Joined admins or creators, used to guard last-admin self-demotion.
     pub admin_count: usize,
+    /// Pending incoming requests to join (filtered to those the viewer can act on).
+    pub knock_requests: Vec<RoomKnockRequest>,
     /// Joined members first, then invited, then banned; highest role first.
     pub members: Vec<RoomMember>,
     /// The member list is still being fetched.
@@ -343,8 +399,9 @@ impl std::fmt::Debug for RoomDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "RoomDetails({} members, loading: {})",
+            "RoomDetails({} members, {} knocks, loading: {})",
             self.members.len(),
+            self.knock_requests.len(),
             self.members_loading
         )
     }
@@ -543,66 +600,68 @@ impl Manager {
                 });
             }
             ManageCmd::Kick { room_id, user_id } => {
-                let refresh = self.refresh.clone();
-                tokio::spawn(async move {
-                    let result =
-                        with_member(&client, &room_id, &user_id, "remove", async |room, user| {
-                            room.kick_user(user, None).await
-                        })
-                        .await;
-                    if result.is_ok() {
-                        bump_refresh(&refresh, &room_id);
-                    }
-                    emit(ManageEvent::Done {
-                        room_id,
-                        change: Change::Kick,
-                        result,
-                    });
-                });
+                self.spawn_member_action(
+                    room_id,
+                    user_id,
+                    "remove",
+                    Change::Kick,
+                    |r, u| async move { r.kick_user(&u, None).await },
+                );
             }
             ManageCmd::Ban {
                 room_id,
                 user_id,
                 reason,
             } => {
-                let refresh = self.refresh.clone();
-                tokio::spawn(async move {
-                    let clean_reason = reason
-                        .as_deref()
-                        .map(sanitize)
-                        .filter(|s| !crate::text::is_blank(s));
-                    let result =
-                        with_member(&client, &room_id, &user_id, "ban", async |room, user| {
-                            room.ban_user(user, clean_reason.as_deref()).await
-                        })
-                        .await;
-                    if result.is_ok() {
-                        bump_refresh(&refresh, &room_id);
-                    }
-                    emit(ManageEvent::Done {
-                        room_id,
-                        change: Change::Ban,
-                        result,
-                    });
-                });
+                let clean = clean_reason(reason.as_deref());
+                self.spawn_member_action(
+                    room_id,
+                    user_id,
+                    "ban",
+                    Change::Ban,
+                    move |r, u| async move { r.ban_user(&u, clean.as_deref()).await },
+                );
             }
             ManageCmd::Unban { room_id, user_id } => {
-                let refresh = self.refresh.clone();
-                tokio::spawn(async move {
-                    let result =
-                        with_member(&client, &room_id, &user_id, "unban", async |room, user| {
-                            room.unban_user(user, None).await
-                        })
-                        .await;
-                    if result.is_ok() {
-                        bump_refresh(&refresh, &room_id);
-                    }
-                    emit(ManageEvent::Done {
-                        room_id,
-                        change: Change::Unban,
-                        result,
-                    });
-                });
+                self.spawn_member_action(
+                    room_id,
+                    user_id,
+                    "unban",
+                    Change::Unban,
+                    |r, u| async move { r.unban_user(&u, None).await },
+                );
+            }
+            ManageCmd::AcceptKnock { room_id, user_id } => {
+                self.spawn_member_action(
+                    room_id,
+                    user_id,
+                    "accept that join request",
+                    Change::AcceptKnock,
+                    |r, u| async move { r.invite_user_by_id(&u).await },
+                );
+            }
+            ManageCmd::DeclineKnock { room_id, user_id } => {
+                self.spawn_member_action(
+                    room_id,
+                    user_id,
+                    "decline that join request",
+                    Change::DeclineKnock,
+                    |r, u| async move { r.kick_user(&u, None).await },
+                );
+            }
+            ManageCmd::BanKnock {
+                room_id,
+                user_id,
+                reason,
+            } => {
+                let clean = clean_reason(reason.as_deref());
+                self.spawn_member_action(
+                    room_id,
+                    user_id,
+                    "ban that user",
+                    Change::BanKnock,
+                    move |r, u| async move { r.ban_user(&u, clean.as_deref()).await },
+                );
             }
             ManageCmd::SetRole {
                 room_id,
@@ -750,6 +809,40 @@ impl Manager {
             }));
         });
     }
+
+    fn spawn_member_action<F, Fut>(
+        &self,
+        room_id: String,
+        user_id: String,
+        what: &'static str,
+        change: Change,
+        work: F,
+    ) where
+        F: FnOnce(Room, OwnedUserId) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + Send,
+    {
+        let client = self.client.clone();
+        let events = self.events.clone();
+        let refresh = self.refresh.clone();
+        tokio::spawn(async move {
+            let result = with_member(&client, &room_id, &user_id, what, async |room, user| {
+                work(room.clone(), user.to_owned()).await
+            })
+            .await;
+            if result.is_ok() {
+                bump_refresh(&refresh, &room_id);
+            }
+            let _ = events.send(MatrixEvent::Manage(ManageEvent::Done {
+                room_id,
+                change,
+                result,
+            }));
+        });
+    }
+}
+
+fn clean_reason(reason: Option<&str>) -> Option<String> {
+    reason.map(sanitize).filter(|s| !crate::text::is_blank(s))
 }
 
 impl Drop for Manager {
@@ -1319,10 +1412,114 @@ async fn server_members(client: &Client, room: &Room) -> Result<Vec<Entry>, Stri
 }
 
 /// Everything about the room but its members.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RawKnock {
+    timestamp: u64,
+    user: OwnedUserId,
+    name: String,
+    reason: Option<String>,
+}
+
+fn raw_knock(
+    timestamp: Option<UInt>,
+    user: OwnedUserId,
+    display_name: Option<&str>,
+    reason: Option<&str>,
+) -> RawKnock {
+    let name = display_name
+        .map(sanitize_line)
+        .filter(|s| !crate::text::is_blank(s))
+        .unwrap_or_else(|| sanitize_line(user.localpart()));
+    let reason = reason
+        .map(|r| sanitize_line(r).trim().to_owned())
+        .filter(|s| !s.is_empty());
+    RawKnock {
+        timestamp: timestamp.map_or(0, u64::from),
+        user,
+        name,
+        reason,
+    }
+}
+
+fn sort_raw_knocks(knocks: &mut [RawKnock]) {
+    knocks.sort_by(|a, b| {
+        a.timestamp
+            .cmp(&b.timestamp)
+            .then_with(|| a.user.cmp(&b.user))
+    });
+}
+
+fn convert_knocks(knocks: Vec<KnockRequest>) -> Vec<RawKnock> {
+    let mut out: Vec<RawKnock> = knocks
+        .into_iter()
+        .map(|k| {
+            raw_knock(
+                k.timestamp,
+                k.member_info.user_id,
+                k.member_info.display_name.as_deref(),
+                k.member_info.reason.as_deref(),
+            )
+        })
+        .collect();
+    sort_raw_knocks(&mut out);
+    out
+}
+
+async fn stored_knocks(room: &Room) -> Vec<RawKnock> {
+    let Ok(members) = room.members_no_sync(RoomMemberships::KNOCK).await else {
+        return Vec::new();
+    };
+    let mut out: Vec<RawKnock> = members
+        .into_iter()
+        .map(|m| {
+            raw_knock(
+                m.event().timestamp(),
+                m.user_id().to_owned(),
+                m.display_name(),
+                m.event().reason(),
+            )
+        })
+        .collect();
+    sort_raw_knocks(&mut out);
+    out
+}
+
+fn build_knock_requests(
+    raw: &[RawKnock],
+    levels: Option<&RoomPowerLevels>,
+    own: &UserId,
+) -> Vec<RoomKnockRequest> {
+    raw.iter()
+        .filter_map(|k| {
+            let not_self = k.user != own;
+            let acceptable = not_self && levels.is_some_and(|l| l.user_can_invite(own));
+            let declinable = not_self && levels.is_some_and(|l| l.user_can_kick_user(own, &k.user));
+            let bannable = not_self && levels.is_some_and(|l| l.user_can_ban_user(own, &k.user));
+            (acceptable || declinable || bannable).then(|| RoomKnockRequest {
+                user_id: sanitize_line(k.user.as_str()),
+                name: k.name.clone(),
+                reason: k.reason.clone(),
+                acceptable,
+                declinable,
+                bannable,
+            })
+        })
+        .collect()
+}
+
 async fn head(
     room: &Room,
     levels: Option<&RoomPowerLevels>,
     own_room_names: &super::people::OwnRoomNames,
+    raw_knocks: &[RawKnock],
 ) -> RoomDetails {
     let joined = room.state() == RoomState::Joined;
     let own = room.own_user_id();
@@ -1386,6 +1583,11 @@ async fn head(
         can_invite: can(&|levels| levels.user_can_invite(own)),
         own_power_level,
         own_is_creator,
+        knock_requests: if joined {
+            build_knock_requests(raw_knocks, levels, own)
+        } else {
+            Vec::new()
+        },
         ..RoomDetails::default()
     }
 }
@@ -1452,9 +1654,13 @@ async fn watch(
             return;
         }
     };
+    type KnockStream = Pin<Box<dyn Stream<Item = Vec<KnockRequest>> + Send>>;
     let own = room.own_user_id().to_owned();
     let mut changes = room.subscribe_info();
     let mut list = MemberList::default();
+    let mut knock_sub: Option<(KnockStream, AbortOnDrop)> = None;
+    let mut knock_tried = false;
+    let mut raw_knocks: Vec<RawKnock> = Vec::new();
     let mut sent: Option<RoomDetails> = None;
     let mut force_refresh = false;
     loop {
@@ -1472,7 +1678,18 @@ async fn watch(
         } else {
             None
         };
-        let mut current = head(&room, levels.as_ref(), &own_room_names).await;
+        if joined && !knock_tried {
+            knock_tried = true;
+            raw_knocks = stored_knocks(&room).await;
+            if let Ok((stream, handle)) = room.subscribe_to_knock_requests().await {
+                knock_sub = Some((Box::pin(stream), AbortOnDrop(handle)));
+            }
+        } else if !joined {
+            knock_sub = None;
+            knock_tried = false;
+            raw_knocks.clear();
+        }
+        let mut current = head(&room, levels.as_ref(), &own_room_names, &raw_knocks).await;
         let counts = (current.joined, current.invited);
         let mut wait = None;
         if joined {
@@ -1569,34 +1786,58 @@ async fn watch(
             }
             sent = Some(current);
         }
-        // Until the room changes, a moderation event happens, or a postponed fetch is due.
-        match wait {
-            Some(time) => {
-                tokio::select! {
-                    change = changes.next() => if change.is_none() { return },
-                    changed = refresh.changed() => {
-                        if changed.is_err() { return; }
-                        force_refresh = true;
+        // Until the room changes, a moderation event or knock arrives, or a postponed fetch is due.
+        let deadline = wait.map(|time| tokio::time::Instant::now() + time);
+        let burst = loop {
+            tokio::select! {
+                change = changes.next() => {
+                    if change.is_none() {
+                        return;
                     }
-                    () = tokio::time::sleep(time) => {}
+                    break true;
                 }
-            }
-            None => {
-                tokio::select! {
-                    change = changes.next() => if change.is_none() { return },
-                    changed = refresh.changed() => {
-                        if changed.is_err() { return; }
-                        force_refresh = true;
+                changed = refresh.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    force_refresh = true;
+                    break false;
+                }
+                knocks = async {
+                    match knock_sub.as_mut() {
+                        Some((stream, _)) => stream.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match knocks {
+                        Some(knocks) => {
+                            let next = convert_knocks(knocks);
+                            if next != raw_knocks {
+                                raw_knocks = next;
+                                break false;
+                            }
+                        }
+                        None => {
+                            knock_sub = None;
+                        }
                     }
                 }
+                () = async {
+                    match deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => break false,
             }
+        };
+        if burst {
+            // Changes come in bursts (a sync brings several); one look afterwards is enough.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            while futures::FutureExt::now_or_never(changes.next())
+                .flatten()
+                .is_some()
+            {}
         }
-        // Changes come in bursts (a sync brings several); one look afterwards is enough.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        while futures::FutureExt::now_or_never(changes.next())
-            .flatten()
-            .is_some()
-        {}
     }
 }
 
@@ -1640,9 +1881,37 @@ mod tests {
             via: Vec::new(),
         };
         assert!(!format!("{command:?}").contains("secret"));
+        let command = ManageCmd::AcceptKnock {
+            room_id: "!r:example.org".into(),
+            user_id: "@bob:example.org".into(),
+        };
+        assert!(!format!("{command:?}").contains("bob"));
+        let command = ManageCmd::DeclineKnock {
+            room_id: "!r:example.org".into(),
+            user_id: "@bob:example.org".into(),
+        };
+        assert!(!format!("{command:?}").contains("bob"));
+        let command = ManageCmd::BanKnock {
+            room_id: "!r:example.org".into(),
+            user_id: "@bob:example.org".into(),
+            reason: Some("secret reason".into()),
+        };
+        let text = format!("{command:?}");
+        assert!(!text.contains("bob") && !text.contains("secret"));
+        let req = RoomKnockRequest {
+            user_id: "@bob:example.org".into(),
+            name: "Secret Bob".into(),
+            reason: Some("the heist".into()),
+            acceptable: true,
+            declinable: true,
+            bannable: false,
+        };
+        let text = format!("{req:?}");
+        assert!(!text.contains("bob") && !text.contains("Secret") && !text.contains("heist"));
         let details = RoomDetails {
             name: "Secret plans".into(),
             topic: "the heist".into(),
+            knock_requests: vec![req],
             ..RoomDetails::default()
         };
         let event = ManageEvent::Info {
@@ -2402,5 +2671,83 @@ mod tests {
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn knock_requests_sort_and_power_gates_per_action() {
+        use matrix_sdk::ruma::events::room::power_levels::{
+            RoomPowerLevelsEventContent, RoomPowerLevelsSource,
+        };
+        use matrix_sdk::ruma::room_version_rules::AuthorizationRules;
+        use std::collections::BTreeMap;
+
+        let alice = UserId::parse("@alice:example.org").unwrap();
+        let bob = UserId::parse("@bob:example.org").unwrap();
+        let carol = UserId::parse("@carol:example.org").unwrap();
+        let dave = UserId::parse("@dave:example.org").unwrap();
+        let regular = UserId::parse("@user:example.org").unwrap();
+
+        let mut content = RoomPowerLevelsEventContent::new(&AuthorizationRules::V11);
+        content.invite = Int::from(50);
+        content.kick = Int::from(50);
+        content.ban = Int::from(75);
+        content.users = BTreeMap::from([
+            (alice.clone(), Int::from(50)),
+            (carol.clone(), Int::from(60)),
+        ]);
+        let levels = RoomPowerLevels::new(
+            RoomPowerLevelsSource::Original(content),
+            &AuthorizationRules::V11,
+            [],
+        );
+
+        let mut raw = vec![
+            raw_knock(
+                Some(UInt::from(200u32)),
+                dave.clone(),
+                None,
+                Some("\tplease\n\x07add me "),
+            ),
+            raw_knock(
+                Some(UInt::from(100u32)),
+                carol.clone(),
+                Some("Carol"),
+                Some("   "),
+            ),
+            raw_knock(
+                Some(UInt::from(100u32)),
+                bob.clone(),
+                Some("Bob\x07\u{202e}"),
+                Some("hello"),
+            ),
+        ];
+        sort_raw_knocks(&mut raw);
+        // Tie on timestamp 100 breaks by user_id (@bob < @carol), then @dave at 200.
+        assert_eq!(
+            raw.iter().map(|k| k.user.as_str()).collect::<Vec<_>>(),
+            [
+                "@bob:example.org",
+                "@carol:example.org",
+                "@dave:example.org"
+            ]
+        );
+
+        let mod_view = build_knock_requests(&raw, Some(&levels), &alice);
+        assert_eq!(mod_view.len(), 3);
+        assert_eq!(mod_view[0].name, "Bob");
+        assert_eq!(mod_view[0].reason.as_deref(), Some("hello"));
+        assert!(mod_view[0].acceptable && mod_view[0].declinable && !mod_view[0].bannable);
+
+        // Target with PL 60 >= Alice's 50 cannot be declined by Alice, though invite is still allowed.
+        assert_eq!(mod_view[1].user_id, "@carol:example.org");
+        assert_eq!(mod_view[1].reason, None);
+        assert!(mod_view[1].acceptable && !mod_view[1].declinable && !mod_view[1].bannable);
+
+        // Localpart fallback & control-char sanitization on dave.
+        assert_eq!(mod_view[2].name, "dave");
+        assert_eq!(mod_view[2].reason.as_deref(), Some("please add me"));
+
+        // Plain member with PL 0 below invite(50)/kick(50)/ban(75) sees no actionable requests.
+        assert!(build_knock_requests(&raw, Some(&levels), &regular).is_empty());
     }
 }

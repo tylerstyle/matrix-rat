@@ -368,7 +368,7 @@ impl UserInfoPopup {
             Confirm::Unignore(_) => format!(
                 "Enter again to stop ignoring, Esc to stay · {name}'s messages will show again"
             ),
-            Confirm::Leave => return None,
+            Confirm::DeclineKnock(_) | Confirm::Leave => return None,
         })
     }
 }

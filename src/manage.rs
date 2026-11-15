@@ -5,7 +5,7 @@ use matrix_sdk::ruma::matrix_uri::MatrixId;
 use matrix_sdk::ruma::{EventId, MatrixToUri, MatrixUri, RoomAliasId, RoomId, ServerName, UserId};
 
 use crate::lineedit::{EditOutcome, LineEdit};
-use crate::matrix::{MemberRole, NotifyLevel, RoomDetails, RoomMember};
+use crate::matrix::{MemberRole, NotifyLevel, RoomDetails, RoomKnockRequest, RoomMember};
 use crate::model::RoomKind;
 
 // ----- addresses ---------------------------------------------------------------------
@@ -423,6 +423,12 @@ pub enum Click {
     RoleOption(usize),
     /// Ignore or stop ignoring the selected member (asks first).
     MemberIgnore,
+    /// Accept the selected incoming knock request.
+    KnockAccept,
+    /// Decline the selected incoming knock request (asks first).
+    KnockDecline,
+    /// Open the ban prompt for the selected incoming knock request.
+    KnockBan,
     /// Favourite on or off for the room in question, without a popup.
     Favourite,
     /// Low priority on or off for the room in question, without a popup.
@@ -769,6 +775,8 @@ pub enum InfoRow {
     Invite,
     OwnName,
     Leave,
+    /// Index into the details' incoming knock request list.
+    KnockRequest(usize),
     /// Index into the details' member list.
     Member(usize),
 }
@@ -779,6 +787,8 @@ pub enum Confirm {
     Leave,
     /// Remove the member with this user id.
     Remove(String),
+    /// Decline the incoming knock request from this user id.
+    DeclineKnock(String),
     /// Unban the member with this user id.
     Unban(String),
     /// Ignore the member with this user id.
@@ -795,6 +805,7 @@ impl std::fmt::Debug for Confirm {
         f.write_str(match self {
             Self::Leave => "Confirm::Leave",
             Self::Remove(_) => "Confirm::Remove",
+            Self::DeclineKnock(_) => "Confirm::DeclineKnock",
             Self::Unban(_) => "Confirm::Unban",
             Self::Ignore(_) => "Confirm::Ignore",
             Self::Unignore(_) => "Confirm::Unignore",
@@ -803,12 +814,13 @@ impl std::fmt::Debug for Confirm {
     }
 }
 
-/// Inline reason prompt for banning the selected member inside room info.
+/// Inline reason prompt for banning the selected member or knocker inside room info.
 #[derive(Clone)]
 pub struct BanPrompt {
     pub user_id: String,
     pub name: String,
     pub reason: LineEdit,
+    pub knock: bool,
 }
 
 impl BanPrompt {
@@ -817,6 +829,14 @@ impl BanPrompt {
             user_id,
             name,
             reason: LineEdit::new().with_max_bytes(256),
+            knock: false,
+        }
+    }
+
+    pub fn for_knock(user_id: String, name: String) -> Self {
+        Self {
+            knock: true,
+            ..Self::new(user_id, name)
         }
     }
 }
@@ -1038,6 +1058,11 @@ impl InfoPopup {
             }
         }
         rows.push(InfoRow::Leave);
+        if !self.pending()
+            && let Some(details) = &self.details
+        {
+            rows.extend((0..details.knock_requests.len()).map(InfoRow::KnockRequest));
+        }
         if let Some(details) = &self.details {
             let needle = self.filter.to_lowercase();
             rows.extend(
@@ -1060,6 +1085,17 @@ impl InfoPopup {
         let rows = self.rows();
         rows.get(self.selected.min(rows.len().saturating_sub(1)))
             .copied()
+    }
+
+    pub fn knock_request(&self, row: InfoRow) -> Option<&RoomKnockRequest> {
+        match row {
+            InfoRow::KnockRequest(index) => self.details.as_ref()?.knock_requests.get(index),
+            _ => None,
+        }
+    }
+
+    pub fn selected_knock_request(&self) -> Option<&RoomKnockRequest> {
+        self.knock_request(self.current()?)
     }
 
     pub fn member(&self, row: InfoRow) -> Option<&RoomMember> {
@@ -1150,6 +1186,9 @@ impl InfoPopup {
         let member = row
             .and_then(|row| self.member(row))
             .map(|member| member.user_id.clone());
+        let knock = row
+            .and_then(|row| self.knock_request(row))
+            .map(|req| req.user_id.clone());
         self.name.clone_from(&details.name);
         self.details = Some(details);
         // A question about someone who is gone, or whom we may no longer remove, is
@@ -1163,6 +1202,10 @@ impl InfoPopup {
         };
         let keep = match &self.confirm {
             Some(Confirm::Remove(user_id)) => still(user_id, true),
+            Some(Confirm::DeclineKnock(user_id)) => details
+                .knock_requests
+                .iter()
+                .any(|k| k.user_id == *user_id && k.declinable),
             Some(Confirm::Unban(user_id)) => details
                 .members
                 .iter()
@@ -1175,14 +1218,27 @@ impl InfoPopup {
         if !keep {
             self.confirm = None;
         }
-        if let Some(prompt) = &self.ban_prompt
-            && !details
-                .members
-                .iter()
-                .any(|m| m.user_id == prompt.user_id && m.bannable)
-        {
-            self.ban_prompt = None;
-            self.error = Some("You are no longer allowed to ban this member.".to_owned());
+        if let Some(prompt) = &self.ban_prompt {
+            let is_knock = prompt.knock;
+            let valid = if is_knock {
+                details
+                    .knock_requests
+                    .iter()
+                    .any(|k| k.user_id == prompt.user_id && k.bannable)
+            } else {
+                details
+                    .members
+                    .iter()
+                    .any(|m| m.user_id == prompt.user_id && m.bannable)
+            };
+            if !valid {
+                self.ban_prompt = None;
+                self.error = Some(if is_knock {
+                    "You are no longer allowed to ban this user.".to_owned()
+                } else {
+                    "You are no longer allowed to ban this member.".to_owned()
+                });
+            }
         }
         if let Some(chooser) = &mut self.role_chooser {
             if details
@@ -1206,12 +1262,15 @@ impl InfoPopup {
             self.error = Some("You are no longer allowed to change this.".to_owned());
         }
         let rows = self.rows();
-        let same = match (&member, row) {
-            (Some(user_id), _) => rows.iter().position(
+        let same = match (&member, &knock, row) {
+            (Some(user_id), _, _) => rows.iter().position(
                 |r| matches!(self.member(*r), Some(member) if member.user_id == *user_id),
             ),
-            (None, Some(row)) => rows.iter().position(|r| *r == row),
-            (None, None) => None,
+            (_, Some(user_id), _) => rows.iter().position(
+                |r| matches!(self.knock_request(*r), Some(req) if req.user_id == *user_id),
+            ),
+            (None, None, Some(row)) => rows.iter().position(|r| *r == row),
+            (None, None, None) => None,
         };
         self.selected = same.unwrap_or(self.selected.min(rows.len().saturating_sub(1)));
         if let Some(row) = self.wanted.take() {
@@ -1955,5 +2014,70 @@ mod tests {
         for secret in ["bob", "Bob", "Secret", "spamming", "alice"] {
             assert!(!debug.contains(secret), "{debug}");
         }
+    }
+
+    #[test]
+    fn knock_requests_rows_selection_and_permission_guards() {
+        let mut popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Room);
+        let alice = RoomKnockRequest {
+            user_id: "@alice:example.org".into(),
+            name: "Alice".into(),
+            reason: Some("secret reason".into()),
+            acceptable: true,
+            declinable: true,
+            bannable: true,
+        };
+        let bob = RoomKnockRequest {
+            user_id: "@bob:example.org".into(),
+            name: "Bob".into(),
+            reason: None,
+            acceptable: true,
+            declinable: true,
+            bannable: true,
+        };
+        let mut d = details(&[("mod", false)]);
+        d.knock_requests = vec![alice.clone(), bob.clone()];
+        popup.set_details(d);
+
+        // Knock requests appear above Members and remain visible when filtering members.
+        popup.set_filter("zzz".to_owned());
+        let rows = popup.rows();
+        assert!(rows.contains(&InfoRow::KnockRequest(0)));
+        assert!(rows.contains(&InfoRow::KnockRequest(1)));
+        assert!(!rows.iter().any(|r| matches!(r, InfoRow::Member(_))));
+
+        // Select Bob (index 1); removing Alice shifts Bob to index 0, keeping Bob selected.
+        popup.select(InfoRow::KnockRequest(1));
+        assert_eq!(
+            popup.selected_knock_request().map(|k| k.user_id.as_str()),
+            Some("@bob:example.org")
+        );
+        popup.confirm = Some(Confirm::DeclineKnock("@bob:example.org".into()));
+        popup.ban_prompt = Some(BanPrompt::for_knock(
+            "@bob:example.org".into(),
+            "Bob".into(),
+        ));
+        let dbg = format!(
+            "{:?} {:?}",
+            popup.confirm.as_ref().unwrap(),
+            popup.ban_prompt.as_ref().unwrap()
+        );
+        assert!(!dbg.contains("bob") && !dbg.contains("Bob"), "{dbg}");
+
+        let mut d2 = details(&[("mod", false)]);
+        let mut bob_no_ban = bob;
+        bob_no_ban.declinable = false;
+        bob_no_ban.bannable = false;
+        d2.knock_requests = vec![bob_no_ban];
+        popup.set_details(d2);
+        assert_eq!(popup.current(), Some(InfoRow::KnockRequest(0)));
+        assert_eq!(popup.confirm, None);
+        assert!(popup.ban_prompt.is_none());
+        assert!(
+            popup
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("no longer allowed to ban"))
+        );
     }
 }

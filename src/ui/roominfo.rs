@@ -16,7 +16,7 @@ use crate::manage::{
     BanPrompt, Click, Confirm, InfoPopup, InfoRow, NewPopup, RoleChooser, Stage, confirm_keys,
     notify_label,
 };
-use crate::matrix::{PreviewMembership, RoomMember};
+use crate::matrix::{PreviewMembership, RoomKnockRequest, RoomMember};
 use crate::text::{sanitize_line, truncate, width, wrap};
 use crate::theme::{Role, Theme};
 
@@ -982,6 +982,8 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
         "Enter save · Esc cancel"
     } else if matches!(current, Some(InfoRow::Member(_))) {
         "Enter info · type to filter · Esc close"
+    } else if matches!(current, Some(InfoRow::KnockRequest(_))) {
+        "Enter accept · Del decline · Alt-B ban · Esc close"
     } else {
         "↑↓ select · Enter · Esc close"
     };
@@ -1050,9 +1052,22 @@ pub fn draw_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut InfoPo
         }
     }
     entries.push(Entry::Text(Line::default()));
+    let mut knock_heading_done = false;
     let mut heading_done = false;
     let mut banned_heading_done = false;
     for (index, row) in rows.iter().enumerate() {
+        if matches!(row, InfoRow::KnockRequest(_)) && !knock_heading_done {
+            knock_heading_done = true;
+            let count = info
+                .details
+                .as_ref()
+                .map_or(0, |details| details.knock_requests.len());
+            entries.push(Entry::Text(Line::default()));
+            entries.push(Entry::Text(Line::from(Span::styled(
+                format!("Join requests ({count})"),
+                theme.style(Role::SidebarSection),
+            ))));
+        }
         if matches!(row, InfoRow::Member(_)) {
             if !heading_done {
                 heading_done = true;
@@ -1256,12 +1271,24 @@ fn confirm_prompt(info: &InfoPopup) -> Option<String> {
             .iter()
             .flat_map(|details| &details.members)
             .find(|member| member.user_id == *user_id)
-            .map_or(user_id.clone(), |member| member.name.clone())
+            .map(|member| member.name.clone())
+            .or_else(|| {
+                info.details
+                    .iter()
+                    .flat_map(|details| &details.knock_requests)
+                    .find(|req| req.user_id == *user_id)
+                    .map(|req| req.name.clone())
+            })
+            .unwrap_or_else(|| user_id.clone())
     };
     Some(match info.confirm.as_ref()? {
         Confirm::Leave => info.leave_confirm().to_owned(),
         Confirm::Remove(user_id) => format!(
             "Del again to remove, Esc to keep · {} will be out of the room",
+            name(user_id)
+        ),
+        Confirm::DeclineKnock(user_id) => format!(
+            "Del again to decline, Esc to keep · {} will not be invited",
             name(user_id)
         ),
         Confirm::Unban(user_id) => format!(
@@ -1322,6 +1349,10 @@ fn status_text(info: &InfoPopup, current: Option<InfoRow>) -> (String, Role) {
         Some(InfoRow::OwnName) => "Set a display name just for this room (clear for default).",
         Some(InfoRow::Leave) if info.pending() => "",
         Some(InfoRow::Leave) => "Leaving also removes the room and its history from this device.",
+        Some(row @ InfoRow::KnockRequest(_)) => match info.knock_request(row) {
+            Some(req) => return (knock_hint(req), Role::Muted),
+            None => "",
+        },
         Some(row @ InfoRow::Member(_)) => match info.member(row) {
             Some(member) if member.own => {
                 if member.role_editable {
@@ -1362,6 +1393,20 @@ fn member_hint(member: &RoomMember) -> String {
     parts.join(" · ")
 }
 
+fn knock_hint(req: &RoomKnockRequest) -> String {
+    let mut parts = Vec::new();
+    if req.acceptable {
+        parts.push("Enter: accept");
+    }
+    if req.declinable {
+        parts.push("Del: decline");
+    }
+    if req.bannable {
+        parts.push("Alt-B: decline & ban");
+    }
+    parts.join(" · ")
+}
+
 /// Draws one selectable row and registers what clicking it does. Returns where the
 /// text cursor belongs if the row is being typed into.
 #[expect(clippy::too_many_arguments)]
@@ -1397,6 +1442,24 @@ fn info_row(
             frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
         }
     };
+
+    if let Some(req) = info.knock_request(row) {
+        app.hits.add(rect, hit(Click::Select(index)));
+        knock_row(
+            frame,
+            app,
+            theme,
+            req,
+            rect,
+            marker,
+            label_style,
+            selected && !busy,
+        );
+        if hovered && !selected {
+            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
+        }
+        return None;
+    }
 
     if let Some(member) = info.member(row) {
         app.hits.add(rect, hit(Click::Select(index)));
@@ -1456,7 +1519,7 @@ fn info_row(
         InfoRow::Invite => ("Invite someone…", label_style),
         InfoRow::OwnName => ("Name in room…", label_style),
         InfoRow::Leave => (info.leave_label(), theme.style(Role::Error)),
-        InfoRow::Member(_) => ("", label_style),
+        InfoRow::KnockRequest(_) | InfoRow::Member(_) => ("", label_style),
     };
     let mut spans = vec![
         marker,
@@ -1636,8 +1699,85 @@ fn member_row(
     spans.push(Span::raw(" ".repeat(pad)));
     spans.push(Span::styled(tag, theme.style(role)));
     frame.render_widget(Line::from(spans), rect);
+    draw_pill_buttons(frame, app, theme, rect, buttons_width, &buttons);
+}
+
+#[expect(clippy::too_many_arguments)]
+fn knock_row(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    req: &RoomKnockRequest,
+    rect: Rect,
+    marker: Span<'static>,
+    name_style: ratatui::style::Style,
+    with_buttons: bool,
+) {
+    let room = (rect.width as usize).saturating_sub(2);
+    let mut buttons: Vec<(&str, Click)> = Vec::new();
+    if with_buttons {
+        if req.acceptable {
+            buttons.push((" accept ", Click::KnockAccept));
+        }
+        if req.declinable {
+            buttons.push((" decline ", Click::KnockDecline));
+        }
+        if req.bannable {
+            buttons.push((" ban ", Click::KnockBan));
+        }
+    }
+    let mut buttons_width: usize = buttons.iter().map(|(label, _)| width(label) + 1).sum();
+    if buttons_width + 12 > room {
+        buttons.clear();
+        buttons_width = 0;
+    }
+    let left = room.saturating_sub(buttons_width);
+    let name_width = (room * 2 / 5).clamp(8, 22).min(left);
+    let clean_name = sanitize_line(&req.name);
+    let clean_id = sanitize_line(&req.user_id);
+    let name = format!("{} ", fit(&clean_name, name_width.saturating_sub(1)));
+    let rest_w = left.saturating_sub(name_width);
+    let (id_part, reason_part) = match req.reason.as_deref().map(sanitize_line) {
+        Some(reason) if !reason.is_empty() && rest_w > 12 => {
+            let id_cap = (width(&clean_id) + 2).min(rest_w / 2).max(8);
+            let id_str = format!("{} ", fit(&clean_id, id_cap.saturating_sub(1)));
+            let r_space = rest_w.saturating_sub(width(&id_str));
+            let r_str = if r_space >= 4 {
+                fit(&format!("· {reason}"), r_space)
+            } else {
+                String::new()
+            };
+            (id_str, r_str)
+        }
+        _ => (fit(&clean_id, rest_w.saturating_sub(1)), String::new()),
+    };
+    let used = 2 + width(&name) + width(&id_part) + width(&reason_part);
+    let mut spans = vec![
+        marker,
+        Span::styled(name, name_style),
+        Span::styled(id_part, theme.style(Role::Muted)),
+    ];
+    if !reason_part.is_empty() {
+        spans.push(Span::styled(reason_part, theme.style(Role::Text)));
+    }
+    let pad = (rect.width as usize).saturating_sub(used + buttons_width);
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
+    }
+    frame.render_widget(Line::from(spans), rect);
+    draw_pill_buttons(frame, app, theme, rect, buttons_width, &buttons);
+}
+
+fn draw_pill_buttons(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    rect: Rect,
+    buttons_width: usize,
+    buttons: &[(&str, Click)],
+) {
     let mut x = rect.right().saturating_sub(buttons_width as u16);
-    for (label, click) in buttons {
+    for &(label, click) in buttons {
         let w = width(label) as u16;
         let button_rect = Rect::new(x, rect.y, w, 1);
         let id = hit(click);
