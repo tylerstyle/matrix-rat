@@ -21,6 +21,8 @@ pub struct Format {
     pub link: Option<usize>,
     /// `data-mx-color`, as `#rrggbb`.
     pub color: Option<(u8, u8, u8)>,
+    /// What this piece of a code block is, once [`crate::highlight`] looked at it.
+    pub syntax: Option<crate::highlight::Syntax>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
