@@ -3126,7 +3126,12 @@ impl App {
                 room_id,
                 members,
                 can_mention_room,
-            } => self.on_room_members(room_id, members, can_mention_room),
+            } => {
+                // Not one of a session that has ended.
+                if !self.logged_out {
+                    self.on_room_members(room_id, members, can_mention_room);
+                }
+            }
             MatrixEvent::Draft {
                 room_id,
                 thread,
