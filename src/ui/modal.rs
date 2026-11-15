@@ -46,6 +46,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Report(form) => report(frame, app, area, form),
         Modal::Pinned(popup) => pinned(frame, app, area, popup),
         Modal::ReasonConfirm(confirm) => reason_confirm(frame, app, area, confirm),
+        Modal::Sessions(popup) => super::devices::draw_sessions(frame, app, area, popup),
+        Modal::Keys(popup) => super::devices::draw_keys(frame, app, area, popup),
     }
     app.modal = Some(modal);
 }
@@ -310,6 +312,18 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
                     Role::Error
                 } else {
                     Role::Muted
+                };
+                spans.push(Span::styled(truncate(&value, room), theme.style(role)));
+            }
+            Setting::Sessions => spans.push(Span::styled(
+                truncate(&value, room),
+                theme.style(Role::Muted),
+            )),
+            Setting::KeyBackup => {
+                // Red only for what needs doing; in progress or unknown is not that.
+                let role = match crate::devices::backup_setting(app.verify.security).1 {
+                    crate::devices::Tone::Warn => Role::Error,
+                    _ => Role::Muted,
                 };
                 spans.push(Span::styled(truncate(&value, room), theme.style(role)));
             }

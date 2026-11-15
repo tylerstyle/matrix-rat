@@ -389,7 +389,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,
-            password,
+            password: password.into(),
         });
 
         // A room both are in, without encryption (the events are read as sent below).

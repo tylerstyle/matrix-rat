@@ -35,6 +35,8 @@ pub enum InputTarget {
     ReasonConfirm,
     /// Inline ban reason input inside `RoomInfo`.
     BanReason,
+    /// A text field of the sessions popup or the key backup popup, by its slot.
+    Devices(usize),
     /// Display name input inside `OwnProfilePopup`.
     OwnProfileName,
     /// Avatar file path input inside `OwnProfilePopup`.

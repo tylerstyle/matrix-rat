@@ -170,6 +170,29 @@ impl Timelines {
         self.member_fetches.abort_all();
     }
 
+    /// Message keys arrived from outside the usual ways (a key file): has every open
+    /// timeline try again what it could not decrypt. (The SDK retries by itself for
+    /// keys it sees arrive; this covers what that may have missed.)
+    pub async fn retry_decryption(&self) {
+        let mut timelines: Vec<Arc<Timeline>> = self
+            .cache
+            .iter()
+            .map(|(_, timeline)| timeline.clone())
+            .collect();
+        if let Some(detached) = &self.detached {
+            timelines.push(detached.timeline.clone());
+        }
+        tokio::spawn(async move {
+            for timeline in timelines {
+                // Which sessions does not matter: matrix-sdk-ui 0.19.1 retries
+                // everything the timeline shows as undecryptable.
+                timeline
+                    .retry_decryption(std::iter::empty::<String>())
+                    .await;
+            }
+        });
+    }
+
     fn room(&self, room_id: &str) -> Result<Room> {
         let id = RoomId::parse(room_id).map_err(|_| anyhow!("invalid room id"))?;
         self.client
@@ -878,6 +901,29 @@ impl Timelines {
                 })
                 .await;
             }
+            MatrixCmd::RetryDecryption { room_id, event_id } => {
+                let events = self.events.clone();
+                let timeline = self.active_timeline(&room_id).await;
+                let answer = move |result: Result<super::Retried, String>, event_id: String| {
+                    let _ = events.send(MatrixEvent::DecryptionRetried {
+                        room_id,
+                        event_id,
+                        result,
+                    });
+                };
+                match timeline {
+                    Ok((timeline, _)) => {
+                        tokio::spawn(async move {
+                            let result = decrypt_again(&timeline, &event_id).await;
+                            if let Err(err) = &result {
+                                tracing::warn!(?err, "could not retry decryption");
+                            }
+                            answer(result.map_err(|err| format!("{err:#}")), event_id);
+                        });
+                    }
+                    Err(err) => answer(Err(format!("{err:#}")), event_id),
+                }
+            }
             MatrixCmd::Typing { room_id, typing } => {
                 if let Ok(room) = self.room(&room_id) {
                     tokio::spawn(async move {
@@ -1091,6 +1137,7 @@ impl Timelines {
             | MatrixCmd::UnignoreUser { .. }
             | MatrixCmd::ReportContent { .. }
             | MatrixCmd::SearchUsers { .. }
+            | MatrixCmd::Devices(_)
             | MatrixCmd::CancelUserSearch
             | MatrixCmd::FetchUserProfile { .. }
             | MatrixCmd::SetOwnDisplayName { .. }
@@ -1098,6 +1145,48 @@ impl Timelines {
             | MatrixCmd::RemoveOwnAvatar => {}
         }
     }
+}
+
+/// Tries once more to read a message that could not be decrypted: fetches its key
+/// from the key backup (if this device can use the backup) and has the SDK decrypt
+/// again.
+///
+/// The SDK asks the user's other devices for a missing key by itself, once per
+/// session; matrix-sdk 0.19.1 offers no way to ask them again.
+async fn decrypt_again(timeline: &Timeline, event_id: &str) -> Result<super::Retried> {
+    use matrix_sdk_ui::timeline::EncryptedMessage;
+
+    use super::Retried;
+    let event_id = EventId::parse(event_id).map_err(|_| anyhow!("invalid event id"))?;
+    let Some(found) = timeline.item_by_event_id(&event_id).await else {
+        return Err(anyhow!("this message is no longer loaded"));
+    };
+    let session_id = match found.content().as_unable_to_decrypt() {
+        // Readable by now.
+        None => return Ok(Retried::Decrypted),
+        Some(EncryptedMessage::MegolmV1AesSha2 { session_id, .. }) => session_id.clone(),
+        Some(_) => return Err(anyhow!("this kind of encryption is not supported")),
+    };
+    let room = timeline.room();
+    let backups = room.client().encryption().backups();
+    // `Ok(false)`: this device has no access to a backup. An error is usual too: the
+    // backup does not have this key.
+    if let Err(err) = backups.download_room_key(room.room_id(), &session_id).await {
+        tracing::debug!(%err, "no key from the backup");
+    }
+    timeline.retry_decryption([session_id]).await;
+    // The answer shows in the timeline; it takes a moment.
+    for _ in 0..15 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        match timeline.item_by_event_id(&event_id).await {
+            Some(now) if now.content().as_unable_to_decrypt().is_some() => {}
+            Some(_) => return Ok(Retried::Decrypted),
+            // Decrypted into something that is not a message of its own, or dropped
+            // from what the timeline holds: not ours to call a success.
+            None => return Ok(Retried::Gone),
+        }
+    }
+    Ok(Retried::StillLocked)
 }
 
 fn item_id(item: &ItemRef) -> Result<TimelineEventItemId> {
@@ -1836,7 +1925,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver: homeserver.clone(),
             username: "alice".to_owned(),
-            password: "alicepass".to_owned(),
+            password: "alicepass".to_owned().into(),
         });
 
         let bob = matrix_sdk::Client::builder()
@@ -2076,7 +2165,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,
-            password,
+            password: password.into(),
         });
 
         // Waits for a room list in which the room is marked or not, as wanted.
@@ -2291,7 +2380,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,
-            password,
+            password: password.into(),
         });
 
         // A room both have joined, without encryption (the other client is a plain
@@ -2514,7 +2603,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username: user,
-            password,
+            password: password.into(),
         });
 
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -2731,7 +2820,7 @@ mod tests {
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username: user,
-            password,
+            password: password.into(),
         });
 
         tokio::time::timeout(Duration::from_secs(30), async {

@@ -47,7 +47,7 @@ pub fn is_blank(text: &str) -> bool {
 
 /// Control characters, and the invisible direction overrides that can reorder the rest
 /// of a terminal row.
-fn unsafe_char(c: char) -> bool {
+pub(crate) fn unsafe_char(c: char) -> bool {
     c.is_control()
         || matches!(
             c,

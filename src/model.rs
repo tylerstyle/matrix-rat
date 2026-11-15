@@ -118,6 +118,96 @@ pub struct Message {
     pub mentions: Option<matrix_sdk::ruma::events::Mentions>,
     /// Who has read up to this message (and no further), as far as they tell.
     pub read_by: ReadBy,
+    /// Why the message could not be decrypted (`kind` is `Undecryptable`). `None`
+    /// for demo data.
+    pub utd: Option<UtdWhy>,
+}
+
+/// Why a message could not be decrypted, as far as the SDK can tell (its `UtdCause`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UtdWhy {
+    /// The key is missing and nothing explains it: it may still arrive.
+    NoKey,
+    /// Sent while this account was not in the room.
+    SentBeforeJoin,
+    /// Sent before this device existed, and the account has no key backup.
+    HistoryNoBackup,
+    /// Sent before this device existed; there is a backup, but this device is not
+    /// verified and so cannot use it.
+    HistoryNeedsVerification,
+    /// The sender refuses to give the key to a device like this one (not verified).
+    WithheldUnverified,
+    /// The sender's device did not give this device the key.
+    Withheld,
+    /// Refused here: the sender was verified once and their identity has changed.
+    SenderIdentityChanged,
+    /// Refused here: the sending device is not signed by its owner.
+    SenderDeviceUnsigned,
+    /// Refused here: the sending device is not known (deleted, or not fetched yet).
+    SenderDeviceUnknown,
+    /// Not encrypted in a way this program understands.
+    Unsupported,
+}
+
+impl UtdWhy {
+    /// What the message shows in place of its text.
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::NoKey => "Unable to decrypt: the key for this message has not arrived",
+            Self::SentBeforeJoin => "Unable to decrypt: sent before you joined the room",
+            Self::HistoryNoBackup => {
+                "Unable to decrypt: sent before this device was logged in, and your account \
+                 has no key backup"
+            }
+            Self::HistoryNeedsVerification => {
+                "Unable to decrypt: sent before this device was logged in. Verify this \
+                 device to read it"
+            }
+            Self::WithheldUnverified => {
+                "Unable to decrypt: the sender shares keys with verified devices only. \
+                 Verify this device"
+            }
+            Self::Withheld => {
+                "Unable to decrypt: the sender's device did not share the key with this device"
+            }
+            Self::SenderIdentityChanged => {
+                "Not decrypted: the sender's verified identity has changed"
+            }
+            Self::SenderDeviceUnsigned => {
+                "Not decrypted: sent from a device its owner has not verified"
+            }
+            Self::SenderDeviceUnknown => {
+                "Not decrypted: sent from a device that is unknown or was removed"
+            }
+            Self::Unsupported => "Unable to decrypt: unknown kind of encryption",
+        }
+    }
+
+    /// What a "Try again" that changed nothing says: what would help, if anything.
+    pub fn advice(self) -> &'static str {
+        match self {
+            Self::NoKey | Self::Withheld => {
+                "Still no key. It may come from another of your devices or from the sender."
+            }
+            Self::SentBeforeJoin => {
+                "Still no key: messages from before you joined stay unreadable unless \
+                 their keys are shared with you."
+            }
+            Self::HistoryNoBackup => {
+                "Still no key. Without a key backup, only a key file exported from another \
+                 of your devices can bring it."
+            }
+            Self::HistoryNeedsVerification | Self::WithheldUnverified => {
+                "Still no key. Verify this device (or enter your recovery key) first."
+            }
+            Self::SenderIdentityChanged
+            | Self::SenderDeviceUnsigned
+            | Self::SenderDeviceUnknown => {
+                "Still not decrypted: the sender's device does not pass this device's checks."
+            }
+            Self::Unsupported => "This kind of encryption is not supported.",
+        }
+    }
 }
 
 /// The people whose read receipt sits on a message: never ourselves, never its sender.
