@@ -26,6 +26,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures::FutureExt;
+use futures::future::{BoxFuture, Shared};
 use matrix_sdk::ruma::api::client::membership::joined_rooms;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::{Client, Room, RoomState};
@@ -70,7 +72,14 @@ pub struct LeftRooms {
     /// joined after all, an invitation or a knock for one came, or an answer changed
     /// when to ask next.
     wake: Arc<Notify>,
+    /// The question on its way, and when it was put: rooms that fall due together (as
+    /// all those found at the start do) cost one request, not one each.
+    question: Arc<Mutex<Option<(Instant, Question)>>>,
 }
+
+/// A question to the server about the rooms the account is in, shared by the rooms
+/// asked about while it is on its way.
+type Question = Shared<BoxFuture<'static, Option<Arc<HashSet<OwnedRoomId>>>>>;
 
 impl std::fmt::Debug for LeftRooms {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -156,10 +165,10 @@ impl LeftRooms {
             Look::Show => false,
             Look::Hide => true,
             Look::Ask(since) => {
-                let (client, room_id, left) =
-                    (room.client(), room.room_id().to_owned(), self.clone());
+                let question = self.question(&room.client(), since);
+                let (room_id, left) = (room.room_id().to_owned(), self.clone());
                 tokio::spawn(async move {
-                    let joined = server_says_joined(&client, &room_id).await;
+                    let joined = question.await.map(|rooms| rooms.contains(&room_id));
                     left.answered(&room_id, since, joined, Instant::now());
                     // Back in the list, or a new time to ask: either way the list is to
                     // be looked at again.
@@ -168,6 +177,30 @@ impl LeftRooms {
                 true
             }
         }
+    }
+
+    /// The question on its way, if it was put after the room was left at `since` (one
+    /// put before could tell of the time the account was still in it); else a new one.
+    fn question(&self, client: &Client, since: Instant) -> Question {
+        let ask = || {
+            let client = client.clone();
+            async move { server_joined(&client).await.map(Arc::new) }
+                .boxed()
+                .shared()
+        };
+        let Ok(mut on_its_way) = self.question.lock() else {
+            return ask();
+        };
+        if let Some((put, question)) = on_its_way.as_ref()
+            && *put >= since
+            && question.peek().is_none()
+        {
+            return question.clone();
+        }
+        // Put now: it is sent (by whoever waits for it first) no earlier than this.
+        let question = ask();
+        *on_its_way = Some((Instant::now(), question.clone()));
+        question
     }
 
     fn look(&self, room_id: &RoomId, state: RoomState, now: Instant) -> Look {
@@ -309,12 +342,6 @@ fn remember(rooms: &mut HashMap<OwnedRoomId, Entry>, room_id: &RoomId, now: Inst
             waiting: false,
         },
     );
-}
-
-/// Whether the server lists the room among those the account is in; `None` if it could
-/// not be asked.
-async fn server_says_joined(client: &Client, room_id: &RoomId) -> Option<bool> {
-    Some(server_joined(client).await?.contains(room_id))
 }
 
 /// The rooms the server says the account is in; `None` if it could not be asked.
@@ -1021,13 +1048,50 @@ mod tests {
         }
         .client()
         .await;
-        assert_eq!(
-            server_says_joined(&client, room_id!("!in:localhost")).await,
-            Some(true)
-        );
-        assert_eq!(
-            server_says_joined(&client, room_id!("!out:localhost")).await,
-            Some(false)
-        );
+        let joined = server_joined(&client).await.expect("an answer");
+        assert!(joined.contains(room_id!("!in:localhost")));
+        assert!(!joined.contains(room_id!("!out:localhost")));
+    }
+
+    #[tokio::test]
+    async fn rooms_that_fall_due_together_are_asked_about_with_one_question() {
+        let rooms = [room_id!("!one:localhost"), room_id!("!two:localhost")];
+        let server = testing::Server {
+            joined: rooms.iter().map(|room| room.as_str()).collect(),
+            ..testing::Server::default()
+        };
+        let seen = server.seen.clone();
+        let client = server.client().await;
+        let left = LeftRooms::default();
+        let now = Instant::now();
+        for room in rooms {
+            left.mark_at(room, now);
+            // Due at once.
+            if let Some(entry) = left.rooms.lock().unwrap().get_mut(room) {
+                entry.ask_at = now;
+            }
+        }
+        for room in rooms {
+            assert!(left.hides(&client.get_room(room).unwrap()));
+        }
+        let unanswered = || {
+            let entries = left.rooms.lock().unwrap();
+            rooms.iter().any(|room| entries[*room].answers == 0)
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while unanswered() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both are answered");
+        let asked = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.ends_with("/joined_rooms"))
+            .count();
+        assert_eq!(asked, 1);
+        assert!(rooms.iter().all(|room| left.is_left(room)));
     }
 }
