@@ -16,8 +16,13 @@
 //! The list is not the only thing that would see such a room: whatever in the worker
 //! wants the rooms the account is in leaves out those that are [gone](LeftRooms::gone)
 //! (or, where only an id is at hand, [left](LeftRooms::is_left)).
+//!
+//! The store keeps such a room as it came back, and this list lasts only a session:
+//! after a restart the room would look like any other. So, once a session, the rooms
+//! the store had as joined at the start are checked against the server's list (see
+//! [`StartCheck`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +30,7 @@ use matrix_sdk::ruma::api::client::membership::joined_rooms;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::{Client, Room, RoomState};
 use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 
 /// A room that shows up as joined this long after it was left is asked about.
 const ASK_AFTER: Duration = Duration::from_secs(10);
@@ -92,26 +98,22 @@ impl LeftRooms {
         let Ok(mut rooms) = self.rooms.lock() else {
             return;
         };
-        // Full: the oldest goes, unless the room is one of them already.
-        if rooms.len() >= MOST
-            && !rooms.contains_key(room_id)
-            && let Some(oldest) = rooms
-                .iter()
-                .min_by_key(|(_, entry)| entry.since)
-                .map(|(id, _)| id.clone())
-        {
-            rooms.remove(&oldest);
+        remember(&mut rooms, room_id, now, 0);
+    }
+
+    /// Rooms that look joined though the server, asked at the start of the session,
+    /// does not list them: remembered as left at `now`. That answer counts as the first,
+    /// so the next question waits as long as after one. A room remembered already (left
+    /// here meanwhile) stays as it is.
+    fn mark_not_in(&self, room_ids: &[OwnedRoomId], now: Instant) {
+        let Ok(mut rooms) = self.rooms.lock() else {
+            return;
+        };
+        for room_id in room_ids.iter().take(MOST) {
+            if !rooms.contains_key(room_id) {
+                remember(&mut rooms, room_id, now, 1);
+            }
         }
-        rooms.insert(
-            room_id.to_owned(),
-            Entry {
-                since: now,
-                ask_at: now + pause(0),
-                answers: 0,
-                asking: false,
-                waiting: false,
-            },
-        );
     }
 
     /// The user is joining this room (again): it is a room like any other.
@@ -284,15 +286,142 @@ impl LeftRooms {
     }
 }
 
+/// Into `rooms`: `room_id`, left at `now`, after `answers` answers that the account is
+/// not in it.
+fn remember(rooms: &mut HashMap<OwnedRoomId, Entry>, room_id: &RoomId, now: Instant, answers: u8) {
+    // Full: the oldest goes, unless the room is one of them already.
+    if rooms.len() >= MOST
+        && !rooms.contains_key(room_id)
+        && let Some(oldest) = rooms
+            .iter()
+            .min_by_key(|(_, entry)| entry.since)
+            .map(|(id, _)| id.clone())
+    {
+        rooms.remove(&oldest);
+    }
+    rooms.insert(
+        room_id.to_owned(),
+        Entry {
+            since: now,
+            ask_at: now + pause(answers),
+            answers,
+            asking: false,
+            waiting: false,
+        },
+    );
+}
+
 /// Whether the server lists the room among those the account is in; `None` if it could
 /// not be asked.
 async fn server_says_joined(client: &Client, room_id: &RoomId) -> Option<bool> {
+    Some(server_joined(client).await?.contains(room_id))
+}
+
+/// The rooms the server says the account is in; `None` if it could not be asked.
+async fn server_joined(client: &Client) -> Option<HashSet<OwnedRoomId>> {
     let request = joined_rooms::v3::Request::new();
     let answer = tokio::time::timeout(Duration::from_secs(20), client.send(request))
         .await
         .ok()?
         .ok()?;
-    Some(answer.joined_rooms.iter().any(|joined| joined == room_id))
+    Some(answer.joined_rooms.into_iter().collect())
+}
+
+/// The check of the rooms the store has as joined, once a session.
+///
+/// A room left (and forgotten) in an earlier session, and brought back by a late answer
+/// then, was written to the store looking joined, and looks so at every start since:
+/// nothing on the server says otherwise, as the account has nothing more to do with it.
+/// Only the server's list of the rooms the account is in tells. So the rooms the store
+/// has as joined are taken before the sync starts, and once the first sync has been
+/// worked in, a room among them that still looks joined and that the server does not
+/// list is remembered as left, as if left here.
+pub struct StartCheck {
+    /// Until the check starts.
+    at_start: Option<HashSet<OwnedRoomId>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl StartCheck {
+    /// Before the sync starts: what it brings is not looked at (the server's list could
+    /// be older than a room joined meanwhile).
+    pub fn new(client: &Client) -> Self {
+        let at_start = client
+            .joined_rooms()
+            .iter()
+            .map(|room| room.room_id().to_owned())
+            .collect();
+        Self {
+            at_start: Some(at_start),
+            task: None,
+        }
+    }
+
+    /// The first sync has been worked in: the server is asked, in the background. Only
+    /// the first call does anything.
+    pub fn caught_up(&mut self, client: &Client, left: &LeftRooms) {
+        if let Some(at_start) = self.at_start.take() {
+            self.task = Some(tokio::spawn(check_at_start(
+                client.clone(),
+                left.clone(),
+                at_start,
+            )));
+        }
+    }
+}
+
+/// Not beyond the session.
+impl Drop for StartCheck {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// One request, whatever the number of rooms. Without an answer (offline, too slow,
+/// refused) nothing is done, and the server is not asked again: the rooms stay as they
+/// look, as before there was this check.
+async fn check_at_start(client: Client, left: LeftRooms, at_start: HashSet<OwnedRoomId>) {
+    if at_start.is_empty() {
+        return;
+    }
+    let Some(on_server) = server_joined(&client).await else {
+        return;
+    };
+    let joined_now = client.joined_rooms();
+    let not_in = not_in_after_all(
+        &at_start,
+        joined_now.iter().map(|room| room.room_id()),
+        &on_server,
+    );
+    if not_in.is_empty() {
+        return;
+    }
+    tracing::info!(
+        rooms = not_in.len(),
+        "rooms the server says the account is not in are kept out"
+    );
+    // (One left and joined again here in the moment since the answer is kept out only
+    // until it is asked about again, as any room that looks joined.)
+    left.mark_not_in(&not_in, Instant::now());
+    // Out of the room list, and out of the spaces.
+    left.wake.notify_one();
+}
+
+/// Of the rooms that look joined now (`joined_now`), those that already did at the
+/// start (`at_start`) and that the server does not list (`on_server`). One joined
+/// since the start is left alone, whatever the server says: its list may be older.
+fn not_in_after_all<'a>(
+    at_start: &HashSet<OwnedRoomId>,
+    joined_now: impl IntoIterator<Item = &'a RoomId>,
+    on_server: &HashSet<OwnedRoomId>,
+) -> Vec<OwnedRoomId> {
+    joined_now
+        .into_iter()
+        .filter(|id| at_start.contains(*id) && !on_server.contains(*id))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// A stand-in homeserver, for tests of what the worker does with the rooms it knows:
@@ -761,6 +890,127 @@ mod tests {
         for state in [RoomState::Joined, RoomState::Left, RoomState::Banned] {
             assert!(left.gone_as(room, state));
         }
+    }
+
+    #[test]
+    fn only_rooms_that_looked_joined_at_the_start_and_are_not_on_the_servers_list_are_found() {
+        let (kept, stale, left_here, new) = (
+            room_id!("!kept:example.org"),
+            room_id!("!stale:example.org"),
+            room_id!("!left:example.org"),
+            room_id!("!new:example.org"),
+        );
+        let set = |ids: &[&RoomId]| -> HashSet<OwnedRoomId> {
+            ids.iter().map(|id| (*id).to_owned()).collect()
+        };
+        let at_start = set(&[kept, stale, left_here]);
+        // One was left here since and looks left; one was joined since.
+        let joined_now = [kept, stale, new];
+        assert_eq!(
+            not_in_after_all(&at_start, joined_now, &set(&[kept])),
+            [stale.to_owned()]
+        );
+        // What the server lists is never found, and what was joined since never is.
+        assert!(not_in_after_all(&at_start, joined_now, &set(&[kept, stale])).is_empty());
+        assert_eq!(
+            not_in_after_all(&at_start, joined_now, &set(&[])),
+            [kept.to_owned(), stale.to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_room_found_left_at_the_start_is_asked_about_as_after_one_answer() {
+        let left = LeftRooms::default();
+        let (found, before) = (
+            room_id!("!found:example.org"),
+            room_id!("!before:example.org"),
+        );
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        // Left here a moment before the server answered: stays as it is.
+        left.mark_at(before, start);
+        left.mark_not_in(&[found.to_owned(), before.to_owned()], at(5));
+        assert!(left.is_left(found));
+        assert_eq!(left.look(found, RoomState::Joined, at(5 + 29)), Look::Hide);
+        assert_eq!(
+            left.look(found, RoomState::Joined, at(5 + 30)),
+            Look::Ask(at(5))
+        );
+        assert_eq!(
+            left.look(before, RoomState::Joined, at(10)),
+            Look::Ask(start)
+        );
+    }
+
+    #[tokio::test]
+    async fn rooms_left_in_an_earlier_session_are_found_with_one_question() {
+        let (kept, stale, new) = (
+            room_id!("!kept:localhost"),
+            room_id!("!stale:localhost"),
+            room_id!("!new:localhost"),
+        );
+        let server = testing::Server {
+            joined: vec![kept.as_str(), stale.as_str(), new.as_str()],
+            server_joined: vec![kept.as_str()],
+            ..testing::Server::default()
+        };
+        let seen = server.seen.clone();
+        let client = server.client().await;
+        let asked = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.ends_with("/joined_rooms"))
+                .count()
+        };
+        let left = LeftRooms::default();
+        // The one the server does not list either came with the first sync: not checked.
+        let at_start = [kept, stale].into_iter().map(ToOwned::to_owned).collect();
+        check_at_start(client.clone(), left.clone(), at_start).await;
+        assert!(left.is_left(stale));
+        assert!(!left.is_left(kept) && !left.is_left(new));
+        assert_eq!(asked(), 1);
+        tokio::time::timeout(Duration::from_secs(5), left.due())
+            .await
+            .expect("the list and the spaces are made again without it");
+        // Asked once a session, however often the sync catches up.
+        let left = LeftRooms::default();
+        let mut check = StartCheck::new(&client);
+        check.caught_up(&client, &left);
+        check.caught_up(&client, &left);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !left.is_left(stale) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("found at the start of this session too");
+        assert_eq!(asked(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_an_answer_or_without_rooms_nothing_is_found_or_asked_again() {
+        use crate::matrix::spaces::fake;
+        let stale = room_id!("!stale:localhost");
+        // This server cannot say which rooms the account is in.
+        let server = fake::Server::start(serde_json::json!({ "join": {
+            "!stale:localhost": fake::joined(false, vec![]),
+        } }))
+        .await;
+        let client = fake::client(&server).await;
+        let asked = || {
+            server
+                .requests()
+                .iter()
+                .filter(|request| request.path.ends_with("/joined_rooms"))
+                .count()
+        };
+        let left = LeftRooms::default();
+        check_at_start(client.clone(), left.clone(), HashSet::new()).await;
+        assert_eq!(asked(), 0);
+        check_at_start(client, left.clone(), HashSet::from([stale.to_owned()])).await;
+        assert!(!left.is_left(stale));
+        assert_eq!(asked(), 1);
     }
 
     #[tokio::test]

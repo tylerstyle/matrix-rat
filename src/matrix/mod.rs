@@ -1667,6 +1667,10 @@ impl Worker {
             safety::UserSearcher::new(client.clone(), self.events.clone(), ignored.clone());
         let mut dir_searcher =
             directory::DirectorySearcher::new(client.clone(), self.events.clone(), left.clone());
+        // The rooms the store has as joined before the sync brings any, to be checked
+        // against the server's list once the first sync is in (a room left in an earlier
+        // session can look joined, see `left`).
+        let mut start_check = left::StartCheck::new(client);
         sync.start().await;
 
         let room_list = sync
@@ -1689,6 +1693,7 @@ impl Worker {
         let caught_up_at_start = caught_up_in(&list_state.get());
         if caught_up_at_start {
             caught_up = true;
+            start_check.caught_up(client, left);
             self.emit(MatrixEvent::CaughtUp);
         }
         let recovery = client.encryption().recovery();
@@ -1928,6 +1933,7 @@ impl Worker {
                 Some(state) = list_state.next(), if !caught_up => {
                     if caught_up_in(&state) {
                         caught_up = true;
+                        start_check.caught_up(client, left);
                         verifier.caught_up();
                         self.emit(MatrixEvent::CaughtUp);
                     }
