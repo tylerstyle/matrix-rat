@@ -12,6 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
 use super::MatrixEvent;
+use super::left::LeftRooms;
 use super::safety::{IgnoredSet, is_ignored_in};
 use crate::text::{sanitize_line, truncate};
 
@@ -79,6 +80,7 @@ pub async fn watch(
     client: &Client,
     events: UnboundedSender<MatrixEvent>,
     ignored: watch::Receiver<IgnoredSet>,
+    left: LeftRooms,
 ) -> Watch {
     let state = std::sync::Arc::new(std::sync::Mutex::new(WatchState {
         events: Some(events),
@@ -103,12 +105,12 @@ pub async fn watch(
                     state.events.clone()
                 }
             };
-            let ignored = ignored.clone();
+            let (ignored, left) = (ignored.clone(), left.clone());
             async move {
                 let Some(events) = events else {
                     return;
                 };
-                match notice(notification, &room, &client, &ignored).await {
+                match notice(notification, &room, &client, &ignored, &left).await {
                     NoticeOutcome::Show(notice) => {
                         let _ = events.send(MatrixEvent::Notice(notice));
                     }
@@ -134,7 +136,13 @@ async fn notice(
     room: &Room,
     client: &Client,
     ignored: &watch::Receiver<IgnoredSet>,
+    left: &LeftRooms,
 ) -> NoticeOutcome {
+    // Left here: a sync answer that was on its way can bring the room back, looking
+    // joined and with its last messages (see `super::left`). Those are not news.
+    if left.gone(room) {
+        return NoticeOutcome::Ignore;
+    }
     if !notification
         .actions
         .iter()
@@ -239,13 +247,17 @@ impl OwnMembers {
     pub async fn ensure(
         &mut self,
         rooms: &matrix_sdk_ui::eyeball_im::Vector<matrix_sdk_ui::room_list_service::RoomListItem>,
+        left: &LeftRooms,
     ) {
         while self.tasks.try_join_next().is_some() {}
         for room in rooms {
             if self.tasks.len() >= Self::AT_ONCE || self.tried.len() >= Self::MOST {
                 return;
             }
+            // A room left here can look joined (see `super::left`): its members are
+            // none of our business any more, and asking would only fail.
             if room.state() != matrix_sdk::RoomState::Joined
+                || left.gone(room)
                 || room.is_space()
                 || self.tried.contains(room.room_id())
                 || self.fine.contains(room.room_id())
@@ -322,8 +334,73 @@ mod tests {
     use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 
     use super::*;
+    use crate::matrix::left::testing::Server;
     use crate::matrix::{MatrixCmd, spawn};
     use crate::paths::Paths;
+
+    #[tokio::test]
+    async fn a_message_in_a_room_left_here_is_not_announced() {
+        use matrix_sdk::ruma::push::Action;
+        use matrix_sdk::ruma::room_id;
+        use matrix_sdk::ruma::serde::Raw;
+
+        let room_id = room_id!("!gone:localhost");
+        let client = Server {
+            joined: vec![room_id.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let room = client.get_room(room_id).unwrap();
+        let sent = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let message = serde_json::json!({
+            "type": "m.room.message",
+            "event_id": "$fresh:localhost",
+            "sender": crate::matrix::left::testing::BOB,
+            "origin_server_ts": sent,
+            "content": { "msgtype": "m.text", "body": "still there?" }
+        });
+        let notification = || Notification {
+            actions: vec![Action::Notify],
+            event: RawAnySyncOrStrippedTimelineEvent::Sync(
+                Raw::from_json_string(message.to_string()).unwrap(),
+            ),
+        };
+        let (_, ignored) = watch::channel(IgnoredSet::default());
+        let left = LeftRooms::default();
+        let outcome = notice(notification(), &room, &client, &ignored, &left).await;
+        assert!(matches!(outcome, NoticeOutcome::Show(notice) if notice.body == "still there?"));
+        left.mark(room_id);
+        let outcome = notice(notification(), &room, &client, &ignored, &left).await;
+        assert!(matches!(outcome, NoticeOutcome::Ignore));
+    }
+
+    #[tokio::test]
+    async fn no_members_are_fetched_for_a_room_left_here() {
+        use matrix_sdk::ruma::room_id;
+        use matrix_sdk_ui::room_list_service::RoomListItem;
+
+        let room = room_id!("!quiet:localhost");
+        let client = Server {
+            without_members: vec![room.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let rooms = client.rooms().into_iter().map(RoomListItem::from).collect();
+        let left = LeftRooms::default();
+        left.mark(room);
+        let mut own = OwnMembers::default();
+        own.ensure(&rooms, &left).await;
+        assert!(own.tried.is_empty());
+        assert!(own.tasks.is_empty());
+        // The same room, not left: its members are fetched.
+        own.ensure(&rooms, &LeftRooms::default()).await;
+        assert!(own.tried.contains(room));
+    }
 
     /// A message from someone else in a joined room produces one notice with the
     /// sender's name and the text; our own messages produce none.

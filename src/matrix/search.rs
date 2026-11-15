@@ -24,6 +24,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::left::LeftRooms;
 use super::safety::{IgnoredSet, is_ignored_in};
 use super::{MatrixEvent, convert};
 
@@ -76,18 +77,21 @@ pub(crate) fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<Stri
     }
 }
 
-/// Returns the IDs of every currently joined room.
-pub(crate) fn joined_room_ids(client: &Client) -> HashSet<String> {
+/// Returns the IDs of every currently joined room. Not those left in this session,
+/// which can look joined while they are not (see `super::left`): their index goes too.
+pub(super) fn joined_room_ids(client: &Client, left: &LeftRooms) -> HashSet<String> {
     client
         .joined_rooms()
         .into_iter()
+        .filter(|room| !left.gone(room))
         .map(|room| room.room_id().to_string())
         .collect()
 }
 
 /// Prunes non-joined room search index directories using the client's restored room list.
 pub(crate) fn prune_stale_search_indexes(client: &Client, search_dir: &Path) {
-    let joined = joined_room_ids(client);
+    // Before the session: nothing was left in it yet.
+    let joined = joined_room_ids(client, &LeftRooms::default());
     prune_search_dir(search_dir, &joined);
 }
 
@@ -95,6 +99,7 @@ pub(super) struct Searcher {
     client: Client,
     events: UnboundedSender<MatrixEvent>,
     ignored: watch::Receiver<IgnoredSet>,
+    left: LeftRooms,
     task: Option<JoinHandle<()>>,
     redecrypt_task: Option<JoinHandle<()>>,
 }
@@ -104,12 +109,14 @@ impl Searcher {
         client: Client,
         events: UnboundedSender<MatrixEvent>,
         ignored: watch::Receiver<IgnoredSet>,
+        left: LeftRooms,
     ) -> Self {
         let redecrypt_task = Some(tokio::spawn(index_redecrypted(client.clone())));
         Self {
             client,
             events,
             ignored,
+            left,
             task: None,
             redecrypt_task,
         }
@@ -120,8 +127,9 @@ impl Searcher {
         let client = self.client.clone();
         let events = self.events.clone();
         let ignored = self.ignored.clone();
+        let left = self.left.clone();
         self.task = Some(tokio::spawn(async move {
-            run_search(client, events, ignored, generation, query).await;
+            run_search(client, events, ignored, &left, generation, query).await;
         }));
     }
 
@@ -278,6 +286,7 @@ async fn run_search(
     client: Client,
     events: UnboundedSender<MatrixEvent>,
     ignored: watch::Receiver<IgnoredSet>,
+    left: &LeftRooms,
     generation: u64,
     query: String,
 ) {
@@ -331,6 +340,7 @@ async fn run_search(
             let Some(hit) = resolve_hit(
                 &client,
                 &ignored,
+                left,
                 &room_id,
                 &event_id,
                 &active_query,
@@ -379,6 +389,7 @@ async fn run_search(
 async fn resolve_hit(
     client: &Client,
     ignored: &watch::Receiver<IgnoredSet>,
+    left: &LeftRooms,
     room_id: &OwnedRoomId,
     event_id: &EventId,
     query: &str,
@@ -387,7 +398,9 @@ async fn resolve_hit(
     sender_names: &mut HashMap<(OwnedRoomId, OwnedUserId), String>,
 ) -> Option<SearchHit> {
     let room = client.get_room(room_id)?;
-    if room.state() != RoomState::Joined {
+    // Not from a room left here, which can look joined while it is not (see
+    // `super::left`): its messages are kept in the index until the session ends.
+    if room.state() != RoomState::Joined || left.gone(&room) {
         return None;
     }
 
@@ -783,8 +796,52 @@ mod tests {
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
+    use crate::matrix::left::testing::{BOB, Server};
     use crate::matrix::{MatrixCmd, MatrixHandle, spawn};
     use crate::model::MsgKind;
+    use matrix_sdk::ruma::room_id;
+
+    #[tokio::test]
+    async fn a_room_left_here_gives_no_search_hits_and_loses_its_index() {
+        let (kept, gone) = (room_id!("!kept:localhost"), room_id!("!gone:localhost"));
+        let client = Server {
+            joined: vec![kept.as_str(), gone.as_str()],
+            event: Some(serde_json::json!({
+                "type": "m.room.message",
+                "event_id": "$hello:localhost",
+                "room_id": gone.as_str(),
+                "sender": BOB,
+                "origin_server_ts": 1_000,
+                "content": { "msgtype": "m.text", "body": "hello there" }
+            })),
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let (_, ignored) = watch::channel(IgnoredSet::default());
+        let left = LeftRooms::default();
+        let hit = async |left: &LeftRooms| {
+            resolve_hit(
+                &client,
+                &ignored,
+                left,
+                &gone.to_owned(),
+                <&EventId>::try_from("$hello:localhost").unwrap(),
+                "hello",
+                &Local::now(),
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+            )
+            .await
+        };
+        assert!(hit(&left).await.is_some());
+        let both = joined_room_ids(&client, &left);
+        assert!(both.contains(kept.as_str()) && both.contains(gone.as_str()));
+        left.mark(gone);
+        assert!(hit(&left).await.is_none());
+        let joined = joined_room_ids(&client, &left);
+        assert!(joined.contains(kept.as_str()) && !joined.contains(gone.as_str()));
+    }
     use crate::paths::Paths;
 
     #[test]

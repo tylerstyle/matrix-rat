@@ -21,6 +21,7 @@ use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
 use tokio::task::JoinSet;
 
 use super::MatrixEvent;
+use super::left::LeftRooms;
 use super::manage::{
     MemberRole, MemberStatus, RoomMember, build_member, failed, numeric_level, role as member_role,
     room as resolve_room,
@@ -291,6 +292,8 @@ pub struct People {
     shared_cooldown: MemberSyncCooldown,
     sync_task: tokio::task::JoinHandle<()>,
     tasks: JoinSet<()>,
+    /// Rooms left in this session (see [`super::left`]).
+    left: LeftRooms,
 }
 
 impl People {
@@ -299,15 +302,18 @@ impl People {
         events: UnboundedSender<MatrixEvent>,
         own_refresh: Arc<watch::Sender<u64>>,
         own_room_names: OwnRoomNames,
+        left: LeftRooms,
     ) -> Self {
         let sync_poke = Arc::new(Notify::new());
         let task_client = client.clone();
         let task_events = events.clone();
         let task_poke = sync_poke.clone();
         let task_own_room_names = own_room_names.clone();
+        let task_left = left.clone();
         let sync_task = tokio::spawn(async move {
             loop {
-                let profile = load_own_profile(&task_client, &task_own_room_names).await;
+                let profile =
+                    load_own_profile(&task_client, &task_left, &task_own_room_names).await;
                 let _ = task_events.send(MatrixEvent::OwnProfile(profile));
                 own_refresh.send_modify(|n| *n = n.wrapping_add(1));
                 task_poke.notified().await;
@@ -321,6 +327,7 @@ impl People {
             shared_cooldown: MemberSyncCooldown::default(),
             sync_task,
             tasks: JoinSet::new(),
+            left,
         }
     }
 
@@ -334,9 +341,11 @@ impl People {
         let events = self.events.clone();
         let own_room_names = self.own_room_names.clone();
         let shared_cooldown = self.shared_cooldown.clone();
+        let left = self.left.clone();
         self.tasks.spawn(async move {
             let result = fetch_user_profile(
                 &client,
+                &left,
                 &user_id,
                 room_id.as_deref(),
                 &own_room_names,
@@ -410,7 +419,11 @@ impl People {
 }
 
 /// Reads the live global account profile and current synced per-room display names.
-pub(super) async fn load_own_profile(client: &Client, own_room_names: &OwnRoomNames) -> OwnProfile {
+pub(super) async fn load_own_profile(
+    client: &Client,
+    left: &LeftRooms,
+    own_room_names: &OwnRoomNames,
+) -> OwnProfile {
     let mut display_name = None;
     let mut avatar = None;
     match tokio::time::timeout(PROFILE_TIMEOUT, client.account().fetch_user_profile()).await {
@@ -434,7 +447,9 @@ pub(super) async fn load_own_profile(client: &Client, own_room_names: &OwnRoomNa
     let mut room_names = BTreeMap::new();
     if let Some(own) = client.user_id() {
         for room in client.rooms() {
-            if room.state() != RoomState::Joined {
+            // Not a room left here, which can look joined while it is not (see
+            // `super::left`).
+            if room.state() != RoomState::Joined || left.gone(&room) {
                 continue;
             }
             let rid = room.room_id().to_string();
@@ -455,6 +470,7 @@ pub(super) async fn load_own_profile(client: &Client, own_room_names: &OwnRoomNa
 
 async fn fetch_user_profile(
     client: &Client,
+    left: &LeftRooms,
     user_id: &str,
     room_id: Option<&str>,
     own_room_names: &OwnRoomNames,
@@ -489,13 +505,13 @@ async fn fetch_user_profile(
 
     let ctx = match (room_id, own_user.as_deref()) {
         (Some(rid), Some(own_id)) => {
-            context_room_info(client, rid, &parsed, own_id, own_room_names).await
+            context_room_info(client, left, rid, &parsed, own_id, own_room_names).await
         }
         _ => ContextRoomInfo::default(),
     };
 
     let (mut shared_rooms, mut shared_rooms_incomplete) =
-        collect_shared_rooms(client, &parsed, room_id, cooldown).await;
+        collect_shared_rooms(client, left, &parsed, room_id, cooldown).await;
     shared_rooms_incomplete |= ctx.shared_check_failed;
     if let Some(ctx_shared) = ctx.shared_room
         && !shared_rooms.iter().any(|r| r.room_id == ctx_shared.room_id)
@@ -514,7 +530,7 @@ async fn fetch_user_profile(
     if avatar.is_none() {
         avatar = match ctx.avatar_fallback {
             some @ Some(_) => some,
-            None => find_member_avatar(client, &parsed, room_id).await,
+            None => find_member_avatar(client, left, &parsed, room_id).await,
         };
     }
 
@@ -727,6 +743,7 @@ fn select_fallback_candidates(
 
 async fn context_room_info(
     client: &Client,
+    left: &LeftRooms,
     room_id: &str,
     target: &UserId,
     own: &UserId,
@@ -736,7 +753,12 @@ async fn context_room_info(
         return ContextRoomInfo::default();
     };
     let rname = room_display_name(&room).await;
-    let state = room.state();
+    // A room left here can look joined while it is not (see `super::left`).
+    let state = if left.gone(&room) {
+        RoomState::Left
+    } else {
+        room.state()
+    };
     if !matches!(state, RoomState::Joined | RoomState::Invited) {
         return ContextRoomInfo {
             room_name: Some(rname),
@@ -869,6 +891,7 @@ async fn fallback_check_room(
 /// Also returns `true` when fallback checks left candidates unqueried or failed/timed out.
 async fn collect_shared_rooms(
     client: &Client,
+    left: &LeftRooms,
     target: &UserId,
     skip_room_id: Option<&str>,
     cooldown: &MemberSyncCooldown,
@@ -879,7 +902,9 @@ async fn collect_shared_rooms(
 
     for room in client.rooms() {
         let state = room.state();
-        if !matches!(state, RoomState::Joined | RoomState::Invited) {
+        // Not a room left here, which can look joined while it is not (see
+        // `super::left`).
+        if !matches!(state, RoomState::Joined | RoomState::Invited) || left.gone(&room) {
             continue;
         }
         if let Ok(Some(member)) = room.get_member_no_sync(target).await {
@@ -978,11 +1003,15 @@ async fn collect_shared_rooms(
 
 async fn find_member_avatar(
     client: &Client,
+    left: &LeftRooms,
     target: &UserId,
     preferred_room: Option<&str>,
 ) -> Option<String> {
+    // Rooms left here can look joined while they are not (see `super::left`); what
+    // is known of them is stale.
     if let Some(rid) = preferred_room
         && let Ok(room) = resolve_room(client, rid)
+        && !left.gone(&room)
         && let Ok(Some(member)) = room.get_member_no_sync(target).await
         && let Some(uri) = member.avatar_url()
         && let Some(safe) = safety::safe_mxc(uri)
@@ -990,7 +1019,7 @@ async fn find_member_avatar(
         return Some(safe);
     }
     for room in client.rooms() {
-        if !matches!(room.state(), RoomState::Joined | RoomState::Invited) {
+        if !matches!(room.state(), RoomState::Joined | RoomState::Invited) || left.gone(&room) {
             continue;
         }
         if let Ok(Some(member)) = room.get_member_no_sync(target).await
@@ -1171,6 +1200,46 @@ fn profile_error(err: &matrix_sdk::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::matrix::left::testing::{BOB, BOB_PICTURE, ME, Server};
+    use matrix_sdk::ruma::room_id;
+
+    #[tokio::test]
+    async fn a_room_left_here_is_not_a_room_shared_with_anyone() {
+        let room = room_id!("!gone:localhost");
+        let client = Server {
+            joined: vec![room.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let bob = <&UserId>::try_from(BOB).unwrap();
+        let me = <&UserId>::try_from(ME).unwrap();
+        let cooldown = MemberSyncCooldown::default();
+        let names = OwnRoomNames::default();
+        let left = LeftRooms::default();
+        let (shared, _) = collect_shared_rooms(&client, &left, bob, None, &cooldown).await;
+        assert_eq!(shared.len(), 1);
+        let avatar = find_member_avatar(&client, &left, bob, None).await;
+        assert_eq!(avatar.as_deref(), Some(BOB_PICTURE));
+        let in_room = find_member_avatar(&client, &left, bob, Some(room.as_str())).await;
+        assert_eq!(in_room.as_deref(), Some(BOB_PICTURE));
+        let own = load_own_profile(&client, &left, &names).await;
+        assert!(own.room_names.contains_key(room.as_str()));
+        let context = context_room_info(&client, &left, room.as_str(), bob, me, &names).await;
+        assert!(context.shared_room.is_some());
+
+        left.mark(room);
+        let (shared, incomplete) = collect_shared_rooms(&client, &left, bob, None, &cooldown).await;
+        assert!(shared.is_empty());
+        assert!(!incomplete, "nothing left to ask about either");
+        assert_eq!(find_member_avatar(&client, &left, bob, None).await, None);
+        let in_room = find_member_avatar(&client, &left, bob, Some(room.as_str())).await;
+        assert_eq!(in_room, None);
+        let own = load_own_profile(&client, &left, &names).await;
+        assert!(own.room_names.is_empty());
+        let context = context_room_info(&client, &left, room.as_str(), bob, me, &names).await;
+        assert!(context.shared_room.is_none() && context.member.is_none());
+    }
 
     #[test]
     fn debug_impls_redact_private_profile_fields() {
