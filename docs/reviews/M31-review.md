@@ -129,3 +129,34 @@ Reviewed `34cc0d0..HEAD` (`f8c0279`) on branch `sync-stall` (`7a35244`, `405848d
 2. **`LeftRooms` session-only across restarts — recommend a one-shot startup `/joined_rooms` check for `0.7` (prefer over an on-disk list):**
    - Because the late sliding-sync answer puts the forgotten room back as `RoomState::Joined` while session 1 is running, the SDK persists that `Joined` zombie into the SQLite store on disk. On restart, sliding sync will never deliver `membership: leave` for a forgotten room, so the zombie reappears in session 2+ (and if the server already rejects `/leave` for a forgotten/non-member room, the user cannot remove it from the UI).
    - **Recommended approach:** do **not** persist a `LeftRooms` list on disk (avoiding plaintext room IDs at rest or extra encrypted state cleanup on logout/reauth). Instead, snapshot `client.joined_rooms()` *before* `sync.start().await` (so nothing joined in the new session is touched), run one `joined_rooms::v3::Request` once `caught_up` becomes true (silently skipping on error/timeout so offline startup keeps working), and call `left.mark` + wake the list for any snapshot room still locally `Joined` that `/joined_rooms` omits. That reuses `LeftRooms` with zero on-disk metadata and closes the restart zombie cleanly.
+
+---
+
+## Re-check 2 (`3dc39d3..b880862`)
+
+Reviewed `cd6155e..HEAD` (`b880862`) on branch `sync-stall` (`.claude/worktrees/sync-stall`): six commits (`3dc39d3`, `ac875b4`, `77f316b`, `2bf24f8`, `3d12e4f`, `9d109a2`) plus `b880862` merging `main` (`9501b88`, adding only the `test-keyring` changes with zero diff to `left.rs`, `manage.rs`, `mod.rs`, `rooms.rs`, or `spaces.rs`). No builds were run (`hpfury` reported 938 unit tests green and server suite 43/43).
+
+### Verdict
+
+**M31 ok — every remaining item, edge, `StartCheck`, and the shared `/joined_rooms` query is closed cleanly.**
+
+### Verification by Item
+
+1. **Merge gap in `spaces` & `manage` (`3dc39d3`) — Closed:**
+   - [`spaces::may_edit`](../../src/matrix/spaces.rs#L241-L248) and [`spaces::summarize`](../../src/matrix/spaces.rs#L95) now exclude spaces where `left.gone(space)`.
+   - [`spaces::space_details`](../../src/matrix/spaces.rs#L271-L328) sets `joined = room.state() == RoomState::Joined && !left.gone(&room)` and `can_edit = may_edit(space, left).await`, so left-looking-joined child rooms/sub-spaces offer preview/rejoin instead of dead-ending in `ManageCmd::Info`.
+   - [`spaces::edit_space`](../../src/matrix/spaces.rs#L486-L550) rejects edits on a `left.gone(&space)` space, rejects `SpaceEdit::Add` for a `left.gone(room)` child, and skips `link_parent` during `SpaceEdit::Remove` when `left.gone(room)`.
+   - [`manage::watch`](../../src/matrix/manage.rs#L2562-L2571) checks `matches!(state, RoomState::Left | RoomState::Banned) || left.gone(&room)` at the top of each loop iteration to emit `ManageEvent::Gone` and return, and passes `&left` into `space_details`.
+2. **Invitation/knock ending a left mark updates `Spaces` (`ac875b4`) — Closed:**
+   - [`LeftRooms::look`](../../src/matrix/left.rs#L214-L225) removes `room_id` on `RoomState::Invited | RoomState::Knocked`, drops the mutex before calling `self.wake.notify_one()`, and documents why stale replayed `Invited` events cannot be separated from real new invitations.
+   - [`Worker::run_session`](../../src/matrix/mod.rs#L1890-L1899) re-emits both `MatrixEvent::Rooms` and `MatrixEvent::Spaces` in the `() = left.due()` arm.
+3. **`ManageCmd::Info` uses `left.gone(&room)` (`77f316b`) — Closed:**
+   - [`Manager::handle`](../../src/matrix/manage.rs#L1007-L1017) checks `self.left.gone(&room)` so a newly invited/knocked room previously left in this session can open `Info` while a left-looking-joined zombie is still refused.
+4. **`MatrixCmd::Join` clears only after `room.join()` succeeds (`2bf24f8`) — Closed:**
+   - [`Timelines::handle`](../../src/matrix/rooms.rs#L1114-L1126) removes the pre-join `left.clear` from `mod.rs` and clears `left.clear(room.room_id())` only after `room.join().await?` succeeds (`Timelines::room` continues rejecting phantom `Joined && left.gone` targets).
+5. **Startup check `left::StartCheck` (`3d12e4f`) — Closed:**
+   - **No false positives:** [`StartCheck::new`](../../src/matrix/left.rs#L375-L385) snapshots `client.joined_rooms()` at [`mod.rs:1673`](../../src/matrix/mod.rs#L1673) *before* `sync.start().await` (`mod.rs:1674`). After [`check_at_start`](../../src/matrix/left.rs#L412-L437) fetches `/joined_rooms` (`server_joined`), [`not_in_after_all`](../../src/matrix/left.rs#L442-L452) keeps only rooms present in `at_start`, still `Joined` in `joined_now`, and absent from `on_server` — so server-listed rooms, rooms joined since start, and rooms already updated to `Left`/`Invited`/`Knocked` by the first catch-up are never marked.
+   - **Missed catch-up / offline / session abort:** `caught_up` is triggered only once when [`caught_up_in`](../../src/matrix/mod.rs#L2132-L2135) matches (`SettingUp | Recovering | Running`) at `mod.rs:1696` or `1936`, so if first catch-up never happens no `/joined_rooms` request is sent; `at_start.is_empty()` also skips sending; [`Drop for StartCheck`](../../src/matrix/left.rs#L401-L407) aborts the spawned task on any `run_session` exit; `mark_not_in` skips rooms already marked in this session (`!rooms.contains_key(room_id)`), bounds at `.take(MOST)`, seeds `answers = 1`, and wakes `left.due()` (`left.wake.notify_one()`).
+6. **Shared `/joined_rooms` query via `futures::Shared` (`9d109a2`) — Closed:**
+   - **No mutex across `.await`:** [`LeftRooms::question`](../../src/matrix/left.rs#L184-L204) locks `self.question` (`std::sync::Mutex`) only synchronously to inspect/swap `Option<(Instant, Question)>` before `tokio::spawn` awaits the cloned `Shared` future.
+   - **No stale answers:** `question()` reuses the in-flight `Shared` future only when `*put >= since && question.peek().is_none()` (with `put = Instant::now()` recorded before the lazy future can be polled, and completed futures with `peek().is_some()` never reused), so a room left after `put` always starts a newer request; [`answered`](../../src/matrix/left.rs#L260-L262) also checks `entry.since != since` before applying any result.
