@@ -475,10 +475,17 @@ differentiators and can be reviewed with fake data in days.
   - **0.5 "message types and terminal comforts" (done, released as 0.5.0):** polls; voice/audio/video entries played
     in the system player; stickers and custom emoji; link previews; code-block colours and
     copying a block; composing in `$EDITOR`.
-  - **Later, by demand:** space management, threads list, room slash commands, message
-    details, clipboard pictures, notification keywords and do-not-disturb, several accounts
-    in one window, QR login, other terminals' picture protocols, other systems and prebuilt
-    binaries, languages, accessibility, export.
+  - **0.6 "finding your way" (picked by matrix-claude from the later list on 2026-11-15, the
+    user said "continue with the next phase"; open to reordering):** room slash commands
+    (`/join`, `/leave`, `/invite`, `/nick`, `/topic`, `/kick`, `/ban`, …); message details
+    (who, when exactly, edits, who read it, the event's source); a list of a room's threads;
+    notification keywords and do-not-disturb; pasting a picture from the clipboard;
+    `NO_COLOR` and a high-contrast theme. Owed from 0.5: server tests for polls and
+    stickers, a link given at start on a fresh login, the flaky room test, the installed
+    icon in notifications (done, on main).
+  - **Later, by demand:** space management, several accounts in one window, QR login, other
+    terminals' picture protocols, other systems and prebuilt binaries, languages, export,
+    custom emoji as pictures and in reactions.
   - **Not planned:** calls (shown as events only), account deactivation, account creation.
 
 - **0.2.0 scope (agreed 2026-11-14, released):** after 0.1.1, five features, each written by one agent
