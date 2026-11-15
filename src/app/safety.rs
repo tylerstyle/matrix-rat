@@ -457,6 +457,7 @@ mod tests {
             user_id: "@alice:example.org".into(),
         });
         app.on_matrix(MatrixEvent::Rooms(vec![RoomSummary {
+            encrypted: false,
             id: ROOM.into(),
             name: "Rats".into(),
             category: RoomCategory::Room,
@@ -1077,6 +1078,7 @@ mod tests {
         app.session_started = Some(Instant::now() - Duration::from_secs(25));
 
         let base_room = |id: &str, name: &str, count: u64| RoomSummary {
+            encrypted: false,
             id: id.into(),
             name: name.into(),
             category: RoomCategory::Room,

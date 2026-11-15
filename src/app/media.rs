@@ -776,6 +776,7 @@ mod tests {
         let (mut app, mut terminal, commands) = app_with(graphics, Vec::new());
         let rooms = (0..count)
             .map(|n| RoomSummary {
+                encrypted: false,
                 id: format!("!r{n}"),
                 name: format!("Room {n:02}"),
                 category: RoomCategory::Room,

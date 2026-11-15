@@ -265,7 +265,11 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
         let room = rect.right().saturating_sub(value_x) as usize;
         app.hits.add(rect, HitId::Setting(index, 0));
         match setting {
-            Setting::Theme | Setting::ThemeDark | Setting::ThemeLight | Setting::SidebarWidth => {
+            Setting::Theme
+            | Setting::ThemeDark
+            | Setting::ThemeLight
+            | Setting::SidebarWidth
+            | Setting::LinkPreviews => {
                 let shown = truncate(&value, room.saturating_sub(4));
                 let arrow = theme.style(Role::StatusKey);
                 let end = value_x + 2 + width(&shown) as u16;

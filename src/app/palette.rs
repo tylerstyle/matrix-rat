@@ -91,6 +91,7 @@ impl App {
             read_receipts: self.read_receipts,
             read_markers: self.read_markers,
             room_previews: self.room_previews,
+            link_previews: self.link_previews,
             notifications: self.notify_mode != crate::notify::NotifyMode::Off,
             download_dir: crate::files::display(&self.download_dir()),
             verify_status: crate::verify::setting_text(self.verify.security),
@@ -228,6 +229,7 @@ impl App {
             | Setting::ReadReceipts
             | Setting::ReadMarkers
             | Setting::RoomPreviews
+            | Setting::LinkPreviews
             | Setting::Notifications => {
                 self.change_setting(setting, 0);
                 self.show_toast(format!(

@@ -252,6 +252,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | Setting | What it does |
 |---|---|
 | `room_previews` | latest message under each room, larger room pictures |
+| `link_previews` | `"off"` (default), `"unencrypted"` or `"all"`: a preview (title and two lines) under messages with a link, for the first link. **Your homeserver fetches the link**, see Good to know |
 | `sidebar_width` | width of the room list (or drag the divider) |
 | `read_receipts`, `read_markers`, `typing_notices` | what others see of you, and what you see of them |
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
@@ -276,6 +277,23 @@ Setting `preset = "vim"` keeps the default keys and adds:
   `notification_click_command` in the config file to the command your desktop offers
   for that, for example `hyprctl dispatch focuswindow class:kitty` on Hyprland or
   `swaymsg '[app_id="kitty"] focus'` on sway.
+- **Link previews** (Settings → Link previews, off by default) show the title and a short
+  description of the *first* link of a message, under it, for the messages that are on
+  screen. They come from your homeserver (`/_matrix/client/v1/media/preview_url`), which
+  means **the homeserver fetches the link: it learns which links you are shown** (and
+  the site learns the homeserver's address, not yours). Hence the choices: "unencrypted
+  rooms" never asks for a message in an encrypted room (or in a room that is not known
+  to be unencrypted yet), so that a link meant for the people in the room is not given
+  to the server; only "all rooms" does. Only `http`/`https` links are asked about, never
+  `matrix.to` or `matrix:` links, never links in messages from users you ignore, in
+  deleted messages or in ones that could not be decrypted. Each address is asked about
+  once per session (failures are remembered too), at most three requests are on their
+  way at once, each with a ten-second limit, and nothing is shown for a server without
+  the feature or with previews turned off, and no error either. What comes back is
+  written by the linked site: it is shown as plain text (control characters and
+  direction marks removed, lengths capped), never as formatting, and there is no image
+  in this version. `o` still opens the link; a preview is part of its message, not
+  something to select.
 - **Writing in your editor** (`Alt-V`, or "Write in $EDITOR" in the command palette): the
   composer's text goes into a temporary file, matrix-rat gives the terminal to the
   editor (`$VISUAL`, else `$EDITOR`, split into words like a shell does, so `code --wait`

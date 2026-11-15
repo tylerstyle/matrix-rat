@@ -3,9 +3,9 @@ source: src/ui/mod.rs
 expression: bottom
 ---
 "╭ 1 Rooms ╭ Settings ────────────────────────────────────────────────╮─────────╮"
-"│ Filter r│   Light theme         ◂ (unset) ▸                      ▲ │        ││"
-"│ ○ Unread│   Room list width     ◂ 24 ▸                             │ch is a ││"
-"│ Favourit│   Room previews       ○ off                              │e       ││"
+"│ Filter r│   Room list width     ◂ 24 ▸                           ▲ │        ││"
+"│ ○ Unread│   Room previews       ○ off                              │ch is a ││"
+"│ Favourit│   Link previews       ◂ off ▸                            │e       ││"
 "│▌R  rust │ Behaviour                                                │m the   ││"
 "│ M  matri│   Mouse               ● on                               │        ││"
 "│ People  │   Typing notices      ● on                               │────────┃│"

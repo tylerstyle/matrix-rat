@@ -506,6 +506,9 @@ pub struct Room {
     pub direct: bool,
     /// True when the room's notification mode is `Mute` (excluded from space unread counts).
     pub muted: bool,
+    /// The room is encrypted, or it is not known yet that it is not (a link in it must
+    /// not be given to the homeserver on a guess).
+    pub encrypted: bool,
     /// Power levels and moderation rights for the current user in this room.
     pub power: RoomPower,
     /// Event IDs listed in `m.room.pinned_events` (server order).
@@ -658,6 +661,7 @@ fn room(name: &str, kind: RoomKind, unread: u32, messages: Vec<Message>) -> Room
         alias: None,
         direct: kind == RoomKind::Person,
         muted: false,
+        encrypted: true,
         power: RoomPower::default(),
         pinned_ids: Vec::new(),
     }

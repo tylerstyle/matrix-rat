@@ -27,6 +27,7 @@ mod palette;
 mod paths;
 mod people;
 mod portal;
+mod previews;
 mod rich;
 mod terminal;
 mod termquery;
