@@ -1,14 +1,20 @@
 //! User profiles, verification status lookup, and own-profile updates.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use matrix_sdk::ruma::UserId;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName, get_profile};
-use matrix_sdk::ruma::events::room::member::{MembershipState, SyncRoomMemberEvent};
+use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
+use matrix_sdk::ruma::api::error::ErrorKind;
+use matrix_sdk::ruma::events::StateEventType;
+use matrix_sdk::ruma::events::room::member::{
+    MembershipState, RoomMemberEventContent, SyncRoomMemberEvent,
+};
 use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
 use matrix_sdk::{Client, Room, RoomMemberships, RoomState};
 use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
@@ -27,6 +33,22 @@ use crate::upload;
 const PROFILE_TIMEOUT: Duration = Duration::from_secs(15);
 const KEYS_TIMEOUT: Duration = Duration::from_secs(5);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Policy bounds for falling back to server queries in [`collect_shared_rooms`] when a room's
+/// local member store is unsynced or stale:
+/// - Rooms with at most `SHARED_ROOM_MAX_MEMBERS` members trigger `room.get_member` (`/members`)
+///   at most once per unsynced room so future popups hit the SDK cache with zero network calls.
+/// - Larger unsynced rooms and stale-synced rooms query only `m.room.member/{target}` via
+///   `GET /state/...` to avoid multi-megabyte payloads and Megolm key rotation.
+/// - At most `SHARED_ROOM_MAX_SYNCS` rooms are queried per popup, prioritized DMs-first then
+///   smallest member count first, up to `SHARED_ROOM_CONCURRENCY` in flight and a shared
+///   `SHARED_ROOM_SYNC_TIMEOUT` deadline; errored/timed-out rooms enter `SHARED_ROOM_COOLDOWN`.
+const SHARED_ROOM_MAX_MEMBERS: u64 = 250;
+const SHARED_ROOM_MAX_SYNCS: usize = 12;
+const SHARED_ROOM_CONCURRENCY: usize = 4;
+const SHARED_ROOM_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
+const SHARED_ROOM_COOLDOWN: Duration = Duration::from_secs(300);
+const SHARED_ROOM_COOLDOWN_CAP: usize = 512;
 
 /// Verification state of a Matrix user's cross-signing identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -124,14 +146,13 @@ pub struct UserSharedRoom {
     pub invited: bool,
 }
 
-/// Never prints the room name to logs.
+/// Never prints room IDs or room names to logs.
 impl fmt::Debug for UserSharedRoom {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UserSharedRoom")
-            .field("room_id", &self.room_id)
             .field("direct", &self.direct)
             .field("invited", &self.invited)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -220,12 +241,51 @@ pub(super) fn record_own_member_event(
     }
 }
 
+/// Per-room cooldown preventing broken or timed-out rooms from stalling every subsequent popup.
+#[derive(Clone, Default)]
+struct MemberSyncCooldown(Arc<Mutex<HashMap<String, Instant>>>);
+
+impl MemberSyncCooldown {
+    fn is_cooling_down(&self, room_id: &str, now: Instant) -> bool {
+        let Ok(guard) = self.0.lock() else {
+            return false;
+        };
+        guard
+            .get(room_id)
+            .is_some_and(|at| now.saturating_duration_since(*at) < SHARED_ROOM_COOLDOWN)
+    }
+
+    fn record_failure(&self, room_id: String, now: Instant) {
+        let Ok(mut guard) = self.0.lock() else {
+            return;
+        };
+        guard.retain(|_, at| now.saturating_duration_since(*at) < SHARED_ROOM_COOLDOWN);
+        if guard.len() >= SHARED_ROOM_COOLDOWN_CAP
+            && !guard.contains_key(&room_id)
+            && let Some(oldest) = guard
+                .iter()
+                .min_by_key(|(_, at)| *at)
+                .map(|(k, _)| k.clone())
+        {
+            guard.remove(&oldest);
+        }
+        guard.insert(room_id, now);
+    }
+
+    fn clear(&self, room_id: &str) {
+        if let Ok(mut guard) = self.0.lock() {
+            guard.remove(room_id);
+        }
+    }
+}
+
 /// Watches own-profile sync updates and serializes own-profile edits / user lookups.
 pub struct People {
     client: Client,
     events: UnboundedSender<MatrixEvent>,
     sync_poke: Arc<Notify>,
     own_room_names: OwnRoomNames,
+    shared_cooldown: MemberSyncCooldown,
     sync_task: tokio::task::JoinHandle<()>,
     tasks: JoinSet<()>,
 }
@@ -255,6 +315,7 @@ impl People {
             events,
             sync_poke,
             own_room_names,
+            shared_cooldown: MemberSyncCooldown::default(),
             sync_task,
             tasks: JoinSet::new(),
         }
@@ -269,10 +330,17 @@ impl People {
         let client = self.client.clone();
         let events = self.events.clone();
         let own_room_names = self.own_room_names.clone();
+        let shared_cooldown = self.shared_cooldown.clone();
         self.tasks.spawn(async move {
-            let result = fetch_user_profile(&client, &user_id, room_id.as_deref(), &own_room_names)
-                .await
-                .map(Box::new);
+            let result = fetch_user_profile(
+                &client,
+                &user_id,
+                room_id.as_deref(),
+                &own_room_names,
+                &shared_cooldown,
+            )
+            .await
+            .map(Box::new);
             let _ = events.send(MatrixEvent::UserProfile { request, result });
         });
     }
@@ -382,11 +450,12 @@ pub(super) async fn load_own_profile(client: &Client, own_room_names: &OwnRoomNa
     }
 }
 
-pub(super) async fn fetch_user_profile(
+async fn fetch_user_profile(
     client: &Client,
     user_id: &str,
     room_id: Option<&str>,
     own_room_names: &OwnRoomNames,
+    cooldown: &MemberSyncCooldown,
 ) -> Result<UserProfile, String> {
     let parsed =
         UserId::parse(user_id).map_err(|_| "That is not a valid Matrix user ID.".to_owned())?;
@@ -415,31 +484,39 @@ pub(super) async fn fetch_user_profile(
         }
     }
 
-    let (room_member, room_name, own_is_creator, own_power_level, admin_count) =
-        match (room_id, own_user.as_deref()) {
-            (Some(rid), Some(own_id)) => {
-                context_room_info(client, rid, &parsed, own_id, own_room_names).await
-            }
-            _ => (None, None, false, 0, 0),
-        };
+    let ctx = match (room_id, own_user.as_deref()) {
+        (Some(rid), Some(own_id)) => {
+            context_room_info(client, rid, &parsed, own_id, own_room_names).await
+        }
+        _ => ContextRoomInfo::default(),
+    };
 
-    let shared_rooms = collect_shared_rooms(client, &parsed).await;
+    let mut shared_rooms = collect_shared_rooms(client, &parsed, room_id, cooldown).await;
+    if let Some(ctx_shared) = ctx.shared_room
+        && !shared_rooms.iter().any(|r| r.room_id == ctx_shared.room_id)
+    {
+        shared_rooms.push(ctx_shared);
+        sort_shared_rooms(&mut shared_rooms);
+    }
 
     // If remote profile lacked name/avatar, fall back to member profile in context room or shared room.
     if display_name.is_none()
-        && let Some(member) = &room_member
+        && let Some(member) = &ctx.member
         && !is_blank(&member.name)
     {
         display_name = Some(member.name.clone());
     }
     if avatar.is_none() {
-        avatar = find_member_avatar(client, &parsed, room_id).await;
+        avatar = match ctx.avatar_fallback {
+            some @ Some(_) => some,
+            None => find_member_avatar(client, &parsed, room_id).await,
+        };
     }
 
     if let Some(err) = &remote_err
         && display_name.is_none()
         && avatar.is_none()
-        && room_member.is_none()
+        && ctx.member.is_none()
         && shared_rooms.is_empty()
         && matches!(verify, UserVerifyStatus::NoKeys | UserVerifyStatus::Unknown)
     {
@@ -452,14 +529,188 @@ pub(super) async fn fetch_user_profile(
         avatar,
         verify,
         shared_rooms,
-        room_member,
-        room_name,
-        own_is_creator,
-        own_power_level,
-        admin_count,
+        room_member: ctx.member,
+        room_name: ctx.room_name,
+        own_is_creator: ctx.own_is_creator,
+        own_power_level: ctx.own_power_level,
+        admin_count: ctx.admin_count,
         own,
         note: remote_err,
     })
+}
+
+#[derive(Default)]
+struct ContextRoomInfo {
+    member: Option<RoomMember>,
+    room_name: Option<String>,
+    own_is_creator: bool,
+    own_power_level: i64,
+    admin_count: usize,
+    shared_room: Option<UserSharedRoom>,
+    avatar_fallback: Option<String>,
+}
+
+struct ResolvedMember {
+    membership: MembershipState,
+    display_name: String,
+    avatar_url: Option<String>,
+    from_fallback: bool,
+}
+
+enum SingleMemberFetch {
+    Found(ResolvedMember),
+    NotFound,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackMode {
+    SyncMembers,
+    SingleStateEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FallbackCandidate {
+    room_id: String,
+    direct: bool,
+    members_count: u64,
+    mode: FallbackMode,
+}
+
+enum FallbackCheck {
+    Matched(UserSharedRoom),
+    NotMember,
+    Failed,
+}
+
+fn member_from_local(member: &matrix_sdk::room::RoomMember, from_fallback: bool) -> ResolvedMember {
+    ResolvedMember {
+        membership: member.membership().clone(),
+        display_name: member.name().to_owned(),
+        avatar_url: member.avatar_url().and_then(safety::safe_mxc),
+        from_fallback,
+    }
+}
+
+async fn fetch_single_member_state(
+    client: &Client,
+    room: &Room,
+    target: &UserId,
+) -> SingleMemberFetch {
+    let req = get_state_event_for_key::v3::Request::new(
+        room.room_id().to_owned(),
+        StateEventType::RoomMember,
+        target.to_string(),
+    );
+    let resp = match tokio::time::timeout(KEYS_TIMEOUT, client.send(req)).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(err)) if matches!(err.client_api_error_kind(), Some(ErrorKind::NotFound)) => {
+            return SingleMemberFetch::NotFound;
+        }
+        Ok(Err(_)) | Err(_) => return SingleMemberFetch::Failed,
+    };
+    let Ok(content) = resp
+        .into_content()
+        .deserialize_as_unchecked::<RoomMemberEventContent>()
+    else {
+        return SingleMemberFetch::Failed;
+    };
+    let display_name =
+        clean_name(content.displayname.as_deref()).unwrap_or_else(|| target.localpart().to_owned());
+    let avatar_url = content.avatar_url.as_deref().and_then(safety::safe_mxc);
+    SingleMemberFetch::Found(ResolvedMember {
+        membership: content.membership,
+        display_name,
+        avatar_url,
+        from_fallback: true,
+    })
+}
+
+async fn resolve_context_member(
+    client: &Client,
+    room: &Room,
+    target: &UserId,
+) -> Option<ResolvedMember> {
+    if let Ok(Some(member)) = room.get_member_no_sync(target).await {
+        return Some(member_from_local(&member, false));
+    }
+    if room.state() != RoomState::Joined {
+        return None;
+    }
+    if !room.are_members_synced() {
+        let count = room
+            .joined_members_count()
+            .saturating_add(room.invited_members_count());
+        if count <= SHARED_ROOM_MAX_MEMBERS {
+            return match tokio::time::timeout(KEYS_TIMEOUT, room.get_member(target)).await {
+                Ok(Ok(Some(member))) => Some(member_from_local(&member, false)),
+                _ => None,
+            };
+        }
+    }
+    // Either `are_members_synced()` was already set before `target` joined (for example via an
+    // early `OwnMembers::ensure` sync) or the room exceeds `SHARED_ROOM_MAX_MEMBERS`: fetch only
+    // `m.room.member/{target}` rather than trusting stale cache state or downloading all members.
+    match fetch_single_member_state(client, room, target).await {
+        SingleMemberFetch::Found(member) => Some(member),
+        SingleMemberFetch::NotFound | SingleMemberFetch::Failed => None,
+    }
+}
+
+async fn build_shared_room(room: &Room, state: RoomState) -> UserSharedRoom {
+    let name = room_display_name(room).await;
+    let direct = room.is_direct().await.unwrap_or(false);
+    UserSharedRoom {
+        room_id: room.room_id().to_string(),
+        name,
+        direct,
+        invited: state == RoomState::Invited,
+    }
+}
+
+fn sort_shared_rooms(rooms: &mut [UserSharedRoom]) {
+    rooms.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.room_id.cmp(&b.room_id))
+    });
+}
+
+fn classify_fallback(
+    members_synced: bool,
+    stored_joined: u64,
+    joined_count: u64,
+    invited_count: u64,
+) -> Option<FallbackMode> {
+    if !members_synced {
+        let total = joined_count.saturating_add(invited_count);
+        if total <= SHARED_ROOM_MAX_MEMBERS {
+            Some(FallbackMode::SyncMembers)
+        } else {
+            Some(FallbackMode::SingleStateEvent)
+        }
+    } else if stored_joined < joined_count {
+        Some(FallbackMode::SingleStateEvent)
+    } else {
+        None
+    }
+}
+
+fn select_fallback_candidates(
+    mut candidates: Vec<FallbackCandidate>,
+    cooldown: &MemberSyncCooldown,
+    now: Instant,
+) -> Vec<FallbackCandidate> {
+    candidates.retain(|c| !cooldown.is_cooling_down(&c.room_id, now));
+    candidates.sort_by(|a, b| {
+        b.direct
+            .cmp(&a.direct)
+            .then_with(|| a.members_count.cmp(&b.members_count))
+            .then_with(|| a.room_id.cmp(&b.room_id))
+    });
+    candidates.truncate(SHARED_ROOM_MAX_SYNCS);
+    candidates
 }
 
 async fn context_room_info(
@@ -468,28 +719,31 @@ async fn context_room_info(
     target: &UserId,
     own: &UserId,
     own_room_names: &OwnRoomNames,
-) -> (Option<RoomMember>, Option<String>, bool, i64, usize) {
+) -> ContextRoomInfo {
     let Ok(room) = resolve_room(client, room_id) else {
-        return (None, None, false, 0, 0);
+        return ContextRoomInfo::default();
     };
     let rname = room_display_name(&room).await;
-    if !matches!(room.state(), RoomState::Joined | RoomState::Invited) {
-        return (None, Some(rname), false, 0, 0);
+    let state = room.state();
+    if !matches!(state, RoomState::Joined | RoomState::Invited) {
+        return ContextRoomInfo {
+            room_name: Some(rname),
+            ..ContextRoomInfo::default()
+        };
     }
-    let member_opt = match room.get_member_no_sync(target).await {
-        Ok(Some(m)) => Some(m),
-        Ok(None) if room.state() == RoomState::Joined && !room.are_members_synced() => {
-            room.get_member(target).await.ok().flatten()
-        }
-        _ => None,
+    let Some(resolved) = resolve_context_member(client, &room, target).await else {
+        return ContextRoomInfo {
+            room_name: Some(rname),
+            ..ContextRoomInfo::default()
+        };
     };
-    let Some(member) = member_opt else {
-        return (None, Some(rname), false, 0, 0);
+    let Some(status) = member_status(resolved.membership.clone()) else {
+        return ContextRoomInfo {
+            room_name: Some(rname),
+            ..ContextRoomInfo::default()
+        };
     };
-    let Some(status) = member_status(member.membership().clone()) else {
-        return (None, Some(rname), false, 0, 0);
-    };
-    let levels = if room.state() == RoomState::Joined {
+    let levels = if state == RoomState::Joined {
         Some(room.power_levels_or_default().await)
     } else {
         None
@@ -497,7 +751,7 @@ async fn context_room_info(
     let own_pl = levels.as_ref().map(|l| l.for_user(own));
     let own_is_creator = matches!(own_pl, Some(UserPowerLevel::Infinite));
     let own_power_level = own_pl.map_or(0, numeric_level);
-    let admin_count = if let Some(ref lvls) = levels {
+    let mut admin_count = if let Some(ref lvls) = levels {
         room.members_no_sync(RoomMemberships::JOIN)
             .await
             .map(|joined| {
@@ -510,52 +764,195 @@ async fn context_room_info(
     } else {
         0
     };
-    let mut info = build_member(target, member.name(), status, levels.as_ref(), own);
+    let mut info = build_member(target, &resolved.display_name, status, levels.as_ref(), own);
+    if resolved.from_fallback
+        && matches!(resolved.membership, MembershipState::Join)
+        && info.role >= MemberRole::Admin
+    {
+        admin_count = admin_count.saturating_add(1);
+    }
     if target == own
         && let Some(cached) = own_room_names.get(room_id)
     {
         info.name = cached.unwrap_or_else(|| own.localpart().to_owned());
     }
-    (
-        Some(info),
-        Some(rname),
+    let shared_room = if matches!(
+        resolved.membership,
+        MembershipState::Join | MembershipState::Invite
+    ) {
+        Some(build_shared_room(&room, state).await)
+    } else {
+        None
+    };
+    ContextRoomInfo {
+        member: Some(info),
+        room_name: Some(rname),
         own_is_creator,
         own_power_level,
         admin_count,
-    )
+        shared_room,
+        avatar_fallback: resolved.avatar_url,
+    }
 }
 
-async fn collect_shared_rooms(client: &Client, target: &UserId) -> Vec<UserSharedRoom> {
+async fn fallback_check_room(
+    client: &Client,
+    room: &Room,
+    target: &UserId,
+    mode: FallbackMode,
+) -> FallbackCheck {
+    let matched = match mode {
+        FallbackMode::SyncMembers => {
+            match tokio::time::timeout(KEYS_TIMEOUT, room.get_member(target)).await {
+                Ok(Ok(Some(member))) => matches!(
+                    *member.membership(),
+                    MembershipState::Join | MembershipState::Invite
+                ),
+                Ok(Ok(None)) => false,
+                Ok(Err(_)) | Err(_) => return FallbackCheck::Failed,
+            }
+        }
+        FallbackMode::SingleStateEvent => {
+            match fetch_single_member_state(client, room, target).await {
+                SingleMemberFetch::Found(m) => {
+                    matches!(
+                        m.membership,
+                        MembershipState::Join | MembershipState::Invite
+                    )
+                }
+                SingleMemberFetch::NotFound => false,
+                SingleMemberFetch::Failed => return FallbackCheck::Failed,
+            }
+        }
+    };
+    if matched {
+        FallbackCheck::Matched(build_shared_room(room, RoomState::Joined).await)
+    } else {
+        FallbackCheck::NotMember
+    }
+}
+
+/// Discovers shared rooms (`Join` / `Invite`) with `target`, falling back boundedly when a
+/// joined non-space room's member store is unsynced or stale.
+///
+/// Sliding sync loads members lazily (`$LAZY` + `$ME`), so rooms not opened in the current
+/// session may still have `are_members_synced() == false`, or `are_members_synced() == true`
+/// with a stale cached count if an early `OwnMembers` sync ran before `target` joined:
+/// 1. Pass 1 reads only the local SDK member store (zero HTTP requests).
+/// 2. Pass 2 considers joined non-space rooms not resolved in Pass 1 (skipping any room already
+///    checked via `context_room_info` or inside [`SHARED_ROOM_COOLDOWN`]). Candidates are ordered
+///    DMs-first then smallest member count first, truncated to [`SHARED_ROOM_MAX_SYNCS`], and
+///    queried with at most [`SHARED_ROOM_CONCURRENCY`] in flight under a shared
+///    [`SHARED_ROOM_SYNC_TIMEOUT`] deadline:
+///    - Unsynced rooms with at most [`SHARED_ROOM_MAX_MEMBERS`] members call `room.get_member`,
+///      filling the SDK store once so subsequent popups hit Pass 1 with no network calls.
+///    - Larger unsynced rooms and stale-synced rooms (`stored_joined < joined_members_count()`)
+///      query only `m.room.member/{target}` so huge `/members` responses and full-member Megolm
+///      key rotations are avoided.
+///
+/// Rooms whose fallback errors or misses the deadline enter [`SHARED_ROOM_COOLDOWN`].
+async fn collect_shared_rooms(
+    client: &Client,
+    target: &UserId,
+    skip_room_id: Option<&str>,
+    cooldown: &MemberSyncCooldown,
+) -> Vec<UserSharedRoom> {
     let mut rooms_out = Vec::new();
+    let mut raw_candidates = Vec::new();
+    let mut candidate_rooms: HashMap<String, Room> = HashMap::new();
+
     for room in client.rooms() {
         let state = room.state();
         if !matches!(state, RoomState::Joined | RoomState::Invited) {
             continue;
         }
-        let Ok(Some(member)) = room.get_member_no_sync(target).await else {
-            continue;
-        };
-        if !matches!(
-            *member.membership(),
-            MembershipState::Join | MembershipState::Invite
-        ) {
+        if let Ok(Some(member)) = room.get_member_no_sync(target).await {
+            if matches!(
+                *member.membership(),
+                MembershipState::Join | MembershipState::Invite
+            ) {
+                rooms_out.push(build_shared_room(&room, state).await);
+            }
             continue;
         }
-        let name = room_display_name(&room).await;
+
+        let rid = room.room_id().to_string();
+        if state != RoomState::Joined
+            || room.is_space()
+            || skip_room_id.is_some_and(|skip| skip == rid)
+        {
+            continue;
+        }
+
+        let joined_count = room.joined_members_count();
+        let invited_count = room.invited_members_count();
+        let members_synced = room.are_members_synced();
+        let stored_joined = if members_synced {
+            room.members_no_sync(RoomMemberships::JOIN)
+                .await
+                .map(|m| m.len() as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let Some(mode) =
+            classify_fallback(members_synced, stored_joined, joined_count, invited_count)
+        else {
+            continue;
+        };
+
         let direct = room.is_direct().await.unwrap_or(false);
-        rooms_out.push(UserSharedRoom {
-            room_id: room.room_id().to_string(),
-            name,
+        raw_candidates.push(FallbackCandidate {
+            room_id: rid.clone(),
             direct,
-            invited: state == RoomState::Invited,
+            members_count: joined_count.saturating_add(invited_count),
+            mode,
         });
+        candidate_rooms.insert(rid, room);
     }
-    rooms_out.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.room_id.cmp(&b.room_id))
-    });
+
+    let chosen = select_fallback_candidates(raw_candidates, cooldown, Instant::now());
+    if !chosen.is_empty() {
+        let chosen_ids: Vec<String> = chosen.iter().map(|c| c.room_id.clone()).collect();
+        let mut completed: HashMap<String, bool> = HashMap::new();
+        let mut stream = futures::stream::iter(chosen.into_iter().filter_map(|cand| {
+            let room = candidate_rooms.get(&cand.room_id)?.clone();
+            let client = client.clone();
+            Some(async move {
+                let outcome = fallback_check_room(&client, &room, target, cand.mode).await;
+                (cand.room_id, outcome)
+            })
+        }))
+        .buffer_unordered(SHARED_ROOM_CONCURRENCY);
+
+        let deadline = tokio::time::Instant::now() + SHARED_ROOM_SYNC_TIMEOUT;
+        while let Ok(Some((rid, outcome))) = tokio::time::timeout_at(deadline, stream.next()).await
+        {
+            match outcome {
+                FallbackCheck::Matched(shared) => {
+                    completed.insert(rid, true);
+                    rooms_out.push(shared);
+                }
+                FallbackCheck::NotMember => {
+                    completed.insert(rid, true);
+                }
+                FallbackCheck::Failed => {
+                    completed.insert(rid, false);
+                }
+            }
+        }
+        drop(stream);
+
+        let done_at = Instant::now();
+        for rid in chosen_ids {
+            match completed.get(&rid).copied() {
+                Some(true) => cooldown.clear(&rid),
+                Some(false) | None => cooldown.record_failure(rid, done_at),
+            }
+        }
+    }
+
+    sort_shared_rooms(&mut rooms_out);
     rooms_out
 }
 
@@ -782,6 +1179,7 @@ mod tests {
             invited: false,
         };
         let shared_dbg = format!("{shared:?}");
+        assert!(!shared_dbg.contains("!r1:example.org"));
         assert!(!shared_dbg.contains(secret_room));
 
         let user = UserProfile {
@@ -895,6 +1293,108 @@ mod tests {
         assert_eq!(names.get("!r:hs"), None);
     }
 
+    #[test]
+    fn classify_fallback_picks_sync_or_state_or_none() {
+        assert_eq!(
+            classify_fallback(false, 0, 10, 0),
+            Some(FallbackMode::SyncMembers)
+        );
+        assert_eq!(
+            classify_fallback(false, 0, SHARED_ROOM_MAX_MEMBERS, 0),
+            Some(FallbackMode::SyncMembers)
+        );
+        assert_eq!(
+            classify_fallback(false, 0, SHARED_ROOM_MAX_MEMBERS + 1, 0),
+            Some(FallbackMode::SingleStateEvent)
+        );
+        assert_eq!(
+            classify_fallback(false, 0, u64::MAX, 1),
+            Some(FallbackMode::SingleStateEvent)
+        );
+        assert_eq!(classify_fallback(true, 2, 2, 0), None);
+        assert_eq!(
+            classify_fallback(true, 1, 2, 0),
+            Some(FallbackMode::SingleStateEvent)
+        );
+    }
+
+    #[test]
+    fn select_fallback_candidates_orders_dms_and_small_rooms_skips_cooldown_and_caps() {
+        let now = Instant::now();
+        let cooldown = MemberSyncCooldown::default();
+        cooldown.record_failure("!cool:hs".to_owned(), now - Duration::from_secs(60));
+        cooldown.record_failure(
+            "!expired:hs".to_owned(),
+            now - SHARED_ROOM_COOLDOWN - Duration::from_secs(1),
+        );
+
+        let mut raw = vec![
+            FallbackCandidate {
+                room_id: "!cool:hs".to_owned(),
+                direct: true,
+                members_count: 2,
+                mode: FallbackMode::SyncMembers,
+            },
+            FallbackCandidate {
+                room_id: "!expired:hs".to_owned(),
+                direct: false,
+                members_count: 3,
+                mode: FallbackMode::SyncMembers,
+            },
+            FallbackCandidate {
+                room_id: "!large-group:hs".to_owned(),
+                direct: false,
+                members_count: 400,
+                mode: FallbackMode::SingleStateEvent,
+            },
+            FallbackCandidate {
+                room_id: "!dm-b:hs".to_owned(),
+                direct: true,
+                members_count: 2,
+                mode: FallbackMode::SyncMembers,
+            },
+            FallbackCandidate {
+                room_id: "!dm-a:hs".to_owned(),
+                direct: true,
+                members_count: 2,
+                mode: FallbackMode::SyncMembers,
+            },
+        ];
+        for i in 0..20 {
+            raw.push(FallbackCandidate {
+                room_id: format!("!group-{i:02}:hs"),
+                direct: false,
+                members_count: 10 + i as u64,
+                mode: FallbackMode::SyncMembers,
+            });
+        }
+
+        let picked = select_fallback_candidates(raw, &cooldown, now);
+        assert_eq!(picked.len(), SHARED_ROOM_MAX_SYNCS);
+        assert!(!picked.iter().any(|c| c.room_id == "!cool:hs"));
+        assert!(!picked.iter().any(|c| c.room_id == "!large-group:hs"));
+        assert_eq!(picked[0].room_id, "!dm-a:hs");
+        assert_eq!(picked[1].room_id, "!dm-b:hs");
+        assert_eq!(picked[2].room_id, "!expired:hs");
+    }
+
+    #[test]
+    fn member_sync_cooldown_prunes_and_caps_entries() {
+        let base = Instant::now();
+        let cooldown = MemberSyncCooldown::default();
+        cooldown.record_failure("!old:hs".to_owned(), base);
+        assert!(cooldown.is_cooling_down("!old:hs", base + Duration::from_secs(10)));
+        assert!(!cooldown.is_cooling_down("!old:hs", base + SHARED_ROOM_COOLDOWN));
+
+        let later = base + SHARED_ROOM_COOLDOWN + Duration::from_secs(1);
+        for i in 0..(SHARED_ROOM_COOLDOWN_CAP + 10) {
+            cooldown.record_failure(format!("!r{i}:hs"), later + Duration::from_millis(i as u64));
+        }
+        let guard = cooldown.0.lock().unwrap();
+        assert!(!guard.contains_key("!old:hs"));
+        assert_eq!(guard.len(), SHARED_ROOM_COOLDOWN_CAP);
+    }
+
     #[tokio::test]
     #[ignore = "needs a local homeserver"]
     async fn own_profile_room_name_avatar_and_user_info_sync() {
@@ -949,8 +1449,8 @@ mod tests {
         let (handle, mut events) = spawn(paths);
         handle.send(MatrixCmd::LoginPassword {
             homeserver: homeserver.clone(),
-            username,
-            password: password.into(),
+            username: username.clone(),
+            password: password.clone().into(),
         });
         let own_id = recv_until(&mut events, "login", |e| match e {
             MatrixEvent::LoggedIn { user_id } => Some(user_id),
@@ -1258,11 +1758,64 @@ mod tests {
             answer: Answer::Cancel,
         }));
 
+        // 6. Fresh session without opening the room still discovers shared_rooms via bounded fallback.
+        handle.send(MatrixCmd::Logout);
+        recv_until(&mut events, "logout session 1", |e| match e {
+            MatrixEvent::NeedLogin { .. } => Some(()),
+            _ => None,
+        })
+        .await;
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+
+        let paths2 = Paths {
+            config_dir: root.join("config2"),
+            data_dir: root.join("data2"),
+            log_dir: root.join("log2"),
+            runtime_dir: root.join("run2"),
+            profile: "it2".into(),
+        };
+        paths2.create_dirs().unwrap();
+        let (handle2, mut events2) = spawn(paths2);
+        handle2.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password: password.into(),
+        });
+        recv_until(&mut events2, "login session 2", |e| match e {
+            MatrixEvent::LoggedIn { .. } => Some(()),
+            _ => None,
+        })
+        .await;
+        recv_until(&mut events2, "room list sees shared room", |e| match e {
+            MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == room_id) => Some(()),
+            _ => None,
+        })
+        .await;
+        handle2.send(MatrixCmd::FetchUserProfile {
+            request: 43,
+            user_id: bob_id.clone(),
+            room_id: None,
+        });
+        let profile2 = recv_until(
+            &mut events2,
+            "fetch bob profile in fresh session",
+            |e| match e {
+                MatrixEvent::UserProfile {
+                    request: 43,
+                    result,
+                } => Some(result.unwrap()),
+                _ => None,
+            },
+        )
+        .await;
+        assert!(profile2.shared_rooms.iter().any(|r| r.room_id == room_id));
+
         // Clean up.
         let _ = bob.get_room(&parsed_room).unwrap().leave().await;
         let _ = bob.logout().await;
-        handle.send(MatrixCmd::SetOwnDisplayName { name: None });
-        let _ = recv_until(&mut events, "cleanup clear display name", |e| match e {
+        handle2.send(MatrixCmd::SetOwnDisplayName { name: None });
+        let _ = recv_until(&mut events2, "cleanup clear display name", |e| match e {
             MatrixEvent::OwnProfileResult {
                 what: OwnProfileAction::DisplayName,
                 ..
@@ -1270,16 +1823,22 @@ mod tests {
             _ => None,
         })
         .await;
-        handle.send(MatrixCmd::Manage(ManageCmd::Leave {
+        handle2.send(MatrixCmd::Manage(ManageCmd::Leave {
             room_id: room_id.clone(),
         }));
-        let _ = recv_until(&mut events, "cleanup leave room", |e| match e {
+        let _ = recv_until(&mut events2, "cleanup leave room", |e| match e {
             MatrixEvent::Manage(_) => Some(()),
             _ => None,
         })
         .await;
-        handle.send(MatrixCmd::Shutdown);
-        while events.recv().await.is_some() {}
+        handle2.send(MatrixCmd::Logout);
+        recv_until(&mut events2, "cleanup logout", |e| match e {
+            MatrixEvent::NeedLogin { .. } => Some(()),
+            _ => None,
+        })
+        .await;
+        handle2.send(MatrixCmd::Shutdown);
+        while events2.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);
     }
 }
