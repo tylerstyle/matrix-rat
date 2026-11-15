@@ -1002,8 +1002,13 @@ impl Manager {
             }
             ManageCmd::Info { room_id } => {
                 self.stop();
-                // Left in this session: whatever is still known of it here is stale.
-                if <&RoomId>::try_from(room_id.as_str()).is_ok_and(|id| self.left.is_left(id)) {
+                // Left in this session: whatever is still known of it here is stale. (An
+                // invitation or a knock since is news, and can be looked at.)
+                let gone = <&RoomId>::try_from(room_id.as_str())
+                    .ok()
+                    .and_then(|id| client.get_room(id))
+                    .is_some_and(|room| self.left.gone(&room));
+                if gone {
                     emit(ManageEvent::Info {
                         room_id,
                         result: Err("You are not in this room any more.".to_owned()),
@@ -2874,6 +2879,50 @@ mod tests {
             direct_chat(&client, &left, BOB, false).await,
             Ok(Some(chat.to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn the_info_of_an_invitation_to_a_room_left_before_can_be_looked_at() {
+        let (gone, asked) = (room_id!("!gone:localhost"), room_id!("!asked:localhost"));
+        let client = Server {
+            joined: vec![gone.as_str()],
+            invited: vec![asked.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let settings = client.notification_settings().await;
+        let left = LeftRooms::default();
+        left.mark(gone);
+        left.mark(asked);
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = Manager::new(
+            client,
+            events,
+            crate::matrix::people::OwnRoomNames::default(),
+            Arc::new(Notify::new()),
+            Arc::new(watch::Sender::new(0)),
+            left,
+            settings,
+            Arc::new(Notify::new()),
+        );
+        let mut info = async |room: &RoomId| {
+            manager.handle(ManageCmd::Info {
+                room_id: room.to_string(),
+            });
+            match next_manage(&mut received).await {
+                ManageEvent::Info { room_id, result } if room_id == room.as_str() => result,
+                other => panic!("expected the info, got {other:?}"),
+            }
+        };
+        // Left here, and looking joined still: there is nothing to show.
+        assert_eq!(
+            info(gone).await.err().as_deref(),
+            Some("You are not in this room any more.")
+        );
+        // Invited since: that is news, and shown.
+        assert!(info(asked).await.is_ok());
+        manager.stop();
     }
 
     #[tokio::test]
