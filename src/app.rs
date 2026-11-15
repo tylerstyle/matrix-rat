@@ -4206,6 +4206,7 @@ impl App {
             InputTarget::EmojiQuery => {
                 if let Some(Modal::Emoji(picker)) = &mut self.modal {
                     picker.query.place(rel_col, false);
+                    picker.goal = None;
                 }
             }
             InputTarget::PaletteQuery => {

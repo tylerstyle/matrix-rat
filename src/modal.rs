@@ -252,6 +252,10 @@ pub struct EmojiPicker {
     pub rows: usize,
     /// Ask the next draw to bring the selection into view.
     pub reveal: bool,
+    /// The grid column up and down aim for: where they started from, kept across
+    /// shorter rows and rows of wider cells as a text editor keeps the cursor's column
+    /// across shorter lines. Forgotten when the selection moves any other way.
+    pub goal: Option<u16>,
 }
 
 /// Hand-written: the id of the message reacted to, what was typed and the custom
@@ -282,6 +286,7 @@ impl Default for EmojiPicker {
             custom_columns: 3,
             rows: 8,
             reveal: true,
+            goal: None,
         }
     }
 }
@@ -332,6 +337,7 @@ impl EmojiPicker {
         self.results = results;
         self.selected = 0;
         self.scroll = 0;
+        self.goal = None;
     }
 
     pub fn selected(&self) -> Option<Pick> {
@@ -360,23 +366,23 @@ impl EmojiPicker {
             self.selected = target.clamp(0, last) as usize;
         }
         self.reveal = true;
+        self.goal = None;
     }
 
-    /// Moves the selection `delta` rows up or down, to what is under it there (the last
-    /// one of a shorter row). Past either end it stays put.
+    /// Moves the selection `delta` rows up or down, to what is under the column it
+    /// started from (see [`EmojiPicker::goal`]), or to the last one of a shorter row.
+    /// It stops at the first and the last row.
     pub fn step_rows(&mut self, delta: isize) {
         let runs = self.runs();
         let Some((row, x, _)) = place(&runs, self.selected) else {
             return;
         };
-        let target = row as isize + delta;
-        if target < 0 || target >= row_count(&runs) as isize {
-            return;
-        }
+        let target = (row as isize + delta).clamp(0, row_count(&runs) as isize - 1);
+        let goal = *self.goal.get_or_insert(x);
         let items = row_items(&runs, target as usize);
         let under = items
             .clone()
-            .find(|&index| place(&runs, index).is_some_and(|(_, left, cell)| x < left + cell));
+            .find(|&index| place(&runs, index).is_some_and(|(_, left, cell)| goal < left + cell));
         if let Some(index) = under.or(items.end.checked_sub(1)) {
             self.selected = index;
             self.reveal = true;
@@ -2003,15 +2009,12 @@ mod tests {
         assert_eq!(picker.selected, 11);
         picker.step_rows(1);
         assert_eq!(picker.selected, 13);
-        picker.step_rows(1);
-        assert_eq!(picker.selected, 14);
         picker.step_rows(-1);
-        assert_eq!(picker.selected, 13);
-        picker.step_rows(-3);
-        assert_eq!(picker.selected, 13);
-        picker.selected = 14 + 12 + 5;
+        assert_eq!(picker.selected, 11);
         picker.step_rows(-1);
-        assert_eq!(picker.selected, 14 + 5);
+        assert_eq!(picker.selected, 9);
+        picker.step_rows(-1);
+        assert_eq!(picker.selected, 9);
 
         // Typed: the custom emoji named so come first, best match first.
         picker.set_query("blob".into());
@@ -2033,6 +2036,75 @@ mod tests {
         for secret in ["example.org", "blob", "Blobs", "$m", "partyb"] {
             assert!(!debug.contains(secret), "{secret} leaked in {debug}");
         }
+    }
+
+    #[test]
+    fn up_and_down_keep_their_column_across_short_and_wide_rows_and_pages_stop_at_the_ends() {
+        let emoji = |code: &str| CustomEmoji {
+            shortcode: code.into(),
+            url: format!("mxc://example.org/{code}"),
+            body: None,
+            pack_name: "Blobs".into(),
+        };
+        let catalog = EmoteCatalog {
+            packs: vec![crate::matrix::EmotePack {
+                id: "user".into(),
+                name: "Blobs".into(),
+                emojis: ["blob", "blobcat", "partyblob", "blobwave"]
+                    .map(emoji)
+                    .to_vec(),
+                stickers: Vec::new(),
+            }],
+        };
+        // Row 0: ten quick reactions; rows 1 and 2: three custom emoji and one; then
+        // twelve emoji to a row from result 14.
+        let mut picker = EmojiPicker::for_reaction(0, "$m".into());
+        picker.set_custom(&catalog);
+        let row_of = |picker: &EmojiPicker| picker.cell_of(picker.selected).unwrap().0;
+
+        // From the tenth column down through the short row and back under it.
+        picker.selected = 9;
+        for expected in [11, 13, 14 + 9, 14 + 12 + 9] {
+            picker.step_rows(1);
+            assert_eq!(picker.selected, expected);
+        }
+        for expected in [14 + 9, 13, 11, 9] {
+            picker.step_rows(-1);
+            assert_eq!(picker.selected, expected);
+        }
+        // From a narrow cell into a wide one and back: the same narrow cell, not the
+        // one at the wide cell's left edge.
+        picker.selected = 14 + 2;
+        picker.goal = None;
+        picker.step_rows(-1);
+        assert_eq!(picker.selected, 13);
+        picker.step_rows(1);
+        assert_eq!(picker.selected, 14 + 2);
+
+        // After a step sideways, the column is where the selection is now.
+        picker.step(1);
+        picker.step_rows(-1);
+        assert_eq!(picker.selected, 13);
+        picker.step_rows(1);
+        assert_eq!(picker.selected, 14 + 3);
+        // After typing too.
+        picker.set_query(String::new());
+        picker.selected = 14 + 2;
+        picker.step_rows(-1);
+        picker.step_rows(1);
+        assert_eq!(picker.selected, 14 + 2);
+
+        // A page that would go past either end stops at the first or the last row.
+        picker.selected = 14 + 12 + 3;
+        picker.goal = None;
+        picker.step_rows(-8);
+        assert_eq!(picker.selected, 3);
+        picker.step_rows(8);
+        assert_eq!(row_of(&picker), 8);
+        picker.step_rows(1_000);
+        assert_eq!(row_of(&picker), picker.grid_rows() - 1);
+        picker.step_rows(-1_000);
+        assert_eq!(picker.selected, 3);
     }
 
     #[test]
