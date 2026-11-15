@@ -1369,7 +1369,9 @@ impl Worker {
         post_notice: Option<String>,
         pending: &mut Option<PendingAuth>,
     ) -> bool {
-        let outcome = self.run_session(&active, post_notice).await;
+        // Rooms left in this session, which a late sync answer must not bring back.
+        let left = left::LeftRooms::default();
+        let outcome = self.run_session(&active, post_notice, &left).await;
         match outcome {
             Ok(SessionEnd::Shutdown) => {
                 let joined = search::joined_room_ids(&active.client);
@@ -1564,6 +1566,7 @@ impl Worker {
         &mut self,
         active: &session::ActiveSession,
         post_notice: Option<String>,
+        left: &left::LeftRooms,
     ) -> Result<SessionEnd> {
         let client = &active.client;
         let passphrase = active.passphrase.as_str();
@@ -1685,7 +1688,7 @@ impl Worker {
         let space_service = matrix_sdk_ui::spaces::SpaceService::new(client.clone()).await;
         let (mut space_filters, space_changes) = space_service.subscribe_to_space_filters().await;
         pin_mut!(space_changes);
-        self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
+        self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters, left)));
 
         // One instance for the whole session: it hears of changes to the push rules
         // only while it lives (dropping it removes its listener, and `notify_changes`
@@ -1698,8 +1701,6 @@ impl Worker {
             notification_settings.clone(),
             self.events.clone(),
         );
-        // Rooms left in this session, which a late sync answer must not bring back.
-        let left = left::LeftRooms::default();
         let mut manager = manage::Manager::new(
             client.clone(),
             self.events.clone(),
@@ -1789,13 +1790,13 @@ impl Worker {
                     for diff in diffs {
                         diff.apply(&mut space_filters);
                     }
-                    self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters)));
+                    self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters, left)));
                 }
                 change = notify_changes.recv(), if notify_open => {
                     match change {
                         Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             self.emit(MatrixEvent::Rooms(
-                                summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
+                                summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                             ));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -1803,11 +1804,14 @@ impl Worker {
                         }
                     }
                 }
-                // A room kept out of the list is one the account is in after all.
-                () = left.back() => {
+                // A room kept out of the list is one the account is in after all, or
+                // it is time to ask the server about one. (A space can be such a room:
+                // the spaces are told again too.)
+                () = left.due() => {
                     self.emit(MatrixEvent::Rooms(
-                        summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
+                        summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                     ));
+                    self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters, left)));
                 }
                 incoming = verifier.next_incoming() => verifier.on_incoming(incoming).await,
                 // Keys came in from a file: what is on screen may be readable now.
@@ -1816,23 +1820,23 @@ impl Worker {
                     for diff in diffs {
                         diff.apply(&mut rooms);
                     }
-                    own_members.ensure(&rooms).await;
+                    own_members.ensure(&rooms, left).await;
                     // The SDK works out a room's latest message only for rooms it was
                     // asked to; ask once for each (it needs the event cache running).
-                    previews.listen(client, &rooms);
+                    previews.listen(client, &rooms, left);
                     _notices.arm();
                     self.emit(MatrixEvent::Rooms(
-                        summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
+                        summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                     ));
                 }
                 Ok(()) = ignored.changed() => {
                     previews.lines.clear();
                     timelines.clear_cache();
                     self.emit(MatrixEvent::Rooms(
-                        summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
+                        summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                     ));
                 }
-                () = own_members.finished() => own_members.ensure(&rooms).await,
+                () = own_members.finished() => own_members.ensure(&rooms, left).await,
                 Some(opened) = timelines.next_opened() => timelines.on_opened(opened).await,
                 Some(state) = sync_state.next() => {
                     self.emit(MatrixEvent::Sync(sync_status(&state)));
@@ -1879,9 +1883,9 @@ impl Worker {
                     Some(MatrixCmd::Previews(wanted)) => {
                         if previews.enabled != wanted {
                             previews.enabled = wanted;
-                            previews.listen(client, &rooms);
+                            previews.listen(client, &rooms, left);
                             self.emit(MatrixEvent::Rooms(
-                                summarize(&rooms, &mut previews, &ignored, &left, &notification_settings).await,
+                                summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                             ));
                         }
                     }
@@ -2088,13 +2092,16 @@ struct Previews {
 impl Previews {
     /// Asks the SDK, in the background, to track the latest message of the rooms at
     /// the top of the list that it does not track yet.
-    fn listen(&mut self, client: &Client, rooms: &Vector<RoomListItem>) {
+    fn listen(&mut self, client: &Client, rooms: &Vector<RoomListItem>, left: &left::LeftRooms) {
         while self.tasks.try_join_next().is_some() {}
         if !self.enabled {
             return;
         }
         let new: Vec<_> = rooms
             .iter()
+            // Not shown, and not ours any more (see `left`): no slot for those. One that
+            // comes back is listened to when it does.
+            .filter(|room| !left.gone(room))
             .take(LATEST_ROOMS)
             .map(|room| room.room_id().to_owned())
             .filter(|id| self.listening.insert(id.clone()))
@@ -2237,6 +2244,29 @@ async fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn no_latest_message_is_followed_for_a_room_left_here() {
+        use matrix_sdk::ruma::room_id;
+
+        let (kept, gone) = (room_id!("!kept:localhost"), room_id!("!gone:localhost"));
+        let client = left::testing::Server {
+            joined: vec![kept.as_str(), gone.as_str()],
+            ..left::testing::Server::default()
+        }
+        .client()
+        .await;
+        let rooms = client.rooms().into_iter().map(RoomListItem::from).collect();
+        let left = left::LeftRooms::default();
+        left.mark(gone);
+        let mut previews = Previews {
+            enabled: true,
+            ..Previews::default()
+        };
+        previews.listen(&client, &rooms, &left);
+        assert!(previews.listening.contains(kept));
+        assert!(!previews.listening.contains(gone));
+    }
 
     #[test]
     fn commands_and_events_print_no_ids_and_no_error_text() {

@@ -4,6 +4,7 @@
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::spaces::SpaceFilter;
 
+use super::left::LeftRooms;
 use crate::text::sanitize_line;
 
 /// A space the room list can be narrowed to.
@@ -29,9 +30,12 @@ impl std::fmt::Debug for SpaceSummary {
     }
 }
 
-pub fn summarize(filters: &Vector<SpaceFilter>) -> Vec<SpaceSummary> {
+pub fn summarize(filters: &Vector<SpaceFilter>, left: &LeftRooms) -> Vec<SpaceSummary> {
     filters
         .iter()
+        // A space (or room) left here can look joined to the SDK (see `super::left`):
+        // it is not one of the user's any more.
+        .filter(|filter| !left.is_left(&filter.space_room.room_id))
         .map(|filter| {
             let name = sanitize_line(&filter.space_room.display_name);
             SpaceSummary {
@@ -42,7 +46,12 @@ pub fn summarize(filters: &Vector<SpaceFilter>) -> Vec<SpaceSummary> {
                     name
                 },
                 level: filter.level,
-                rooms: filter.descendants.iter().map(|id| id.to_string()).collect(),
+                rooms: filter
+                    .descendants
+                    .iter()
+                    .filter(|id| !left.is_left(id))
+                    .map(|id| id.to_string())
+                    .collect(),
             }
         })
         .collect()
@@ -61,6 +70,57 @@ mod tests {
 
     use crate::matrix::{MatrixCmd, MatrixEvent, spawn};
     use crate::paths::Paths;
+
+    #[test]
+    fn a_space_or_room_left_here_is_not_offered() {
+        use matrix_sdk::ruma::{OwnedRoomId, room_id};
+        use matrix_sdk_ui::spaces::{SpaceFilter, SpaceRoom};
+
+        use super::summarize;
+        use crate::matrix::left::LeftRooms;
+
+        let filter = |id: &str, rooms: &[&str]| SpaceFilter {
+            space_room: SpaceRoom {
+                room_id: OwnedRoomId::try_from(id).unwrap(),
+                canonical_alias: None,
+                name: None,
+                display_name: "A space".to_owned(),
+                topic: None,
+                avatar_url: None,
+                room_type: None,
+                num_joined_members: 1,
+                join_rule: None,
+                world_readable: None,
+                guest_can_join: false,
+                is_direct: None,
+                children_count: 0,
+                state: Some(matrix_sdk::RoomState::Joined),
+                heroes: None,
+                via: Vec::new(),
+                suggested: false,
+                is_dm: None,
+            },
+            level: 0,
+            descendants: rooms
+                .iter()
+                .map(|room| OwnedRoomId::try_from(*room).unwrap())
+                .collect(),
+        };
+        let filters: matrix_sdk_ui::eyeball_im::Vector<SpaceFilter> = [
+            filter("!kept:localhost", &["!in:localhost", "!out:localhost"]),
+            filter("!left:localhost", &["!in:localhost"]),
+        ]
+        .into_iter()
+        .collect();
+        let left = LeftRooms::default();
+        assert_eq!(summarize(&filters, &left).len(), 2);
+        left.mark(room_id!("!left:localhost"));
+        left.mark(room_id!("!out:localhost"));
+        let spaces = summarize(&filters, &left);
+        assert_eq!(spaces.len(), 1);
+        assert_eq!(spaces[0].id, "!kept:localhost");
+        assert_eq!(spaces[0].rooms, ["!in:localhost"]);
+    }
 
     /// A space with one room in it shows up as a space that contains that room.
     /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=... cargo test -- --ignored`
