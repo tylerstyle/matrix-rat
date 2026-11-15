@@ -703,6 +703,11 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::RetryDecryption => sel.undecryptable,
         Action::UserInfo => sel.can_user_info,
         Action::OpenPinned => ctx.has_room && !in_pending,
+        // About the room that room info would show, as in the room's menu.
+        Action::OpenThreads => ctx
+            .target
+            .as_ref()
+            .is_some_and(|(_, kind)| !kind.is_pending()),
         Action::Copy => sel.can_copy,
         Action::CopyCode => sel.can_copy_code,
         Action::Save => sel.can_save,
@@ -787,6 +792,10 @@ fn action_meta<'a>(
             Cow::Borrowed(description),
             &["pinned messages", "pins", "bookmarks"],
         ),
+        Action::OpenThreads => (
+            Cow::Borrowed(description),
+            &["threads", "thread list", "replies", "conversations"],
+        ),
         Action::WithdrawKnock => (
             Cow::Borrowed(description),
             &["cancel knock", "withdraw request", "leave room"],
@@ -821,6 +830,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::RetryDecryption
                 | Action::UserInfo
                 | Action::OpenPinned
+                | Action::OpenThreads
                 | Action::JumpToNewest
                 | Action::JumpToOldest
         ),
