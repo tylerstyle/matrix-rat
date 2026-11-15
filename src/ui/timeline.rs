@@ -11,6 +11,7 @@ use crate::action::Action;
 use crate::action::Pane;
 use crate::app::App;
 use std::collections::BTreeSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::config::LinkPreviews;
 use crate::highlight::Syntax;
@@ -1010,8 +1011,8 @@ struct RowKey {
     /// Changes when a picture arrives or fails, which may change its height.
     images: u64,
     /// What decides about link previews: one arrives, the mode or the room's encryption
-    /// changes, or a sender is ignored.
-    previews: (u64, LinkPreviews, bool, usize),
+    /// changes, or who is ignored (which decides about custom emoji pictures too).
+    previews: (u64, LinkPreviews, bool, u64),
     /// Changes when image packs arrive: reactions show their shortcodes.
     emotes: u64,
     /// Changes when a custom emoji's picture arrives or goes: two cells or its name.
@@ -1191,7 +1192,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
             app.previews.rev,
             app.link_previews,
             room.encrypted,
-            app.ignored_users.len(),
+            // The people themselves, not how many: one may take another's place.
+            {
+                let mut hasher = DefaultHasher::new();
+                app.ignored_users.hash(&mut hasher);
+                hasher.finish()
+            },
         ),
         emotes: app.emotes.rev,
         emote_pictures: app.images.emote_rev,

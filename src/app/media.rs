@@ -1010,6 +1010,24 @@ mod tests {
     }
 
     #[test]
+    fn someone_newly_ignored_in_place_of_another_shows_no_emoji_pictures() {
+        let message = Message {
+            sender_id: Some("@alice:example.org".into()),
+            ..formatted("1", format!("look {BLOB} here"))
+        };
+        let (mut app, mut terminal, _commands) = app_with(kitty(), vec![message]);
+        app.ignored_users = ["@bob:example.org".to_owned()].into();
+        blob_arrives(&mut app);
+        frame(&mut app, &mut terminal);
+        assert_eq!(kitty_cells(terminal.backend().buffer()).len(), 2);
+        // The list changes with its length kept: Bob is not ignored any more, Alice is.
+        app.ignored_users = ["@alice:example.org".to_owned()].into();
+        frame(&mut app, &mut terminal);
+        assert!(kitty_cells(terminal.backend().buffer()).is_empty());
+        assert!(screen(&terminal).contains("look :blob: here"));
+    }
+
+    #[test]
     fn a_custom_emoji_under_a_corner_pill_leaves_its_data_to_a_copy_in_view() {
         // The same emoji twice in the bottom line: at its start, where the pill of
         // newer messages being loaded goes, and further on.
