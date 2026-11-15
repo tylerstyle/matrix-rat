@@ -137,7 +137,7 @@ impl App {
         popup.focus = popup.default_preview_focus();
     }
 
-    fn open_new_with(&mut self, stage: Stage, fill: impl FnOnce(&mut NewPopup)) {
+    pub(super) fn open_new_with(&mut self, stage: Stage, fill: impl FnOnce(&mut NewPopup)) {
         // From the room info view the form takes its place; any other popup stays.
         let from_info = match &self.modal {
             Some(Modal::RoomInfo(info)) => Some(info.room_id.clone()),
@@ -187,7 +187,7 @@ impl App {
         }
     }
 
-    fn submit_new(&mut self) {
+    pub(super) fn submit_new(&mut self) {
         let own = self.user_id.clone();
         let request = self.next_request();
         let Some(Modal::New(popup)) = &mut self.modal else {
@@ -1909,36 +1909,12 @@ impl App {
             info.editing = None;
             return;
         }
-        let (command, change) = match row {
-            InfoRow::Name if text.is_empty() => {
-                info.error = Some("A room needs a name.".to_owned());
+        let (command, change) = match room_text_change(row, room_id, text) {
+            Ok(change) => change,
+            Err(error) => {
+                info.error = Some(error.to_owned());
                 return;
             }
-            InfoRow::Name | InfoRow::OwnName if text.len() > NAME_MAX => {
-                info.error = Some("That name is too long.".to_owned());
-                return;
-            }
-            InfoRow::Name => (
-                ManageCmd::SetName {
-                    room_id,
-                    name: text,
-                },
-                Change::Name,
-            ),
-            InfoRow::OwnName => (
-                ManageCmd::SetOwnName {
-                    room_id,
-                    name: (!text.is_empty()).then_some(text),
-                },
-                Change::OwnName,
-            ),
-            _ => (
-                ManageCmd::SetTopic {
-                    room_id,
-                    topic: text,
-                },
-                Change::Topic,
-            ),
         };
         info.editing = None;
         if !connected {
@@ -3170,6 +3146,42 @@ struct NormalizedAddressInput {
     canonical: Option<String>,
     alts: Vec<String>,
     own_hs: Option<String>,
+}
+
+/// What setting the room's name (`InfoRow::Name`), its topic (`InfoRow::Topic`) or
+/// one's own name in it (`InfoRow::OwnName`) to `text` sends, after the checks every
+/// way of doing so shares. `text` has been through `clean_input` already.
+pub(super) fn room_text_change(
+    row: InfoRow,
+    room_id: String,
+    text: String,
+) -> Result<(ManageCmd, Change), &'static str> {
+    match row {
+        InfoRow::Name if text.is_empty() => Err("A room needs a name."),
+        InfoRow::Name | InfoRow::OwnName if text.len() > NAME_MAX => Err("That name is too long."),
+        _ if text.len() > FIELD_MAX => Err("That is too long."),
+        InfoRow::Name => Ok((
+            ManageCmd::SetName {
+                room_id,
+                name: text,
+            },
+            Change::Name,
+        )),
+        InfoRow::OwnName => Ok((
+            ManageCmd::SetOwnName {
+                room_id,
+                name: (!text.is_empty()).then_some(text),
+            },
+            Change::OwnName,
+        )),
+        _ => Ok((
+            ManageCmd::SetTopic {
+                room_id,
+                topic: text,
+            },
+            Change::Topic,
+        )),
+    }
 }
 
 fn step_focus(current: usize, stops: &[usize], step: isize) -> usize {

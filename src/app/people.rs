@@ -22,6 +22,16 @@ use crate::text::{is_blank, sanitize_line};
 /// Maximum length of a Matrix display name.
 const PROFILE_NAME_MAX: usize = 255;
 
+/// The display name to set from what was typed (`None` clears it), after the checks
+/// every way of setting it shares.
+pub(super) fn checked_display_name(typed: &str) -> Result<Option<String>, &'static str> {
+    let cleaned = crate::manage::clean_input(typed.trim());
+    if cleaned.len() > PROFILE_NAME_MAX {
+        return Err("That display name is too long.");
+    }
+    Ok((!is_blank(&cleaned)).then_some(cleaned))
+}
+
 impl App {
     fn next_user_info_request(&mut self) -> u64 {
         self.user_info_requests = self.user_info_requests.wrapping_add(1).max(1);
@@ -86,6 +96,27 @@ impl App {
                 user_id,
                 room_id,
             });
+        }
+    }
+
+    /// Opens User Info with the row of `action` selected and pressed once, as `Enter`
+    /// would: what asks first there asks first here too.
+    pub(super) fn open_user_info_at(
+        &mut self,
+        user_id: String,
+        room_id: Option<String>,
+        initial_name: Option<String>,
+        action: UserAction,
+    ) {
+        self.open_user_info(user_id.clone(), room_id, initial_name);
+        let ctx = self.user_info_ctx(&user_id);
+        let Some(Modal::UserInfo(popup)) = &mut self.modal else {
+            return;
+        };
+        let row = UserInfoRow::Action(action);
+        if let Some(index) = popup.rows(&ctx).iter().position(|r| *r == row) {
+            popup.select(index, &ctx);
+            self.activate_user_info_row(row);
         }
     }
 
@@ -526,7 +557,7 @@ impl App {
         });
     }
 
-    fn activate_user_info_row(&mut self, row: UserInfoRow) {
+    pub(super) fn activate_user_info_row(&mut self, row: UserInfoRow) {
         let request = self.next_request();
         let ctx_uid = match &self.modal {
             Some(Modal::UserInfo(popup)) if popup.busy.is_none() => popup.user_id.clone(),
@@ -551,14 +582,7 @@ impl App {
                     return;
                 };
                 self.modal = None;
-                if self.space.is_some() && !self.space_rooms.contains(&room_id) {
-                    self.select_space(None);
-                }
-                self.open_room(room_idx);
-                if let Some(at) = self.visible_rooms().iter().position(|i| *i == room_idx) {
-                    self.sidebar.cursor = at;
-                    self.sidebar.reveal_cursor = true;
-                }
+                self.show_room(room_idx);
             }
             UserInfoRow::Action(action) => {
                 let disabled_reason = {
@@ -1124,12 +1148,13 @@ impl App {
         };
         form.error = None;
         form.notice = None;
-        let cleaned = crate::manage::clean_input(form.display_name.as_str().trim());
-        if cleaned.len() > PROFILE_NAME_MAX {
-            form.error = Some("That display name is too long.".to_owned());
-            return;
-        }
-        let target = (!is_blank(&cleaned)).then_some(cleaned);
+        let target = match checked_display_name(form.display_name.as_str()) {
+            Ok(target) => target,
+            Err(error) => {
+                form.error = Some(error.to_owned());
+                return;
+            }
+        };
         if target == form.current_name {
             form.dirty_name = false;
             form.notice = Some("Display name is already up to date.".to_owned());

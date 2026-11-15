@@ -705,6 +705,16 @@ impl RoomPower {
     pub fn can_ban_user(&self, own_user_id: Option<&str>, target_user_id: &str) -> bool {
         self.can_ban && own_user_id != Some(target_user_id) && self.outranks(target_user_id)
     }
+
+    /// Whether the current user can remove `target_user_id` from the room right now.
+    pub fn can_kick_user(&self, own_user_id: Option<&str>, target_user_id: &str) -> bool {
+        self.can_kick && own_user_id != Some(target_user_id) && self.outranks(target_user_id)
+    }
+
+    /// Whether the current user can lift the ban on `target_user_id` right now.
+    pub fn can_unban_user(&self, own_user_id: Option<&str>, target_user_id: &str) -> bool {
+        self.can_unban && own_user_id != Some(target_user_id) && self.outranks(target_user_id)
+    }
 }
 
 /// Counts and flags only: never puts user IDs in logs.

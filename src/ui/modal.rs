@@ -1238,6 +1238,30 @@ fn reason_confirm(frame: &mut Frame, app: &mut App, area: Rect, form: &mut Reaso
             },
             "Ban",
         ),
+        ReasonConfirmKind::Kick {
+            user_id, user_name, ..
+        } => (
+            " Remove from room ",
+            "Remove this member from the room?",
+            if user_name.is_empty() {
+                user_id.clone()
+            } else {
+                user_name.clone()
+            },
+            "Remove",
+        ),
+        ReasonConfirmKind::Unban {
+            user_id, user_name, ..
+        } => (
+            " Unban user ",
+            "Let this user back into the room?",
+            if user_name.is_empty() {
+                user_id.clone()
+            } else {
+                user_name.clone()
+            },
+            "Unban",
+        ),
     };
     let inner = popup(
         frame,

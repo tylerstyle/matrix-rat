@@ -143,6 +143,31 @@ the sent message). `/me`, `/spoiler`, `/plain`, `/shrug` and friends work as com
 `/poll` starts a poll and `/sticker` picks a sticker to send; `@`, `:`, `#` and `/` open
 completions (`:` offers your custom emoji too).
 
+Commands for rooms and people do what the menus and popups do, and ask the same questions
+before anything changes:
+
+| Command | Does |
+|---|---|
+| `/join <room>` | opens a room you are in, or shows the preview of one you are not in, to join from; `<room>` is `#name:server`, a room ID or a link |
+| `/leave` | asks, then leaves the open room |
+| `/invite <user>` | invites someone to the open room |
+| `/kick <user> [reason]` | asks (with the reason filled in), then removes someone from the open room |
+| `/ban <user> [reason]` | asks, then bans someone from the open room |
+| `/unban <user> [reason]` | asks, then lets a banned person back in |
+| `/ignore <user>` | asks in their User info, then hides their messages and invitations |
+| `/unignore <user>` | asks in their User info, then shows them again |
+| `/dm <user>` or `/msg <user>` | opens your direct chat with someone, or starts one |
+| `/whois <user>` | shows someone's User info |
+| `/nick <name>` | changes your display name |
+| `/roomnick <name>` | changes your name in the open room only |
+| `/topic <text>` | changes the open room's topic, where you may |
+| `/roomname <name>` | renames the open room, where you may |
+| `/help` | shows the keys |
+
+A `<user>` is a full ID (`@name:server`), a link to them, or the display name or the part
+before the colon of someone in the open room, as long as only one person fits; picking them
+from the `@` completions always does.
+
 Unsent text stays with its room or thread and is still there after a restart (it is kept
 in the encrypted session store). A reply comes back as its text, without what it answered.
 To ignore or report someone, use the message menu (`m` or right-click) or Room info (`F4`, `Alt-I`);

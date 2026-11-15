@@ -200,6 +200,32 @@ impl App {
                     reason,
                 }));
             }
+            ReasonConfirmKind::Kick {
+                room_id, user_id, ..
+            } => {
+                if self.matrix.is_none() {
+                    self.show_toast(NO_ACCOUNT);
+                    return;
+                }
+                self.send_matrix(MatrixCmd::Manage(ManageCmd::Kick {
+                    room_id,
+                    user_id,
+                    reason,
+                }));
+            }
+            ReasonConfirmKind::Unban {
+                room_id, user_id, ..
+            } => {
+                if self.matrix.is_none() {
+                    self.show_toast(NO_ACCOUNT);
+                    return;
+                }
+                self.send_matrix(MatrixCmd::Manage(ManageCmd::Unban {
+                    room_id,
+                    user_id,
+                    reason,
+                }));
+            }
         }
     }
 

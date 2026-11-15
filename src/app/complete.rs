@@ -332,6 +332,21 @@ impl App {
         true
     }
 
+    /// The members of the open room as far as they are known; the demo makes them up
+    /// from who wrote there, as it does for `@` completion.
+    pub(super) fn known_members(&self) -> std::borrow::Cow<'_, [Member]> {
+        match self
+            .room_id()
+            .and_then(|id| self.complete.room_members.get(&id))
+        {
+            Some(loaded) => std::borrow::Cow::Borrowed(&loaded.members),
+            None if self.matrix.is_none() => {
+                std::borrow::Cow::Owned(self.demo_members(&self.recent_speakers()))
+            }
+            None => std::borrow::Cow::Borrowed(&[]),
+        }
+    }
+
     fn recent_speakers(&self) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();

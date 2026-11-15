@@ -2,6 +2,7 @@
 
 mod attach;
 mod code;
+mod commands;
 mod complete;
 mod devices;
 mod drafts;
@@ -1540,6 +1541,10 @@ impl App {
     }
 
     fn send(&mut self) {
+        // A room command does what it says (and waits while a message is edited).
+        if self.room_command() {
+            return;
+        }
         // An `/upload` command attaches; with files waiting, Enter sends those. An
         // edit comes first: its text is a message, and files wait until it is done.
         if !matches!(self.compose_mode, ComposeMode::Edit(_))
@@ -1703,6 +1708,22 @@ impl App {
     }
 
     /// Opens the `n`th link of a message in the system browser.
+    /// Opens room `index` of the list, leaving a space that does not hold it, with the
+    /// list's cursor on it.
+    pub(super) fn show_room(&mut self, index: usize) {
+        let Some(room_id) = self.rooms.get(index).map(|room| room.id.clone()) else {
+            return;
+        };
+        if self.space.is_some() && !self.space_rooms.contains(&room_id) {
+            self.select_space(None);
+        }
+        self.open_room(index);
+        if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
+            self.sidebar.cursor = at;
+            self.sidebar.reveal_cursor = true;
+        }
+    }
+
     pub(super) fn find_joined_room(&self, target: &str) -> Option<usize> {
         self.rooms.iter().position(|room| {
             !room.is_pending() && (room.id == target || room.alias.as_deref() == Some(target))
@@ -1746,15 +1767,7 @@ impl App {
             }
             Ok(crate::manage::Address::Room { target, via }) => {
                 if let Some(index) = self.find_joined_room(&target) {
-                    let room_id = self.rooms[index].id.clone();
-                    if self.space.is_some() && !self.space_rooms.contains(&room_id) {
-                        self.select_space(None);
-                    }
-                    self.open_room(index);
-                    if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
-                        self.sidebar.cursor = at;
-                        self.sidebar.reveal_cursor = true;
-                    }
+                    self.show_room(index);
                 } else {
                     self.open_room_preview(&target, via);
                 }
@@ -1858,15 +1871,7 @@ impl App {
             Ok(crate::manage::Address::Room { target, via }) => {
                 if let Some(index) = self.find_joined_room(&target) {
                     self.startup_target = None;
-                    let room_id = self.rooms[index].id.clone();
-                    if self.space.is_some() && !self.space_rooms.contains(&room_id) {
-                        self.select_space(None);
-                    }
-                    self.open_room(index);
-                    if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
-                        self.sidebar.cursor = at;
-                        self.sidebar.reveal_cursor = true;
-                    }
+                    self.show_room(index);
                 } else if self.matrix.is_none() || self.sync == Some(SyncStatus::Synced) {
                     self.startup_target = None;
                     self.open_room_preview(&target, via);
