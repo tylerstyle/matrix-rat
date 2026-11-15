@@ -80,6 +80,7 @@ pub async fn watch(
     client: &Client,
     events: UnboundedSender<MatrixEvent>,
     ignored: watch::Receiver<IgnoredSet>,
+    left: LeftRooms,
 ) -> Watch {
     let state = std::sync::Arc::new(std::sync::Mutex::new(WatchState {
         events: Some(events),
@@ -104,12 +105,12 @@ pub async fn watch(
                     state.events.clone()
                 }
             };
-            let ignored = ignored.clone();
+            let (ignored, left) = (ignored.clone(), left.clone());
             async move {
                 let Some(events) = events else {
                     return;
                 };
-                match notice(notification, &room, &client, &ignored).await {
+                match notice(notification, &room, &client, &ignored, &left).await {
                     NoticeOutcome::Show(notice) => {
                         let _ = events.send(MatrixEvent::Notice(notice));
                     }
@@ -135,7 +136,13 @@ async fn notice(
     room: &Room,
     client: &Client,
     ignored: &watch::Receiver<IgnoredSet>,
+    left: &LeftRooms,
 ) -> NoticeOutcome {
+    // Left here: a sync answer that was on its way can bring the room back, looking
+    // joined and with its last messages (see `super::left`). Those are not news.
+    if left.gone(room) {
+        return NoticeOutcome::Ignore;
+    }
     if !notification
         .actions
         .iter()
@@ -330,6 +337,46 @@ mod tests {
     use crate::matrix::left::testing::Server;
     use crate::matrix::{MatrixCmd, spawn};
     use crate::paths::Paths;
+
+    #[tokio::test]
+    async fn a_message_in_a_room_left_here_is_not_announced() {
+        use matrix_sdk::ruma::push::Action;
+        use matrix_sdk::ruma::room_id;
+        use matrix_sdk::ruma::serde::Raw;
+
+        let room_id = room_id!("!gone:localhost");
+        let client = Server {
+            joined: vec![room_id.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let room = client.get_room(room_id).unwrap();
+        let sent = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let message = serde_json::json!({
+            "type": "m.room.message",
+            "event_id": "$fresh:localhost",
+            "sender": crate::matrix::left::testing::BOB,
+            "origin_server_ts": sent,
+            "content": { "msgtype": "m.text", "body": "still there?" }
+        });
+        let notification = || Notification {
+            actions: vec![Action::Notify],
+            event: RawAnySyncOrStrippedTimelineEvent::Sync(
+                Raw::from_json_string(message.to_string()).unwrap(),
+            ),
+        };
+        let (_, ignored) = watch::channel(IgnoredSet::default());
+        let left = LeftRooms::default();
+        let outcome = notice(notification(), &room, &client, &ignored, &left).await;
+        assert!(matches!(outcome, NoticeOutcome::Show(notice) if notice.body == "still there?"));
+        left.mark(room_id);
+        let outcome = notice(notification(), &room, &client, &ignored, &left).await;
+        assert!(matches!(outcome, NoticeOutcome::Ignore));
+    }
 
     #[tokio::test]
     async fn no_members_are_fetched_for_a_room_left_here() {

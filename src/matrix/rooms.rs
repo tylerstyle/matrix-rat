@@ -105,6 +105,8 @@ pub struct Timelines {
     pinned_cache: Arc<std::sync::Mutex<super::moderation::PinnedCache>>,
     /// The running request for a page of a room's threads, if any.
     thread_lister: Option<JoinHandle<()>>,
+    /// Rooms left in this session (see [`super::left`]).
+    left: super::left::LeftRooms,
 }
 
 impl Timelines {
@@ -114,6 +116,7 @@ impl Timelines {
         ignored: watch::Receiver<IgnoredSet>,
         own_refresh: watch::Receiver<u64>,
         own_room_names: super::people::OwnRoomNames,
+        left: super::left::LeftRooms,
     ) -> Self {
         let (open_tx, open_rx) = unbounded_channel();
         Self {
@@ -140,6 +143,7 @@ impl Timelines {
             unread_flags: UnreadFlags::start(events.clone()),
             pinned_cache: Arc::default(),
             thread_lister: None,
+            left,
             events,
         }
     }
@@ -211,11 +215,19 @@ impl Timelines {
         });
     }
 
+    /// The room a command is for. Every command finds its room here.
     fn room(&self, room_id: &str) -> Result<Room> {
         let id = RoomId::parse(room_id).map_err(|_| anyhow!("invalid room id"))?;
-        self.client
+        let room = self
+            .client
             .get_room(&id)
-            .ok_or_else(|| anyhow!("this room is not known yet"))
+            .ok_or_else(|| anyhow!("this room is not known yet"))?;
+        // Left here, and brought back looking joined by a sync answer that was on its
+        // way (see `super::left`): as gone as it was before that answer came.
+        if room.state() == matrix_sdk::RoomState::Joined && self.left.gone(&room) {
+            bail!("you are not in this room any more");
+        }
+        Ok(room)
     }
 
     async fn timeline(&mut self, room_id: &str) -> Result<Arc<Timeline>> {
@@ -1095,12 +1107,18 @@ impl Timelines {
                 }),
                 Err(err) => self.fail("Could not join", err),
             },
+            // Declining an invitation, or taking a knock back.
             MatrixCmd::Leave { room_id } => match self.room(&room_id) {
                 Ok(room) => {
                     let client = self.client.clone();
+                    let left = self.left.clone();
                     self.spawn("Could not leave", async move {
                         let was_knocked = room.state() == matrix_sdk::RoomState::Knocked;
                         room.leave().await?;
+                        // Remembered like any room left, so that a sync answer that was on
+                        // its way cannot bring it back as one the user is in. (A new
+                        // invitation still shows: that is news.)
+                        left.mark(room.room_id());
                         if was_knocked {
                             super::manage::cleanup_left_room(&client, &room).await;
                         }
@@ -2199,6 +2217,104 @@ async fn forward(
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    /// The session's timelines, for a client of the stand-in server.
+    fn timelines_of(
+        client: matrix_sdk::Client,
+        left: &crate::matrix::left::LeftRooms,
+    ) -> (
+        super::Timelines,
+        tokio::sync::mpsc::UnboundedReceiver<crate::matrix::MatrixEvent>,
+    ) {
+        let (events, received) = tokio::sync::mpsc::unbounded_channel();
+        let (_, ignored) = tokio::sync::watch::channel(super::IgnoredSet::default());
+        let (_, own_refresh) = tokio::sync::watch::channel(0);
+        let timelines = super::Timelines::new(
+            client,
+            events,
+            ignored,
+            own_refresh,
+            crate::matrix::people::OwnRoomNames::default(),
+            left.clone(),
+        );
+        (timelines, received)
+    }
+
+    #[tokio::test]
+    async fn a_room_left_here_is_not_opened_whatever_it_looks_like() {
+        use crate::matrix::left::{LeftRooms, testing::Server};
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+        use matrix_sdk::ruma::room_id;
+
+        let room = room_id!("!gone:localhost");
+        let client = Server {
+            joined: vec![room.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let left = LeftRooms::default();
+        left.mark(room);
+        let (mut timelines, mut events) = timelines_of(client, &left);
+        // Jumping to a message in it (a link, a search hit) fails at once.
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room.to_string(),
+                event_id: "$message:localhost".to_owned(),
+                thread_root: None,
+                generation: 7,
+            })
+            .await;
+        match events.try_recv() {
+            Ok(MatrixEvent::JumpFailed { generation, reason }) => {
+                assert_eq!(generation, 7);
+                assert!(reason.contains("not in this room"), "{reason}");
+            }
+            other => panic!("expected the jump to fail, got {other:?}"),
+        }
+        // Opening it fails too, as does anything else done in it.
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room.to_string(),
+                generation: 8,
+            })
+            .await;
+        match events.try_recv() {
+            Ok(MatrixEvent::ActionFailed(text)) => assert!(text.contains("not in this room")),
+            other => panic!("expected opening to fail, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_declined_invitation_is_remembered_as_left() {
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::left::{LeftRooms, testing::Server};
+        use matrix_sdk::ruma::room_id;
+
+        let room = room_id!("!declined:localhost");
+        let client = Server {
+            invited: vec![room.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let left = LeftRooms::default();
+        let (mut timelines, _events) = timelines_of(client, &left);
+        timelines
+            .handle(MatrixCmd::Leave {
+                room_id: room.to_string(),
+            })
+            .await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !left.is_left(room) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the declined invitation is remembered");
+        // (The SDK forgets it. Brought back looking joined by a late answer, it now stays
+        // hidden, while a new invitation shows: see the tests of `left`.)
+    }
 
     #[test]
     fn an_unread_mark_is_only_skipped_when_nothing_speaks_against_it() {

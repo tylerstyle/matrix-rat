@@ -1374,7 +1374,7 @@ impl Worker {
         let outcome = self.run_session(&active, post_notice, &left).await;
         match outcome {
             Ok(SessionEnd::Shutdown) => {
-                let joined = search::joined_room_ids(&active.client);
+                let joined = search::joined_room_ids(&active.client, &left);
                 drop(active);
                 search::prune_search_dir(&self.paths.search_dir(), &joined);
                 return false;
@@ -1386,7 +1386,7 @@ impl Worker {
                 if let Err(err) = session::mark_soft_logout(&self.paths, &active) {
                     tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not record soft logout state");
                 }
-                let joined = search::joined_room_ids(&active.client);
+                let joined = search::joined_room_ids(&active.client, &left);
                 drop(active);
                 search::prune_search_dir(&self.paths.search_dir(), &joined);
                 *pending = Some(PendingAuth::Reauth {
@@ -1589,7 +1589,8 @@ impl Worker {
         let ignore_tracker =
             safety::IgnoreTracker::start(client.clone(), self.events.clone()).await;
         let mut ignored = ignore_tracker.subscribe();
-        let _notices = notify::watch(client, self.events.clone(), ignored.clone()).await;
+        let _notices =
+            notify::watch(client, self.events.clone(), ignored.clone(), left.clone()).await;
         let mut session_changes = client.subscribe_to_session_changes();
         let token_saver = {
             let mut changes = client.subscribe_to_session_changes();
@@ -1627,8 +1628,12 @@ impl Worker {
             .context("could not set up sync")?;
         // Start listening for redecryption reports before sync begins so any
         // newly decrypted UTDs are forwarded into the search index.
-        let mut searcher =
-            search::Searcher::new(client.clone(), self.events.clone(), ignored.clone());
+        let mut searcher = search::Searcher::new(
+            client.clone(),
+            self.events.clone(),
+            ignored.clone(),
+            left.clone(),
+        );
         let mut user_searcher =
             safety::UserSearcher::new(client.clone(), self.events.clone(), ignored.clone());
         let mut dir_searcher =
@@ -1671,12 +1676,14 @@ impl Worker {
             ignored.clone(),
             own_refresh.subscribe(),
             own_room_names.clone(),
+            left.clone(),
         );
         let mut people_mgr = people::People::start(
             client.clone(),
             self.events.clone(),
             own_refresh.clone(),
             own_room_names.clone(),
+            left.clone(),
         );
         let mut own_members = notify::OwnMembers::default();
         let mut previews = Previews::default();
