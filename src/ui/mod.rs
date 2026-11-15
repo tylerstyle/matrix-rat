@@ -581,6 +581,45 @@ mod tests {
     }
 
     #[test]
+    fn emoji_picker_custom() {
+        use crate::matrix::{CustomEmoji, EmoteCatalog, EmotePack};
+        let mut app = App::demo();
+        let emoji = |code: &str| CustomEmoji {
+            shortcode: code.into(),
+            url: format!("mxc://example.org/{code}"),
+            body: None,
+            pack_name: "Rat pack".into(),
+        };
+        app.emotes.catalog = EmoteCatalog {
+            packs: vec![EmotePack {
+                id: "user".into(),
+                name: "Rat pack".into(),
+                emojis: ["ratwave", "ratparty", "blobrat", "a_very_long_rat_name"]
+                    .map(emoji)
+                    .to_vec(),
+                stickers: Vec::new(),
+            }],
+        };
+        // On an 80x24 terminal, reacting to a message: the quick reactions, then the
+        // custom emoji by name, then the rest.
+        render(&mut app, 80, 24);
+        app.timeline.selected = Some(1);
+        app.perform(Action::React);
+        // Drawn once, so that the arrows know the grid: down to the second row of
+        // custom emoji.
+        render(&mut app, 80, 24);
+        for _ in 0..2 {
+            app.on_event(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Down,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+        }
+        insta::assert_snapshot!(render(&mut app, 80, 24));
+    }
+
+    #[test]
     fn message_kinds() {
         use crate::model::{Message, MsgKind, SendState};
         let mut app = App::demo();

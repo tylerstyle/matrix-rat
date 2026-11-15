@@ -159,6 +159,19 @@ pub fn is_valid_mxc(url: &str) -> bool {
         && url.rsplit_once('/').is_some_and(|(_, id)| !id.is_empty())
 }
 
+/// What a reaction made with a custom emoji carries besides its `mxc://` key: the
+/// emoji's shortcode, for clients that do not know the picture to show by name
+/// (MSC4027). Ruma has no field for it yet; it goes under the name the proposal gives
+/// it and under the unstable one clients read today. `None` for a shortcode that would
+/// not be one in a pack.
+pub fn reaction_shortcode(shortcode: &str) -> Option<serde_json::Map<String, Value>> {
+    let named = Value::String(format!(":{}:", clean_shortcode(shortcode)?));
+    Some(serde_json::Map::from_iter([
+        ("shortcode".to_owned(), named.clone()),
+        ("com.beeper.reaction.shortcode".to_owned(), named),
+    ]))
+}
+
 fn clean_shortcode(raw: &str) -> Option<String> {
     let code = sanitize_line(raw.trim().trim_matches(':'));
     let ok = !code.is_empty()
@@ -804,6 +817,24 @@ mod tests {
             assert!(emoji.shortcode.len() <= MAX_SHORTCODE_LEN);
             assert!(!emoji.shortcode.contains([' ', ':']));
         }
+    }
+
+    #[test]
+    fn a_reaction_with_a_custom_emoji_names_it_both_ways() {
+        let extra = reaction_shortcode("blobcat").unwrap();
+        assert_eq!(
+            Value::Object(extra),
+            json!({
+                "shortcode": ":blobcat:",
+                "com.beeper.reaction.shortcode": ":blobcat:"
+            })
+        );
+        assert_eq!(
+            reaction_shortcode(":blobcat:").unwrap()["shortcode"],
+            ":blobcat:"
+        );
+        assert!(reaction_shortcode("two words").is_none());
+        assert!(reaction_shortcode("").is_none());
     }
 
     #[test]

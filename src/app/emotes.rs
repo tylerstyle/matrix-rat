@@ -1,5 +1,6 @@
 //! Custom emoji and stickers from image packs: asking the worker for the packs when
-//! something first needs them, and the sticker picker.
+//! something first needs them, and the sticker picker. (Custom emoji are offered in the
+//! emoji picker too; see `App::pick_emoji`.)
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -74,8 +75,10 @@ impl App {
             self.emotes.catalog = catalog;
             self.emotes.rev += 1;
         }
-        if let Some(Modal::Stickers(picker)) = &mut self.modal {
-            picker.set_catalog(&self.emotes.catalog, false);
+        match &mut self.modal {
+            Some(Modal::Stickers(picker)) => picker.set_catalog(&self.emotes.catalog, false),
+            Some(Modal::Emoji(picker)) => picker.set_custom(&self.emotes.catalog),
+            _ => {}
         }
         self.sync_completion();
     }
@@ -386,6 +389,111 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, MatrixCmd::EnsureEmotePacks { .. }))
         );
+    }
+
+    fn reactions(commands: &mut UnboundedReceiver<MatrixCmd>) -> Vec<MatrixCmd> {
+        sent(commands)
+            .into_iter()
+            .filter(|c| matches!(c, MatrixCmd::ToggleReaction { .. }))
+            .collect()
+    }
+
+    /// Opens the emoji picker on the first message (to react to it) or for the draft,
+    /// with the packs arrived, and types `query`.
+    fn picked(react: bool, query: &str) -> (App, UnboundedReceiver<MatrixCmd>) {
+        let (mut app, mut commands) = logged_in();
+        app.rooms[0].messages[0].item = Some(crate::model::ItemRef::Event("$ev".into()));
+        if react {
+            app.timeline.selected = Some(0);
+            app.perform(Action::React);
+        } else {
+            app.perform(Action::OpenEmoji);
+        }
+        assert!(matches!(app.modal, Some(Modal::Emoji(_))));
+        // The packs are asked for, and offered as soon as they are there.
+        assert!(
+            sent(&mut commands)
+                .iter()
+                .any(|c| matches!(c, MatrixCmd::EnsureEmotePacks { .. }))
+        );
+        app.on_matrix(MatrixEvent::EmotePacks(catalog()));
+        typed(&mut app, query);
+        (app, commands)
+    }
+
+    #[test]
+    fn reacting_with_a_custom_emoji_sends_its_address_and_its_shortcode() {
+        let (mut app, mut commands) = picked(true, "blobcat");
+        let Some(Modal::Emoji(picker)) = &app.modal else {
+            panic!("the picker is open");
+        };
+        assert_eq!(
+            picker.custom_at(0).map(|e| e.shortcode.as_str()),
+            Some("blobcat")
+        );
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        let sent_now = reactions(&mut commands);
+        let [
+            MatrixCmd::ToggleReaction {
+                room_id,
+                key: reacted,
+                shortcode,
+                ..
+            },
+        ] = sent_now.as_slice()
+        else {
+            panic!("one reaction is sent: {sent_now:?}");
+        };
+        assert_eq!(room_id, ROOM);
+        assert_eq!(reacted, "mxc://example.org/blobcat");
+        assert_eq!(shortcode.as_deref(), Some("blobcat"));
+
+        // An ordinary emoji goes as itself, without a shortcode.
+        let (mut app, mut commands) = picked(true, "thumbsup");
+        app.on_event(key(KeyCode::Enter));
+        let sent_now = reactions(&mut commands);
+        assert!(
+            matches!(
+                sent_now.as_slice(),
+                [MatrixCmd::ToggleReaction { key: reacted, shortcode: None, .. }] if reacted == "👍"
+            ),
+            "{sent_now:?}"
+        );
+    }
+
+    #[test]
+    fn a_custom_emoji_chosen_for_the_draft_is_sent_as_its_picture() {
+        let (mut app, _commands) = picked(false, "blobcat");
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.composer.text(), ":blobcat: ");
+        let crate::format::Outgoing::Text {
+            html: Some(html), ..
+        } = app.format_outgoing(app.composer.text())
+        else {
+            panic!("formatted text");
+        };
+        assert!(
+            html.contains("<img data-mx-emoticon src=\"mxc://example.org/blobcat\""),
+            "{html}"
+        );
+
+        // After a word it is set apart, or it would stay text.
+        let (mut app, _commands) = logged_in();
+        app.composer.set_text("hello");
+        app.perform(Action::OpenEmoji);
+        app.on_matrix(MatrixEvent::EmotePacks(catalog()));
+        typed(&mut app, "blobcat");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.composer.text(), "hello :blobcat: ");
+        let crate::format::Outgoing::Text {
+            html: Some(html), ..
+        } = app.format_outgoing(app.composer.text())
+        else {
+            panic!("formatted text");
+        };
+        assert!(html.contains("data-mx-emoticon"), "{html}");
     }
 
     #[test]

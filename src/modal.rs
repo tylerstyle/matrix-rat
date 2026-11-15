@@ -4,7 +4,7 @@ use emojis::Emoji;
 
 use crate::emoji;
 use crate::lineedit::LineEdit;
-use crate::matrix::{EmoteCatalog, ReauthKind, ReauthTarget, StickerItem};
+use crate::matrix::{CustomEmoji, EmoteCatalog, ReauthKind, ReauthTarget, StickerItem};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReauthInfo {
@@ -208,17 +208,47 @@ impl std::fmt::Debug for RecoveryForm {
 /// What the reaction picker offers before anything is typed.
 const QUICK_REACTIONS: [&str; 10] = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🙏", "👀", "✅", "🔥"];
 
+/// Columns an emoji takes in the picker: two for the glyph, one of spacing.
+pub const EMOJI_CELL: u16 = 3;
+/// Columns a custom emoji takes in the picker: its picture (where there is one) and its
+/// name, by which it is known in every terminal.
+pub const CUSTOM_CELL: u16 = 14;
+
+/// One result of the emoji picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    Unicode(&'static Emoji),
+    /// Index into [`EmojiPicker::custom`].
+    Custom(usize),
+}
+
+/// Results of one kind in a row of their own: the picker's grid is made of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Run {
+    /// Index of its first result, and how many it has.
+    start: usize,
+    len: usize,
+    /// Cells per row, and their width.
+    columns: usize,
+    cell: u16,
+    first_row: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct EmojiPicker {
     /// Index and id of the message to react to; `None` inserts into the draft.
     pub react_to: Option<(usize, String)>,
     pub query: LineEdit,
-    pub results: Vec<&'static Emoji>,
+    /// The custom emoji of the image packs, as they were when it was opened or since.
+    pub custom: Vec<CustomEmoji>,
+    pub results: Vec<Pick>,
     pub selected: usize,
     /// First visible row of the grid.
     pub scroll: usize,
-    /// Grid size as of the last draw; arrow keys need it.
+    /// Grid size as of the last draw; arrow keys need it. `columns` counts emoji,
+    /// `custom_columns` custom emoji, which take wider cells.
     pub columns: usize,
+    pub custom_columns: usize,
     pub rows: usize,
     /// Ask the next draw to bring the selection into view.
     pub reveal: bool,
@@ -229,10 +259,12 @@ impl Default for EmojiPicker {
         Self {
             react_to: None,
             query: LineEdit::new(),
-            results: emoji::search(""),
+            custom: Vec::new(),
+            results: emoji::search("").into_iter().map(Pick::Unicode).collect(),
             selected: 0,
             scroll: 0,
             columns: 12,
+            custom_columns: 3,
             rows: 8,
             reveal: true,
         }
@@ -249,28 +281,54 @@ impl EmojiPicker {
         picker
     }
 
+    /// Offers the custom emoji of `catalog` too. Only filters again when they changed.
+    pub fn set_custom(&mut self, catalog: &EmoteCatalog) {
+        let custom: Vec<CustomEmoji> = catalog.emojis().cloned().collect();
+        if custom != self.custom {
+            self.custom = custom;
+            self.refilter();
+        }
+    }
+
     #[cfg(test)]
     pub fn set_query(&mut self, query: String) {
         self.query.set(query);
         self.refilter();
     }
 
+    /// The results for the query: custom emoji first (their names match what was typed
+    /// best), then the others. Before anything is typed for a reaction, the quick
+    /// reactions come first of all.
     pub fn refilter(&mut self) {
-        self.results = emoji::search(&self.query);
+        let unicode = emoji::search(&self.query);
+        let custom = emoji::search_custom(&self.query, &self.custom);
+        let mut results = Vec::with_capacity(unicode.len() + custom.len());
+        let mut rest = unicode;
         if self.query.is_empty() && self.react_to.is_some() {
             let quick: Vec<_> = QUICK_REACTIONS
                 .iter()
                 .filter_map(|e| emojis::get(e))
                 .collect();
-            self.results.retain(|e| !quick.contains(e));
-            self.results.splice(0..0, quick);
+            rest.retain(|e| !quick.contains(e));
+            results.extend(quick.into_iter().map(Pick::Unicode));
         }
+        results.extend(custom.into_iter().map(Pick::Custom));
+        results.extend(rest.into_iter().map(Pick::Unicode));
+        self.results = results;
         self.selected = 0;
         self.scroll = 0;
     }
 
-    pub fn selected(&self) -> Option<&'static Emoji> {
+    pub fn selected(&self) -> Option<Pick> {
         self.results.get(self.selected).copied()
+    }
+
+    /// The custom emoji a result stands for, if it is one.
+    pub fn custom_at(&self, index: usize) -> Option<&CustomEmoji> {
+        match self.results.get(index)? {
+            Pick::Custom(at) => self.custom.get(*at),
+            Pick::Unicode(_) => None,
+        }
     }
 
     /// Moves the selection, staying inside the results.
@@ -289,11 +347,116 @@ impl EmojiPicker {
         self.reveal = true;
     }
 
+    /// Moves the selection `delta` rows up or down, to what is under it there (the last
+    /// one of a shorter row). Past either end it stays put.
+    pub fn step_rows(&mut self, delta: isize) {
+        let runs = self.runs();
+        let Some((row, x, _)) = place(&runs, self.selected) else {
+            return;
+        };
+        let target = row as isize + delta;
+        if target < 0 || target >= row_count(&runs) as isize {
+            return;
+        }
+        let items = row_items(&runs, target as usize);
+        let under = items
+            .clone()
+            .find(|&index| place(&runs, index).is_some_and(|(_, left, cell)| x < left + cell));
+        if let Some(index) = under.or(items.end.checked_sub(1)) {
+            self.selected = index;
+            self.reveal = true;
+        }
+    }
+
     pub fn scroll_by(&mut self, rows: isize) {
-        let total = self.results.len().div_ceil(self.columns.max(1));
+        let total = row_count(&self.runs());
         let max = total.saturating_sub(self.rows) as isize;
         self.scroll = (self.scroll as isize + rows).clamp(0, max.max(0)) as usize;
     }
+
+    /// How many rows the grid has.
+    pub fn grid_rows(&self) -> usize {
+        row_count(&self.runs())
+    }
+
+    /// Row, first column and width of a result's cell in the grid.
+    pub fn cell_of(&self, index: usize) -> Option<(usize, u16, u16)> {
+        place(&self.runs(), index)
+    }
+
+    /// The results on rows `rows` of the grid, with their row, column and width.
+    pub fn cells(&self, rows: std::ops::Range<usize>) -> Vec<(usize, usize, u16, u16)> {
+        let runs = self.runs();
+        let mut cells = Vec::new();
+        for row in rows.start..rows.end.min(row_count(&runs)) {
+            for index in row_items(&runs, row) {
+                if let Some((row, x, width)) = place(&runs, index) {
+                    cells.push((index, row, x, width));
+                }
+            }
+        }
+        cells
+    }
+
+    fn runs(&self) -> Vec<Run> {
+        let mut runs: Vec<Run> = Vec::new();
+        let mut row = 0;
+        for (index, pick) in self.results.iter().enumerate() {
+            let custom = matches!(pick, Pick::Custom(_));
+            let same = runs
+                .last()
+                .is_some_and(|run| (run.cell == CUSTOM_CELL) == custom);
+            if let Some(run) = runs.last_mut().filter(|_| same) {
+                run.len += 1;
+                continue;
+            }
+            if let Some(run) = runs.last() {
+                row += run.len.div_ceil(run.columns);
+            }
+            let (columns, cell) = if custom {
+                (self.custom_columns.max(1), CUSTOM_CELL)
+            } else {
+                (self.columns.max(1), EMOJI_CELL)
+            };
+            runs.push(Run {
+                start: index,
+                len: 1,
+                columns,
+                cell,
+                first_row: row,
+            });
+        }
+        runs
+    }
+}
+
+fn row_count(runs: &[Run]) -> usize {
+    runs.last()
+        .map_or(0, |run| run.first_row + run.len.div_ceil(run.columns))
+}
+
+fn place(runs: &[Run], index: usize) -> Option<(usize, u16, u16)> {
+    let run = runs
+        .iter()
+        .find(|run| (run.start..run.start + run.len).contains(&index))?;
+    let at = index - run.start;
+    let column = (at % run.columns) as u16;
+    Some((
+        run.first_row + at / run.columns,
+        column * run.cell,
+        run.cell,
+    ))
+}
+
+fn row_items(runs: &[Run], row: usize) -> std::ops::Range<usize> {
+    let Some(run) = runs
+        .iter()
+        .rfind(|run| run.first_row <= row && row < run.first_row + run.len.div_ceil(run.columns))
+    else {
+        return 0..0;
+    };
+    let start = run.start + (row - run.first_row) * run.columns;
+    start..(start + run.columns).min(run.start + run.len)
 }
 
 /// The rows of the settings menu, in display order.
@@ -1765,7 +1928,10 @@ mod tests {
         assert_eq!(picker.selected, picker.columns);
         picker.set_query("rat".into());
         assert_eq!(picker.selected, 0);
-        assert_eq!(picker.selected().unwrap().as_str(), "🐀");
+        assert_eq!(
+            picker.selected(),
+            Some(Pick::Unicode(emojis::get("🐀").unwrap()))
+        );
         picker.step(1_000_000);
         assert_eq!(picker.selected, 0);
         picker.set_query("zzzzqqqq".into());
@@ -1773,6 +1939,85 @@ mod tests {
         assert!(picker.selected().is_none());
         picker.scroll_by(5);
         assert_eq!(picker.scroll, 0);
+    }
+
+    #[test]
+    fn the_picker_offers_custom_emoji_by_name_in_rows_of_their_own() {
+        let emoji = |code: &str| CustomEmoji {
+            shortcode: code.into(),
+            url: format!("mxc://example.org/{code}"),
+            body: None,
+            pack_name: "Blobs".into(),
+        };
+        let catalog = EmoteCatalog {
+            packs: vec![crate::matrix::EmotePack {
+                id: "user".into(),
+                name: "Blobs".into(),
+                emojis: ["blob", "blobcat", "partyblob", "blobwave"]
+                    .map(emoji)
+                    .to_vec(),
+                stickers: Vec::new(),
+            }],
+        };
+        let mut picker = EmojiPicker::for_reaction(0, "$m".into());
+        picker.set_custom(&catalog);
+        // The quick reactions, the custom emoji, then everything else.
+        assert!(matches!(picker.results[9], Pick::Unicode(_)));
+        let custom: Vec<&str> = (10..14)
+            .map(|at| picker.custom_at(at).unwrap().shortcode.as_str())
+            .collect();
+        assert_eq!(custom, ["blob", "blobcat", "partyblob", "blobwave"]);
+        assert!(matches!(picker.results[14], Pick::Unicode(_)));
+
+        // Twelve emoji or three custom ones to a row; each kind starts a row.
+        assert_eq!(picker.cell_of(9), Some((0, 27, EMOJI_CELL)));
+        assert_eq!(picker.cell_of(10), Some((1, 0, CUSTOM_CELL)));
+        assert_eq!(picker.cell_of(12), Some((1, 28, CUSTOM_CELL)));
+        assert_eq!(picker.cell_of(13), Some((2, 0, CUSTOM_CELL)));
+        assert_eq!(picker.cell_of(14), Some((3, 0, EMOJI_CELL)));
+        let cells = picker.cells(1..3);
+        assert_eq!(
+            cells.iter().map(|c| c.0).collect::<Vec<_>>(),
+            [10, 11, 12, 13]
+        );
+
+        // Up and down go to what is under the selection, or to the last of a
+        // shorter row; past the top it stays.
+        picker.selected = 9;
+        picker.step_rows(1);
+        assert_eq!(picker.selected, 11);
+        picker.step_rows(1);
+        assert_eq!(picker.selected, 13);
+        picker.step_rows(1);
+        assert_eq!(picker.selected, 14);
+        picker.step_rows(-1);
+        assert_eq!(picker.selected, 13);
+        picker.step_rows(-3);
+        assert_eq!(picker.selected, 13);
+        picker.selected = 14 + 12 + 5;
+        picker.step_rows(-1);
+        assert_eq!(picker.selected, 14 + 5);
+
+        // Typed: the custom emoji named so come first, best match first.
+        picker.set_query("blob".into());
+        let found: Vec<&str> = (0..4)
+            .map(|at| picker.custom_at(at).unwrap().shortcode.as_str())
+            .collect();
+        assert_eq!(found, ["blob", "blobcat", "blobwave", "partyblob"]);
+        // The same packs again change nothing; new ones are offered at once.
+        picker.selected = 2;
+        picker.set_custom(&catalog);
+        assert_eq!(picker.selected, 2);
+        picker.set_custom(&EmoteCatalog::default());
+        assert!(picker.custom.is_empty());
+        assert!(picker.results.iter().all(|p| matches!(p, Pick::Unicode(_))));
+        // Nothing of them in a log.
+        picker.set_custom(&catalog);
+        let debug = format!("{picker:?}");
+        assert!(
+            !debug.contains("example.org") && !debug.contains("blobcat"),
+            "{debug}"
+        );
     }
 
     #[test]

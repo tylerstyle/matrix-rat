@@ -33,8 +33,8 @@ pub use devices::{
 pub use directory::PreviewJoinRule;
 pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
 #[cfg(test)]
-pub use emotes::{CustomEmoji, EmotePack};
-pub use emotes::{EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
+pub use emotes::EmotePack;
+pub use emotes::{CustomEmoji, EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
 pub use keyring::SecretStoreMode;
 // For `crate::logsafe`, which turns it into a word for the log.
 pub(crate) use keyring::KeyringError;
@@ -182,6 +182,9 @@ pub enum MatrixCmd {
         room_id: String,
         item: ItemRef,
         key: String,
+        /// For a custom emoji (`key` is its `mxc://` address): its shortcode, which goes
+        /// along with a new reaction (MSC4027).
+        shortcode: Option<String>,
     },
     Redact {
         room_id: String,
