@@ -1,0 +1,28 @@
+---
+source: src/ui/mod.rs
+expression: bottom
+---
+"╭ 1 Rooms ╭ Settings ────────────────────────────────────────────────╮─────────╮"
+"│ Filter r│   Light theme         ◂ (unset) ▸                      ▲ │        ││"
+"│ ○ Unread│   Room list width     ◂ 24 ▸                             │ch is a ││"
+"│ Favourit│   Room previews       ○ off                              │e       ││"
+"│▌R  rust │ Behaviour                                                │m the   ││"
+"│ M  matri│   Mouse               ● on                               │        ││"
+"│ People  │   Typing notices      ● on                               │────────┃│"
+"│ B  bob  │   Read receipts       ● on                               │        ┃│"
+"│ C  carol│   Read markers        ● on                               │eded?   ┃│"
+"│ Rooms   │   Notifications       ○ off                              │        ┃│"
+"│ D  desig│   Download folder     ~/Downloads                        │        ┃│"
+"│ N  nixos│ Help                                                     │ still …┃│"
+"│ O  off-t│   Key bindings        default                            │        ┃│"
+"│         │ Account                                                  │        ┃│"
+"│         │   Profile             Edit…                              │        ┃│"
+"│         │   Encryption          unknown                            │        ┃│"
+"│         │   Sessions            Enter to view                      │        ┃│"
+"│         │   Key backup          unknown                            │        ┃│"
+"│         │   Ignored users       None                               │k 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
+"│         │ › Log out             Enter again logs out · Esc stays   │─────────╯"
+"│         │ Ends this session. Encrypted history needs your recovery │─────────╮"
+"│         │ key again.                                               │   📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
+"╰─────────╰─────────────── ↑↓ select · ←→ change · Enter · Esc close ╯─────────╯"
+" ● demo data  Enter send      Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

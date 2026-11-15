@@ -3796,6 +3796,7 @@ impl App {
                             | Modal::Pinned(_)
                             | Modal::Sessions(_)
                             | Modal::UserInfo(_)
+                            | Modal::Settings(_)
                     )
                 ) =>
             {
@@ -3818,6 +3819,11 @@ impl App {
                         }
                     }
                     Some(Modal::UserInfo(_)) => self.scroll_user_info(delta),
+                    // Row by row: the list follows the selected row. Not while a
+                    // value is being typed.
+                    Some(Modal::Settings(menu)) if menu.editing.is_none() => {
+                        menu.step(delta.signum());
+                    }
                     _ => {}
                 }
                 self.dirty = true;

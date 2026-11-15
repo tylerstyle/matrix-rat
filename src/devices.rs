@@ -36,7 +36,7 @@ pub enum Click {
 
 /// What the app keeps for both popups. The list and the backup's state are only kept
 /// current while one of the popups is open.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct DevicesState {
     /// `None` until the worker has answered.
     pub list: Option<Result<SessionList, String>>,
@@ -51,6 +51,25 @@ pub struct DevicesState {
     /// Messages "try again" was asked for and has not been answered: by event id,
     /// why each could not be decrypted.
     pub retried: std::collections::HashMap<String, UtdWhy>,
+}
+
+/// Session ids, event ids and the reasons of failures stay out of a log: counts and
+/// kinds only.
+impl std::fmt::Debug for DevicesState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let list = match &self.list {
+            None => "none",
+            Some(Ok(_)) => "listed",
+            Some(Err(_)) => "failed",
+        };
+        f.debug_struct("DevicesState")
+            .field("list", &list)
+            .field("backup", &self.backup)
+            .field("upload", &self.upload)
+            .field("watch", &self.watch)
+            .field("retried", &self.retried.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl DevicesState {
@@ -240,7 +259,7 @@ pub enum SessionStage {
     SignOut(SignOut),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SessionsPopup {
     pub stage: SessionStage,
     /// The device id of the selected session; kept across updates of the list.
@@ -250,6 +269,17 @@ pub struct SessionsPopup {
     pub page: usize,
     pub reveal: bool,
     pub show_addresses: bool,
+}
+
+/// Which session is selected is not for a log.
+impl std::fmt::Debug for SessionsPopup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionsPopup")
+            .field("stage", &self.stage)
+            .field("selected", &self.selected.is_some())
+            .field("show_addresses", &self.show_addresses)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SessionsPopup {
@@ -1053,8 +1083,39 @@ mod tests {
             request: None,
             error: None,
         };
-        let text = format!("{export:?}{import:?}{sign_out:?}{rename:?}");
-        for secret in ["hunter2", "someone", "secret name", "example.org"] {
+        // The popups and what the app keeps for them: which session is selected,
+        // which messages were retried, why a list could not be had.
+        let sessions = SessionsPopup {
+            selected: Some("PHONE".into()),
+            stage: SessionStage::SignOut(sign_out.clone()),
+            ..SessionsPopup::default()
+        };
+        let keys = KeysPopup {
+            stage: KeysStage::Export(export.clone()),
+            ..KeysPopup::default()
+        };
+        let mut state = DevicesState {
+            list: Some(Err("no answer from example.org".into())),
+            backup: ServerBackup::Present {
+                keys: 7,
+                version: "backup-version-9".into(),
+            },
+            ..DevicesState::default()
+        };
+        state
+            .retried
+            .insert("$event-one:example.org".into(), UtdWhy::NoKey);
+        let text =
+            format!("{export:?}{import:?}{sign_out:?}{rename:?}{sessions:?}{keys:?}{state:?}");
+        for secret in [
+            "hunter2",
+            "someone",
+            "secret name",
+            "example.org",
+            "PHONE",
+            "$event-one",
+            "backup-version-9",
+        ] {
             assert!(!text.contains(secret), "{secret} in {text}");
         }
     }

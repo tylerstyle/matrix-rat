@@ -139,10 +139,10 @@ in the encrypted session store). A reply comes back as its text, without what it
 To ignore or report someone, use the message menu (`m` or right-click) or Room info (`F4`, `Alt-I`);
 you can manage ignored users under **Settings → Ignored users** (`F2`). Where your room
 permissions allow, the message menu and Room info also let you pin or delete other members'
-messages with a reason, ban or unban users (`Alt-B`), and change roles (`Alt-R`); `P` opens
+messages with a reason, ban users (`Alt-B`; `Del` on a banned member lifts the ban), and change roles (`Alt-R`); `P` opens
 pinned messages, and `Forward…` copies a message to another room without its reply or thread context.
 
-Click a sender's name or picture, choose **User info** from the message menu (`m` or palette
+Click a sender's name, choose **User info** from the message menu (`m` or palette
 `Ctrl-P`), press `Enter` on a member in Room info (`F4`), or open a `matrix.to` user link
 or user-search result to view their profile, verification state and shared rooms (press
 `Enter` to jump to one, `c` to copy their ID), mention them, open a chat, verify or ignore
@@ -231,7 +231,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`.
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `save`, `open`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `open_pinned`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
@@ -287,10 +287,14 @@ Setting `preset = "vim"` keeps the default keys and adds:
   verified itself; until then the list repeats what the server says ("says verified"),
   and nothing is shown as good news. A session's name is whatever that session (or
   anyone logged in to the account) set.
-- **Passwords and passphrases** are wiped from matrix-rat's own memory when they have
-  been sent or their field is closed, and are pasted exactly as they are (spaces
-  included). Copies outside its reach remain: your terminal's, and those the Matrix
-  libraries make while a request is on its way.
+- **Passwords, passphrases and the recovery key** are wiped from matrix-rat's own
+  memory when they have been sent or their field is closed. A paste goes in as it is,
+  spaces included; only its first line is taken, and control characters are dropped.
+  What stays outside its reach: the recovery key is shown in the clear while you type
+  it (so it is on screen and in the screen's buffer), your terminal and the library
+  that reads the keyboard keep their own copies for a while, so do the Matrix
+  libraries while a request is on its way, and the system may write memory to swap or
+  into a crash dump.
 - **Logs** are in `~/.local/state/matrix-rat/<profile>/`. At the default level the app
   keeps message text, passwords and keys out of them.
 - **Something stuck?** `Ctrl-Q` quits and `Ctrl-Z` suspends to the shell, also from

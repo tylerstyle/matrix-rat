@@ -93,7 +93,7 @@ impl std::fmt::Debug for SessionList {
 
 /// The backup of message keys, as the server has it (whether or not this device can
 /// use it).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub enum ServerBackup {
     /// Not asked yet, or the server could not be reached: nothing is known.
     #[default]
@@ -106,6 +106,18 @@ pub enum ServerBackup {
         /// with it: matrix-sdk 0.19.1 keeps its backup version to itself.)
         version: String,
     },
+}
+
+/// Which backup it is and how much it holds says something about the account: not
+/// for a log.
+impl std::fmt::Debug for ServerBackup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unknown => "Unknown",
+            Self::Missing => "Missing",
+            Self::Present { .. } => "Present",
+        })
+    }
 }
 
 /// What this device's uploads to the backup are doing, as far as was seen while the
@@ -195,7 +207,8 @@ impl std::fmt::Debug for SignOutOutcome {
             Self::NeedsPassword => f.write_str("NeedsPassword"),
             Self::WrongPassword => f.write_str("WrongPassword"),
             Self::Web { url } => write!(f, "Web(url: {})", url.is_some()),
-            Self::Failed(err) => write!(f, "Failed({err})"),
+            // The reason can name a session or a server.
+            Self::Failed(_) => f.write_str("Failed"),
         }
     }
 }
@@ -341,8 +354,10 @@ impl Devices {
                         .await
                         .map(|_| ())
                         .map_err(|err| format!("Could not rename the session: {err}"));
-                    if let Err(err) = &result {
-                        tracing::warn!(err, "sessions");
+                    // (What went wrong is told to the user; its text can name
+                    // sessions and servers and stays out of the log.)
+                    if result.is_err() {
+                        tracing::warn!("a session could not be renamed");
                     }
                     send(DevicesEvent::Renamed { request, result });
                     refresh.notify_one();
@@ -355,8 +370,8 @@ impl Devices {
             } => {
                 self.tasks.spawn(async move {
                     let outcome = sign_out(&client, &device_id, password).await;
-                    if let SignOutOutcome::Failed(err) = &outcome {
-                        tracing::warn!(err, "sessions");
+                    if matches!(outcome, SignOutOutcome::Failed(_)) {
+                        tracing::warn!("a session could not be signed out");
                     }
                     if outcome == SignOutOutcome::Done {
                         // The crypto store forgets the device when the keys are
@@ -376,8 +391,9 @@ impl Devices {
             } => {
                 self.tasks.spawn(async move {
                     let result = export_keys(&client, path, passphrase).await;
-                    if let Err(err) = &result {
-                        tracing::warn!(err, "key export");
+                    // (The reason names the file; it is shown, not logged.)
+                    if result.is_err() {
+                        tracing::warn!("the message keys could not be exported");
                     }
                     send(DevicesEvent::Exported { request, result });
                 });
@@ -394,7 +410,7 @@ impl Devices {
                         Ok(_) => {
                             let _ = imported.send(());
                         }
-                        Err(err) => tracing::warn!(err, "key import"),
+                        Err(_) => tracing::warn!("the message keys could not be imported"),
                     }
                     send(DevicesEvent::Imported { request, result });
                     // A backup takes the new keys up.
@@ -547,7 +563,7 @@ async fn list(client: &Client, asked: &mut HashSet<OwnedDeviceId>) -> Result<Ses
         // The store hears of a new device with a later sync; ask for the keys now, so
         // that a session is not shown as having none while they are on their way.
         if let Err(err) = encryption.request_user_identity(user_id).await {
-            tracing::debug!(%err, "could not fetch our own keys");
+            tracing::debug!(kind = ?err.client_api_error_kind(), "could not fetch our own keys");
         }
         known = encryption.get_user_devices(user_id).await.ok();
     }
@@ -604,7 +620,7 @@ async fn server_backup(client: &Client) -> ServerBackup {
             ServerBackup::Missing
         }
         Err(err) => {
-            tracing::debug!(%err, "could not ask for the key backup");
+            tracing::debug!(kind = ?err.client_api_error_kind(), "could not ask for the key backup");
             ServerBackup::Unknown
         }
     }
@@ -1074,7 +1090,18 @@ mod tests {
             "192.0.2.7",
             "account.example.org",
             "backup-version-9",
+            "PHONEDEVICE",
         ] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        // What a failure was about, and which backup the server has.
+        let failed = SignOutOutcome::Failed("Could not sign out PHONEDEVICE at example.org".into());
+        let backup = ServerBackup::Present {
+            keys: 7,
+            version: "backup-version-9".into(),
+        };
+        let text = format!("{failed:?}{backup:?}");
+        for secret in ["PHONEDEVICE", "example.org", "backup-version-9", "7"] {
             assert!(!text.contains(secret), "{secret} in {text}");
         }
     }
