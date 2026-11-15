@@ -14,6 +14,7 @@ const CONFIG: &str = r#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bu
 <busconfig>
   <type>session</type>
   <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
   <policy context="default">
     <allow send_destination="*" eavesdrop="true"/>
     <allow eavesdrop="true"/>
