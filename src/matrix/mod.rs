@@ -1708,6 +1708,8 @@ impl Worker {
             notification_settings.clone(),
             self.events.clone(),
         );
+        // Room management asks for the room list to be made again (a room muted here).
+        let relist = std::sync::Arc::new(tokio::sync::Notify::new());
         let mut manager = manage::Manager::new(
             client.clone(),
             self.events.clone(),
@@ -1716,6 +1718,7 @@ impl Worker {
             own_refresh.clone(),
             left.clone(),
             notification_settings.clone(),
+            relist.clone(),
         );
         let mut devices = devices::Devices::new(client.clone(), self.events.clone());
         let mut emote_mgr = emotes::EmoteManager::new(client.clone(), self.events.clone());
@@ -1819,6 +1822,11 @@ impl Worker {
                         summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                     ));
                     self.emit(MatrixEvent::Spaces(spaces::summarize(&space_filters, left)));
+                }
+                () = relist.notified() => {
+                    self.emit(MatrixEvent::Rooms(
+                        summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
+                    ));
                 }
                 incoming = verifier.next_incoming() => verifier.on_incoming(incoming).await,
                 // Keys came in from a file: what is on screen may be readable now.

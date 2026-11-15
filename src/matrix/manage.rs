@@ -755,6 +755,8 @@ pub struct Manager {
     left: super::left::LeftRooms,
     /// The session's view of the push rules, which knows a change made here at once.
     notify: NotificationSettings,
+    /// Has the session make the room list again.
+    relist: Arc<Notify>,
 }
 
 /// Wakes the open room info watcher when the watched room changes.
@@ -800,6 +802,7 @@ pub(super) fn bump_refresh(refresh: &Refresh, room_id: &str) {
 }
 
 impl Manager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Client,
         events: UnboundedSender<MatrixEvent>,
@@ -808,6 +811,7 @@ impl Manager {
         own_refresh: Arc<watch::Sender<u64>>,
         left: super::left::LeftRooms,
         notify: NotificationSettings,
+        relist: Arc<Notify>,
     ) -> Self {
         Self {
             client,
@@ -819,6 +823,7 @@ impl Manager {
             own_refresh,
             left,
             notify,
+            relist,
         }
     }
 
@@ -1157,8 +1162,15 @@ impl Manager {
             }
             ManageCmd::SetNotify { room_id, level } => {
                 let settings = self.notify.clone();
+                let relist = self.relist.clone();
                 tokio::spawn(async move {
                     let result = set_notify(&settings, &client, &room_id, level).await;
+                    // The room list shows whether a room is muted. `settings` knows the
+                    // change at once, but says nothing of it: only a change that comes
+                    // with a sync is announced, and that can take a while.
+                    if result.is_ok() {
+                        relist.notify_one();
+                    }
                     emit(ManageEvent::Done {
                         room_id,
                         change: Change::Notify,
@@ -2653,6 +2665,49 @@ mod tests {
     use matrix_sdk::config::SyncSettings;
     use matrix_sdk::ruma::room_id;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    #[tokio::test]
+    async fn muting_a_room_has_the_room_list_made_again_at_once() {
+        let room = room_id!("!loud:localhost");
+        let client = Server {
+            joined: vec![room.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let settings = client.notification_settings().await;
+        let relist = Arc::new(Notify::new());
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = Manager::new(
+            client.clone(),
+            events,
+            crate::matrix::people::OwnRoomNames::default(),
+            Arc::new(Notify::new()),
+            Arc::new(watch::Sender::new(0)),
+            LeftRooms::default(),
+            settings.clone(),
+            relist.clone(),
+        );
+        manager.handle(ManageCmd::SetNotify {
+            room_id: room.to_string(),
+            level: NotifyLevel::Mute,
+        });
+        match tokio::time::timeout(Duration::from_secs(10), received.recv()).await {
+            Ok(Some(MatrixEvent::Manage(ManageEvent::Done { result, .. }))) => {
+                assert_eq!(result, Ok(()));
+            }
+            other => panic!("expected the change to be done, got {other:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(1), relist.notified())
+            .await
+            .expect("the room list is made again");
+        // And made again, it shows the room muted.
+        let room = client.get_room(room).unwrap();
+        assert_eq!(
+            notification_mode(&settings, &room).await,
+            Some(RoomNotificationMode::Mute)
+        );
+    }
 
     #[tokio::test]
     async fn a_chat_left_here_is_not_taken_for_the_chat_with_that_person() {
