@@ -1,7 +1,7 @@
 mod receipts;
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
@@ -11,11 +11,12 @@ use crate::action::Action;
 use crate::action::Pane;
 use crate::app::App;
 use std::collections::BTreeSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::config::LinkPreviews;
 use crate::highlight::Syntax;
-use crate::images::{ImageStore, Slot};
-use crate::matrix::EmoteCatalog;
+use crate::images::{EMOTE_CELLS, ImageStore, Slot};
+use crate::matrix::{EmoteCatalog, is_valid_mxc};
 use crate::model::{Message, MsgKind, Room, RoomKind, SendState, ThreadSummary};
 use crate::previews::{Preview, PreviewStore};
 use crate::rich::{self, Format, Rich, Segment};
@@ -35,6 +36,26 @@ pub struct Row {
     hits: Vec<(u16, u16, HitId)>,
     /// Set if the row is kept free for a picture.
     image: Option<ImageRow>,
+    /// Cells of the row that custom emoji pictures are painted over.
+    emotes: Vec<EmoteSpot>,
+}
+
+/// The two cells of a row that a custom emoji's picture goes over.
+#[derive(Clone)]
+struct EmoteSpot {
+    /// Column of the first cell, from the row's left edge.
+    col: u16,
+    /// The picture's `mxc://` address.
+    url: String,
+}
+
+/// Hand-written: the address stays out of logs.
+impl std::fmt::Debug for EmoteSpot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmoteSpot")
+            .field("col", &self.col)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One row of the space a picture takes.
@@ -55,20 +76,24 @@ impl Row {
             source: 0,
             hits: Vec::new(),
             image: None,
+            emotes: Vec::new(),
         }
     }
 }
 
 const INDENT: &str = "  ";
 
-/// What a reaction chip shows. A custom emoji (its key is an `mxc://` address) shows
-/// by its shortcode where the packs know it, and never by its address.
-fn reaction_label(key: &str, emotes: &EmoteCatalog) -> String {
-    let is_mxc = key
-        .trim_start()
+/// Whether a reaction is made with a custom emoji: its key is an `mxc://` address.
+fn is_mxc_key(key: &str) -> bool {
+    key.trim_start()
         .get(..6)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mxc://"));
-    if !is_mxc {
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mxc://"))
+}
+
+/// What a reaction chip shows without a picture. A custom emoji shows by its shortcode
+/// where the packs know it, and never by its address.
+fn reaction_label(key: &str, emotes: &EmoteCatalog) -> String {
+    if !is_mxc_key(key) {
         return key.to_owned();
     }
     match emotes.shortcode_for_url(key.trim()) {
@@ -115,12 +140,35 @@ pub struct PreviewView<'a> {
     pub ignored: &'a BTreeSet<String>,
 }
 
+/// What decides how custom emoji are shown.
+pub struct EmoteView<'a> {
+    /// The image packs: a reaction with an emoji is named after it where they know it.
+    pub catalog: &'a EmoteCatalog,
+    /// Nothing is fetched for what these people sent.
+    pub ignored: &'a BTreeSet<String>,
+}
+
 /// The rows of a room, and the links that would be previewed if they were known.
 pub struct Layout {
     pub rows: Vec<Row>,
     /// Message index and address of the link to ask the homeserver about, for each
     /// message that has one (whether or not its preview is there yet).
     pub wants: Vec<(usize, String)>,
+    /// Message index and address of each custom emoji that is shown as a picture once
+    /// it is there, in the text or on a reaction.
+    pub emote_wants: Vec<(usize, String)>,
+}
+
+/// Whether the custom emoji in the text of `message` may be shown as pictures: the
+/// terminal can draw them, and the message is an ordinary one from someone who is not
+/// ignored (a deleted one, or one that could not be decrypted, shows nothing of them).
+fn emote_pictures(message: &Message, images: &ImageStore, ignored: &BTreeSet<String>) -> bool {
+    images.emote_pictures()
+        && matches!(message.kind, MsgKind::Text | MsgKind::Emote)
+        && !message
+            .sender_id
+            .as_deref()
+            .is_some_and(|id| ignored.contains(id))
 }
 
 /// The address that gets a preview under `message`: its first link, when previews are on
@@ -159,6 +207,7 @@ fn preview_rows(preview: &Preview, msg: usize, body_width: usize, theme: &Theme)
         source: msg,
         hits: Vec::new(),
         image: None,
+        emotes: Vec::new(),
     };
     let title = Style {
         fg: theme.style(Role::Text).fg,
@@ -195,7 +244,10 @@ pub fn build_rows(
         revealed,
         images,
         None,
-        &EmoteCatalog::default(),
+        &EmoteView {
+            catalog: &EmoteCatalog::default(),
+            ignored: &BTreeSet::new(),
+        },
     )
     .rows
 }
@@ -208,9 +260,10 @@ pub fn build_layout(
     revealed: Option<usize>,
     images: &ImageStore,
     previews: Option<&PreviewView>,
-    emotes: &EmoteCatalog,
+    emotes: &EmoteView,
 ) -> Layout {
     let mut wants = Vec::new();
+    let mut emote_wants = Vec::new();
     let body_width = max_width.saturating_sub(INDENT.len()).max(1);
     // Foreground only, so the row's background (selection, hover) shows through.
     let text_style = Style {
@@ -329,6 +382,7 @@ pub fn build_layout(
                     source: i,
                     hits,
                     image: None,
+                    emotes: Vec::new(),
                 });
             }
 
@@ -367,6 +421,7 @@ pub fn build_layout(
                                         cols: *cols,
                                         rows: *count,
                                     }),
+                                    emotes: Vec::new(),
                                 });
                             }
                         }
@@ -384,6 +439,7 @@ pub fn build_layout(
                                 // Clicking tries again, through the viewer.
                                 hits: vec![(start, end, HitId::Image(i))],
                                 image: None,
+                                emotes: Vec::new(),
                             });
                         }
                         Slot::Failed(_) | Slot::Off => {}
@@ -428,6 +484,26 @@ pub fn build_layout(
                     );
                 }
                 let reveal = revealed == Some(i);
+                // Custom emoji get two cells for their picture where it is there to draw;
+                // one under a spoiler only while the message is uncovered.
+                if emote_pictures(message, images, emotes.ignored) {
+                    let mut hidden = vec![false; rich.emotes.len()];
+                    for segment in rich.lines.iter().flat_map(|line| &line.segments) {
+                        if let Some(e) = segment.format.emote
+                            && segment.format.spoiler
+                            && !reveal
+                            && let Some(hidden) = hidden.get_mut(e)
+                        {
+                            *hidden = true;
+                        }
+                    }
+                    for (emote, hidden) in rich.emotes.iter_mut().zip(hidden) {
+                        if !hidden {
+                            emote.picture = images.emote_ready(&emote.url);
+                            emote_wants.push((i, emote.url.clone()));
+                        }
+                    }
+                }
                 let mut wrapped = if text_wanted {
                     rich::wrap(&rich, body_width)
                 } else {
@@ -459,6 +535,7 @@ pub fn build_layout(
                     in_block = row.block;
                     let mut spans = vec![Span::raw(INDENT)];
                     let mut segment_hits = Vec::new();
+                    let mut spots = Vec::new();
                     let mut col = INDENT.len();
                     let play_start = col as u16;
                     if !row.prefix.is_empty() {
@@ -467,6 +544,12 @@ pub fn build_layout(
                     }
                     for (seg_idx, segment) in row.segments.into_iter().enumerate() {
                         let segment_width = width(&segment.text);
+                        if let Some(emote) = segment.emote_box().and_then(|e| rich.emotes.get(e)) {
+                            spots.push(EmoteSpot {
+                                col: col as u16,
+                                url: emote.url.clone(),
+                            });
+                        }
                         let (text, style) = styled(&segment, body_style, theme, reveal);
                         if let Some(link) = segment.format.link {
                             segment_hits.push((
@@ -534,6 +617,7 @@ pub fn build_layout(
                         source: i,
                         hits,
                         image: None,
+                        emotes: spots,
                     });
                     rows.extend(own_row);
                 }
@@ -549,19 +633,40 @@ pub fn build_layout(
                 }
             }
 
-            // Reaction chips, wrapped onto further rows when they do not fit.
+            // Reaction chips, wrapped onto further rows when they do not fit. One made
+            // with a custom emoji shows its picture once it is there.
             let mut spans = vec![Span::raw(INDENT)];
             let mut hits = Vec::new();
+            let mut spots = Vec::new();
             let mut col = INDENT.len();
+            // Reactions stay on a message that could not be decrypted (they are not
+            // encrypted), but like its text they show nothing of their pictures.
+            let chip_pictures = images.emote_pictures()
+                && !matches!(message.kind, MsgKind::Redacted | MsgKind::Undecryptable)
+                && !message
+                    .sender_id
+                    .as_deref()
+                    .is_some_and(|id| emotes.ignored.contains(id));
             for (r, reaction) in message.reactions.iter().enumerate() {
-                let chip = truncate(
-                    &format!(
+                let key = reaction.key.trim();
+                let wanted = chip_pictures && is_mxc_key(key) && is_valid_mxc(key);
+                if wanted {
+                    emote_wants.push((i, key.to_owned()));
+                }
+                // A chip too wide for the pane is cut short, and then has no room for
+                // the picture: it shows the name instead, as much of it as fits.
+                let pictured = format!(" {} {} ", rich::EMOTE_BOX, reaction.count);
+                let picture = wanted && images.emote_ready(key) && width(&pictured) <= body_width;
+                let whole = if picture {
+                    pictured
+                } else {
+                    format!(
                         " {} {} ",
-                        reaction_label(&reaction.key, emotes),
+                        reaction_label(&reaction.key, emotes.catalog),
                         reaction.count
-                    ),
-                    body_width,
-                );
+                    )
+                };
+                let chip = truncate(&whole, body_width);
                 let chip_width = width(&chip);
                 if col + chip_width > max_width && !hits.is_empty() {
                     rows.push(Row {
@@ -570,8 +675,15 @@ pub fn build_layout(
                         source: i,
                         hits: std::mem::take(&mut hits),
                         image: None,
+                        emotes: std::mem::take(&mut spots),
                     });
                     col = INDENT.len();
+                }
+                if picture {
+                    spots.push(EmoteSpot {
+                        col: col as u16 + 1,
+                        url: key.to_owned(),
+                    });
                 }
                 let role = if reaction.own {
                     Role::ReactionOwn
@@ -593,6 +705,7 @@ pub fn build_layout(
                     source: i,
                     hits,
                     image: None,
+                    emotes: spots,
                 });
             }
             if let Some(thread) = &message.thread {
@@ -603,7 +716,11 @@ pub fn build_layout(
             row.source = i;
         }
     }
-    Layout { rows, wants }
+    Layout {
+        rows,
+        wants,
+        emote_wants,
+    }
 }
 
 /// The line under a message that started a thread: how many replies, and who said
@@ -649,6 +766,7 @@ fn thread_row(thread: &ThreadSummary, msg: usize, body_width: usize, theme: &The
         source: msg,
         hits: vec![(start, start + used as u16, HitId::Thread(msg))],
         image: None,
+        emotes: Vec::new(),
     }
 }
 
@@ -828,6 +946,7 @@ fn push_poll_rows(
             source: i,
             hits,
             image: None,
+            emotes: Vec::new(),
         });
     }
 
@@ -892,10 +1011,12 @@ struct RowKey {
     /// Changes when a picture arrives or fails, which may change its height.
     images: u64,
     /// What decides about link previews: one arrives, the mode or the room's encryption
-    /// changes, or a sender is ignored.
-    previews: (u64, LinkPreviews, bool, usize),
+    /// changes, or who is ignored (which decides about custom emoji pictures too).
+    previews: (u64, LinkPreviews, bool, u64),
     /// Changes when image packs arrive: reactions show their shortcodes.
     emotes: u64,
+    /// Changes when a custom emoji's picture arrives or goes: two cells or its name.
+    emote_pictures: u64,
 }
 
 /// The laid-out rows of the open room, reused between frames while nothing that
@@ -906,6 +1027,8 @@ pub struct RowCache {
     rows: Vec<Row>,
     /// The links to ask the homeserver about (see `Layout::wants`).
     wants: Vec<(usize, String)>,
+    /// The custom emoji pictures to fetch (see `Layout::emote_wants`).
+    emote_wants: Vec<(usize, String)>,
     /// What was at the bottom of the view when it was last drawn scrolled up.
     anchor: Option<Anchor>,
 }
@@ -922,7 +1045,9 @@ struct Anchor {
     scroll: usize,
 }
 
-pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
+/// Draws the timeline into `area`. `popup`: where the completion popup goes over it
+/// later in this frame.
+pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
     let Some(room) = app.rooms.get(app.active) else {
         let block = super::pane_block(app, Pane::Timeline, "No room");
         let inner = block.inner(area);
@@ -1067,9 +1192,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             app.previews.rev,
             app.link_previews,
             room.encrypted,
-            app.ignored_users.len(),
+            // The people themselves, not how many: one may take another's place.
+            {
+                let mut hasher = DefaultHasher::new();
+                app.ignored_users.hash(&mut hasher);
+                hasher.finish()
+            },
         ),
         emotes: app.emotes.rev,
+        emote_pictures: app.images.emote_rev,
     };
     let previous = app.row_cache.take();
     let mut cache = match previous {
@@ -1081,14 +1212,22 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 encrypted: room.encrypted,
                 ignored: &app.ignored_users,
             };
-            let Layout { mut rows, wants } = build_layout(
+            let emote_view = EmoteView {
+                catalog: &app.emotes.catalog,
+                ignored: &app.ignored_users,
+            };
+            let Layout {
+                mut rows,
+                wants,
+                emote_wants,
+            } = build_layout(
                 room,
                 content.width as usize,
                 theme,
                 revealed,
                 &app.images,
                 Some(&view),
-                &app.emotes.catalog,
+                &emote_view,
             );
             if app.read_markers {
                 rows = receipts::add(rows, room, content.width as usize, theme);
@@ -1114,6 +1253,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 key,
                 rows,
                 wants,
+                emote_wants,
                 anchor: None,
             }
         }
@@ -1197,8 +1337,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Pictures are painted over the rows kept free for them; what is scrolled out of
-    // the view is left out.
+    // the view is left out. Nothing new is sent to the terminal where something is
+    // drawn over it later in the frame (a popup, a corner pill, the completion popup):
+    // such a transmission never arrives, and the other copies of that picture on
+    // screen would stay empty (see `ImageStore::verify`). A picture already sent
+    // shows around them.
     let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
+    let pills = corner_pills(app, content, scroll);
+    let overlays: Vec<Rect> = pills.iter().map(|pill| pill.0).chain(popup).collect();
+    // A picture's data travels in its first cell.
+    let under_overlay = |x: u16, y: u16| {
+        overlays
+            .iter()
+            .any(|overlay| overlay.contains(Position::new(x, y)))
+    };
     let indent = INDENT.len() as u16;
     let last_visible = (top + height).min(rows.len());
     let mut n = top;
@@ -1227,11 +1379,26 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 skip: slot.row,
                 size: (slot.cols, slot.rows),
                 play_mark: msg.is_playable() && msg.state != SendState::Failed,
-                covered,
+                covered: covered || under_overlay(rect.x, rect.y),
             };
             super::image::draw_inline(frame, &mut app.images, theme, inline);
         }
         n += count;
+    }
+    // Custom emoji pictures, over the two cells kept for each. Until one can be drawn
+    // (it is held back where it could be painted over, see `ImageStore::inline`) the
+    // cells stay empty. The same emoji is often on screen more than once: its data
+    // travels with the first copy that nothing is drawn over.
+    for (n, row) in rows.iter().enumerate().take(last_visible).skip(top) {
+        let y = content.y + pad + (n - top) as u16;
+        for spot in &row.emotes {
+            let x = content.x + spot.col;
+            if x + EMOTE_CELLS.0 <= content.right() {
+                let rect = Rect::new(x, y, EMOTE_CELLS.0, EMOTE_CELLS.1);
+                let covered = covered || under_overlay(x, y);
+                super::image::draw_emote(frame, &mut app.images, theme, &spot.url, rect, covered);
+            }
+        }
     }
     // Links of the messages that are on screen are asked about (a few at a time, once
     // each: see `PreviewStore`); the answers lay the rows out again.
@@ -1245,6 +1412,20 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 app.previews.request(url);
             }
         }
+    }
+    // So are the custom emoji pictures of the messages on screen, a few at a time (see
+    // `ImageStore::request_emotes`); each one that arrives lays the rows out again.
+    if !cache.emote_wants.is_empty()
+        && let (Some(first), Some(last)) = (rows.get(top), rows.get(last_visible.wrapping_sub(1)))
+    {
+        let on_screen = first.source..=last.source;
+        app.images.request_emotes(
+            cache
+                .emote_wants
+                .iter()
+                .filter(|(msg, _)| on_screen.contains(msg))
+                .map(|(_, url)| url.as_str()),
+        );
     }
     // Pictures within a page of the view are fetched ahead.
     let near = top.saturating_sub(height)..(top + 2 * height).min(rows.len());
@@ -1282,24 +1463,38 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_stateful_widget(bar, inner, &mut state);
     }
 
+    for (rect, label, hit) in pills {
+        frame.render_widget(
+            Line::from(Span::styled(label, theme.style(Role::Pill))),
+            rect,
+        );
+        if let Some(hit) = hit {
+            app.hits.add(rect, hit);
+        }
+    }
+    cache.anchor = anchor;
+    app.row_cache = Some(cache);
+}
+
+/// The pills in the corners of the view: what is being loaded, and the way back to the
+/// newest message, with what a click on one does. Known before the pictures are drawn,
+/// which must not send anything to the terminal under them.
+fn corner_pills(
+    app: &App,
+    content: Rect,
+    scroll: usize,
+) -> Vec<(Rect, &'static str, Option<HitId>)> {
+    let mut pills = Vec::new();
     if app.timeline.loading_older && content.width > 24 {
         let label = " loading older messages… ";
         let rect = Rect::new(content.x + 1, content.y, width(label) as u16, 1);
-        frame.render_widget(
-            Line::from(Span::styled(label, theme.style(Role::Pill))),
-            rect,
-        );
+        pills.push((rect, label, None));
     }
-
     if app.timeline.loading_newer && content.width > 26 && (scroll == 0 || content.width > 38) {
         let label = " loading newer messages… ";
         let rect = Rect::new(content.x + 1, content.bottom() - 1, width(label) as u16, 1);
-        frame.render_widget(
-            Line::from(Span::styled(label, theme.style(Role::Pill))),
-            rect,
-        );
+        pills.push((rect, label, None));
     }
-
     if scroll > 0 {
         let label = " ↓ newest ";
         let label_width = width(label) as u16;
@@ -1310,13 +1505,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 label_width,
                 1,
             );
-            let line = Line::from(Span::styled(label, theme.style(Role::Pill)));
-            frame.render_widget(&line, rect);
-            app.hits.add(rect, HitId::Button(Button::JumpToNewest));
+            pills.push((rect, label, Some(HitId::Button(Button::JumpToNewest))));
         }
     }
-    cache.anchor = anchor;
-    app.row_cache = Some(cache);
+    pills
 }
 
 #[cfg(test)]
@@ -1415,7 +1607,11 @@ mod tests {
             ..Message::default()
         }];
         let images = ImageStore::new(Graphics::halfblocks());
-        let text: String = build_layout(&room, 60, &theme, None, &images, None, &emotes)
+        let view = EmoteView {
+            catalog: &emotes,
+            ignored: &BTreeSet::new(),
+        };
+        let text: String = build_layout(&room, 60, &theme, None, &images, None, &view)
             .rows
             .iter()
             .map(|row| row.line.to_string())
@@ -1424,6 +1620,187 @@ mod tests {
         assert!(text.contains(" :?: 2 "), "{text}");
         assert!(text.contains(" 🐀 2 "), "{text}");
         assert!(!text.contains("mxc"), "{text}");
+    }
+
+    const BLOB: &str = "mxc://example.org/blob";
+    const PARTY: &str = "mxc://example.org/party";
+
+    /// A message from `sender` with a custom emoji in its text (inside `<span>` and
+    /// `</span>`, if given), and a reaction made with another.
+    fn emoji_message(sender: &str, around: (&str, &str)) -> Message {
+        use crate::model::Reaction;
+        Message {
+            body: "hi :blob: there".into(),
+            html: Some(format!(
+                "hi {}<img data-mx-emoticon src=\"{BLOB}\" alt=\":blob:\">{} there",
+                around.0, around.1
+            )),
+            sender_id: Some(sender.into()),
+            reactions: vec![Reaction {
+                key: PARTY.into(),
+                count: 2,
+                own: false,
+            }],
+            ..Message::default()
+        }
+    }
+
+    fn emoji_layout(
+        message: Message,
+        images: &ImageStore,
+        ignored: &BTreeSet<String>,
+        revealed: Option<usize>,
+    ) -> (Layout, String) {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let mut room = demo_rooms().remove(0);
+        room.messages = vec![message];
+        let view = EmoteView {
+            catalog: &EmoteCatalog::default(),
+            ignored,
+        };
+        let layout = build_layout(&room, 60, &theme, revealed, images, None, &view);
+        let text = layout
+            .rows
+            .iter()
+            .map(|row| row.line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (layout, text)
+    }
+
+    /// Where pictures are painted: row, column and address.
+    fn spots(layout: &Layout) -> Vec<(usize, u16, &str)> {
+        layout
+            .rows
+            .iter()
+            .enumerate()
+            .flat_map(|(n, row)| row.emotes.iter().map(move |s| (n, s.col, s.url.as_str())))
+            .collect()
+    }
+
+    #[test]
+    fn custom_emoji_take_two_cells_once_their_picture_is_there() {
+        use crate::images::testing::{decoded, kitty};
+        let nobody = BTreeSet::new();
+        let message = || emoji_message("@alice:example.org", ("", ""));
+        let mut images = ImageStore::new(kitty());
+
+        // Not there yet: their names, as before, and both are wanted.
+        let (layout, text) = emoji_layout(message(), &images, &nobody, None);
+        assert!(text.contains("  hi :blob: there"), "{text}");
+        assert!(text.contains("   :?: 2 "), "{text}");
+        assert_eq!(
+            layout.emote_wants,
+            [(0, BLOB.to_owned()), (0, PARTY.to_owned())]
+        );
+        assert!(spots(&layout).is_empty());
+
+        // There: two cells each, in the text and on the reaction, painted over.
+        images.begin_frame();
+        images.request_emotes([BLOB, PARTY]);
+        images.on_emote(BLOB, Ok(decoded(64, 64)));
+        images.on_emote(PARTY, Ok(decoded(64, 64)));
+        let (layout, text) = emoji_layout(message(), &images, &nobody, None);
+        let lines: Vec<&str> = text.lines().collect();
+        let row = lines.iter().position(|l| l.contains("hi")).unwrap();
+        let chips = lines.iter().position(|l| l.contains(" 2 ")).unwrap();
+        assert_eq!(lines[row].trim_end(), "  hi    there");
+        assert_eq!(lines[chips].trim_end(), "      2");
+        assert_eq!(spots(&layout), [(row, 5, BLOB), (chips, 3, PARTY)]);
+        assert!(!text.contains("blob") && !text.contains(":?:"), "{text}");
+
+        // One that failed keeps its name.
+        let mut failed = ImageStore::new(kitty());
+        failed.begin_frame();
+        failed.request_emotes([BLOB]);
+        failed.on_emote(BLOB, Err("could not be loaded".into()));
+        let (layout, text) = emoji_layout(message(), &failed, &nobody, None);
+        assert!(text.contains("hi :blob: there"), "{text}");
+        assert!(spots(&layout).is_empty());
+
+        // Without kitty's protocol, or with pictures off: names, and nothing wanted.
+        for graphics in [Graphics::halfblocks(), Graphics::off()] {
+            let images = ImageStore::new(graphics);
+            let (layout, text) = emoji_layout(message(), &images, &nobody, None);
+            assert!(text.contains("hi :blob: there"), "{text}");
+            assert!(layout.emote_wants.is_empty());
+            assert!(spots(&layout).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_reaction_chip_too_wide_for_the_pane_shows_its_name_cut_short() {
+        use crate::images::testing::{decoded, kitty};
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let mut images = ImageStore::new(kitty());
+        images.begin_frame();
+        images.request_emotes([PARTY]);
+        images.on_emote(PARTY, Ok(decoded(64, 64)));
+        let mut room = demo_rooms().remove(0);
+        let mut message = emoji_message("@alice:example.org", ("", ""));
+        message.reactions[0].count = 1_234_567_890;
+        room.messages = vec![message];
+        let nobody = BTreeSet::new();
+        let view = EmoteView {
+            catalog: &EmoteCatalog::default(),
+            ignored: &nobody,
+        };
+        let chip = |layout: &Layout| -> (String, usize) {
+            let row = layout
+                .rows
+                .iter()
+                .find(|row| row.hits.iter().any(|hit| hit.2 == HitId::Reaction(0, 0)))
+                .expect("a chip");
+            (row.line.to_string(), row.emotes.len())
+        };
+        // Twelve columns for the chip; with the picture it would take fifteen.
+        let (text, pictures) = chip(&build_layout(&room, 14, &theme, None, &images, None, &view));
+        assert!(text.trim_start().starts_with(":?: 123"), "{text:?}");
+        assert_eq!(pictures, 0);
+        // With room enough, the picture.
+        let (text, pictures) = chip(&build_layout(&room, 17, &theme, None, &images, None, &view));
+        assert_eq!(text.trim(), "1234567890", "{text:?}");
+        assert_eq!(pictures, 1);
+    }
+
+    #[test]
+    fn hidden_messages_and_ignored_people_fetch_no_emoji_pictures() {
+        use crate::images::testing::kitty;
+        let images = ImageStore::new(kitty());
+        let nobody = BTreeSet::new();
+        let alice = "@alice:example.org";
+
+        // Under a spoiler: only once the message is uncovered. The reaction is not
+        // covered by it.
+        let spoiler = || emoji_message(alice, ("<span data-mx-spoiler>", "</span>"));
+        let (layout, text) = emoji_layout(spoiler(), &images, &nobody, None);
+        assert_eq!(layout.emote_wants, [(0, PARTY.to_owned())]);
+        assert!(!text.contains("blob"), "{text}");
+        let (layout, _) = emoji_layout(spoiler(), &images, &nobody, Some(0));
+        assert_eq!(
+            layout.emote_wants,
+            [(0, BLOB.to_owned()), (0, PARTY.to_owned())]
+        );
+
+        // Deleted, or not decrypted (its reactions are still there): nothing.
+        for kind in [MsgKind::Redacted, MsgKind::Undecryptable] {
+            let hidden = Message {
+                kind,
+                ..emoji_message(alice, ("", ""))
+            };
+            assert!(
+                emoji_layout(hidden, &images, &nobody, None)
+                    .0
+                    .emote_wants
+                    .is_empty(),
+                "{kind:?}"
+            );
+        }
+
+        // From someone ignored: nothing either.
+        let ignored = BTreeSet::from([alice.to_owned()]);
+        let (layout, _) = emoji_layout(emoji_message(alice, ("", "")), &images, &ignored, None);
+        assert!(layout.emote_wants.is_empty());
     }
 
     #[test]

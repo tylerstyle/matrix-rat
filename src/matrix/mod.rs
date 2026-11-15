@@ -33,8 +33,8 @@ pub use devices::{
 pub use directory::PreviewJoinRule;
 pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
 #[cfg(test)]
-pub use emotes::{CustomEmoji, EmotePack};
-pub use emotes::{EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
+pub use emotes::EmotePack;
+pub use emotes::{CustomEmoji, EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
 pub use keyring::SecretStoreMode;
 // For `crate::logsafe`, which turns it into a word for the log.
 pub(crate) use keyring::KeyringError;
@@ -182,6 +182,9 @@ pub enum MatrixCmd {
         room_id: String,
         item: ItemRef,
         key: String,
+        /// For a custom emoji (`key` is its `mxc://` address): its shortcode, which goes
+        /// along with a new reaction (MSC4027).
+        shortcode: Option<String>,
     },
     Redact {
         room_id: String,
@@ -270,6 +273,11 @@ pub enum MatrixCmd {
     },
     /// Fetch the small picture of a room; answered with [`MatrixEvent::Avatar`].
     FetchAvatar {
+        /// Its `mxc://` address.
+        url: String,
+    },
+    /// Fetch the picture of a custom emoji; answered with [`MatrixEvent::EmotePicture`].
+    FetchEmotePicture {
         /// Its `mxc://` address.
         url: String,
     },
@@ -507,6 +515,7 @@ impl MatrixCmd {
             // The source of an encrypted file carries its key.
             Self::FetchImage { full, .. } => ("FetchImage", vec![Some(format!("full: {full}"))]),
             Self::FetchAvatar { .. } => ("FetchAvatar", vec![]),
+            Self::FetchEmotePicture { .. } => ("FetchEmotePicture", vec![]),
             // The address is from a message.
             Self::LinkPreview { .. } => ("LinkPreview", vec![]),
             Self::Verification(command) => ("Verification", vec![Some(format!("{command:?}"))]),
@@ -854,6 +863,11 @@ pub enum MatrixEvent {
         url: String,
         result: Result<crate::images::Decoded, String>,
     },
+    /// Outcome of [`MatrixCmd::FetchEmotePicture`].
+    EmotePicture {
+        url: String,
+        result: Result<crate::images::Decoded, String>,
+    },
     /// The largest file the server accepts, in bytes.
     UploadLimit(u64),
     /// The first file of a [`MatrixCmd::SendFiles`] could not be sent, so none was:
@@ -968,8 +982,13 @@ pub enum MatrixEvent {
         generation: u64,
         message: String,
     },
-    /// Session-cached MSC2545 / Matrix 1.19 custom emoji and sticker packs.
-    EmotePacks(EmoteCatalog),
+    /// Session-cached MSC2545 / Matrix 1.19 custom emoji and sticker packs: the
+    /// account's, and those of `room_id` (the room they were loaded for, which the UI
+    /// may have left by the time they arrive).
+    EmotePacks {
+        room_id: Option<String>,
+        catalog: EmoteCatalog,
+    },
     /// A page of [`MatrixCmd::ListThreads`].
     Threads(ThreadPage),
     /// [`MatrixCmd::ListThreads`] got no answer: the server has no thread list, or
@@ -1075,6 +1094,7 @@ impl MatrixEvent {
                 vec![Some(format!("full: {whole}")), ok(result.is_ok())],
             ),
             Self::Avatar { result, .. } => ("Avatar", vec![ok(result.is_ok())]),
+            Self::EmotePicture { result, .. } => ("EmotePicture", vec![ok(result.is_ok())]),
             Self::LinkPreview { result, .. } => (
                 "LinkPreview",
                 vec![Some(format!("found: {}", result.is_some()))],
@@ -1207,7 +1227,16 @@ impl MatrixEvent {
             ),
             Self::DirectoryResults(page) => ("DirectoryResults", vec![Some(format!("{page:?}"))]),
             Self::DirectoryError { generation: g, .. } => ("DirectoryError", vec![generation(g)]),
-            Self::EmotePacks(catalog) => ("EmotePacks", vec![Some(format!("{catalog:?}"))]),
+            Self::EmotePacks { room_id, catalog } => (
+                "EmotePacks",
+                vec![
+                    match room_id {
+                        Some(room_id) => id(room_id),
+                        None => Some("no room".to_owned()),
+                    },
+                    Some(format!("{catalog:?}")),
+                ],
+            ),
             Self::Threads(page) => ("Threads", vec![Some(format!("{page:?}"))]),
             Self::ThreadsFailed { generation: g, .. } => ("ThreadsFailed", vec![generation(g)]),
         };
@@ -2257,6 +2286,23 @@ mod tests {
         assert_eq!(
             MatrixEvent::ActionFailed(failed.into()).describe(),
             format!("ActionFailed({failed})")
+        );
+        let packs = |room_id: Option<&str>| MatrixEvent::EmotePacks {
+            room_id: room_id.map(str::to_owned),
+            catalog: EmoteCatalog::default(),
+        };
+        let event = packs(Some("!room:example.org"));
+        assert_eq!(
+            format!("{event:?}"),
+            "EmotePacks(EmoteCatalog { packs: 0 })"
+        );
+        assert_eq!(
+            event.describe(),
+            "EmotePacks(!room:example.org, EmoteCatalog { packs: 0 })"
+        );
+        assert_eq!(
+            format!("{:?}", packs(None)),
+            "EmotePacks(no room, EmoteCatalog { packs: 0 })"
         );
     }
 

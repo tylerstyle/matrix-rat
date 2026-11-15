@@ -1,0 +1,28 @@
+---
+source: src/ui/mod.rs
+expression: "render(&mut app, 80, 24)"
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────╮"
+"│ Filter rooms…        ││   👍 2   🎉 1                                       ││" Hidden by multi-width symbols: [(29, " "), (36, " ")]
+"│ ○ Unread  ○ People   ││  Back-pagination also survives restarts, which is a ││"
+"│ Favourites           ││  big deal for large rooms like this one where       ││"
+"│▌R  rust              ││  scrolling up used to refetch everything from the   ││"
+"│ M  matrix-rat        ││  server╭ React ───────────────────────────────────╮ ││"
+"│ People               ││────────│ ⌕ type to search…                        │─┃│"
+"│ B  bob            2  ││● carol │ 👍 ❤️ 😂 🎉 😮 😢 🙏 👀 ✅ 🔥            │ ┃│" Hidden by multi-width symbols: [(36, " "), (39, " "), (42, " "), (45, " "), (48, " "), (51, " "), (54, " "), (57, " "), (60, " "), (63, " ")]
+"│ C  carol             ││  Mornin│ :ratwave:     :ratparty:                 │ ┃│"
+"│ Rooms                ││        │ :blobrat:     :a_very_long…              │ ┃│"
+"│ D  design         5  ││● alice │ 😀 😃 😄 😁 😆 😅 🤣 🙂 🙃 🫠 🫫 😉 😊   │ ┃│" Hidden by multi-width symbols: [(36, " "), (39, " "), (42, " "), (45, " "), (48, " "), (51, " "), (54, " "), (57, " "), (60, " "), (63, " "), (66, " "), (69, " "), (72, " ")]
+"│ N  nixos             ││  ┃ caro│ 😇 🥰 😍 🤩 😘 😗 ☺️ 😚 😙 🥲 😋 😛 😜   │…┃│" Hidden by multi-width symbols: [(36, " "), (39, " "), (42, " "), (45, " "), (48, " "), (51, " "), (54, " "), (57, " "), (60, " "), (63, " "), (66, " "), (69, " "), (72, " ")]
+"│ O  off-topic     12  ││  No, it│ 🤪 😝 🤑 🤗 🤭 🫢 🫣 🤫 🤔 🫡 🤐 🤨 😐   │ ┃│" Hidden by multi-width symbols: [(36, " "), (39, " "), (42, " "), (45, " "), (48, " "), (51, " "), (54, " "), (57, " "), (60, " "), (63, " "), (66, " "), (69, " "), (72, " ")]
+"│                      ││        │ 😑 😶 🫥 😶‍🌫️ 😏 😒 🙄 😬 😮‍💨 🤥 🫨 🙂‍↔️ 🙂‍↕️   │ ┃│" Hidden by multi-width symbols: [(36, " "), (39, " "), (42, " "), (45, " "), (48, " "), (51, " "), (54, " "), (57, " "), (60, " "), (63, " "), (66, " "), (69, " "), (72, " ")]
+"│                      ││● you  0│ 😌 😔 😪 🤤 😴 🫩 😷 🤒 🤕 🤢 🤮 🤧 🥵   │ ┃│" Hidden by multi-width symbols: [(36, " "), (39, " "), (42, " "), (45, " "), (48, " "), (51, " "), (54, " "), (57, " "), (60, " "), (63, " "), (66, " "), (69, " "), (72, " ")]
+"│                      ││  Good t│ 🥶 🥴 😵 😵‍💫 🤯 🤠 🥳 🥸 😎 🤓 🧐 😕 🫤   │ ┃│" Hidden by multi-width symbols: [(36, " "), (39, " "), (42, " "), (45, " "), (48, " "), (51, " "), (54, " "), (57, " "), (60, " "), (63, " "), (66, " "), (69, " "), (72, " ")]
+"│                      ││        │ 😟 🙁 ☹️ 😯 😲 😳 🫪 🥺 🥹 😦 😧 😨 😰   │ ┃│" Hidden by multi-width symbols: [(36, " "), (39, " "), (42, " "), (45, " "), (48, " "), (51, " "), (54, " "), (57, " "), (60, " "), (63, " "), (66, " "), (69, " "), (72, " ")]
+"│                      ││● dave  │ 😥 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠   │ ┃│" Hidden by multi-width symbols: [(36, " "), (39, " "), (42, " "), (45, " "), (48, " "), (51, " "), (54, " "), (57, " "), (60, " "), (63, " "), (66, " "), (69, " "), (72, " ")]
+"│                      ││  Shippi│ :blobrat:  Rat pack                      │ ┃│"
+"│                      │╰ carol i╰───── ↑↓←→ move · Enter react · Esc close ╯──╯"
+"│                      │╭ 3 Message ───────────────────────────────────────────╮"
+"│                      ││ Type a message…                                📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
+"╰──────────────────────╯╰──────────────────────────────────────────────────────╯"
+" ● demo data  Enter send      Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

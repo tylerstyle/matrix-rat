@@ -28,7 +28,7 @@ notifications and themes that follow your desktop are all there.
 | | |
 |---|---|
 | 🔐 **Private by default** | End-to-end encryption, device verification by emoji comparison, recovery key, and warnings on messages that cannot be fully trusted. See where your account is logged in and sign sessions out, check your key backup, move message keys between devices in a file, and read why a message could not be decrypted. |
-| 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list (kitty graphics only; coloured initials otherwise). |
+| 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list and custom emoji in the text (kitty graphics only; coloured initials and `:names:` otherwise). |
 | 💬 **Everything a chat needs** | Replies, edits, reactions, threads, polls, stickers and custom emoji, mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
 | 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread to come back to it later (your other clients see that too), or everything as read. |
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, or `Alt-I` for the picture in the clipboard; `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
@@ -447,12 +447,18 @@ Setting `preset = "vim"` keeps the default keys and adds:
 - **Custom emoji and stickers** come from image packs: your own, the open room's, and
   those of other rooms you switched on for everywhere (packs are made in another client,
   such as Cinny or FluffyChat). They are loaded the first time something needs them
-  (typing `:` and two letters, or the sticker picker), not at start. Custom emoji in
-  messages show as their `:shortcode:` text, not as pictures; a reaction with one shows
-  its shortcode when your packs know it, else `:?:`. Choosing one from the `:`
-  completions sends it as a picture to other clients. Stickers show as small pictures;
-  "Send a sticker…" in the command palette (or `/sticker`, with words to filter by)
-  lists yours by name.
+  (typing `:` and two letters, the emoji picker, the sticker picker, or a room with a
+  reaction made with a custom emoji), not at start.
+  With the kitty graphics protocol, custom emoji in messages and on reactions show as
+  small pictures, two columns wide like any emoji. Until a picture has arrived, when it
+  cannot be loaded, in other terminals and with pictures off, an emoji shows as its
+  `:shortcode:`, and a reaction with one as its shortcode when your packs know it, else
+  `:?:`. Nothing is fetched for a message that is deleted, for a spoiler you have not
+  uncovered, or for someone you ignore. The emoji picker (`Alt-E`, or `r` on a message)
+  lists your custom emoji by name: choosing one reacts with it (its shortcode goes along
+  for other clients) or puts it into your message, which, as with the `:` completions,
+  sends it as a picture. Stickers show as small pictures; "Send a sticker…" in the
+  command palette (or `/sticker`, with words to filter by) lists yours by name.
 - **Key backup and recovery are not created here yet.** matrix-rat uses a backup and a
   recovery key that exist, and tells you when they are missing; to set them up (or reset
   them), use Element: Settings → Encryption.

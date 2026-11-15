@@ -8,8 +8,12 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::text::{is_blank, sanitize, sanitize_line, truncate, unsafe_char, width};
 
-/// Stands in for a custom emoji whose name is not known: pictures are not shown inline.
+/// Stands in for a custom emoji whose name is not known.
 pub const EMOTICON_PLACEHOLDER: &str = ":?:";
+
+/// What a custom emoji whose picture is shown takes in a wrapped row: two cells, the
+/// width of an ordinary emoji, which the picture is painted over when the row is drawn.
+pub const EMOTE_BOX: &str = "  ";
 
 /// A custom emoji as text: its `:shortcode:` from the `alt` or `title` the sender gave,
 /// cleaned like all message text and kept short.
@@ -64,12 +68,41 @@ pub struct Format {
     pub color: Option<(u8, u8, u8)>,
     /// What this piece of a code block is, once [`crate::highlight`] looked at it.
     pub syntax: Option<crate::highlight::Syntax>,
+    /// Index into [`Rich::emotes`]: this piece is a custom emoji, its text its name.
+    pub emote: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     pub text: String,
     pub format: Format,
+}
+
+impl Segment {
+    /// The custom emoji whose picture goes over this piece of a wrapped row, if it is
+    /// one (see [`Emote::picture`]).
+    pub fn emote_box(&self) -> Option<usize> {
+        self.format.emote.filter(|_| self.text == EMOTE_BOX)
+    }
+}
+
+/// A custom emoji in a message.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Emote {
+    /// Its picture: a checked `mxc://` address.
+    pub url: String,
+    /// Whether [`wrap`] keeps two cells for its picture instead of showing its name.
+    /// Decided by whoever lays the message out: the picture has to be there to draw.
+    pub picture: bool,
+}
+
+/// Hand-written: the address stays out of logs.
+impl std::fmt::Debug for Emote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Emote")
+            .field("picture", &self.picture)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -101,6 +134,9 @@ pub struct Rich {
     pub links: Vec<String>,
     /// Every code block, in order, including empty ones (lines refer to them by index).
     pub code_blocks: Vec<CodeBlock>,
+    /// Every custom emoji with a picture that could be shown, in order (pieces refer to
+    /// them by index). One in a code block is only its name.
+    pub emotes: Vec<Emote>,
 }
 
 impl Rich {
@@ -581,9 +617,21 @@ impl Builder {
                 return;
             }
             // A void element: nothing to close, so no format to keep. Only custom emoji
-            // are shown, as text.
+            // are shown: by their name, and by their picture where it can be drawn.
             "img" => {
                 if is_emoticon(attributes) {
+                    let url = attribute(attributes, "src")
+                        .map(|src| decode_entities(src).trim().to_owned())
+                        .filter(|src| crate::matrix::is_valid_mxc(src));
+                    // In code, inline or a block, it stays its name: what is written
+                    // there is shown as written.
+                    if let Some(url) = url.filter(|_| !self.pre && !format.code) {
+                        format.emote = Some(self.rich.emotes.len());
+                        self.rich.emotes.push(Emote {
+                            url,
+                            picture: false,
+                        });
+                    }
                     self.push_piece(&emoticon_label(attributes), &format);
                 }
                 return;
@@ -818,9 +866,11 @@ pub fn wrap(rich: &Rich, max: usize) -> Vec<WrappedRow> {
                     block: line.block,
                 },
             );
-            // A space that fitted before the wrap point is not shown at the row's end.
+            // A space that fitted before the wrap point is not shown at the row's end
+            // (the cells of an emoji's picture are not space).
             if !line.preformatted
                 && let Some(last) = finished.segments.last_mut()
+                && last.emote_box().is_none()
             {
                 last.text.truncate(last.text.trim_end().len());
             }
@@ -837,6 +887,23 @@ pub fn wrap(rich: &Rich, max: usize) -> Vec<WrappedRow> {
         };
 
         for segment in &line.segments {
+            // A custom emoji's picture: two cells that are never split. Where not even
+            // they fit, the emoji keeps its name.
+            let emote_width = width(EMOTE_BOX);
+            if segment
+                .format
+                .emote
+                .and_then(|e| rich.emotes.get(e))
+                .is_some_and(|emote| emote.picture)
+                && room >= emote_width
+            {
+                if used + emote_width > room && used > 0 {
+                    next_row(&mut row, &mut rows, &mut used);
+                }
+                push(&mut row, EMOTE_BOX, &segment.format);
+                used += emote_width;
+                continue;
+            }
             if line.preformatted {
                 // Code is cut at the edge rather than re-flowed.
                 for g in segment.text.graphemes(true) {
@@ -1260,6 +1327,83 @@ mod tests {
                 .collect();
             assert_eq!(text, "a b", "{html}");
         }
+    }
+
+    #[test]
+    fn custom_emoji_keep_their_address_for_the_picture_but_never_show_it() {
+        let rich = from_html(
+            "a <img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blob:\"> b \
+             <img src=\"https://example.org/x.png\" alt=\":web:\"> \
+             <img src=\"mxc://example.org/a&quot;b\" alt=\":quote:\"> \
+             <code><img data-mx-emoticon src=\"mxc://example.org/inline\" alt=\":inline:\"></code> \
+             <tt><img data-mx-emoticon src=\"mxc://example.org/tt\" alt=\":tt:\"></tt> \
+             <pre><img src=\"mxc://example.org/code\" alt=\":code:\"></pre>",
+        );
+        // Only a plain `mxc://` address outside code counts; the others are names.
+        assert_eq!(rich.emotes.len(), 1);
+        assert_eq!(rich.emotes[0].url, "mxc://example.org/blob");
+        assert!(!rich.emotes[0].picture);
+        assert_eq!(
+            texts(&rich),
+            ["a :blob: b :web: :quote: :inline: :tt:", ":code:"]
+        );
+        let emotes: Vec<(&str, Option<usize>)> = rich
+            .lines
+            .iter()
+            .flat_map(|line| &line.segments)
+            .filter(|s| s.format.emote.is_some())
+            .map(|s| (s.text.as_str(), s.format.emote))
+            .collect();
+        assert_eq!(emotes, [(":blob:", Some(0))]);
+        let debug = format!("{rich:?}");
+        assert!(!debug.contains("mxc"), "{debug}");
+    }
+
+    #[test]
+    fn a_custom_emoji_picture_takes_two_cells_and_its_name_until_then() {
+        let html =
+            "hi <img data-mx-emoticon src=\"mxc://example.org/blob\" alt=\":blobcat:\"> there";
+        let mut rich = from_html(html);
+        let shown = |rich: &Rich, max: usize| -> Vec<String> {
+            wrap(rich, max)
+                .iter()
+                .map(|r| r.segments.iter().map(|s| s.text.as_str()).collect())
+                .collect()
+        };
+        // Not there yet: its name, as before.
+        assert_eq!(shown(&rich, 40), ["hi :blobcat: there"]);
+        assert!(
+            wrap(&rich, 40)[0]
+                .segments
+                .iter()
+                .all(|s| s.emote_box().is_none())
+        );
+
+        rich.emotes[0].picture = true;
+        let rows = wrap(&rich, 40);
+        assert_eq!(shown(&rich, 40), [format!("hi {EMOTE_BOX} there")]);
+        let boxes: Vec<usize> = rows[0]
+            .segments
+            .iter()
+            .filter_map(Segment::emote_box)
+            .collect();
+        assert_eq!(boxes, [0]);
+        // The two cells are never split, and are not taken for space at a row's end.
+        assert_eq!(
+            shown(&rich, 5),
+            [format!("hi {EMOTE_BOX}"), "there".to_owned()]
+        );
+        let narrow = wrap(&rich, 4);
+        assert_eq!(shown(&rich, 4)[0], "hi");
+        assert_eq!(narrow[1].segments[0].emote_box(), Some(0));
+        for max in 1..20 {
+            for row in wrap(&rich, max) {
+                let total: usize = row.segments.iter().map(|s| width(&s.text)).sum();
+                assert!(total <= max, "{max}: {row:?}");
+            }
+        }
+        // Where not even two cells fit, the name is shown, cut like any word.
+        assert!(shown(&rich, 1).concat().contains("blobcat"));
     }
 
     #[test]

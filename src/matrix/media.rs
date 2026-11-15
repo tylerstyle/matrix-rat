@@ -24,7 +24,8 @@ use url::Url;
 use super::MatrixEvent;
 use crate::files;
 use crate::images::{
-    self, AVATAR_PIXELS, Decoded, FULL_PIXELS, MAX_DOWNLOAD, THUMBNAIL_PIXELS, human_size,
+    self, AVATAR_PIXELS, Decoded, EMOTE_PIXELS, FULL_PIXELS, MAX_DOWNLOAD, THUMBNAIL_PIXELS,
+    human_size,
 };
 use crate::model::{Attachment, MediaRef};
 
@@ -41,6 +42,8 @@ const SMALL_FILE: u64 = 256 * 1024;
 const SMALL_FILE_LIMIT: u64 = 1024 * 1024;
 /// An avatar larger than this is not worth showing in two cells.
 const AVATAR_DOWNLOAD: u64 = 2 * 1024 * 1024;
+/// Nor is a custom emoji; its thumbnail is a few kB.
+const EMOTE_DOWNLOAD: u64 = 1024 * 1024;
 /// Why a picture is not shown when the details are of no use to the user.
 const FAILED: &str = "could not be loaded";
 
@@ -51,6 +54,7 @@ pub struct Media {
     busy: Arc<Mutex<HashSet<(String, bool)>>>,
     slots: Arc<Semaphore>,
     avatar_slots: Arc<Semaphore>,
+    emote_slots: Arc<Semaphore>,
     /// Saving holds a whole file in memory, so only one runs at a time.
     save_slot: Arc<Semaphore>,
     /// The running picture fetches. They end with the session: dropping this stops them.
@@ -65,6 +69,7 @@ impl Media {
             busy: Arc::default(),
             slots: Arc::new(Semaphore::new(PARALLEL)),
             avatar_slots: Arc::new(Semaphore::new(2)),
+            emote_slots: Arc::new(Semaphore::new(2)),
             save_slot: Arc::new(Semaphore::new(1)),
             fetches: Mutex::default(),
         }
@@ -128,6 +133,43 @@ impl Media {
             .await;
             busy.lock().expect("not poisoned").remove(&id);
             let _ = events.send(MatrixEvent::Avatar { url, result });
+        });
+    }
+
+    /// Fetches the picture of a custom emoji as a small thumbnail; the outcome arrives as
+    /// [`MatrixEvent::EmotePicture`]. `url` is its `mxc://` address, from a message or a
+    /// reaction: anything else is refused without a request.
+    pub fn fetch_emote(&self, url: String) {
+        if !super::is_valid_mxc(&url) {
+            let _ = self.events.send(MatrixEvent::EmotePicture {
+                url,
+                result: Err(FAILED.to_owned()),
+            });
+            return;
+        }
+        let id = (format!("emote {url}"), false);
+        if !self.busy.lock().expect("not poisoned").insert(id.clone()) {
+            return;
+        }
+        let client = self.client.clone();
+        let events = self.events.clone();
+        let busy = self.busy.clone();
+        // Their own budget, like room pictures: a screen of new emoji must not hold up
+        // the pictures in the chat or the room list.
+        let slots = self.emote_slots.clone();
+        let mut fetches = self.fetches.lock().expect("not poisoned");
+        while fetches.try_join_next().is_some() {}
+        fetches.spawn(async move {
+            let result = async {
+                let _slot = slots.acquire().await.map_err(|_| FAILED.to_owned())?;
+                match tokio::time::timeout(AVATAR_TIMEOUT, load_emote(&client, &url)).await {
+                    Ok(result) => result,
+                    Err(_) => Err(FAILED.to_owned()),
+                }
+            }
+            .await;
+            busy.lock().expect("not poisoned").remove(&id);
+            let _ = events.send(MatrixEvent::EmotePicture { url, result });
         });
     }
 
@@ -208,6 +250,23 @@ async fn load_avatar(client: &Client, url: &str) -> Result<Decoded, String> {
             .map_err(|refused| refused.reason())?,
     };
     tokio::task::spawn_blocking(move || images::decode_avatar(&bytes))
+        .await
+        .map_err(|_| FAILED.to_owned())?
+}
+
+/// A custom emoji: a thumbnail from the server, scaled rather than cut so a wide one
+/// stays whole; the file itself (under the same limit) where the server has none.
+async fn load_emote(client: &Client, url: &str) -> Result<Decoded, String> {
+    let source = MediaSource::Plain(<&MxcUri>::from(url).to_owned());
+    let thumb = Some(Thumb::scale(EMOTE_PIXELS));
+    let bytes = match get(client, &source, thumb, EMOTE_DOWNLOAD).await {
+        Ok(bytes) => bytes,
+        Err(refused @ Refused::TooLarge(_)) => return Err(refused.reason()),
+        Err(Refused::Failed) => get(client, &source, None, EMOTE_DOWNLOAD)
+            .await
+            .map_err(|refused| refused.reason())?,
+    };
+    tokio::task::spawn_blocking(move || images::decode(&bytes, EMOTE_PIXELS))
         .await
         .map_err(|_| FAILED.to_owned())?
 }

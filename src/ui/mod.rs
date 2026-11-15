@@ -88,8 +88,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let [timeline_area, composer_area] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(composer_height)])
                 .areas(area);
-        timeline::draw(frame, app, timeline_area);
+        // The composer first: where its cursor is decides where the completion popup
+        // goes over the timeline, and the timeline's pictures keep clear of it.
         composer::draw(frame, app, composer_area);
+        let popup = complete::area(app, area, frame.area(), composer_area.y);
+        timeline::draw(frame, app, timeline_area, popup);
         complete::draw(frame, app, area, composer_area.y);
     }
     status::draw(frame, app, status_area);
@@ -611,6 +614,45 @@ mod tests {
             ));
         }
         insta::assert_snapshot!(render(&mut app, 100, 30));
+    }
+
+    #[test]
+    fn emoji_picker_custom() {
+        use crate::matrix::{CustomEmoji, EmoteCatalog, EmotePack};
+        let mut app = App::demo();
+        let emoji = |code: &str| CustomEmoji {
+            shortcode: code.into(),
+            url: format!("mxc://example.org/{code}"),
+            body: None,
+            pack_name: "Rat pack".into(),
+        };
+        app.emotes.catalog = EmoteCatalog {
+            packs: vec![EmotePack {
+                id: "user".into(),
+                name: "Rat pack".into(),
+                emojis: ["ratwave", "ratparty", "blobrat", "a_very_long_rat_name"]
+                    .map(emoji)
+                    .to_vec(),
+                stickers: Vec::new(),
+            }],
+        };
+        // On an 80x24 terminal, reacting to a message: the quick reactions, then the
+        // custom emoji by name, then the rest.
+        render(&mut app, 80, 24);
+        app.timeline.selected = Some(1);
+        app.perform(Action::React);
+        // Drawn once, so that the arrows know the grid: down to the second row of
+        // custom emoji.
+        render(&mut app, 80, 24);
+        for _ in 0..2 {
+            app.on_event(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Down,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+        }
+        insta::assert_snapshot!(render(&mut app, 80, 24));
     }
 
     #[test]

@@ -159,6 +159,19 @@ pub fn is_valid_mxc(url: &str) -> bool {
         && url.rsplit_once('/').is_some_and(|(_, id)| !id.is_empty())
 }
 
+/// What a reaction made with a custom emoji carries besides its `mxc://` key: the
+/// emoji's shortcode, for clients that do not know the picture to show by name
+/// (MSC4027). Ruma has no field for it yet; it goes under the name the proposal gives
+/// it and under the unstable one clients read today. `None` for a shortcode that would
+/// not be one in a pack.
+pub fn reaction_shortcode(shortcode: &str) -> Option<serde_json::Map<String, Value>> {
+    let named = Value::String(format!(":{}:", clean_shortcode(shortcode)?));
+    Some(serde_json::Map::from_iter([
+        ("shortcode".to_owned(), named.clone()),
+        ("com.beeper.reaction.shortcode".to_owned(), named),
+    ]))
+}
+
 fn clean_shortcode(raw: &str) -> Option<String> {
     let code = sanitize_line(raw.trim().trim_matches(':'));
     let ok = !code.is_empty()
@@ -355,6 +368,15 @@ struct CacheState {
     room_packs: HashMap<String, Vec<(String, EmotePack)>>,
 }
 
+impl CacheState {
+    /// The packs are wanted, with those of `room_id`: the open room, or none. The room
+    /// is replaced even by none, or packs of a room left behind would still be loaded.
+    fn want(&mut self, room_id: Option<String>) {
+        self.requested = true;
+        self.active_room = room_id;
+    }
+}
+
 fn lock(state: &Mutex<CacheState>) -> MutexGuard<'_, CacheState> {
     state
         .lock()
@@ -385,7 +407,12 @@ impl EmoteManager {
                     continue;
                 }
                 let catalog = load_catalog(&client, &task_state, active_room.as_deref()).await;
-                let _ = events.send(MatrixEvent::EmotePacks(catalog));
+                // Tagged with the room: the UI drops it if another room was opened
+                // while it was being loaded.
+                let _ = events.send(MatrixEvent::EmotePacks {
+                    room_id: active_room,
+                    catalog,
+                });
             }
         });
         Self {
@@ -397,13 +424,7 @@ impl EmoteManager {
 
     /// Loads (or sends again) the packs of the account and of `room_id`.
     pub fn ensure(&self, room_id: Option<String>) {
-        {
-            let mut guard = lock(&self.state);
-            guard.requested = true;
-            if room_id.is_some() {
-                guard.active_room = room_id;
-            }
-        }
+        lock(&self.state).want(room_id);
         self.poke.notify_one();
     }
 
@@ -807,6 +828,24 @@ mod tests {
     }
 
     #[test]
+    fn a_reaction_with_a_custom_emoji_names_it_both_ways() {
+        let extra = reaction_shortcode("blobcat").unwrap();
+        assert_eq!(
+            Value::Object(extra),
+            json!({
+                "shortcode": ":blobcat:",
+                "com.beeper.reaction.shortcode": ":blobcat:"
+            })
+        );
+        assert_eq!(
+            reaction_shortcode(":blobcat:").unwrap()["shortcode"],
+            ":blobcat:"
+        );
+        assert!(reaction_shortcode("two words").is_none());
+        assert!(reaction_shortcode("").is_none());
+    }
+
+    #[test]
     fn only_plain_mxc_addresses_are_valid() {
         assert!(is_valid_mxc("mxc://example.org/abc-DEF_123"));
         assert!(is_valid_mxc("mxc://[::1]:8448/abc"));
@@ -825,6 +864,17 @@ mod tests {
             "mxc://example.org/{}",
             "a".repeat(MAX_MXC_LEN)
         )));
+    }
+
+    #[test]
+    fn packs_wanted_without_a_room_leave_the_last_room_out() {
+        let mut state = CacheState::default();
+        state.want(Some("!a:example.org".into()));
+        assert!(state.requested);
+        assert_eq!(state.active_room.as_deref(), Some("!a:example.org"));
+        state.want(None);
+        assert!(state.requested);
+        assert_eq!(state.active_room, None);
     }
 
     #[test]
