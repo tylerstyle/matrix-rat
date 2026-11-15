@@ -126,6 +126,7 @@ pub struct PaletteContext {
     pub focus: Pane,
     pub compose_mode: ComposeMode,
     pub in_invite: bool,
+    pub in_knock: bool,
     pub thread_open: bool,
     pub has_room: bool,
     pub has_messages: bool,
@@ -159,9 +160,10 @@ pub struct PaletteContext {
     pub rooms: Vec<RoomItem>,
     pub selection: MessageCaps,
     /// The room that room-level commands (room info, invite, favourite, leave) would
-    /// act on, by the rule they follow themselves: its name, and whether it is an
-    /// invitation. Not always the open room; `None` if there is none.
-    pub target: Option<(String, bool)>,
+    /// act on, by the rule they follow themselves: its name and kind, so invitations and
+    /// pending knocks are labelled cleanly. Not always the open room; `None` if there is
+    /// none.
+    pub target: Option<(String, crate::model::RoomKind)>,
     /// Effective keymap for displaying dynamic shortcuts.
     pub keymap: keymap::Keymap,
 }
@@ -387,6 +389,19 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             None,
             "Decline invite",
             &["reject invite", "leave room"],
+            true,
+            0,
+        );
+    }
+    if ctx.in_knock {
+        push_entry(
+            out,
+            Target::Action(Action::WithdrawKnock),
+            Category::Action,
+            "Withdraw join request",
+            None,
+            "Withdraw join request",
+            &["cancel knock", "withdraw request", "leave room"],
             true,
             0,
         );
@@ -649,6 +664,7 @@ fn include_keymap_action(action: Action) -> ActionInclusion {
 
 fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
     let sel = ctx.selection;
+    let in_pending = ctx.in_invite || ctx.in_knock;
     match action {
         Action::Reply => sel.has_selection,
         Action::Edit => sel.can_edit,
@@ -658,7 +674,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::ForwardMessage => sel.can_forward,
         Action::RetryDecryption => sel.undecryptable,
         Action::UserInfo => sel.can_user_info,
-        Action::OpenPinned => ctx.has_room && !ctx.in_invite,
+        Action::OpenPinned => ctx.has_room && !in_pending,
         Action::Copy => sel.can_copy,
         Action::Save => sel.can_save,
         Action::Open => sel.can_open,
@@ -667,14 +683,15 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::CloseThread => ctx.thread_open,
         Action::EditLast => ctx.can_edit_last,
         Action::Attach => {
-            ctx.has_room && !ctx.in_invite && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
+            ctx.has_room && !in_pending && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
         Action::JumpToNewest | Action::JumpToOldest | Action::JumpToUnread => {
             ctx.has_room && ctx.has_messages
         }
         Action::AcceptInvite | Action::DeclineInvite => ctx.in_invite,
+        Action::WithdrawKnock => ctx.in_knock,
         Action::RoomInfo => ctx.target.is_some(),
-        Action::Search => ctx.has_room && !ctx.in_invite,
+        Action::Search => ctx.has_room && !in_pending,
         Action::SpaceNext | Action::SpacePrev => !ctx.spaces.is_empty(),
         _ => true,
     }
@@ -859,24 +876,30 @@ fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
     use crate::manage::{Click, Stage};
     // Named, so that it is plain which room is meant: with the room list focused it
     // is the one under the cursor, not the open one.
-    let (name, invite) = match &ctx.target {
-        Some((name, invite)) => (crate::text::truncate(name, 30), *invite),
-        None => ("this room".to_owned(), false),
+    let (name, kind) = match &ctx.target {
+        Some((name, kind)) => (crate::text::truncate(name, 30), Some(*kind)),
+        None => ("this room".to_owned(), None),
     };
-    let in_room = ctx.target.is_some() && !invite;
+    let in_room = kind.is_some_and(|k| !k.is_pending());
     let invite_title = format!("Invite someone to {name}…");
     let favourite_title = format!("Favourite on/off for {name}");
     let low_priority_title = format!("Low priority on/off for {name}");
-    let leave_title = if invite {
-        format!("Decline the invitation to {name}…")
-    } else {
-        format!("Leave {name}…")
+    let leave_title = match kind {
+        Some(crate::model::RoomKind::Invite) => format!("Decline the invitation to {name}…"),
+        Some(crate::model::RoomKind::Knock) => format!("Withdraw join request for {name}…"),
+        _ => format!("Leave {name}…"),
     };
-    let entries: [(Action, &str, &[&str], bool); 7] = [
+    let entries: [(Action, &str, &[&str], bool); 8] = [
         (
             Action::Manage(Click::Stage(Stage::Join)),
             "Join a room…",
             &["join by address", "matrix.to link", "alias"],
+            true,
+        ),
+        (
+            Action::Manage(Click::Stage(Stage::Browse)),
+            "Browse public rooms…",
+            &["public rooms", "directory", "discover", "search rooms"],
             true,
         ),
         (
@@ -918,6 +941,8 @@ fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
                 "leave chat",
                 "part",
                 "forget room",
+                "withdraw request",
+                "cancel request",
             ],
             ctx.target.is_some(),
         ),
@@ -1210,6 +1235,7 @@ mod tests {
             focus: Pane::Composer,
             compose_mode: ComposeMode::Normal,
             in_invite: false,
+            in_knock: false,
             thread_open: false,
             has_room: true,
             has_messages: true,
@@ -1228,7 +1254,7 @@ mod tests {
             verify_status: "unknown",
             backup_status: "unknown",
             ignored_users: 0,
-            target: Some(("rust".to_owned(), false)),
+            target: Some(("rust".to_owned(), crate::model::RoomKind::Room)),
             wanted_theme: "rat-dark".to_owned(),
             theme_dark: None,
             theme_light: None,
@@ -1521,7 +1547,7 @@ mod tests {
         assert!(title(&palette, "Room info").1);
         // An invitation can be looked at and declined, nothing else.
         let mut ctx = sample_context();
-        ctx.target = Some(("Party".to_owned(), true));
+        ctx.target = Some(("Party".to_owned(), crate::model::RoomKind::Invite));
         let palette = Palette::open(ctx);
         assert_eq!(
             title(&palette, "Decline"),
@@ -1530,6 +1556,16 @@ mod tests {
         assert!(!title(&palette, "Invite someone to Party").1);
         assert!(!title(&palette, "Favourite on/off for Party").1);
         assert!(!title(&palette, "Low priority on/off for Party").1);
+        assert!(title(&palette, "Room info").1);
+        // A pending knock can be looked at and withdrawn, nothing else.
+        let mut ctx = sample_context();
+        ctx.target = Some(("Club".to_owned(), crate::model::RoomKind::Knock));
+        let palette = Palette::open(ctx);
+        assert_eq!(
+            title(&palette, "Withdraw join request"),
+            ("Withdraw join request for Club…".to_owned(), true)
+        );
+        assert!(!title(&palette, "Invite someone to Club").1);
         assert!(title(&palette, "Room info").1);
         // No room to act on (even with one open behind a filtered list): all off.
         let mut ctx = sample_context();
@@ -1555,7 +1591,7 @@ mod tests {
         }
         // A long name does not push the rest of the row out.
         let mut ctx = sample_context();
-        ctx.target = Some(("x".repeat(200), false));
+        ctx.target = Some(("x".repeat(200), crate::model::RoomKind::Room));
         let palette = Palette::open(ctx);
         assert!(title(&palette, "Leave").0.chars().count() < 50);
     }

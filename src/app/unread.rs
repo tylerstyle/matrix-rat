@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use super::App;
 use crate::action::Pane;
 use crate::matrix::MatrixCmd;
-use crate::model::{ItemRef, Message, MsgKind, RoomKind};
+#[cfg(test)]
+use crate::model::RoomKind;
+use crate::model::{ItemRef, Message, MsgKind};
 
 /// Identity of the line among the open room's messages.
 const LINE_ID: &str = "unread-line";
@@ -235,7 +237,7 @@ impl App {
             self.unread.pending_mark = None;
             return;
         };
-        let pending = room.kind != RoomKind::Invite
+        let pending = !room.is_pending()
             && !room.marked_unread
             && (room.unread > 0 || room.bold || room.mention);
         self.unread.pending_mark = pending.then(|| room.id.clone());
@@ -263,7 +265,7 @@ impl App {
             && self.unread.pending_mark.as_deref() == self.room_id().as_deref()
             && self
                 .room()
-                .is_some_and(|r| r.kind != RoomKind::Invite && !r.marked_unread)
+                .is_some_and(|r| !r.is_pending() && !r.marked_unread)
     }
 
     /// A receipt is about to be sent for the open conversation, up to this event.
@@ -340,7 +342,7 @@ impl App {
                 self.unread.line = Line::Off;
                 if self
                     .room()
-                    .is_some_and(|r| r.kind != RoomKind::Invite && !r.marked_unread)
+                    .is_some_and(|r| !r.is_pending() && !r.marked_unread)
                 {
                     self.unread.pending_mark = self.room_id();
                 }
@@ -500,7 +502,7 @@ impl App {
         let Some(room) = self.rooms.get_mut(index) else {
             return;
         };
-        if room.kind == RoomKind::Invite {
+        if room.is_pending() {
             return;
         }
         room.marked_unread = true;
@@ -520,8 +522,9 @@ impl App {
         let Some(room) = self.room() else {
             return;
         };
-        if room.kind == RoomKind::Invite {
-            return self.show_toast("Accept the invitation first");
+        if room.is_pending() {
+            let hint = room.kind.pending_hint();
+            return self.show_toast(hint);
         }
         if room.shows_unread() {
             self.mark_room_read(self.active);
@@ -553,7 +556,7 @@ impl App {
         let unread: Vec<usize> = (0..self.rooms.len())
             .filter(|at| {
                 let room = &self.rooms[*at];
-                room.kind != RoomKind::Invite && room.shows_unread()
+                !room.is_pending() && room.shows_unread()
             })
             .collect();
         // The open room counts as read since it was opened, so it is not in that

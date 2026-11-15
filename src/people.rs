@@ -218,7 +218,9 @@ impl UserInfoPopup {
             rows.push(UserInfoRow::Action(UserAction::Mention));
         }
         if !ctx.is_self {
-            rows.push(UserInfoRow::Action(UserAction::Verify));
+            if self.verify_status() != UserVerifyStatus::Verified {
+                rows.push(UserInfoRow::Action(UserAction::Verify));
+            }
             rows.push(UserInfoRow::Action(UserAction::IgnoreToggle));
         }
         if let Some(member) = self.effective_member() {
@@ -261,6 +263,8 @@ impl UserInfoPopup {
                     Some("The demo has no account to do this with.")
                 } else if self.loading {
                     Some("Loading encryption keys…")
+                } else if self.verify_status() == UserVerifyStatus::Verified {
+                    Some("This user is already verified.")
                 } else if self.verify_status() == UserVerifyStatus::NoKeys {
                     Some("This user has no encryption keys yet.")
                 } else {
@@ -364,7 +368,7 @@ impl UserInfoPopup {
             Confirm::Unignore(_) => format!(
                 "Enter again to stop ignoring, Esc to stay · {name}'s messages will show again"
             ),
-            Confirm::Leave => return None,
+            Confirm::DeclineKnock(_) | Confirm::Leave => return None,
         })
     }
 }
@@ -597,6 +601,22 @@ mod tests {
             ]
         );
         assert_eq!(UserAction::IgnoreToggle.label(ctx.ignored), "Stop ignoring");
+
+        let mut verified_popup = popup.clone();
+        verified_popup.profile = Some(UserProfile {
+            verify: UserVerifyStatus::Verified,
+            ..UserProfile::default()
+        });
+        assert!(
+            !verified_popup
+                .rows(&ctx)
+                .contains(&UserInfoRow::Action(UserAction::Verify))
+        );
+        assert!(
+            verified_popup
+                .action_disabled_reason(UserAction::Verify, &ctx)
+                .is_some()
+        );
 
         let self_popup = UserInfoPopup::new(
             "@me:hs".into(),

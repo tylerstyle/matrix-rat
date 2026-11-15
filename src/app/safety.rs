@@ -1,16 +1,15 @@
 //! UI state and handlers for ignoring users, reporting content, and finding people.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use super::{bump_search_gen, search_debounce_deadline, take_due_search_debounce};
 use crate::lineedit::EditKeys;
 use crate::manage::Stage;
 use crate::matrix::{MatrixCmd, UserMatch};
 use crate::modal::{IgnoredUsersPopup, Modal, ReportForm};
 use crate::model::ItemRef;
-
-pub(super) const USER_SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
 
 impl super::App {
     /// Whether `user_id` is currently in the session's ignored user list.
@@ -269,9 +268,8 @@ impl super::App {
 
     pub(super) fn on_user_search_input_changed(&mut self) {
         let has_matrix = self.matrix.is_some();
-        let next_gen = self.user_search_gen.wrapping_add(1);
-        self.user_search_gen = next_gen;
-        let was_debouncing = self.user_search_debounce.take().is_some();
+        let (next_gen, was_debouncing) =
+            bump_search_gen(&mut self.user_search_gen, &mut self.user_search_debounce);
 
         let Some(Modal::New(popup)) = &mut self.modal else {
             return;
@@ -304,8 +302,8 @@ impl super::App {
     }
 
     pub(super) fn cancel_user_search(&mut self) {
-        self.user_search_gen = self.user_search_gen.wrapping_add(1);
-        let was_debouncing = self.user_search_debounce.take().is_some();
+        let (_, was_debouncing) =
+            bump_search_gen(&mut self.user_search_gen, &mut self.user_search_debounce);
         let had_worker_task = match &mut self.modal {
             Some(Modal::New(popup)) => {
                 let active = popup.user_searching && !was_debouncing;
@@ -320,18 +318,13 @@ impl super::App {
     }
 
     pub(super) fn user_search_debounce_deadline(&self) -> Option<tokio::time::Instant> {
-        self.user_search_debounce
-            .map(|at| (at + USER_SEARCH_DEBOUNCE).into())
+        search_debounce_deadline(self.user_search_debounce)
     }
 
     pub(super) fn tick_user_search(&mut self) {
-        if !self
-            .user_search_debounce
-            .is_some_and(|at| at.elapsed() >= USER_SEARCH_DEBOUNCE)
-        {
+        if !take_due_search_debounce(&mut self.user_search_debounce) {
             return;
         }
-        self.user_search_debounce = None;
         let dispatch = match &self.modal {
             Some(Modal::New(popup))
                 if matches!(popup.stage, Stage::Direct | Stage::Invite) && popup.busy.is_none() =>
@@ -1060,7 +1053,7 @@ mod tests {
         assert!(app.user_search_gen > before_gen);
         assert!(app.modal.is_none());
 
-        app.modal = Some(Modal::New(NewPopup::new(Stage::Direct)));
+        app.modal = Some(Modal::New(Box::new(NewPopup::new(Stage::Direct))));
         if let Some(Modal::New(popup)) = &mut app.modal {
             popup.user_results.push(UserMatch {
                 user_id: BOB.into(),

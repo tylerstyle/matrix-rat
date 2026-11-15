@@ -41,6 +41,12 @@ pub enum InputTarget {
     OwnProfileName,
     /// Avatar file path input inside `OwnProfilePopup`.
     OwnProfileAvatar,
+    /// Confirmation input inside `SettingSubview::EncryptConfirm`.
+    RoomSettingEncrypt,
+    /// Image path input inside `SettingSubview::Picture`.
+    RoomSettingAvatar,
+    /// Alias input inside `SettingSubview::Addresses`.
+    RoomSettingAlias,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -892,7 +892,7 @@ pub enum Modal {
     /// Global full-text search across loaded rooms.
     GlobalSearch(crate::app::global_search::GlobalSearch),
     /// Join a room, start a direct chat, create a room, or invite someone.
-    New(crate::manage::NewPopup),
+    New(Box<crate::manage::NewPopup>),
     RoomInfo(Box<crate::manage::InfoPopup>),
     /// Profile details, shared rooms, and actions for a user.
     UserInfo(Box<crate::people::UserInfoPopup>),

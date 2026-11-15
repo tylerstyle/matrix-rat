@@ -33,6 +33,8 @@ impl App {
             .collect();
 
         let in_invite = self.room().is_some_and(|r| r.kind == RoomKind::Invite);
+        let in_knock = self.room().is_some_and(|r| r.kind == RoomKind::Knock);
+        let in_pending = in_invite || in_knock;
         let thread_open = self.thread_open();
         let selected = self.timeline.selected.and_then(|i| self.messages().get(i));
         let room = self.room();
@@ -48,7 +50,7 @@ impl App {
                     can_save: self.can_save(),
                     can_open: m.image.is_some() || m.file.is_some() || has_links,
                     can_open_thread: !thread_open
-                        && !in_invite
+                        && !in_pending
                         && !matches!(m.kind, MsgKind::System | MsgKind::ReadMarker)
                         && (self.matrix.is_none()
                             || matches!(m.item, Some(crate::model::ItemRef::Event(_)))),
@@ -71,13 +73,14 @@ impl App {
             focus: self.focus,
             compose_mode: self.compose_mode,
             in_invite,
+            in_knock,
             thread_open,
             has_room: self.room().is_some(),
             has_messages: !self.messages().is_empty(),
             can_edit_last: self.last_editable().is_some(),
             open_unread: self
                 .room()
-                .filter(|room| room.kind != RoomKind::Invite)
+                .filter(|room| !room.is_pending())
                 .map(|room| room.shows_unread()),
             connected: self.matrix.is_some(),
             user_id: self.user_id.clone(),

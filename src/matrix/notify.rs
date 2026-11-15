@@ -340,10 +340,9 @@ mod tests {
                     // (The test server collects private rooms of other tests, which
                     // Bob cannot join: wait for the room both are in.)
                     MatrixEvent::Rooms(rooms)
-                        if rooms.iter().any(|room| {
-                            room.category != crate::matrix::RoomCategory::Invite
-                                && room.name == "Test Lounge"
-                        }) =>
+                        if rooms
+                            .iter()
+                            .any(|room| !room.is_pending() && room.name == "Test Lounge") =>
                     {
                         return rooms;
                     }
@@ -361,7 +360,7 @@ mod tests {
         // Not the invitations: nothing arrives in a room we have not joined.
         let shared: Vec<String> = listed
             .into_iter()
-            .filter(|room| room.category != crate::matrix::RoomCategory::Invite)
+            .filter(|room| !room.is_pending())
             .filter(|room| room.name == "Test Lounge")
             .map(|room| room.id)
             .collect();

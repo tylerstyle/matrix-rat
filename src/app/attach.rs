@@ -10,11 +10,10 @@ use crate::action::Pane;
 use crate::format::Outgoing;
 use crate::images::human_size;
 use crate::matrix::MatrixCmd;
-use crate::model::{ItemRef, Message, OWN_NAME, RoomKind};
+#[cfg(test)]
+use crate::model::RoomKind;
+use crate::model::{ItemRef, Message, OWN_NAME};
 use crate::upload::{self, Chosen};
-
-/// Completions named in the status line when Tab leaves a choice.
-const OPTIONS_SHOWN: usize = 6;
 
 /// Where files wait: a room, or one thread of it (room id and what names the thread).
 /// Like drafts, they belong to the conversation they were attached in.
@@ -88,11 +87,12 @@ impl App {
         if matches!(self.compose_mode, ComposeMode::Edit(_)) {
             self.show_toast("Finish editing before attaching a file");
             false
-        } else if self
+        } else if let Some(hint) = self
             .room()
-            .is_some_and(|room| room.kind == RoomKind::Invite)
+            .filter(|room| room.is_pending())
+            .map(|room| room.kind.pending_hint())
         {
-            self.show_toast("Accept the invitation first");
+            self.show_toast(hint);
             false
         } else {
             self.room().is_some()
@@ -131,9 +131,9 @@ impl App {
     /// A paste that is nothing but the paths of existing files (what a terminal types
     /// when files are dropped on it) attaches them. False: it is text.
     pub(super) fn attach_pasted(&mut self, text: &str) -> bool {
-        // Where no file can be attached (an edit, an invitation), a path is text.
-        let invited = self.room().is_none_or(|room| room.kind == RoomKind::Invite);
-        if invited || matches!(self.compose_mode, ComposeMode::Edit(_)) {
+        // Where no file can be attached (an edit, an invitation or pending knock), a path is text.
+        let pending = self.room().is_none_or(|room| room.is_pending());
+        if pending || matches!(self.compose_mode, ComposeMode::Edit(_)) {
             return false;
         }
         let Some(paths) = upload::dropped_files(text) else {
@@ -272,15 +272,7 @@ impl App {
         }
         match upload::complete(argument) {
             Some(completion) => {
-                if !completion.options.is_empty() {
-                    let shown = completion.options.len().min(OPTIONS_SHOWN);
-                    let mut choices = completion.options[..shown].join("  ");
-                    if completion.options.len() > shown {
-                        choices.push_str(&format!(
-                            "  … and {} more",
-                            completion.options.len() - shown
-                        ));
-                    }
+                if let Some(choices) = super::format_completion_options(&completion.options) {
                     self.show_toast(choices);
                 }
                 self.composer
@@ -302,8 +294,9 @@ impl App {
             return false;
         }
         let room_id = room.id.clone();
-        if room.kind == RoomKind::Invite {
-            self.show_toast("Accept the invitation first");
+        if room.is_pending() {
+            let hint = room.kind.pending_hint();
+            self.show_toast(hint);
             return true;
         }
         // Never send what is not on the screen.

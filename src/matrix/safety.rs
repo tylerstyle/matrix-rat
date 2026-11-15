@@ -332,7 +332,7 @@ mod tests {
     use matrix_sdk::ruma::{MxcUri, RoomId};
 
     use super::*;
-    use crate::matrix::{ManageCmd, ManageEvent, MatrixCmd, RoomCategory, spawn};
+    use crate::matrix::{ManageCmd, ManageEvent, MatrixCmd, spawn};
     use crate::paths::Paths;
 
     #[test]
@@ -425,9 +425,7 @@ mod tests {
             loop {
                 match events.recv().await.expect("worker stopped") {
                     MatrixEvent::Rooms(rooms)
-                        if rooms
-                            .iter()
-                            .any(|r| r.id == room_id && r.category != RoomCategory::Invite) =>
+                        if rooms.iter().any(|r| r.id == room_id && !r.is_pending()) =>
                     {
                         return;
                     }

@@ -9,7 +9,9 @@ use crate::action::Pane;
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::MatrixCmd;
 use crate::modal::Modal;
-use crate::model::{MsgKind, RoomKind};
+use crate::model::MsgKind;
+#[cfg(test)]
+use crate::model::RoomKind;
 
 /// Rounds of loading older history for one "find older" before giving up, so a word
 /// that never occurs does not page through years of a busy room unasked.
@@ -40,7 +42,7 @@ pub struct SearchBar {
 
 impl App {
     pub(super) fn open_search(&mut self) {
-        let Some(room) = self.room().filter(|room| room.kind != RoomKind::Invite) else {
+        let Some(room) = self.room().filter(|room| !room.is_pending()) else {
             return;
         };
         // Too small to draw the bar: an invisible bar would only swallow keys.
@@ -149,9 +151,7 @@ impl App {
     fn search_dig(&mut self, rounds: u8) {
         let can_load = self.matrix.is_some()
             && !self.timeline.reached_start
-            && self
-                .room()
-                .is_some_and(|room| room.kind != RoomKind::Invite);
+            && self.room().is_some_and(|room| !room.is_pending());
         let note = if !can_load {
             Some("no older matches")
         } else if rounds == 0 {

@@ -614,7 +614,11 @@ pub(super) async fn set_display_name(client: &Client, name: Option<String>) -> R
         .map_err(|err| failed("update your display name", &err))
 }
 
-pub(super) async fn set_avatar(client: &Client, path: &Path) -> Result<(), String> {
+/// Reads and validates a local image file for either an account or room avatar upload.
+pub(super) async fn prepare_avatar_upload(
+    client: &Client,
+    path: &Path,
+) -> Result<(mime::Mime, Vec<u8>), String> {
     let limit = tokio::time::timeout(
         Duration::from_secs(5),
         client.load_or_fetch_max_upload_size(),
@@ -637,13 +641,15 @@ pub(super) async fn set_avatar(client: &Client, path: &Path) -> Result<(), Strin
     if mime.type_() != mime::IMAGE {
         return Err(format!("{} is not a supported image", prepared.name));
     }
-    let mxc = tokio::time::timeout(
-        UPLOAD_TIMEOUT,
-        client.account().upload_avatar(&mime, prepared.bytes),
-    )
-    .await
-    .map_err(|_| "Uploading the avatar took too long.".to_owned())?
-    .map_err(|err| failed("upload your avatar", &err))?;
+    Ok((mime, prepared.bytes))
+}
+
+pub(super) async fn set_avatar(client: &Client, path: &Path) -> Result<(), String> {
+    let (mime, bytes) = prepare_avatar_upload(client, path).await?;
+    let mxc = tokio::time::timeout(UPLOAD_TIMEOUT, client.account().upload_avatar(&mime, bytes))
+        .await
+        .map_err(|_| "Uploading the avatar took too long.".to_owned())?
+        .map_err(|err| failed("upload your avatar", &err))?;
     client
         .account()
         .set_avatar_url(Some(&mxc))

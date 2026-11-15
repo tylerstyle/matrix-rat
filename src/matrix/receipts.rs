@@ -502,7 +502,7 @@ mod tests {
         use matrix_sdk::ruma::events::receipt::ReceiptThread;
         use matrix_sdk::ruma::{EventId, RoomId};
 
-        use crate::matrix::{MatrixCmd, MatrixEvent, RoomCategory, spawn};
+        use crate::matrix::{MatrixCmd, MatrixEvent, spawn};
         use crate::model::ItemRef;
         use crate::paths::Paths;
 
@@ -555,7 +555,7 @@ mod tests {
                     MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
                     MatrixEvent::Rooms(rooms) => {
                         let shared = rooms.iter().find(|summary| {
-                            summary.category != RoomCategory::Invite
+                            !summary.is_pending()
                                 && RoomId::parse(&summary.id)
                                     .ok()
                                     .and_then(|id| other.get_room(&id))

@@ -70,7 +70,7 @@ mod tests {
 
     use tokio::sync::mpsc::UnboundedReceiver;
 
-    use crate::matrix::{MatrixCmd, MatrixEvent, MatrixHandle, RoomCategory, spawn};
+    use crate::matrix::{MatrixCmd, MatrixEvent, MatrixHandle, spawn};
     use crate::paths::Paths;
 
     /// Waits for the room list, logging in if the worker asks for it; opens the shared
@@ -98,9 +98,7 @@ mod tests {
                             .into_iter()
                             // Always the same room: the order of the list differs
                             // between a first and a later start.
-                            .find(|room| {
-                                room.category != RoomCategory::Invite && room.name == "Test Lounge"
-                            });
+                            .find(|room| !room.is_pending() && room.name == "Test Lounge");
                         if let Some(room) = joined {
                             handle.send(MatrixCmd::OpenRoom {
                                 room_id: room.id.clone(),

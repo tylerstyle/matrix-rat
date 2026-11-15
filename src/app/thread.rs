@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use super::{App, TimelineState};
 use crate::action::Pane;
 use crate::matrix::MatrixCmd;
-use crate::model::{ItemRef, Message, MsgKind, RoomKind, ThreadSummary};
+#[cfg(test)]
+use crate::model::RoomKind;
+use crate::model::{ItemRef, Message, MsgKind, ThreadSummary};
 
 /// Identity of the thread's first message while it stands in for the thread's own
 /// copy of it. Timelines number their items independently, so the id it has in the
@@ -124,7 +126,7 @@ impl App {
             self.show_toast("This is already a thread");
             return;
         }
-        if self.room().is_none_or(|room| room.kind == RoomKind::Invite) {
+        if self.room().is_none_or(|room| room.is_pending()) {
             return;
         }
         let Some(message) = self.messages().get(index) else {

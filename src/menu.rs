@@ -512,7 +512,6 @@ pub fn link_items() -> Vec<Item> {
 /// The entries for a room in the room list.
 pub fn room_items(room: &Room, keys: &Keymap) -> Vec<Item> {
     use Context::Sidebar;
-    let invite = room.kind == RoomKind::Invite;
     let mut items = vec![
         Item::new(
             "Open",
@@ -521,10 +520,19 @@ pub fn room_items(room: &Room, keys: &Keymap) -> Vec<Item> {
         ),
         Item::action(keys, "Room info", Sidebar, Action::RoomInfo),
     ];
-    if invite {
+    if room.kind == RoomKind::Invite {
         items.push(Item::action(
             keys,
             "Decline invitation…",
+            Sidebar,
+            Action::LeaveRoom,
+        ));
+        return items;
+    }
+    if room.kind == RoomKind::Knock {
+        items.push(Item::action(
+            keys,
+            "Withdraw request…",
             Sidebar,
             Action::LeaveRoom,
         ));

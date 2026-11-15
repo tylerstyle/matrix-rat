@@ -555,18 +555,26 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let theme = &app.theme;
-    if room.kind == RoomKind::Invite {
-        let line = Line::from(Span::styled(
-            " You are invited to this room.",
-            theme.style(Role::Muted),
-        ));
+    if room.is_pending() {
+        let (prompt, actions): (&str, &[(&str, Action)]) = if room.kind == RoomKind::Invite {
+            (
+                " You are invited to this room.",
+                &[
+                    (" Accept ", Action::AcceptInvite),
+                    (" Decline ", Action::DeclineInvite),
+                ],
+            )
+        } else {
+            (
+                " You asked to join this room — waiting for approval.",
+                &[(" Withdraw ", Action::WithdrawKnock)],
+            )
+        };
+        let line = Line::from(Span::styled(prompt, theme.style(Role::Muted)));
         frame.render_widget(line, inner);
         if inner.height > 2 {
             let mut x = inner.x + 1;
-            for (label, action) in [
-                (" Accept ", Action::AcceptInvite),
-                (" Decline ", Action::DeclineInvite),
-            ] {
+            for &(label, action) in actions {
                 let w = (width(label) as u16).min(inner.right().saturating_sub(x));
                 let rect = Rect::new(x, inner.y + 2, w, 1);
                 frame.render_widget(

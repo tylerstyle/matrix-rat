@@ -5,15 +5,21 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use super::App;
+use super::{
+    App, PathCompleteResult, bump_search_gen, complete_path_field, dropped_single_image_path,
+    search_debounce_deadline, take_due_search_debounce, validate_avatar_path,
+};
 use crate::action::{Action, Pane};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::manage::{
     Address, BanPrompt, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NewPopup, Pending,
-    RoleChooser, Stage, clean_input, parse_address, parse_alias_local, parse_user,
+    PermAction, PreviewButton, RoleChooser, RoomSetting, SettingSubview, Stage, address_entries,
+    clean_input, normalize_alias_input, parse_address, parse_alias_local, parse_user,
+    validate_permissions_draft,
 };
 use crate::matrix::{
-    Change, ManageCmd, ManageEvent, MatrixCmd, MemberRole, NotifyLevel, RoomDetails, RoomMember,
+    Change, DirectoryPage, ManageCmd, ManageEvent, MatrixCmd, MemberRole, NotifyLevel,
+    PreviewMembership, RoomDetails, RoomHistory, RoomJoinRule, RoomMember,
 };
 use crate::modal::Modal;
 use crate::model::{MsgKind, RoomKind};
@@ -52,11 +58,10 @@ impl App {
         }
     }
 
-    /// Name of the room the room-level commands would act on now, and whether it is
-    /// an invitation.
-    pub(super) fn manage_target(&self) -> Option<(String, bool)> {
+    /// Name and kind of the room the room-level commands would act on now.
+    pub(super) fn manage_target(&self) -> Option<(String, RoomKind)> {
         let room = self.rooms.get(self.target_room()?)?;
-        Some((room.name.clone(), room.kind == RoomKind::Invite))
+        Some((room.name.clone(), room.kind))
     }
 
     /// Sends a command to the worker; false in the demo, which has none.
@@ -90,10 +95,46 @@ impl App {
         self.open_new_with(stage, |_| {});
     }
 
-    pub(super) fn open_new_join(&mut self, address: &str) {
-        self.open_new_with(Stage::Join, |popup| {
-            popup.address.set(address);
+    pub(super) fn open_room_preview(&mut self, target: &str, via: Vec<String>) {
+        let request = self.next_request();
+        let has_matrix = self.matrix.is_some();
+        let owned_target = target.to_owned();
+        let via_clone = via.clone();
+        self.open_new_with(Stage::Preview, move |popup| {
+            Self::prepare_preview_popup(
+                popup,
+                owned_target,
+                via_clone,
+                false,
+                has_matrix.then_some(request),
+            );
         });
+        if has_matrix {
+            self.manage(ManageCmd::Preview {
+                request,
+                target: target.to_owned(),
+                via,
+            });
+        }
+    }
+
+    fn prepare_preview_popup(
+        popup: &mut NewPopup,
+        target: String,
+        via: Vec<String>,
+        from_browse: bool,
+        request: Option<u64>,
+    ) {
+        popup.preview_from_browse = from_browse;
+        popup.preview_target = target;
+        popup.preview_via = via;
+        popup.preview = None;
+        popup.preview_reason.set("");
+        popup.preview_loading = request.is_some();
+        popup.preview_request = request;
+        popup.error = None;
+        popup.busy = None;
+        popup.focus = popup.default_preview_focus();
     }
 
     fn open_new_with(&mut self, stage: Stage, fill: impl FnOnce(&mut NewPopup)) {
@@ -108,11 +149,15 @@ impl App {
         }
         if matches!(self.modal, Some(Modal::New(ref popup)) if popup.busy.is_none()) {
             self.cancel_user_search();
+            self.cancel_dir_search();
         }
         if let Some(Modal::New(popup)) = &mut self.modal {
             if popup.busy.is_none() {
                 popup.go(stage);
                 fill(popup);
+                if stage == Stage::Browse {
+                    self.init_dir_browse();
+                }
             }
             return;
         }
@@ -127,8 +172,8 @@ impl App {
                 self.show_toast("No room to invite to");
                 return;
             };
-            if room.kind == RoomKind::Invite {
-                self.show_toast("Accept the invitation first");
+            if room.is_pending() {
+                self.show_toast(room.kind.pending_hint());
                 return;
             }
             popup.room = Some((room.id.clone(), room.name.clone()));
@@ -136,7 +181,10 @@ impl App {
         if from_info.is_some() {
             self.close_manage();
         }
-        self.open_modal(Modal::New(popup));
+        self.open_modal(Modal::New(Box::new(popup)));
+        if stage == Stage::Browse {
+            self.init_dir_browse();
+        }
     }
 
     fn submit_new(&mut self) {
@@ -161,6 +209,22 @@ impl App {
         };
         let prepared: Result<(ManageCmd, &'static str), String> = match popup.stage {
             Stage::Choose => return,
+            Stage::Browse => {
+                if self.dir_search_debounce.take().is_some() {
+                    self.dispatch_armed_dir_search();
+                } else if popup.dir_results.is_empty() && !popup.dir_searching {
+                    self.start_dir_search();
+                } else {
+                    self.preview_dir_entry();
+                }
+                return;
+            }
+            Stage::Preview => {
+                if let Some(btn) = popup.preview_button_at(popup.focus) {
+                    self.submit_preview_button(btn);
+                }
+                return;
+            }
             Stage::Join => parse_address(&popup.address).and_then(|address| match address {
                 Address::Room { target, via }
                 | Address::Event {
@@ -219,6 +283,7 @@ impl App {
         match prepared {
             Ok((command, busy)) => {
                 self.cancel_user_search();
+                self.cancel_dir_search();
                 if let Some(Modal::New(popup)) = &mut self.modal {
                     popup.busy = Some(busy);
                     popup.request = Some(request);
@@ -247,17 +312,108 @@ impl App {
             return;
         }
         if popup.stage == Stage::Choose {
+            let mut entered = false;
             match code {
                 KeyCode::Up | KeyCode::BackTab => popup.step(-1),
                 KeyCode::Down | KeyCode::Tab => popup.step(1),
-                KeyCode::Enter | KeyCode::Right => popup.go(Stage::CHOICES[popup.choice]),
-                KeyCode::Char(c @ '1'..='3') if plain => {
+                KeyCode::Enter | KeyCode::Right => {
+                    popup.go(Stage::CHOICES[popup.choice]);
+                    entered = true;
+                }
+                KeyCode::Char(c @ '1'..='4') if plain => {
                     popup.choice = c as usize - '1' as usize;
                     popup.go(Stage::CHOICES[popup.choice]);
+                    entered = true;
                 }
                 _ => {}
             }
+            if entered && matches!(&self.modal, Some(Modal::New(p)) if p.stage == Stage::Browse) {
+                self.init_dir_browse();
+            }
             return;
+        }
+        if popup.stage == Stage::Browse {
+            match code {
+                KeyCode::Up => {
+                    popup.step_dir(-1);
+                    self.maybe_load_more_dir();
+                    return;
+                }
+                KeyCode::Down => {
+                    popup.step_dir(1);
+                    self.maybe_load_more_dir();
+                    return;
+                }
+                KeyCode::PageUp => {
+                    let page = popup.dir_page.max(1) as isize;
+                    popup.step_dir(-page);
+                    self.maybe_load_more_dir();
+                    return;
+                }
+                KeyCode::PageDown => {
+                    let page = popup.dir_page.max(1) as isize;
+                    popup.step_dir(page);
+                    self.maybe_load_more_dir();
+                    return;
+                }
+                KeyCode::Tab => {
+                    popup.step(1);
+                    return;
+                }
+                KeyCode::BackTab => {
+                    popup.step(-1);
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.submit_new();
+                    return;
+                }
+                _ => {
+                    if let Some(field) = popup.field_mut()
+                        && field.handle_key(code, mods, EditKeys::FULL).changed()
+                    {
+                        popup.error = None;
+                        self.on_dir_search_input_changed();
+                    }
+                    return;
+                }
+            }
+        }
+        if popup.stage == Stage::Preview {
+            match code {
+                KeyCode::Tab | KeyCode::Down => {
+                    popup.step(1);
+                    return;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    popup.step(-1);
+                    return;
+                }
+                KeyCode::Left if popup.field_mut().is_none() && plain => {
+                    popup.step(-1);
+                    return;
+                }
+                KeyCode::Right if popup.field_mut().is_none() && plain => {
+                    popup.step(1);
+                    return;
+                }
+                KeyCode::Enter => {
+                    if let Some(btn) = popup.preview_button_at(popup.focus) {
+                        self.submit_preview_button(btn);
+                    } else if popup.focus + 1 < popup.slots() {
+                        popup.step(1);
+                    }
+                    return;
+                }
+                _ => {
+                    if let Some(field) = popup.field_mut()
+                        && field.handle_key(code, mods, EditKeys::FULL).changed()
+                    {
+                        popup.error = None;
+                    }
+                    return;
+                }
+            }
         }
         let search_stage = matches!(popup.stage, Stage::Direct | Stage::Invite);
         if search_stage && !popup.user_results.is_empty() {
@@ -303,6 +459,415 @@ impl App {
         }
     }
 
+    fn own_server(&self) -> Option<String> {
+        self.user_id
+            .as_deref()
+            .and_then(|id| id.split_once(':'))
+            .map(|(_, server)| server.to_owned())
+    }
+
+    fn init_dir_browse(&mut self) {
+        let default_server = self.own_server();
+        if let Some(Modal::New(popup)) = &mut self.modal {
+            popup.dir_default_server = default_server;
+            popup.dir_query.set("");
+            popup.dir_server.set("");
+            popup.clear_dir_search();
+            popup.error = None;
+        }
+        self.start_dir_search();
+    }
+
+    pub(super) fn on_dir_search_input_changed(&mut self) {
+        let has_matrix = self.matrix.is_some();
+        let (next_gen, was_debouncing) =
+            bump_search_gen(&mut self.dir_search_gen, &mut self.dir_search_debounce);
+        let Some(Modal::New(popup)) = &mut self.modal else {
+            return;
+        };
+        let had_worker_task = (popup.dir_searching || popup.dir_loading_more) && !was_debouncing;
+        if popup.stage != Stage::Browse {
+            popup.clear_dir_search();
+            if has_matrix && had_worker_task {
+                self.send_matrix(MatrixCmd::CancelDirectorySearch);
+            }
+            return;
+        }
+        popup.clear_dir_search();
+        popup.dir_search_gen = Some(next_gen);
+        popup.dir_searching = has_matrix;
+        if has_matrix {
+            if had_worker_task {
+                self.send_matrix(MatrixCmd::CancelDirectorySearch);
+            }
+            self.dir_search_debounce = Some(Instant::now());
+        } else {
+            popup.dir_error = Some(NO_ACCOUNT.to_owned());
+        }
+    }
+
+    pub(super) fn cancel_dir_search(&mut self) {
+        let (_, was_debouncing) =
+            bump_search_gen(&mut self.dir_search_gen, &mut self.dir_search_debounce);
+        let had_worker_task = match &mut self.modal {
+            Some(Modal::New(popup)) => {
+                let active = (popup.dir_searching || popup.dir_loading_more) && !was_debouncing;
+                popup.clear_dir_search();
+                active
+            }
+            _ => false,
+        };
+        if had_worker_task && self.matrix.is_some() {
+            self.send_matrix(MatrixCmd::CancelDirectorySearch);
+        }
+    }
+
+    pub(super) fn dir_search_debounce_deadline(&self) -> Option<tokio::time::Instant> {
+        search_debounce_deadline(self.dir_search_debounce)
+    }
+
+    pub(super) fn tick_dir_search(&mut self) {
+        if take_due_search_debounce(&mut self.dir_search_debounce) {
+            self.dispatch_armed_dir_search();
+        }
+    }
+
+    fn start_dir_search(&mut self) {
+        let (generation, _) =
+            bump_search_gen(&mut self.dir_search_gen, &mut self.dir_search_debounce);
+        self.dispatch_dir_search(generation);
+    }
+
+    fn dispatch_armed_dir_search(&mut self) {
+        self.dir_search_debounce = None;
+        let generation = match &self.modal {
+            Some(Modal::New(popup)) => popup.dir_search_gen,
+            _ => None,
+        }
+        .unwrap_or(self.dir_search_gen);
+        self.dispatch_dir_search(generation);
+    }
+
+    fn dispatch_dir_search(&mut self, generation: u64) {
+        let has_matrix = self.matrix.is_some();
+        let dispatch = match &mut self.modal {
+            Some(Modal::New(popup)) if popup.stage == Stage::Browse && popup.busy.is_none() => {
+                popup.clear_dir_search();
+                popup.dir_search_gen = Some(generation);
+                if has_matrix {
+                    popup.dir_searching = true;
+                    let filter = sanitize_line(popup.dir_query.as_str()).trim().to_owned();
+                    let server = sanitize_line(popup.dir_server.as_str()).trim().to_owned();
+                    Some((filter, (!server.is_empty()).then_some(server)))
+                } else {
+                    popup.dir_error = Some(NO_ACCOUNT.to_owned());
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((query, server)) = dispatch {
+            self.send_matrix(MatrixCmd::SearchDirectory {
+                query,
+                server,
+                generation,
+            });
+        }
+    }
+
+    fn maybe_load_more_dir(&mut self) {
+        if self.matrix.is_none() {
+            return;
+        }
+        let generation = match &mut self.modal {
+            Some(Modal::New(popup))
+                if popup.stage == Stage::Browse && popup.busy.is_none() && popup.near_dir_end() =>
+            {
+                let Some(generation) = popup.dir_search_gen else {
+                    return;
+                };
+                popup.dir_loading_more = true;
+                generation
+            }
+            _ => return,
+        };
+        self.send_matrix(MatrixCmd::DirectoryNextPage { generation });
+    }
+
+    pub(super) fn scroll_dir_browse(&mut self, lines: isize) {
+        if let Some(Modal::New(popup)) = &mut self.modal
+            && popup.stage == Stage::Browse
+        {
+            popup.scroll_dir(lines);
+            if lines > 0
+                && popup.dir_has_more
+                && !popup.dir_searching
+                && !popup.dir_loading_more
+                && popup.dir_scroll + popup.dir_page.max(1) + 3 >= popup.dir_results.len()
+                && let Some(generation) = popup.dir_search_gen
+                && self.matrix.is_some()
+            {
+                popup.dir_loading_more = true;
+                self.send_matrix(MatrixCmd::DirectoryNextPage { generation });
+            }
+        }
+    }
+
+    pub(super) fn on_directory_results(&mut self, page: DirectoryPage) {
+        let Some(Modal::New(popup)) = &mut self.modal else {
+            return;
+        };
+        if popup.dir_search_gen != Some(page.generation) {
+            return;
+        }
+        popup.dir_searching = false;
+        popup.dir_loading_more = false;
+        popup.dir_error = None;
+        popup.dir_has_more = page.has_more;
+        if page.append {
+            for room in page.rooms {
+                if !popup
+                    .dir_results
+                    .iter()
+                    .any(|existing| existing.room_id == room.room_id)
+                {
+                    popup.dir_results.push(room);
+                }
+            }
+        } else {
+            popup.dir_results = page.rooms;
+            popup.dir_selected = 0;
+            popup.dir_scroll = 0;
+            popup.dir_reveal = true;
+        }
+    }
+
+    pub(super) fn on_directory_error(&mut self, generation: u64, message: String) {
+        let Some(Modal::New(popup)) = &mut self.modal else {
+            return;
+        };
+        if popup.dir_search_gen != Some(generation) {
+            return;
+        }
+        popup.dir_searching = false;
+        popup.dir_loading_more = false;
+        popup.dir_has_more = false;
+        popup.dir_error = Some(message);
+    }
+
+    pub(super) fn open_joined_room_index(&mut self, index: usize) {
+        let Some(room) = self.rooms.get(index) else {
+            return;
+        };
+        let room_id = room.id.clone();
+        if self.space.is_some() && !self.space_rooms.contains(&room_id) {
+            self.select_space(None);
+        }
+        self.open_room(index);
+        if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
+            self.sidebar.cursor = at;
+            self.sidebar.reveal_cursor = true;
+        }
+    }
+
+    fn preview_dir_entry(&mut self) {
+        let (entry, server_hint) = match &self.modal {
+            Some(Modal::New(popup)) if popup.stage == Stage::Browse => {
+                let Some(entry) = popup.dir_results.get(popup.dir_selected).cloned() else {
+                    return;
+                };
+                let server_hint = sanitize_line(popup.dir_server.as_str()).trim().to_owned();
+                (entry, server_hint)
+            }
+            _ => return,
+        };
+        if let Some(index) = self.find_joined_room(&entry.room_id).or_else(|| {
+            entry
+                .alias
+                .as_deref()
+                .and_then(|alias| self.find_joined_room(alias))
+        }) {
+            self.close_manage();
+            self.open_joined_room_index(index);
+            return;
+        }
+        let target = entry
+            .alias
+            .clone()
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| entry.room_id.clone());
+        let mut via = Vec::new();
+        if !server_hint.is_empty() {
+            via.push(server_hint);
+        }
+        if let Some((_, hs)) = entry.room_id.split_once(':')
+            && !via.iter().any(|s| s == hs)
+        {
+            via.push(hs.to_owned());
+        }
+        let request = self.next_request();
+        let has_matrix = self.matrix.is_some();
+        if let Some(Modal::New(popup)) = &mut self.modal {
+            popup.go(Stage::Preview);
+            Self::prepare_preview_popup(
+                popup,
+                target.clone(),
+                via.clone(),
+                true,
+                has_matrix.then_some(request),
+            );
+        }
+        if has_matrix {
+            self.manage(ManageCmd::Preview {
+                request,
+                target,
+                via,
+            });
+        }
+    }
+
+    fn submit_preview_button(&mut self, button: PreviewButton) {
+        match button {
+            PreviewButton::Cancel => {
+                let from_browse = matches!(
+                    &self.modal,
+                    Some(Modal::New(popup)) if popup.stage == Stage::Preview && popup.preview_from_browse
+                );
+                if from_browse {
+                    if let Some(Modal::New(popup)) = &mut self.modal {
+                        popup.go(Stage::Browse);
+                    }
+                } else {
+                    self.close_manage();
+                }
+                return;
+            }
+            PreviewButton::Open => {
+                let idx = match &self.modal {
+                    Some(Modal::New(popup)) => popup
+                        .preview
+                        .as_ref()
+                        .and_then(|p| self.find_joined_room(&p.room_id))
+                        .or_else(|| self.find_joined_room(&popup.preview_target)),
+                    _ => None,
+                };
+                self.close_manage();
+                if let Some(index) = idx {
+                    self.open_joined_room_index(index);
+                }
+                return;
+            }
+            PreviewButton::Accept => {
+                let room_id = match &self.modal {
+                    Some(Modal::New(popup)) => popup
+                        .preview
+                        .as_ref()
+                        .map(|p| p.room_id.clone())
+                        .unwrap_or_else(|| popup.preview_target.clone()),
+                    _ => return,
+                };
+                if let Some(room_id) = self
+                    .rooms
+                    .iter()
+                    .find(|r| r.id == room_id && r.kind == RoomKind::Invite)
+                    .map(|r| r.id.clone())
+                {
+                    let request = self.next_request();
+                    if let Some(Modal::New(popup)) = &mut self.modal {
+                        popup.busy = Some("Joining…");
+                        popup.request = Some(request);
+                        popup.error = None;
+                    }
+                    if !self.manage(ManageCmd::Join {
+                        request,
+                        target: room_id,
+                        via: Vec::new(),
+                    }) && let Some(Modal::New(popup)) = &mut self.modal
+                    {
+                        popup.busy = None;
+                        popup.request = None;
+                        popup.error = Some(NO_ACCOUNT.to_owned());
+                    }
+                    return;
+                }
+            }
+            PreviewButton::Withdraw => {
+                let room_id = match &self.modal {
+                    Some(Modal::New(popup)) => popup
+                        .preview
+                        .as_ref()
+                        .map(|p| p.room_id.clone())
+                        .unwrap_or_else(|| popup.preview_target.clone()),
+                    _ => return,
+                };
+                if let Some(room_id) = self
+                    .rooms
+                    .iter()
+                    .find(|r| r.id == room_id && r.kind == RoomKind::Knock)
+                    .map(|r| r.id.clone())
+                {
+                    self.close_manage();
+                    self.send_matrix(MatrixCmd::Leave { room_id });
+                    return;
+                }
+            }
+            PreviewButton::Join | PreviewButton::Knock => {}
+        }
+
+        let request = self.next_request();
+        let Some(Modal::New(popup)) = &mut self.modal else {
+            return;
+        };
+        if popup.busy.is_some() {
+            return;
+        }
+        let target = popup
+            .preview
+            .as_ref()
+            .and_then(|p| {
+                p.canonical_alias
+                    .clone()
+                    .or_else(|| Some(p.room_id.clone()))
+            })
+            .unwrap_or_else(|| popup.preview_target.clone());
+        let via = popup.preview_via.clone();
+        let (command, busy) = match button {
+            PreviewButton::Knock => {
+                let clean = sanitize_line(popup.preview_reason.as_str())
+                    .trim()
+                    .to_owned();
+                let reason = (!clean.is_empty()).then_some(clean);
+                (
+                    ManageCmd::Knock {
+                        request,
+                        target,
+                        via,
+                        reason,
+                    },
+                    "Asking to join…",
+                )
+            }
+            _ => (
+                ManageCmd::Join {
+                    request,
+                    target,
+                    via,
+                },
+                "Joining…",
+            ),
+        };
+        popup.error = None;
+        popup.busy = Some(busy);
+        popup.request = Some(request);
+        if !self.manage(command)
+            && let Some(Modal::New(popup)) = &mut self.modal
+        {
+            popup.busy = None;
+            popup.request = None;
+            popup.error = Some(NO_ACCOUNT.to_owned());
+        }
+    }
+
     // ----- room info -----------------------------------------------------------------
 
     /// Shows the room info for the room at `index`, with `select` selected.
@@ -330,6 +895,7 @@ impl App {
     pub(super) fn close_manage(&mut self) {
         if matches!(self.modal, Some(Modal::New(_))) {
             self.cancel_user_search();
+            self.cancel_dir_search();
         }
         if matches!(self.modal, Some(Modal::RoomInfo(_))) {
             self.manage(ManageCmd::StopInfo);
@@ -341,6 +907,14 @@ impl App {
 
     /// Esc: one step back.
     pub(super) fn manage_escape(&mut self) {
+        if let Some(Modal::New(popup)) = &mut self.modal
+            && popup.busy.is_none()
+            && popup.stage == Stage::Preview
+            && popup.preview_from_browse
+        {
+            popup.go(Stage::Browse);
+            return;
+        }
         let back_to_choose = matches!(
             &self.modal,
             Some(Modal::New(popup))
@@ -348,6 +922,7 @@ impl App {
         );
         if back_to_choose {
             self.cancel_user_search();
+            self.cancel_dir_search();
             if let Some(Modal::New(popup)) = &mut self.modal {
                 popup.go(Stage::Choose);
             }
@@ -356,12 +931,19 @@ impl App {
         match &mut self.modal {
             Some(Modal::New(_)) => self.close_manage(),
             Some(Modal::RoomInfo(info)) => {
+                if let Some(SettingSubview::Addresses { confirm_delete, .. }) =
+                    &mut info.setting_view
+                    && confirm_delete.take().is_some()
+                {
+                    return;
+                }
                 if info.ban_prompt.take().is_some()
                     || info.role_chooser.take().is_some()
                     || info.editing.take().is_some()
+                    || info.setting_view.take().is_some()
                     || info.confirm.take().is_some()
                 {
-                    // Stepped back from typing, choosing a role, or the question.
+                    // Stepped back from typing, choosing a role, room setting, or the question.
                 } else if !info.filter.is_empty() {
                     info.set_filter(String::new());
                 } else {
@@ -372,21 +954,80 @@ impl App {
         }
     }
 
-    pub(super) fn on_manage_paste(&mut self, first_line: &str) {
+    pub(super) fn on_manage_paste(&mut self, full_text: &str, first_line: &str) {
         match &mut self.modal {
             Some(Modal::New(popup)) if popup.busy.is_none() => {
                 let search_stage = matches!(popup.stage, Stage::Direct | Stage::Invite);
+                let browse_stage = popup.stage == Stage::Browse;
                 if let Some(field) = popup.field_mut()
                     && field.paste(first_line).changed()
                 {
                     popup.error = None;
                     if search_stage {
                         self.on_user_search_input_changed();
+                    } else if browse_stage {
+                        self.on_dir_search_input_changed();
                     }
                 }
             }
             Some(Modal::RoomInfo(info)) => {
-                if let Some(prompt) = &mut info.ban_prompt {
+                if let Some(subview) = &mut info.setting_view {
+                    if info.busy.is_some() {
+                        return;
+                    }
+                    match subview {
+                        SettingSubview::EncryptConfirm {
+                            confirm,
+                            focus,
+                            error,
+                        } => {
+                            if *focus == 0 && confirm.paste(first_line).changed() {
+                                *error = None;
+                            }
+                        }
+                        SettingSubview::Picture {
+                            path,
+                            focus,
+                            error,
+                            notice,
+                        } => match dropped_single_image_path(full_text) {
+                            Ok(Some(dropped)) => {
+                                path.set(dropped);
+                                *focus = 0;
+                                *error = None;
+                                *notice =
+                                    Some("Image file ready — press Enter to upload.".to_owned());
+                            }
+                            Ok(None) => {
+                                if *focus == 0 && path.paste(first_line).changed() {
+                                    *error = None;
+                                    *notice = None;
+                                }
+                            }
+                            Err(msg) => {
+                                *error = Some(msg.to_owned());
+                                *notice = None;
+                            }
+                        },
+                        SettingSubview::Addresses {
+                            input,
+                            focus,
+                            confirm_delete,
+                            error,
+                            notice,
+                            ..
+                        } => {
+                            if *focus == 0 && input.paste(first_line).changed() {
+                                *confirm_delete = None;
+                                *error = None;
+                                *notice = None;
+                            }
+                        }
+                        SettingSubview::JoinRule { .. }
+                        | SettingSubview::History { .. }
+                        | SettingSubview::Permissions { .. } => {}
+                    }
+                } else if let Some(prompt) = &mut info.ban_prompt {
                     prompt.reason.paste(first_line);
                 } else if let Some((_, edit)) = &mut info.editing {
                     edit.paste(first_line);
@@ -415,6 +1056,9 @@ impl App {
         };
         if code == KeyCode::Esc {
             return self.manage_escape();
+        }
+        if info.setting_view.is_some() {
+            return self.on_setting_view_key(code, mods);
         }
         if let Some(prompt) = &mut info.ban_prompt {
             if code == KeyCode::Enter && plain {
@@ -461,6 +1105,32 @@ impl App {
             KeyCode::Left | KeyCode::Right if row == Some(InfoRow::Notify) && plain => {
                 self.info_activate(InfoRow::Notify, if code == KeyCode::Left { -1 } else { 1 });
             }
+            KeyCode::Left if row == Some(InfoRow::SettingsToggle) && plain => {
+                if info.settings_open {
+                    info.settings_open = false;
+                    info.error = None;
+                    info.notice = None;
+                    info.reveal = true;
+                }
+            }
+            KeyCode::Right if row == Some(InfoRow::SettingsToggle) && plain => {
+                if !info.settings_open {
+                    info.settings_open = true;
+                    info.error = None;
+                    info.notice = None;
+                    info.reveal = true;
+                }
+            }
+            KeyCode::Char(' ')
+                if matches!(
+                    row,
+                    Some(InfoRow::SettingsToggle | InfoRow::Setting(RoomSetting::Direct))
+                ) && plain =>
+            {
+                if let Some(row) = row {
+                    self.info_activate(row, 0);
+                }
+            }
             KeyCode::Enter => {
                 if let Some(row) = row {
                     self.info_activate(row, 0);
@@ -469,13 +1139,17 @@ impl App {
             KeyCode::Delete if matches!(row, Some(InfoRow::Member(_))) => {
                 self.remove_or_unban_member()
             }
+            KeyCode::Delete if matches!(row, Some(InfoRow::KnockRequest(_))) => {
+                self.decline_knock()
+            }
             KeyCode::Char('i')
                 if mods == KeyModifiers::ALT && matches!(row, Some(InfoRow::Member(_))) =>
             {
                 self.toggle_ignore_member();
             }
             KeyCode::Char('b')
-                if mods == KeyModifiers::ALT && matches!(row, Some(InfoRow::Member(_))) =>
+                if mods == KeyModifiers::ALT
+                    && matches!(row, Some(InfoRow::Member(_) | InfoRow::KnockRequest(_))) =>
             {
                 self.open_ban_prompt();
             }
@@ -486,9 +1160,9 @@ impl App {
             }
             _ => {
                 let keys = EditKeys {
-                    arrows: row != Some(InfoRow::Notify),
+                    arrows: row != Some(InfoRow::Notify) && row != Some(InfoRow::SettingsToggle),
                     home_end: false,
-                    delete: !matches!(row, Some(InfoRow::Member(_))),
+                    delete: !matches!(row, Some(InfoRow::Member(_) | InfoRow::KnockRequest(_))),
                     kill_to_end: true,
                 };
                 info.apply_filter(|f| f.handle_key(code, mods, keys));
@@ -530,6 +1204,33 @@ impl App {
                 }
                 _ => {}
             },
+            Click::BrowseRow(index) => {
+                if let Some(Modal::New(popup)) = &mut self.modal
+                    && popup.stage == Stage::Browse
+                    && popup.busy.is_none()
+                    && index < popup.dir_results.len()
+                {
+                    popup.dir_selected = index;
+                    self.preview_dir_entry();
+                }
+            }
+            Click::PreviewBtn(index) => {
+                let btn = match &mut self.modal {
+                    Some(Modal::New(popup))
+                        if popup.stage == Stage::Preview && popup.busy.is_none() =>
+                    {
+                        let btn = popup.preview_buttons().get(index).copied();
+                        if btn.is_some() {
+                            popup.focus = usize::from(popup.preview_has_reason()) + index;
+                        }
+                        btn
+                    }
+                    _ => None,
+                };
+                if let Some(btn) = btn {
+                    self.submit_preview_button(btn);
+                }
+            }
             Click::Row(index) | Click::Step(index, _) | Click::Select(index) => {
                 let Some(Modal::RoomInfo(info)) = &mut self.modal else {
                     return;
@@ -563,12 +1264,54 @@ impl App {
             Click::MemberRole => self.open_role_chooser(),
             Click::RoleOption(index) => self.pick_role_option(index),
             Click::MemberIgnore => self.toggle_ignore_member(),
+            Click::KnockAccept => self.accept_knock(),
+            Click::KnockDecline => self.decline_knock(),
+            Click::KnockBan => self.open_ban_prompt(),
             Click::Favourite => self.toggle_room_tag(false),
             Click::LowPriority => self.toggle_room_tag(true),
             // The name above the messages is the open room's, wherever the focus is.
             Click::OpenInfo => {
                 let open = (self.active < self.rooms.len()).then_some(self.active);
                 self.open_info(open, None);
+            }
+            Click::SettingChoice(idx) => self.on_setting_choice(idx),
+            Click::SettingSlot(slot) => self.on_setting_slot(slot),
+            Click::AddressRow(idx) => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && let Some(SettingSubview::Addresses {
+                        selected,
+                        confirm_delete,
+                        error,
+                        notice,
+                        ..
+                    }) = &mut info.setting_view
+                {
+                    *selected = idx;
+                    *confirm_delete = None;
+                    *error = None;
+                    *notice = None;
+                }
+            }
+            Click::AddressMakeMain(idx) => self.make_main_alias_at(idx),
+            Click::AddressPublishAlt(idx) => self.publish_alt_alias_at(idx),
+            Click::AddressUnpublish(idx) => self.unpublish_alias_at(idx),
+            Click::AddressDeleteLocal(idx) => self.delete_local_alias_at(idx),
+            Click::PermSet(row_idx, level) => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && info.setting_editable(RoomSetting::Permissions)
+                    && let Some(action) = PermAction::ALL.get(row_idx).copied()
+                    && let Some(SettingSubview::Permissions {
+                        draft,
+                        selected,
+                        error,
+                    }) = &mut info.setting_view
+                {
+                    *selected = row_idx;
+                    action.set(draft, level);
+                    *error = None;
+                }
             }
         }
     }
@@ -578,8 +1321,8 @@ impl App {
             self.show_toast("No room is open");
             return;
         };
-        if room.kind == RoomKind::Invite {
-            self.show_toast("Accept the invitation first");
+        if room.is_pending() {
+            self.show_toast(room.kind.pending_hint());
             return;
         }
         let room_id = room.id.clone();
@@ -610,6 +1353,7 @@ impl App {
             return;
         }
         info.error = None;
+        info.notice = None;
         let room_id = info.room_id.clone();
         let confirmed = std::mem::take(&mut info.confirm);
         // Nothing is changed, shown as changed or asked about where there is no
@@ -621,8 +1365,9 @@ impl App {
                 | InfoRow::Topic
                 | InfoRow::Invite
                 | InfoRow::Pinned
+                | InfoRow::SettingsToggle
                 | InfoRow::Member(_)
-        );
+        ) && !matches!(row, InfoRow::Setting(s) if s != RoomSetting::Direct);
         if sends && !connected {
             info.error = Some(NO_ACCOUNT.to_owned());
             return;
@@ -710,6 +1455,28 @@ impl App {
                 }
                 (ManageCmd::Leave { room_id }, Pending::Leave, "Leaving…")
             }
+            InfoRow::KnockRequest(_) => return self.accept_knock(),
+            InfoRow::SettingsToggle => {
+                info.settings_open = !info.settings_open;
+                info.reveal = true;
+                return;
+            }
+            InfoRow::Setting(RoomSetting::Direct) => {
+                let Some(details) = &mut info.details else {
+                    return;
+                };
+                let next = !details.direct;
+                details.direct = next;
+                (
+                    ManageCmd::SetDirect {
+                        room_id,
+                        direct: next,
+                    },
+                    Pending::Change(Change::Direct(next)),
+                    "Saving…",
+                )
+            }
+            InfoRow::Setting(setting) => return self.activate_room_setting(setting),
             InfoRow::Member(_) => {
                 return self.open_user_info_from_room_member(row);
             }
@@ -810,6 +1577,72 @@ impl App {
         }
     }
 
+    fn accept_knock(&mut self) {
+        let connected = self.matrix.is_some();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || info.editing.is_some() {
+            return;
+        }
+        info.error = None;
+        info.confirm = None;
+        info.ban_prompt = None;
+        info.role_chooser = None;
+        let Some(req) = info.selected_knock_request().cloned() else {
+            return;
+        };
+        if !req.acceptable {
+            info.error = Some("You are not allowed to accept this request.".to_owned());
+            return;
+        }
+        if !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        info.wait_for(Pending::Change(Change::AcceptKnock), "Accepting…");
+        let room_id = info.room_id.clone();
+        self.manage(ManageCmd::AcceptKnock {
+            room_id,
+            user_id: req.user_id,
+        });
+    }
+
+    /// Del on an incoming knock request: asks first, declines on the second press.
+    fn decline_knock(&mut self) {
+        let connected = self.matrix.is_some();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || info.editing.is_some() {
+            return;
+        }
+        info.error = None;
+        info.ban_prompt = None;
+        info.role_chooser = None;
+        let Some(req) = info.selected_knock_request().cloned() else {
+            return;
+        };
+        if !req.declinable {
+            info.confirm = None;
+            info.error = Some("You are not allowed to decline this request.".to_owned());
+            return;
+        }
+        let user_id = req.user_id;
+        if info.confirm != Some(Confirm::DeclineKnock(user_id.clone())) {
+            info.confirm = Some(Confirm::DeclineKnock(user_id));
+            return;
+        }
+        info.confirm = None;
+        if !connected {
+            info.error = Some(NO_ACCOUNT.to_owned());
+            return;
+        }
+        info.wait_for(Pending::Change(Change::DeclineKnock), "Declining…");
+        let room_id = info.room_id.clone();
+        self.manage(ManageCmd::DeclineKnock { room_id, user_id });
+    }
+
     fn open_ban_prompt(&mut self) {
         let Some(Modal::RoomInfo(info)) = &mut self.modal else {
             return;
@@ -820,25 +1653,27 @@ impl App {
         info.error = None;
         info.confirm = None;
         info.role_chooser = None;
-        let Some(member) = info.selected_member().cloned() else {
-            return;
-        };
-        if !member.bannable {
-            info.error = Some(if member.own {
-                "You cannot ban yourself.".to_owned()
-            } else if member.banned {
-                "This user is already banned.".to_owned()
-            } else {
-                "You are not allowed to ban this member.".to_owned()
-            });
-            return;
+        if let Some(member) = info.selected_member().cloned() {
+            if !member.bannable {
+                info.error = Some(if member.own {
+                    "You cannot ban yourself.".to_owned()
+                } else if member.banned {
+                    "This user is already banned.".to_owned()
+                } else {
+                    "You are not allowed to ban this member.".to_owned()
+                });
+                return;
+            }
+            let name = display_user_label(&member.name, &member.user_id);
+            info.ban_prompt = Some(BanPrompt::new(member.user_id, name));
+        } else if let Some(req) = info.selected_knock_request().cloned() {
+            if !req.bannable {
+                info.error = Some("You are not allowed to ban this user.".to_owned());
+                return;
+            }
+            let name = display_user_label(&req.name, &req.user_id);
+            info.ban_prompt = Some(BanPrompt::for_knock(req.user_id, name));
         }
-        let name = if member.name.is_empty() {
-            member.user_id.clone()
-        } else {
-            sanitize_line(&member.name)
-        };
-        info.ban_prompt = Some(BanPrompt::new(member.user_id, name));
     }
 
     fn submit_ban_prompt(&mut self) {
@@ -858,13 +1693,28 @@ impl App {
             (!trimmed.is_empty()).then_some(trimmed)
         };
         info.error = None;
-        info.wait_for(Pending::Change(Change::Ban), "Banning…");
         let room_id = info.room_id.clone();
-        self.manage(ManageCmd::Ban {
-            room_id,
-            user_id: prompt.user_id,
-            reason,
-        });
+        let (change, cmd) = if prompt.knock {
+            (
+                Change::BanKnock,
+                ManageCmd::BanKnock {
+                    room_id,
+                    user_id: prompt.user_id,
+                    reason,
+                },
+            )
+        } else {
+            (
+                Change::Ban,
+                ManageCmd::Ban {
+                    room_id,
+                    user_id: prompt.user_id,
+                    reason,
+                },
+            )
+        };
+        info.wait_for(Pending::Change(change), "Banning…");
+        self.manage(cmd);
     }
 
     fn unban_member(&mut self) {
@@ -1094,37 +1944,98 @@ impl App {
 
     // ----- answers from the worker ---------------------------------------------------
 
+    fn finish_open_or_knock(
+        &mut self,
+        request: u64,
+        result: Result<String, String>,
+        fallback_toast: &str,
+        open_toast: Option<&str>,
+    ) {
+        let asked = match &mut self.modal {
+            Some(Modal::New(popup)) if popup.request == Some(request) => {
+                popup.request = None;
+                popup.busy = None;
+                true
+            }
+            Some(Modal::RoomInfo(info)) => info.answered(Pending::Chat(request)),
+            _ => false,
+        };
+        match (result, asked) {
+            (Ok(room_id), true) => {
+                self.close_manage();
+                self.manage.pending_open = Some((room_id, Instant::now()));
+                self.open_pending_room();
+                if let Some(toast) = open_toast {
+                    self.show_toast(toast);
+                }
+            }
+            (Ok(_), false) => self.show_toast(fallback_toast),
+            (Err(error), true) => match &mut self.modal {
+                Some(Modal::New(popup)) => popup.error = Some(error),
+                Some(Modal::RoomInfo(info)) => info.error = Some(error),
+                _ => {}
+            },
+            (Err(error), false) => self.show_toast(error),
+        }
+    }
+
     pub(super) fn on_manage(&mut self, event: ManageEvent) {
         match event {
             ManageEvent::Opened { request, result } => {
                 if self.on_user_info_manage_opened(request, &result) {
                     return;
                 }
-                // Only the popup that asked for exactly this is touched by the answer.
-                let asked = match &mut self.modal {
-                    Some(Modal::New(popup)) if popup.request == Some(request) => {
-                        popup.request = None;
-                        popup.busy = None;
-                        true
+                self.finish_open_or_knock(
+                    request,
+                    result,
+                    "Done: the room is in your room list",
+                    None,
+                );
+            }
+            ManageEvent::Knocked { request, result } => {
+                self.finish_open_or_knock(
+                    request,
+                    result,
+                    "Join request sent",
+                    Some("Join request sent"),
+                );
+            }
+            ManageEvent::Preview { request, result } => {
+                let mut membership_override = None;
+                if let Ok(ref preview) = result
+                    && preview.membership == PreviewMembership::None
+                {
+                    membership_override =
+                        self.rooms
+                            .iter()
+                            .find(|r| r.id == preview.room_id)
+                            .map(|r| match r.kind {
+                                RoomKind::Invite => PreviewMembership::Invited,
+                                RoomKind::Knock => PreviewMembership::Knocked,
+                                _ => PreviewMembership::Joined,
+                            });
+                }
+                if let Some(Modal::New(popup)) = &mut self.modal
+                    && popup.stage == Stage::Preview
+                    && popup.preview_request == Some(request)
+                {
+                    popup.preview_loading = false;
+                    popup.preview_request = None;
+                    match result {
+                        Ok(mut preview) => {
+                            if let Some(m) = membership_override {
+                                preview.membership = m;
+                            }
+                            popup.preview = Some(*preview);
+                            popup.error = None;
+                            popup.focus = popup.default_preview_focus();
+                        }
+                        Err(error) => {
+                            popup.preview = None;
+                            popup.error = Some(error);
+                            popup.focus = popup.default_preview_focus();
+                        }
                     }
-                    Some(Modal::RoomInfo(info)) => info.answered(Pending::Chat(request)),
-                    _ => false,
-                };
-                match (result, asked) {
-                    (Ok(room_id), true) => {
-                        self.close_manage();
-                        self.manage.pending_open = Some((room_id, Instant::now()));
-                        self.open_pending_room();
-                    }
-                    // Whoever asked has closed the form and moved on: the room is
-                    // there, but nothing jumps to it or closes what is open now.
-                    (Ok(_), false) => self.show_toast("Done: the room is in your room list"),
-                    (Err(error), true) => match &mut self.modal {
-                        Some(Modal::New(popup)) => popup.error = Some(error),
-                        Some(Modal::RoomInfo(info)) => info.error = Some(error),
-                        _ => {}
-                    },
-                    (Err(error), false) => self.show_toast(error),
                 }
             }
             ManageEvent::NoDirectChat { request, user_id } => {
@@ -1209,6 +2120,9 @@ impl App {
             Change::Ban => "Banned from the room",
             Change::Unban => "Unbanned",
             Change::SetRole => "Role updated",
+            Change::AcceptKnock => "Join request accepted",
+            Change::DeclineKnock => "Join request declined",
+            Change::BanKnock => "Declined and banned",
             Change::Name => "Room renamed",
             Change::OwnName => "Name in room updated",
             Change::Topic => "Topic changed",
@@ -1217,6 +2131,17 @@ impl App {
             Change::LowPriority(true) => "Marked low priority",
             Change::LowPriority(false) => "Removed from low priority",
             Change::Notify => "",
+            Change::JoinRule => "Who can join updated",
+            Change::HistoryVisibility => "History visibility updated",
+            Change::EnableEncryption => "Encryption turned on",
+            Change::RoomAvatar => "Room picture updated",
+            Change::RemoveRoomAvatar => "Room picture removed",
+            Change::Addresses => "Room addresses updated",
+            Change::CreateLocalAlias => "Local address created",
+            Change::DeleteLocalAlias => "Local address deleted",
+            Change::Direct(true) => "Marked as a direct chat",
+            Change::Direct(false) => "Unmarked as a direct chat",
+            Change::Permissions => "Permissions updated",
         };
         if self.on_user_info_manage_done(room_id, change, done, &result) {
             return;
@@ -1246,12 +2171,48 @@ impl App {
                 info.answered(Pending::Change(change));
                 match result {
                     Ok(()) => {
+                        match change {
+                            Change::Addresses
+                            | Change::CreateLocalAlias
+                            | Change::DeleteLocalAlias => {
+                                if let Some(SettingSubview::Addresses {
+                                    input,
+                                    confirm_delete,
+                                    error,
+                                    notice,
+                                    ..
+                                }) = &mut info.setting_view
+                                {
+                                    if change != Change::DeleteLocalAlias {
+                                        input.clear();
+                                    }
+                                    *confirm_delete = None;
+                                    *error = None;
+                                    *notice = (!done.is_empty()).then(|| done.to_owned());
+                                }
+                            }
+                            Change::JoinRule
+                            | Change::HistoryVisibility
+                            | Change::EnableEncryption
+                            | Change::RoomAvatar
+                            | Change::RemoveRoomAvatar
+                            | Change::Permissions => {
+                                info.setting_view = None;
+                                if !done.is_empty() {
+                                    info.notice = Some(done.to_owned());
+                                }
+                            }
+                            Change::Direct(_) if !done.is_empty() => {
+                                info.notice = Some(done.to_owned());
+                            }
+                            _ => {}
+                        }
                         if !done.is_empty() {
                             self.show_toast(done);
                         }
                     }
                     Err(error) => {
-                        info.error = Some(error);
+                        self.setting_view_error(error);
                         // What was shown ahead of the answer is not true; look again.
                         let room_id = room_id.to_owned();
                         self.manage(ManageCmd::Info { room_id });
@@ -1324,6 +2285,898 @@ impl App {
             self.sidebar.reveal_cursor = true;
         }
     }
+
+    fn send_room_setting(&mut self, change: Change, cmd: ManageCmd, busy: &'static str) -> bool {
+        if self.matrix.is_none() {
+            self.setting_view_error(NO_ACCOUNT);
+            return false;
+        }
+        if let Some(Modal::RoomInfo(info)) = &mut self.modal {
+            info.error = None;
+            info.notice = None;
+            info.wait_for(Pending::Change(change), busy);
+        }
+        self.manage(cmd)
+    }
+
+    fn setting_view_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        match &mut info.setting_view {
+            Some(SettingSubview::EncryptConfirm { error, .. }) => *error = Some(message),
+            Some(SettingSubview::Picture { error, notice, .. }) => {
+                *error = Some(message);
+                *notice = None;
+            }
+            Some(SettingSubview::Addresses { error, notice, .. }) => {
+                *error = Some(message);
+                *notice = None;
+            }
+            Some(SettingSubview::Permissions { error, .. }) => *error = Some(message),
+            _ => info.error = Some(message),
+        }
+    }
+
+    fn activate_room_setting(&mut self, setting: RoomSetting) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        let Some(details) = &info.details else {
+            return;
+        };
+        let editable = info.setting_editable(setting);
+        match setting {
+            RoomSetting::JoinRule => {
+                if !editable {
+                    info.error = Some(
+                        if details.join_rule.is_some_and(|r| r.to_ruma().is_none()) {
+                            "This room uses a restricted or custom join rule that cannot be edited here.".to_owned()
+                        } else {
+                            "You do not have permission to change who can join.".to_owned()
+                        },
+                    );
+                    return;
+                }
+                let selected = details
+                    .join_rule
+                    .and_then(|cur| RoomJoinRule::EDITABLE.iter().position(|r| *r == cur))
+                    .unwrap_or(0);
+                info.setting_view = Some(SettingSubview::JoinRule { selected });
+            }
+            RoomSetting::History => {
+                if !editable {
+                    info.error =
+                        Some("You do not have permission to change history visibility.".to_owned());
+                    return;
+                }
+                let selected = details
+                    .history_visibility
+                    .and_then(|cur| RoomHistory::ALL.iter().position(|h| *h == cur))
+                    .unwrap_or(0);
+                info.setting_view = Some(SettingSubview::History { selected });
+            }
+            RoomSetting::Encryption => {
+                if details.encrypted == Some(true) {
+                    info.error =
+                        Some("End-to-end encryption cannot be turned off once enabled.".to_owned());
+                    return;
+                }
+                if details.encrypted.is_none() {
+                    info.error = Some("Encryption status is not known yet.".to_owned());
+                    return;
+                }
+                if !editable {
+                    info.error =
+                        Some("You do not have permission to turn on encryption.".to_owned());
+                    return;
+                }
+                info.setting_view = Some(SettingSubview::EncryptConfirm {
+                    confirm: LineEdit::new().with_max_bytes(16),
+                    focus: 0,
+                    error: None,
+                });
+            }
+            RoomSetting::Picture => {
+                if !editable {
+                    info.error =
+                        Some("You do not have permission to change the room picture.".to_owned());
+                    return;
+                }
+                info.setting_view = Some(SettingSubview::Picture {
+                    path: LineEdit::new().with_max_bytes(FIELD_MAX),
+                    focus: 0,
+                    error: None,
+                    notice: None,
+                });
+            }
+            RoomSetting::Addresses => {
+                info.setting_view = Some(SettingSubview::Addresses {
+                    input: LineEdit::new().with_max_bytes(FIELD_MAX),
+                    focus: 0,
+                    selected: 0,
+                    confirm_delete: None,
+                    error: None,
+                    notice: None,
+                });
+            }
+            RoomSetting::Permissions => {
+                info.setting_view = Some(SettingSubview::Permissions {
+                    draft: details.permissions,
+                    selected: 0,
+                    error: None,
+                });
+            }
+            RoomSetting::Direct => {}
+        }
+    }
+
+    fn on_setting_view_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() {
+            return;
+        }
+        let can_edit_addresses = info.setting_editable(RoomSetting::Addresses);
+        let can_edit_permissions = info.setting_editable(RoomSetting::Permissions);
+        let has_avatar = info
+            .details
+            .as_ref()
+            .is_some_and(|d| d.avatar_url.is_some());
+        let has_canonical = info
+            .details
+            .as_ref()
+            .is_some_and(|d| d.canonical_alias.is_some());
+        let entry_count = info
+            .details
+            .as_ref()
+            .map_or(0, |d| address_entries(d).len());
+        match &mut info.setting_view {
+            Some(SettingSubview::JoinRule { selected }) => {
+                let len = RoomJoinRule::EDITABLE.len() as isize;
+                match code {
+                    KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
+                        *selected = (*selected as isize - 1).rem_euclid(len) as usize;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if code == KeyCode::Down || plain => {
+                        *selected = (*selected as isize + 1).rem_euclid(len) as usize;
+                    }
+                    KeyCode::Enter if plain => {
+                        let choice = *selected;
+                        self.on_setting_choice(choice);
+                    }
+                    _ => {}
+                }
+            }
+            Some(SettingSubview::History { selected }) => {
+                let len = RoomHistory::ALL.len() as isize;
+                match code {
+                    KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
+                        *selected = (*selected as isize - 1).rem_euclid(len) as usize;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if code == KeyCode::Down || plain => {
+                        *selected = (*selected as isize + 1).rem_euclid(len) as usize;
+                    }
+                    KeyCode::Enter if plain => {
+                        let choice = *selected;
+                        self.on_setting_choice(choice);
+                    }
+                    _ => {}
+                }
+            }
+            Some(SettingSubview::EncryptConfirm {
+                confirm,
+                focus,
+                error,
+            }) => match code {
+                KeyCode::Tab if mods.is_empty() => {
+                    *focus = step_focus(*focus, &[0, 1, 2], 1);
+                }
+                KeyCode::BackTab => {
+                    *focus = step_focus(*focus, &[0, 1, 2], -1);
+                }
+                KeyCode::Left | KeyCode::Right if *focus >= 1 && plain => {
+                    let step = if code == KeyCode::Left { -1 } else { 1 };
+                    *focus = step_focus(*focus, &[1, 2], step);
+                }
+                KeyCode::Enter if plain => {
+                    if *focus == 2 {
+                        info.setting_view = None;
+                    } else {
+                        self.submit_enable_encryption();
+                    }
+                }
+                _ if *focus == 0 && confirm.handle_key(code, mods, EditKeys::FULL).changed() => {
+                    *error = None;
+                }
+                _ => {}
+            },
+            Some(SettingSubview::Picture {
+                path,
+                focus,
+                error,
+                notice,
+            }) => {
+                let stops: &[usize] = if has_avatar {
+                    &[0, 1, 2, 3]
+                } else {
+                    &[0, 1, 3]
+                };
+                let btn_stops: &[usize] = if has_avatar { &[1, 2, 3] } else { &[1, 3] };
+                match code {
+                    KeyCode::Tab if mods.is_empty() && *focus == 0 && !path.is_empty() => {
+                        self.complete_room_avatar_path();
+                    }
+                    KeyCode::Tab if mods.is_empty() => {
+                        *focus = step_focus(*focus, stops, 1);
+                    }
+                    KeyCode::BackTab => {
+                        *focus = step_focus(*focus, stops, -1);
+                    }
+                    KeyCode::Left | KeyCode::Right if *focus >= 1 && plain => {
+                        let step = if code == KeyCode::Left { -1 } else { 1 };
+                        *focus = step_focus(*focus, btn_stops, step);
+                    }
+                    KeyCode::Enter if plain => {
+                        let slot = if *focus == 0 { 1 } else { *focus };
+                        self.on_setting_slot(slot);
+                    }
+                    _ if *focus == 0 && path.handle_key(code, mods, EditKeys::FULL).changed() => {
+                        *error = None;
+                        *notice = None;
+                    }
+                    _ => {}
+                }
+            }
+            Some(SettingSubview::Addresses {
+                input,
+                focus,
+                selected,
+                confirm_delete,
+                error,
+                notice,
+            }) => {
+                if !can_edit_addresses {
+                    match code {
+                        KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
+                            *selected = selected.saturating_sub(1);
+                        }
+                        KeyCode::Down | KeyCode::Char('j')
+                            if (code == KeyCode::Down || plain) && *selected + 1 < entry_count =>
+                        {
+                            *selected += 1;
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                let stops: &[usize] = if has_canonical {
+                    &[0, 1, 2, 3]
+                } else {
+                    &[0, 1, 2]
+                };
+                let btn_stops: &[usize] = if has_canonical { &[1, 2, 3] } else { &[1, 2] };
+                match code {
+                    KeyCode::Tab if mods.is_empty() => {
+                        *focus = step_focus(*focus, stops, 1);
+                    }
+                    KeyCode::BackTab => {
+                        *focus = step_focus(*focus, stops, -1);
+                    }
+                    KeyCode::Up => {
+                        *selected = selected.saturating_sub(1);
+                        *confirm_delete = None;
+                    }
+                    KeyCode::Down => {
+                        if *selected + 1 < entry_count {
+                            *selected += 1;
+                        }
+                        *confirm_delete = None;
+                    }
+                    KeyCode::Left | KeyCode::Right if *focus >= 1 && plain => {
+                        let step = if code == KeyCode::Left { -1 } else { 1 };
+                        *focus = step_focus(*focus, btn_stops, step);
+                    }
+                    KeyCode::Enter if plain => {
+                        let slot = if *focus == 0 { 1 } else { *focus };
+                        self.on_setting_slot(slot);
+                    }
+                    KeyCode::Char('k') if *focus != 0 && plain => {
+                        *selected = selected.saturating_sub(1);
+                        *confirm_delete = None;
+                    }
+                    KeyCode::Char('j') if *focus != 0 && plain => {
+                        if *selected + 1 < entry_count {
+                            *selected += 1;
+                        }
+                        *confirm_delete = None;
+                    }
+                    KeyCode::Char('m') if *focus != 0 && plain => {
+                        let idx = *selected;
+                        self.make_main_alias_at(idx);
+                    }
+                    KeyCode::Char('u') if *focus != 0 && plain => {
+                        let idx = *selected;
+                        self.unpublish_alias_at(idx);
+                    }
+                    KeyCode::Delete if *focus != 0 && plain => {
+                        let idx = *selected;
+                        self.delete_local_alias_at(idx);
+                    }
+                    _ if *focus == 0 && input.handle_key(code, mods, EditKeys::FULL).changed() => {
+                        *confirm_delete = None;
+                        *error = None;
+                        *notice = None;
+                    }
+                    _ => {}
+                }
+            }
+            Some(SettingSubview::Permissions {
+                draft,
+                selected,
+                error,
+            }) => {
+                if !can_edit_permissions {
+                    if code == KeyCode::Enter && plain {
+                        info.setting_view = None;
+                    }
+                    return;
+                }
+                let rows = PermAction::ALL.len();
+                let max_sel = rows + 1;
+                match code {
+                    KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
+                        *selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if code == KeyCode::Down || plain => {
+                        if *selected < max_sel {
+                            *selected += 1;
+                        }
+                    }
+                    KeyCode::Tab if mods.is_empty() => {
+                        *selected = if *selected < rows {
+                            rows
+                        } else if *selected == rows {
+                            rows + 1
+                        } else {
+                            0
+                        };
+                    }
+                    KeyCode::BackTab => {
+                        *selected = if *selected == rows + 1 {
+                            rows
+                        } else if *selected == rows {
+                            rows.saturating_sub(1)
+                        } else if *selected == 0 {
+                            rows + 1
+                        } else {
+                            *selected - 1
+                        };
+                    }
+                    KeyCode::Left | KeyCode::Right if plain => {
+                        let step = if code == KeyCode::Left { -1 } else { 1 };
+                        if let Some(action) = PermAction::ALL.get(*selected).copied() {
+                            let next = step_perm_level(action.get(draft), step);
+                            action.set(draft, next);
+                            *error = None;
+                        } else if *selected >= rows {
+                            *selected = if *selected == rows { rows + 1 } else { rows };
+                        }
+                    }
+                    KeyCode::Enter if plain => {
+                        if *selected == max_sel {
+                            info.setting_view = None;
+                        } else {
+                            self.submit_permissions();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn on_setting_choice(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() {
+            return;
+        }
+        let room_id = info.room_id.clone();
+        match &mut info.setting_view {
+            Some(SettingSubview::JoinRule { selected }) => {
+                let Some(&rule) = RoomJoinRule::EDITABLE.get(idx) else {
+                    return;
+                };
+                *selected = idx;
+                if info.details.as_ref().and_then(|d| d.join_rule) == Some(rule) {
+                    info.setting_view = None;
+                    return;
+                }
+                self.send_room_setting(
+                    Change::JoinRule,
+                    ManageCmd::SetJoinRule { room_id, rule },
+                    "Saving…",
+                );
+            }
+            Some(SettingSubview::History { selected }) => {
+                let Some(&visibility) = RoomHistory::ALL.get(idx) else {
+                    return;
+                };
+                *selected = idx;
+                if info.details.as_ref().and_then(|d| d.history_visibility) == Some(visibility) {
+                    info.setting_view = None;
+                    return;
+                }
+                self.send_room_setting(
+                    Change::HistoryVisibility,
+                    ManageCmd::SetHistoryVisibility {
+                        room_id,
+                        visibility,
+                    },
+                    "Saving…",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn on_setting_slot(&mut self, slot: usize) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() {
+            return;
+        }
+        match &info.setting_view {
+            Some(SettingSubview::EncryptConfirm { .. }) => match slot {
+                1 => self.submit_enable_encryption(),
+                2 => info.setting_view = None,
+                _ => {}
+            },
+            Some(SettingSubview::Picture { .. }) => match slot {
+                1 => self.submit_room_avatar(),
+                2 => self.submit_remove_room_avatar(),
+                3 => info.setting_view = None,
+                _ => {}
+            },
+            Some(SettingSubview::Addresses { .. }) => match slot {
+                1 => self.create_local_alias(),
+                2 => self.publish_input_alt_alias(),
+                3 => self.clear_main_alias(),
+                _ => {}
+            },
+            Some(SettingSubview::Permissions { .. }) => match slot {
+                0 => self.submit_permissions(),
+                1 => info.setting_view = None,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn submit_enable_encryption(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Encryption) {
+            self.setting_view_error("Encryption cannot be turned on in this room.");
+            return;
+        }
+        let room_id = info.room_id.clone();
+        let typed = match &info.setting_view {
+            Some(SettingSubview::EncryptConfirm { confirm, .. }) => {
+                confirm.as_str().trim().to_owned()
+            }
+            _ => return,
+        };
+        if typed != "ENCRYPT" {
+            self.setting_view_error("Type ENCRYPT in capitals to turn encryption on.");
+            return;
+        }
+        self.send_room_setting(
+            Change::EnableEncryption,
+            ManageCmd::EnableEncryption { room_id },
+            "Turning encryption on…",
+        );
+    }
+
+    fn complete_room_avatar_path(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        let Some(SettingSubview::Picture {
+            path,
+            error,
+            notice,
+            ..
+        }) = &mut info.setting_view
+        else {
+            return;
+        };
+        match complete_path_field(path) {
+            PathCompleteResult::Empty => {
+                *error = Some("Type the beginning of a file path first.".to_owned());
+                *notice = None;
+            }
+            PathCompleteResult::Handled {
+                notice: msg,
+                changed,
+                has_options,
+            } => {
+                if changed || has_options {
+                    *error = None;
+                    *notice = msg;
+                } else {
+                    *error = Some("No file or folder starts with that path.".to_owned());
+                    *notice = None;
+                }
+            }
+            PathCompleteResult::NoMatch => {
+                *error = Some("No file or folder starts with that path.".to_owned());
+                *notice = None;
+            }
+        }
+    }
+
+    fn submit_room_avatar(&mut self) {
+        let limit = self.attach.limit;
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Picture) {
+            self.setting_view_error("You do not have permission to change the room picture.");
+            return;
+        }
+        let room_id = info.room_id.clone();
+        let raw = match &info.setting_view {
+            Some(SettingSubview::Picture { path, .. }) => path.as_str().to_owned(),
+            _ => return,
+        };
+        let path = match validate_avatar_path(&raw, limit) {
+            Ok(path) => path,
+            Err(err) => {
+                self.setting_view_error(err);
+                return;
+            }
+        };
+        self.send_room_setting(
+            Change::RoomAvatar,
+            ManageCmd::SetRoomAvatar { room_id, path },
+            "Uploading picture…",
+        );
+    }
+
+    fn submit_remove_room_avatar(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Picture) {
+            self.setting_view_error("You do not have permission to change the room picture.");
+            return;
+        }
+        if info.details.as_ref().is_none_or(|d| d.avatar_url.is_none()) {
+            self.setting_view_error("This room has no picture to remove.");
+            return;
+        }
+        let room_id = info.room_id.clone();
+        self.send_room_setting(
+            Change::RemoveRoomAvatar,
+            ManageCmd::RemoveRoomAvatar { room_id },
+            "Removing picture…",
+        );
+    }
+
+    fn normalized_address_input(&mut self) -> Option<NormalizedAddressInput> {
+        let (room_id, raw, own_hs, canonical, alts) = {
+            let Some(Modal::RoomInfo(info)) = &self.modal else {
+                return None;
+            };
+            let Some(details) = &info.details else {
+                return None;
+            };
+            let Some(SettingSubview::Addresses { input, .. }) = &info.setting_view else {
+                return None;
+            };
+            (
+                info.room_id.clone(),
+                input.as_str().to_owned(),
+                details.own_homeserver.clone(),
+                details.canonical_alias.clone(),
+                details.alt_aliases.clone(),
+            )
+        };
+        match normalize_alias_input(&raw, own_hs.as_deref()) {
+            Ok(alias) => Some(NormalizedAddressInput {
+                room_id,
+                alias,
+                canonical,
+                alts,
+                own_hs,
+            }),
+            Err(err) => {
+                self.setting_view_error(err);
+                None
+            }
+        }
+    }
+
+    fn submit_addresses_update(&mut self, canonical: Option<String>, alt_aliases: Vec<String>) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Addresses) {
+            self.setting_view_error("You do not have permission to edit room addresses.");
+            return;
+        }
+        let room_id = info.room_id.clone();
+        self.send_room_setting(
+            Change::Addresses,
+            ManageCmd::SetAddresses {
+                room_id,
+                canonical,
+                alt_aliases,
+            },
+            "Saving addresses…",
+        );
+    }
+
+    fn create_local_alias(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Addresses) {
+            self.setting_view_error("You do not have permission to edit room addresses.");
+            return;
+        }
+        let Some(parsed) = self.normalized_address_input() else {
+            return;
+        };
+        if let Some(hs) = parsed.own_hs.as_deref()
+            && !parsed.alias.ends_with(&format!(":{hs}"))
+        {
+            self.setting_view_error(format!(
+                "Local addresses must be on your homeserver (:{hs})."
+            ));
+            return;
+        }
+        self.send_room_setting(
+            Change::CreateLocalAlias,
+            ManageCmd::CreateLocalAlias {
+                room_id: parsed.room_id,
+                alias: parsed.alias,
+            },
+            "Creating local address…",
+        );
+    }
+
+    fn publish_input_alt_alias(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Addresses) {
+            self.setting_view_error("You do not have permission to edit room addresses.");
+            return;
+        }
+        let Some(mut parsed) = self.normalized_address_input() else {
+            return;
+        };
+        if parsed.canonical.as_deref() == Some(parsed.alias.as_str()) {
+            self.setting_view_error("That address is already the main address.");
+            return;
+        }
+        if parsed.alts.contains(&parsed.alias) {
+            self.setting_view_error("That address is already published as an alternate.");
+            return;
+        }
+        parsed.alts.push(parsed.alias);
+        self.submit_addresses_update(parsed.canonical, parsed.alts);
+    }
+
+    fn clear_main_alias(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if !info.setting_editable(RoomSetting::Addresses) {
+            self.setting_view_error("You do not have permission to edit room addresses.");
+            return;
+        }
+        let Some(details) = &info.details else {
+            return;
+        };
+        if details.canonical_alias.is_none() {
+            return;
+        }
+        let alts = details.alt_aliases.clone();
+        self.submit_addresses_update(None, alts);
+    }
+
+    fn make_main_alias_at(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if info.busy.is_some() || !info.setting_editable(RoomSetting::Addresses) {
+            return;
+        }
+        let Some(details) = &info.details else {
+            return;
+        };
+        let entries = address_entries(details);
+        let Some(entry) = entries.get(idx) else {
+            return;
+        };
+        if entry.is_canonical {
+            return;
+        }
+        let next_main = entry.alias.clone();
+        let mut alts: Vec<String> = details
+            .alt_aliases
+            .iter()
+            .filter(|a| *a != &next_main)
+            .cloned()
+            .collect();
+        if let Some(prev) = &details.canonical_alias
+            && prev != &next_main
+            && !alts.contains(prev)
+        {
+            alts.push(prev.clone());
+        }
+        self.submit_addresses_update(Some(next_main), alts);
+    }
+
+    fn publish_alt_alias_at(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if info.busy.is_some() || !info.setting_editable(RoomSetting::Addresses) {
+            return;
+        }
+        let Some(details) = &info.details else {
+            return;
+        };
+        let entries = address_entries(details);
+        let Some(entry) = entries.get(idx) else {
+            return;
+        };
+        if entry.is_canonical || entry.is_alt {
+            return;
+        }
+        let canonical = details.canonical_alias.clone();
+        let mut alts = details.alt_aliases.clone();
+        alts.push(entry.alias.clone());
+        self.submit_addresses_update(canonical, alts);
+    }
+
+    fn unpublish_alias_at(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        if info.busy.is_some() || !info.setting_editable(RoomSetting::Addresses) {
+            return;
+        }
+        let Some(details) = &info.details else {
+            return;
+        };
+        let entries = address_entries(details);
+        let Some(entry) = entries.get(idx) else {
+            return;
+        };
+        if !entry.is_canonical && !entry.is_alt {
+            return;
+        }
+        let canonical = details
+            .canonical_alias
+            .clone()
+            .filter(|a| a != &entry.alias);
+        let alts = details
+            .alt_aliases
+            .iter()
+            .filter(|a| *a != &entry.alias)
+            .cloned()
+            .collect();
+        self.submit_addresses_update(canonical, alts);
+    }
+
+    fn delete_local_alias_at(&mut self, idx: usize) {
+        let Some(Modal::RoomInfo(info)) = &mut self.modal else {
+            return;
+        };
+        if info.busy.is_some() || !info.setting_editable(RoomSetting::Addresses) {
+            return;
+        }
+        let room_id = info.room_id.clone();
+        let Some(details) = &info.details else {
+            return;
+        };
+        let entries = address_entries(details);
+        let Some(entry) = entries.get(idx) else {
+            return;
+        };
+        let own_hs = details.own_homeserver.as_deref();
+        let local_on_own_hs =
+            entry.is_local && own_hs.is_none_or(|hs| entry.alias.ends_with(&format!(":{hs}")));
+        if !local_on_own_hs {
+            self.setting_view_error("Only local addresses on your homeserver can be deleted here.");
+            return;
+        }
+        let alias = entry.alias.clone();
+        if let Some(SettingSubview::Addresses {
+            confirm_delete,
+            error,
+            notice,
+            ..
+        }) = &mut info.setting_view
+        {
+            if confirm_delete.as_deref() != Some(alias.as_str()) {
+                *confirm_delete = Some(alias);
+                *error = None;
+                *notice = None;
+                return;
+            }
+            *confirm_delete = None;
+        } else {
+            return;
+        }
+        self.send_room_setting(
+            Change::DeleteLocalAlias,
+            ManageCmd::DeleteLocalAlias { room_id, alias },
+            "Deleting local address…",
+        );
+    }
+
+    fn submit_permissions(&mut self) {
+        let Some(Modal::RoomInfo(info)) = &self.modal else {
+            return;
+        };
+        let Some(details) = &info.details else {
+            return;
+        };
+        let Some(SettingSubview::Permissions { draft, .. }) = &info.setting_view else {
+            return;
+        };
+        if let Err(err) = validate_permissions_draft(details, draft) {
+            self.setting_view_error(err);
+            return;
+        }
+        let room_id = info.room_id.clone();
+        let permissions = *draft;
+        self.send_room_setting(
+            Change::Permissions,
+            ManageCmd::SetPermissions {
+                room_id,
+                permissions,
+            },
+            "Saving permissions…",
+        );
+    }
+}
+
+struct NormalizedAddressInput {
+    room_id: String,
+    alias: String,
+    canonical: Option<String>,
+    alts: Vec<String>,
+    own_hs: Option<String>,
+}
+
+fn step_focus(current: usize, stops: &[usize], step: isize) -> usize {
+    let idx = stops.iter().position(|&s| s == current).unwrap_or(0) as isize;
+    stops[(idx + step).rem_euclid(stops.len() as isize) as usize]
+}
+
+fn step_perm_level(current: i64, step: isize) -> i64 {
+    let levels = PermAction::LEVELS;
+    let idx = levels
+        .iter()
+        .position(|(level, _)| *level >= current)
+        .unwrap_or(levels.len() - 1) as isize;
+    let next_idx = (idx + step).clamp(0, levels.len() as isize - 1) as usize;
+    levels[next_idx].0
 }
 
 /// The demo's rooms have no server to ask: everyone who wrote is a member.
@@ -1367,6 +3220,14 @@ fn demo_details(room: &crate::model::Room) -> RoomDetails {
         can_invite: false,
         members,
         ..RoomDetails::default()
+    }
+}
+
+fn display_user_label(name: &str, user_id: &str) -> String {
+    if name.is_empty() {
+        user_id.to_owned()
+    } else {
+        sanitize_line(name)
     }
 }
 
@@ -3193,6 +5054,7 @@ mod tests {
             RoomKind::SECTIONS,
             [
                 RoomKind::Invite,
+                RoomKind::Knock,
                 RoomKind::Favourite,
                 RoomKind::Person,
                 RoomKind::Room,
@@ -3313,6 +5175,1144 @@ mod tests {
         app.open_room(3); // Invited
         sent(&mut commands);
         app.manage_click(Click::LowPriority);
+        assert!(sent(&mut commands).is_empty());
+    }
+
+    fn all_commands(commands: &mut UnboundedReceiver<MatrixCmd>) -> Vec<MatrixCmd> {
+        let mut out = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            out.push(command);
+        }
+        out
+    }
+
+    #[test]
+    fn browse_public_rooms_debounce_pagination_errors_and_redaction() {
+        use crate::matrix::{PreviewJoinRule, PreviewMembership, PublicRoom, RoomPreview};
+
+        let (mut app, mut terminal, mut commands) = connected();
+        all_commands(&mut commands);
+
+        // Choosing option 4 opens Browse with own HS hint and searches immediately.
+        app.on_event(ctrl('n'));
+        app.on_event(key(KeyCode::Char('4')));
+        match &app.modal {
+            Some(Modal::New(popup)) => {
+                assert_eq!(popup.stage, Stage::Browse);
+                assert_eq!(popup.dir_default_server.as_deref(), Some("example.org"));
+                assert!(popup.dir_searching);
+            }
+            other => panic!("expected Browse modal, got {other:?}"),
+        }
+        let cmds = all_commands(&mut commands);
+        assert!(matches!(
+            cmds.as_slice(),
+            [MatrixCmd::SearchDirectory { query, server: None, generation: g }]
+                if query.is_empty() && *g > 0
+        ));
+        let g0 = app.dir_search_gen;
+
+        // Typing cancels the active worker search, arms 250 ms debounce, and ignores stale results.
+        type_text(&mut app, "rust");
+        let cmds = all_commands(&mut commands);
+        assert!(matches!(
+            cmds.as_slice(),
+            [MatrixCmd::CancelDirectorySearch]
+        ));
+        assert!(app.dir_search_debounce.is_some());
+        let g1 = app.dir_search_gen;
+        assert!(g1 > g0);
+
+        app.on_matrix(MatrixEvent::DirectoryResults(DirectoryPage {
+            generation: g0,
+            append: false,
+            rooms: vec![PublicRoom {
+                room_id: "!stale:example.org".into(),
+                name: Some("Stale".into()),
+                alias: None,
+                topic: None,
+                avatar: None,
+                joined_members: 1,
+                world_readable: false,
+                knock: false,
+                joined: false,
+            }],
+            has_more: false,
+        }));
+        if let Some(Modal::New(popup)) = &app.modal {
+            assert!(popup.dir_results.is_empty());
+        }
+
+        // Elapsed debounce dispatches the new search query.
+        app.dir_search_debounce = Instant::now().checked_sub(Duration::from_millis(300));
+        app.tick_dir_search();
+        assert!(matches!(
+            all_commands(&mut commands).as_slice(),
+            [MatrixCmd::SearchDirectory { query, server: None, generation }]
+                if query == "rust" && *generation == g1
+        ));
+
+        let page1 = DirectoryPage {
+            generation: g1,
+            append: false,
+            rooms: vec![
+                PublicRoom {
+                    room_id: ROOM.into(),
+                    name: Some("Rats".into()),
+                    alias: Some("#rats:example.org".into()),
+                    topic: Some("Already here".into()),
+                    avatar: None,
+                    joined_members: 42,
+                    world_readable: true,
+                    knock: false,
+                    joined: true,
+                },
+                PublicRoom {
+                    room_id: "!secret:example.org".into(),
+                    name: Some("Secret Club".into()),
+                    alias: Some("#club:example.org".into()),
+                    topic: Some("Ask politely to enter".into()),
+                    avatar: None,
+                    joined_members: 15,
+                    world_readable: false,
+                    knock: true,
+                    joined: false,
+                },
+                PublicRoom {
+                    room_id: "!a:example.org".into(),
+                    name: Some("Alpha".into()),
+                    alias: None,
+                    topic: None,
+                    avatar: None,
+                    joined_members: 5,
+                    world_readable: false,
+                    knock: false,
+                    joined: false,
+                },
+                PublicRoom {
+                    room_id: "!b:example.org".into(),
+                    name: Some("Beta".into()),
+                    alias: None,
+                    topic: None,
+                    avatar: None,
+                    joined_members: 4,
+                    world_readable: false,
+                    knock: false,
+                    joined: false,
+                },
+            ],
+            has_more: true,
+        };
+        app.on_matrix(MatrixEvent::DirectoryResults(page1.clone()));
+        insta::assert_snapshot!("directory_browse", screen(&mut app, &mut terminal));
+
+        // Stepping near the bottom triggers pagination cleanly once and deduplicates.
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        assert!(matches!(
+            all_commands(&mut commands).as_slice(),
+            [MatrixCmd::DirectoryNextPage { generation }] if *generation == g1
+        ));
+        app.on_matrix(MatrixEvent::DirectoryResults(DirectoryPage {
+            generation: g1,
+            append: true,
+            rooms: vec![
+                // Duplicate room ID must not be inserted twice.
+                PublicRoom {
+                    room_id: "!b:example.org".into(),
+                    name: Some("Beta".into()),
+                    alias: None,
+                    topic: None,
+                    avatar: None,
+                    joined_members: 4,
+                    world_readable: false,
+                    knock: false,
+                    joined: false,
+                },
+                PublicRoom {
+                    room_id: "!c:example.org".into(),
+                    name: Some("Gamma".into()),
+                    alias: None,
+                    topic: Some("Third page entry".into()),
+                    avatar: None,
+                    joined_members: 3,
+                    world_readable: false,
+                    knock: false,
+                    joined: false,
+                },
+            ],
+            has_more: false,
+        }));
+        if let Some(Modal::New(popup)) = &app.modal {
+            assert_eq!(popup.dir_results.len(), 5);
+            assert!(!popup.dir_has_more);
+        }
+
+        // Switching to Server field + error + Enter retries; Enter on joined room opens it directly.
+        app.on_event(key(KeyCode::Tab));
+        type_text(&mut app, "other.org");
+        app.dir_search_debounce = Instant::now().checked_sub(Duration::from_millis(300));
+        app.tick_dir_search();
+        let g2 = app.dir_search_gen;
+        assert!(matches!(
+            all_commands(&mut commands).as_slice(),
+            [MatrixCmd::SearchDirectory { query, server: Some(s), generation }]
+                if query == "rust" && s == "other.org" && *generation == g2
+        ));
+        let err_event = MatrixEvent::DirectoryError {
+            generation: g2,
+            message: "other.org does not share a public room directory.".into(),
+        };
+        app.on_matrix(err_event);
+        let err_screen = screen(&mut app, &mut terminal);
+        find(&err_screen, "does not share a public room directory");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            all_commands(&mut commands).as_slice(),
+            [MatrixCmd::SearchDirectory { server: Some(s), .. }] if s == "other.org"
+        ));
+
+        // Deliver joined entry and hit Enter -> closes popup and switches to ROOM directly.
+        let g3 = app.dir_search_gen;
+        app.on_matrix(MatrixEvent::DirectoryResults(DirectoryPage {
+            generation: g3,
+            append: false,
+            rooms: vec![page1.rooms[0].clone()],
+            has_more: false,
+        }));
+        app.open_room(1); // start in CHAT so switching to ROOM proves navigation
+        all_commands(&mut commands);
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.room().map(|r| r.id.as_str()), Some(ROOM));
+
+        // Redacting Debug checks.
+        let secret_preview = RoomPreview {
+            room_id: "!topsecret:other.org".into(),
+            canonical_alias: Some("#hidden-alias:other.org".into()),
+            name: Some("Private Name".into()),
+            topic: Some("Confidential Topic".into()),
+            avatar: Some("mxc://other.org/abc".into()),
+            joined_members: 9,
+            join_rule: PreviewJoinRule::Knock,
+            encrypted: None,
+            world_readable: false,
+            membership: PreviewMembership::None,
+            via: vec!["other.org".into()],
+        };
+        for dbg in [
+            format!("{page1:?}"),
+            format!("{:?}", page1.rooms[0]),
+            format!("{secret_preview:?}"),
+            format!(
+                "{:?}",
+                MatrixCmd::SearchDirectory {
+                    query: "secretquery".into(),
+                    server: Some("secret.org".into()),
+                    generation: 1
+                }
+            ),
+            format!(
+                "{:?}",
+                MatrixEvent::DirectoryError {
+                    generation: 1,
+                    message: "secret error body".into(),
+                }
+            ),
+            format!(
+                "{:?}",
+                ManageCmd::Knock {
+                    request: 1,
+                    target: "#club:example.org".into(),
+                    via: vec!["example.org".into()],
+                    reason: Some("secret reason".into()),
+                }
+            ),
+            format!("{:?}", NewPopup::new(Stage::Browse)),
+        ] {
+            for leaked in [
+                "Rats",
+                "Already here",
+                "topsecret",
+                "hidden-alias",
+                "Private Name",
+                "Confidential Topic",
+                "secretquery",
+                "secret.org",
+                "secret error",
+                "#club:example.org",
+                "secret reason",
+            ] {
+                assert!(!dbg.contains(leaked), "leaked {leaked:?} in {dbg}");
+            }
+        }
+    }
+
+    #[test]
+    fn preview_and_knock_flow_and_pending_withdraw() {
+        use crate::matrix::{PreviewJoinRule, PreviewMembership, PublicRoom, RoomPreview};
+
+        let (mut app, mut terminal, mut commands) = connected();
+        all_commands(&mut commands);
+
+        // Browse -> Enter on unjoined knock room -> Preview -> Esc back to Browse -> Re-enter -> Knock.
+        app.on_event(ctrl('n'));
+        app.on_event(key(KeyCode::Char('4')));
+        let g = app.dir_search_gen;
+        all_commands(&mut commands);
+        app.on_matrix(MatrixEvent::DirectoryResults(DirectoryPage {
+            generation: g,
+            append: false,
+            rooms: vec![PublicRoom {
+                room_id: "!club:other.org".into(),
+                name: Some("Tea Club".into()),
+                alias: Some("#club:other.org".into()),
+                topic: Some("Warm tea discussions".into()),
+                avatar: None,
+                joined_members: 18,
+                world_readable: false,
+                knock: true,
+                joined: false,
+            }],
+            has_more: false,
+        }));
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::New(p)) if p.stage == Stage::Preview && p.preview_loading && p.preview_from_browse
+        ));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::Preview { target, via, .. }]
+                if target == "#club:other.org" && via == &["other.org".to_owned()]
+        ));
+
+        let req = app.manage.requests;
+        answer(
+            &mut app,
+            ManageEvent::Preview {
+                request: req,
+                result: Ok(Box::new(RoomPreview {
+                    room_id: "!club:other.org".into(),
+                    canonical_alias: Some("#club:other.org".into()),
+                    name: Some("Tea Club".into()),
+                    topic: Some("Warm tea discussions".into()),
+                    avatar: None,
+                    joined_members: 18,
+                    join_rule: PreviewJoinRule::Knock,
+                    encrypted: None,
+                    world_readable: false,
+                    membership: PreviewMembership::None,
+                    via: vec!["other.org".into()],
+                })),
+            },
+        );
+        insta::assert_snapshot!("room_preview_knock", screen(&mut app, &mut terminal));
+
+        // Esc goes back to Browse preserving directory results; Enter opens Preview again.
+        app.on_event(key(KeyCode::Esc));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::New(p)) if p.stage == Stage::Browse && p.dir_results.len() == 1
+        ));
+        app.on_event(key(KeyCode::Enter));
+        sent(&mut commands);
+        let req2 = app.manage.requests;
+        answer(
+            &mut app,
+            ManageEvent::Preview {
+                request: req2,
+                result: Ok(Box::new(RoomPreview {
+                    room_id: "!club:other.org".into(),
+                    canonical_alias: Some("#club:other.org".into()),
+                    name: Some("Tea Club".into()),
+                    topic: Some("Warm tea discussions".into()),
+                    avatar: None,
+                    joined_members: 18,
+                    join_rule: PreviewJoinRule::Knock,
+                    encrypted: None,
+                    world_readable: false,
+                    membership: PreviewMembership::None,
+                    via: vec!["other.org".into()],
+                })),
+            },
+        );
+
+        // Move to Reason, type reason, Enter advances to Ask to join, Enter sends Knock.
+        app.on_event(key(KeyCode::BackTab));
+        type_text(&mut app, "I love oolong");
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::Knock { target, reason: Some(r), .. }]
+                if target == "#club:other.org" && r == "I love oolong"
+        ));
+
+        let knock_req = app.manage.requests;
+        answer(
+            &mut app,
+            ManageEvent::Knocked {
+                request: knock_req,
+                result: Ok("!club:other.org".into()),
+            },
+        );
+        assert!(app.modal.is_none());
+
+        // Pending knock appears in sidebar and blocks member-only actions cleanly.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Rats", RoomCategory::Room),
+            summary(CHAT, "bob", RoomCategory::Person),
+            summary("!club:other.org", "Tea Club", RoomCategory::Knock),
+        ]));
+        assert_eq!(app.room().map(|r| r.id.as_str()), Some("!club:other.org"));
+        assert_eq!(app.room().map(|r| r.kind), Some(RoomKind::Knock));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Pending knocks");
+        find(&text, "asked to join this room");
+        find(&text, "Withdraw");
+
+        // Trying to invite / toggle favourite / open search on pending knock is refused.
+        app.open_new(Stage::Invite);
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|t| t.0.as_str()),
+            Some("Wait for your join request to be accepted first")
+        );
+        app.manage_click(Click::Favourite);
+        assert!(sent(&mut commands).is_empty());
+
+        // Palette labels Leave as "Withdraw join request for Tea Club…" and Room info uses Withdraw confirm.
+        app.on_event(ctrl('p'));
+        let pal_text = screen(&mut app, &mut terminal);
+        assert!(
+            !pal_text.contains("Decline the invitation"),
+            "unexpected Invite copy in palette:\n{pal_text}"
+        );
+        app.on_event(key(KeyCode::Esc));
+
+        app.on_event(key(KeyCode::F(4)));
+        sent(&mut commands);
+        app.on_event(key(KeyCode::Enter)); // first Enter on Leave -> "Withdraw request" confirm
+        assert!(screen(&mut app, &mut terminal).contains("Enter again to withdraw"));
+        app.on_event(key(KeyCode::Esc));
+        app.on_event(key(KeyCode::Esc));
+        sent(&mut commands);
+
+        // Clicking timeline Withdraw pill sends MatrixCmd::Leave.
+        all_commands(&mut commands);
+        app.perform(Action::WithdrawKnock);
+        assert!(matches!(
+            all_commands(&mut commands).as_slice(),
+            [MatrixCmd::Leave { room_id }] if room_id == "!club:other.org"
+        ));
+
+        // Accepting our knock server-side promotes the room and triggers timeline load.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Rats", RoomCategory::Room),
+            summary(CHAT, "bob", RoomCategory::Person),
+            summary("!club:other.org", "Tea Club", RoomCategory::Room),
+        ]));
+        assert_eq!(app.room().map(|r| r.kind), Some(RoomKind::Room));
+        let cmds = all_commands(&mut commands);
+        assert!(cmds.iter().any(
+            |c| matches!(c, MatrixCmd::OpenRoom { room_id, .. } if room_id == "!club:other.org")
+        ));
+        assert!(cmds.iter().any(
+            |c| matches!(c, MatrixCmd::FetchMembers { room_id } if room_id == "!club:other.org")
+        ));
+    }
+
+    #[test]
+    fn link_opens_preview_and_membership_variants() {
+        use crate::manage::PreviewButton;
+        use crate::matrix::{PreviewJoinRule, PreviewMembership, RoomPreview};
+
+        let (mut app, _terminal, mut commands) = connected();
+        all_commands(&mut commands);
+        assert!(app.try_open_matrix_link("https://matrix.to/#/#club:other.org"));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::New(p))
+                if p.stage == Stage::Preview
+                    && p.preview_loading
+                    && !p.preview_from_browse
+                    && p.preview_target == "#club:other.org"
+        ));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::Preview { target, via, .. }]
+                if target == "#club:other.org" && via.is_empty()
+        ));
+
+        let mut base_preview = RoomPreview {
+            room_id: "!club:other.org".into(),
+            canonical_alias: Some("#club:other.org".into()),
+            name: Some("Tea Club".into()),
+            topic: None,
+            avatar: None,
+            joined_members: 4,
+            join_rule: PreviewJoinRule::Knock,
+            encrypted: Some(true),
+            world_readable: false,
+            membership: PreviewMembership::None,
+            via: vec![],
+        };
+
+        let cases = [
+            (
+                PreviewMembership::Joined,
+                vec![PreviewButton::Open, PreviewButton::Cancel],
+            ),
+            (
+                PreviewMembership::Invited,
+                vec![PreviewButton::Accept, PreviewButton::Cancel],
+            ),
+            (
+                PreviewMembership::Knocked,
+                vec![PreviewButton::Withdraw, PreviewButton::Cancel],
+            ),
+            (PreviewMembership::Banned, vec![PreviewButton::Cancel]),
+        ];
+        for (membership, expected) in cases {
+            assert!(app.try_open_matrix_link("matrix:r/club:other.org"));
+            sent(&mut commands);
+            let req = app.manage.requests;
+            let mut p = base_preview.clone();
+            p.membership = membership;
+            answer(
+                &mut app,
+                ManageEvent::Preview {
+                    request: req,
+                    result: Ok(Box::new(p)),
+                },
+            );
+            let Some(Modal::New(popup)) = &app.modal else {
+                panic!("expected Preview modal for {membership:?}");
+            };
+            assert_eq!(popup.preview_buttons(), expected);
+        }
+
+        // PreviewButton::Open on an already-known local room switches straight to it without re-joining.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary(ROOM, "Rats", RoomCategory::Room),
+            summary("!club:other.org", "Tea Club", RoomCategory::Room),
+        ]));
+        app.open_room(0);
+        all_commands(&mut commands);
+        assert!(app.try_open_matrix_link("https://matrix.to/#/#club:other.org"));
+        sent(&mut commands);
+        let req = app.manage.requests;
+        base_preview.membership = PreviewMembership::Joined;
+        answer(
+            &mut app,
+            ManageEvent::Preview {
+                request: req,
+                result: Ok(Box::new(base_preview)),
+            },
+        );
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.room().map(|r| r.id.as_str()), Some("!club:other.org"));
+        assert!(sent(&mut commands).is_empty());
+
+        // Preview failure still allows falling back to Join / Ask to join / Cancel.
+        assert!(app.try_open_matrix_link("https://matrix.to/#/%21broken:other.org"));
+        sent(&mut commands);
+        let req = app.manage.requests;
+        answer(
+            &mut app,
+            ManageEvent::Preview {
+                request: req,
+                result: Err("unreachable".into()),
+            },
+        );
+        let Some(Modal::New(popup)) = &app.modal else {
+            panic!("expected fallback Preview modal");
+        };
+        assert_eq!(
+            popup.preview_buttons(),
+            vec![
+                PreviewButton::Join,
+                PreviewButton::Knock,
+                PreviewButton::Cancel
+            ]
+        );
+    }
+
+    #[test]
+    fn room_info_incoming_knock_requests_and_permissions() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.open_room(0);
+        app.on_event(key(KeyCode::F(4)));
+        all_commands(&mut commands);
+
+        let carol = "@carol:example.org";
+        let dave = "@dave:example.org";
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(RoomDetails {
+                name: "Rats".into(),
+                joined: 1,
+                knock_requests: vec![
+                    crate::matrix::RoomKnockRequest {
+                        user_id: carol.into(),
+                        name: "Carol".into(),
+                        reason: Some("let me in".into()),
+                        acceptable: true,
+                        declinable: true,
+                        bannable: true,
+                    },
+                    crate::matrix::RoomKnockRequest {
+                        user_id: dave.into(),
+                        name: "Dave".into(),
+                        reason: None,
+                        acceptable: true,
+                        declinable: false,
+                        bannable: false,
+                    },
+                ],
+                members: vec![member("me", MemberRole::Admin, false)],
+                ..RoomDetails::default()
+            })),
+        }));
+
+        if let Some(Modal::RoomInfo(info)) = &mut app.modal {
+            info.select(InfoRow::KnockRequest(0));
+        }
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Join requests (2)");
+        find(&text, "Carol");
+        find(&text, "let me in");
+        find(&text, "Dave");
+        let accept_at = find(&text, " accept ");
+        find(&text, " decline ");
+        find(&text, " ban ");
+
+        // Clicking `accept` pill sends AcceptKnock and waits.
+        app.on_event(click(accept_at.0 + 1, accept_at.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::AcceptKnock { room_id, user_id }]
+                if room_id == ROOM && user_id == carol
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::AcceptKnock,
+            result: Ok(()),
+        }));
+
+        // Del asks to confirm declining on first press, then sends DeclineKnock on second.
+        app.on_event(key(KeyCode::Delete));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Del again to decline");
+        app.on_event(key(KeyCode::Delete));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::DeclineKnock { room_id, user_id }]
+                if room_id == ROOM && user_id == carol
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::DeclineKnock,
+            result: Ok(()),
+        }));
+
+        // Alt-B opens BanPrompt and sends BanKnock with optional reason.
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::ALT,
+        )));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Ban Carol");
+        type_text(&mut app, "spam");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::BanKnock { room_id, user_id, reason: Some(r) }]
+                if room_id == ROOM && user_id == carol && r == "spam"
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::BanKnock,
+            result: Ok(()),
+        }));
+
+        // Dave only has `acceptable: true`: Del and Alt-B show permission errors cleanly.
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(info(&app).current(), Some(InfoRow::KnockRequest(1)));
+        app.on_event(key(KeyCode::Delete));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "not allowed to decline");
+
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::ALT,
+        )));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "not allowed to ban");
+
+        // Enter on Dave accepts his request.
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::AcceptKnock { room_id, user_id }]
+                if room_id == ROOM && user_id == dave
+        ));
+    }
+
+    #[test]
+    fn room_settings_toggle_all_views_and_guards() {
+        use crate::matrix::{RoomPermissions, RoomSettingsPower};
+
+        let (mut app, mut terminal, mut commands) = connected();
+        app.open_room(0);
+        app.on_event(key(KeyCode::F(4)));
+        all_commands(&mut commands);
+
+        let full_power = RoomSettingsPower {
+            can_join_rule: true,
+            can_history: true,
+            can_encrypt: true,
+            can_avatar: true,
+            can_aliases: true,
+            can_permissions: true,
+        };
+        let base_details = || RoomDetails {
+            name: "Rats".into(),
+            joined: 2,
+            encrypted: Some(false),
+            direct: false,
+            join_rule: Some(RoomJoinRule::Invite),
+            history_visibility: Some(RoomHistory::Invited),
+            canonical_alias: Some("#main:example.org".into()),
+            alt_aliases: vec!["#alt:example.org".into()],
+            local_aliases: vec!["#main:example.org".into(), "#local:example.org".into()],
+            own_homeserver: Some("example.org".into()),
+            own_power_level: 100,
+            settings_power: full_power,
+            permissions: RoomPermissions {
+                send_messages: 0,
+                invite: 0,
+                kick: 50,
+                ban: 50,
+                redact: 50,
+                change_settings: 50,
+                power_levels_event_level: 50,
+                explicit_power_levels_rule: false,
+            },
+            members: vec![member("me", MemberRole::Admin, false)],
+            ..RoomDetails::default()
+        };
+
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(base_details())),
+        }));
+
+        // Collapsed by default right above Members.
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "▸ Room settings");
+        assert!(!info(&app).settings_open);
+
+        // Expand with Enter / Space / Right, collapse with Left.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::SettingsToggle);
+        }
+        app.on_event(key(KeyCode::Right));
+        assert!(info(&app).settings_open);
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "▾ Room settings");
+        find(&text, "Who can join");
+        find(&text, "Permissions");
+        insta::assert_snapshot!("room_info_settings_expanded", text);
+
+        app.on_event(key(KeyCode::Left));
+        assert!(!info(&app).settings_open);
+        app.on_event(key(KeyCode::Char(' ')));
+        assert!(info(&app).settings_open);
+
+        // 1. Join rule picker.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::JoinRule));
+        }
+        app.on_event(key(KeyCode::Enter));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Who can join");
+        find(&text, "Invite only (current)");
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetJoinRule {
+                room_id,
+                rule: RoomJoinRule::Knock
+            }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::JoinRule,
+            result: Ok(()),
+        }));
+        assert!(info(&app).setting_view.is_none());
+
+        // Restricted join rule is clearly read-only and refuses editing.
+        let mut restricted = base_details();
+        restricted.join_rule = Some(RoomJoinRule::Restricted);
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(restricted)),
+        }));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Restricted (read-only)");
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::JoinRule));
+        }
+        app.on_event(key(KeyCode::Enter));
+        assert!(info(&app).setting_view.is_none());
+        assert!(info(&app).error.is_some());
+
+        // Restore editable details.
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(base_details())),
+        }));
+
+        // 2. History visibility shows prominent warning about future messages.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::History));
+        }
+        app.on_event(key(KeyCode::Enter));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "WARNING:");
+        find(&text, "only affects future");
+        find(&text, "messages.");
+        insta::assert_snapshot!("room_settings_history_warning", text);
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetHistoryVisibility {
+                room_id,
+                visibility: RoomHistory::Joined
+            }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::HistoryVisibility,
+            result: Ok(()),
+        }));
+
+        // 3. Encryption requires exact ENCRYPT confirmation and cannot be turned off once on.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Encryption));
+        }
+        app.on_event(key(KeyCode::Enter));
+        type_text(&mut app, "encrypt");
+        app.on_event(key(KeyCode::Enter));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Type ENCRYPT in capitals");
+        for _ in 0..7 {
+            app.on_event(key(KeyCode::Backspace));
+        }
+        type_text(&mut app, "ENCRYPT");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::EnableEncryption { room_id }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::EnableEncryption,
+            result: Ok(()),
+        }));
+        let mut enc_on = base_details();
+        enc_on.encrypted = Some(true);
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(enc_on)),
+        }));
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Encryption));
+        }
+        app.on_event(key(KeyCode::Enter));
+        assert!(info(&app).setting_view.is_none());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "on · cannot be turned off");
+
+        // 4. Room picture: shared Tab completion + dropped file paste + upload + remove.
+        let pic_dir =
+            std::env::temp_dir().join(format!("matrix-rat-room-pic-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&pic_dir);
+        std::fs::create_dir_all(&pic_dir).unwrap();
+        let pic_file = pic_dir.join("room-crest.png");
+        let mut png_bytes = Vec::new();
+        crate::images::demo_picture(32, 20)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        std::fs::write(&pic_file, &png_bytes).unwrap();
+
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Picture));
+        }
+        app.on_event(key(KeyCode::Enter));
+        let prefix = pic_dir.join("room-cr").display().to_string();
+        type_text(&mut app, &prefix);
+        app.on_event(key(KeyCode::Tab));
+        if let Some(SettingSubview::Picture { path, .. }) = &info(&app).setting_view {
+            assert_eq!(path.as_str(), pic_file.display().to_string());
+        } else {
+            panic!("expected Picture subview");
+        }
+        app.on_event(key(KeyCode::Esc));
+
+        // Drag-and-drop paste fills path and sets ready notice even if non-empty.
+        app.on_event(key(KeyCode::Enter));
+        let pasted = format!("'{}'\n", pic_file.display());
+        app.on_event(Event::Paste(pasted));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Image file ready");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetRoomAvatar { room_id, path }]
+                if room_id == ROOM && path == &pic_file
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::RoomAvatar,
+            result: Ok(()),
+        }));
+
+        // Mid-edit permission withdrawal closes Picture subview.
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            info(&app).setting_view,
+            Some(SettingSubview::Picture { .. })
+        ));
+        let mut no_pic = base_details();
+        no_pic.settings_power.can_avatar = false;
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(no_pic)),
+        }));
+        assert!(info(&app).setting_view.is_none());
+        assert!(info(&app).error.is_some());
+
+        // Remove existing picture.
+        let mut has_pic = base_details();
+        has_pic.avatar_url = Some("mxc://example.org/pic".into());
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(has_pic)),
+        }));
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Picture));
+        }
+        app.on_event(key(KeyCode::Enter));
+        let text = screen(&mut app, &mut terminal);
+        let rem_btn = find(&text, "[Remove picture]");
+        app.on_event(click(rem_btn.0 + 1, rem_btn.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::RemoveRoomAvatar { room_id }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::RemoveRoomAvatar,
+            result: Ok(()),
+        }));
+        let _ = std::fs::remove_dir_all(&pic_dir);
+
+        // 5. Addresses subview: create local, publish alt, make main, unpublish, delete confirm.
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(base_details())),
+        }));
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Addresses));
+        }
+        app.on_event(key(KeyCode::Enter));
+        type_text(&mut app, "extra");
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::CreateLocalAlias { room_id, alias }]
+                if room_id == ROOM && alias == "#extra:example.org"
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::CreateLocalAlias,
+            result: Ok(()),
+        }));
+        // Stays open on Addresses and clears input.
+        assert!(matches!(
+            info(&app).setting_view,
+            Some(SettingSubview::Addresses { .. })
+        ));
+
+        // Publish input as alt.
+        type_text(&mut app, "fresh-alt");
+        let text = screen(&mut app, &mut terminal);
+        let pub_btn = find(&text, "[Publish alt]");
+        app.on_event(click(pub_btn.0 + 1, pub_btn.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetAddresses {
+                room_id,
+                canonical: Some(main),
+                alt_aliases
+            }] if room_id == ROOM
+                && main == "#main:example.org"
+                && *alt_aliases == ["#alt:example.org", "#fresh-alt:example.org"]
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::Addresses,
+            result: Ok(()),
+        }));
+
+        // Select row 2 (`#local:example.org`) and promote via Make main; then Unpublish row 1.
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        let text = screen(&mut app, &mut terminal);
+        let mk = find(&text, "[Make main]");
+        app.on_event(click(mk.0 + 1, mk.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetAddresses {
+                room_id,
+                canonical: Some(main),
+                alt_aliases
+            }] if room_id == ROOM
+                && main == "#local:example.org"
+                && *alt_aliases == ["#alt:example.org", "#main:example.org"]
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::Addresses,
+            result: Ok(()),
+        }));
+
+        // Two-step delete confirmation for local alias, Esc cancels only confirm first.
+        let text = screen(&mut app, &mut terminal);
+        let del = find(&text, "[Delete local]");
+        app.on_event(click(del.0 + 1, del.1));
+        assert!(sent(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Delete local #local:example.org?");
+        app.on_event(key(KeyCode::Esc));
+        assert!(matches!(
+            info(&app).setting_view,
+            Some(SettingSubview::Addresses {
+                confirm_delete: None,
+                ..
+            })
+        ));
+        let text = screen(&mut app, &mut terminal);
+        let del = find(&text, "[Delete local]");
+        app.on_event(click(del.0 + 1, del.1));
+        let text = screen(&mut app, &mut terminal);
+        let del2 = find(&text, "[Delete local]");
+        app.on_event(click(del2.0 + 1, del2.1));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::DeleteLocalAlias { room_id, alias }]
+                if room_id == ROOM && alias == "#local:example.org"
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::DeleteLocalAlias,
+            result: Ok(()),
+        }));
+        app.on_event(key(KeyCode::Esc));
+        assert!(info(&app).setting_view.is_none());
+
+        // 6. Direct chat toggle via Space.
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Direct));
+        }
+        app.on_event(key(KeyCode::Char(' ')));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetDirect {
+                room_id,
+                direct: true
+            }] if room_id == ROOM
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::Direct(true),
+            result: Ok(()),
+        }));
+
+        // 7. Permissions subview: level cap guard for moderator (50) and save for admin (100).
+        let mut mod_details = base_details();
+        mod_details.own_power_level = 50;
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(mod_details)),
+        }));
+        if let Some(Modal::RoomInfo(i)) = &mut app.modal {
+            i.select(InfoRow::Setting(RoomSetting::Permissions));
+        }
+        app.on_event(key(KeyCode::Enter));
+        // Move to Invite -> Moderator (50), then Ban (row 3) -> Right tries 100 -> live error & blocked save.
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Right));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "above your own level (50)");
+        app.on_event(key(KeyCode::Enter));
+        assert!(sent(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Esc));
+
+        // Admin (100) changes Invite to Moderator (50), snapshots, and saves.
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(base_details())),
+        }));
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Right));
+        let text = screen(&mut app, &mut terminal);
+        insta::assert_snapshot!("room_settings_permissions", text);
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(
+            sent(&mut commands).as_slice(),
+            [ManageCmd::SetPermissions {
+                room_id,
+                permissions
+            }] if room_id == ROOM && permissions.invite == 50
+        ));
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Done {
+            room_id: ROOM.into(),
+            change: Change::Permissions,
+            result: Ok(()),
+        }));
+        assert!(info(&app).setting_view.is_none());
+
+        // Read-only permissions view when can_permissions is false.
+        let mut plain_member = base_details();
+        plain_member.settings_power = RoomSettingsPower::default();
+        plain_member.own_power_level = 0;
+        app.on_matrix(MatrixEvent::Manage(ManageEvent::Info {
+            room_id: ROOM.into(),
+            result: Ok(Box::new(plain_member)),
+        }));
+        app.on_event(key(KeyCode::Enter));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Read-only: you do not have permission");
+        app.on_event(key(KeyCode::Enter));
+        assert!(info(&app).setting_view.is_none());
         assert!(sent(&mut commands).is_empty());
     }
 }

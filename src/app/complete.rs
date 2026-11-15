@@ -59,7 +59,7 @@ impl App {
         let Some(room) = self.room() else {
             return;
         };
-        if room.kind == RoomKind::Invite {
+        if room.is_pending() {
             self.complete.opened_for_room = None;
             return;
         }
@@ -368,9 +368,7 @@ impl App {
     fn room_targets(&self) -> Vec<RoomTarget> {
         self.rooms
             .iter()
-            .filter(|r| {
-                r.kind != RoomKind::Invite && (r.kind != RoomKind::Person || r.alias.is_some())
-            })
+            .filter(|r| !r.is_pending() && (r.kind != RoomKind::Person || r.alias.is_some()))
             .map(|r| RoomTarget {
                 id: r.id.clone(),
                 name: r.name.clone(),

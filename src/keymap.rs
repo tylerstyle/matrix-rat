@@ -170,6 +170,7 @@ action_table! {
     Action::InviteUser => ("invite_user", Context::Global, "Invite someone to this room"),
     Action::AcceptInvite => ("accept_invite", Context::Global, "Accept invitation"),
     Action::DeclineInvite => ("decline_invite", Context::Global, "Decline invitation"),
+    Action::WithdrawKnock => ("withdraw_knock", Context::Global, "Withdraw join request"),
     Action::StartVerification => ("start_verification", Context::Global, "Encryption / Verify device"),
     Action::CloseThread => ("close_thread", Context::Global, "Close thread"),
     Action::ContextMenu => ("context_menu", Context::Global, "Menu for what has the focus"),

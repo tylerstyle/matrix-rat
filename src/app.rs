@@ -317,8 +317,44 @@ pub struct App {
     pub(super) user_search_gen: u64,
     /// Deadline timer start for debounced user directory lookups in `NewPopup`.
     pub(super) user_search_debounce: Option<std::time::Instant>,
+    /// Monotonic counter for active/debounced public room directory searches.
+    pub(super) dir_search_gen: u64,
+    /// Deadline timer start for debounced public room directory searches in `NewPopup`.
+    pub(super) dir_search_debounce: Option<std::time::Instant>,
     /// The account's sessions and the key backup, for their popups.
     pub devices: crate::devices::DevicesState,
+}
+
+/// Shared 250 ms search debounce window used by directory & user lookups.
+pub(super) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Advances a search generation counter and clears any pending debounce timer,
+/// returning `(next_generation, had_pending_debounce)`.
+pub(super) fn bump_search_gen(counter: &mut u64, debounce: &mut Option<Instant>) -> (u64, bool) {
+    *counter = counter.wrapping_add(1);
+    (*counter, debounce.take().is_some())
+}
+
+/// Converts a search debounce start timestamp into a `tokio::time::Instant` deadline.
+pub(super) fn search_debounce_deadline(debounce: Option<Instant>) -> Option<tokio::time::Instant> {
+    debounce.map(|at| (at + SEARCH_DEBOUNCE).into())
+}
+
+/// Clears and returns `true` when a search debounce deadline has elapsed.
+pub(super) fn take_due_search_debounce(debounce: &mut Option<Instant>) -> bool {
+    if debounce.is_some_and(|at| at.elapsed() >= SEARCH_DEBOUNCE) {
+        *debounce = None;
+        true
+    } else {
+        false
+    }
+}
+
+async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 impl App {
@@ -491,6 +527,8 @@ impl App {
             ignored_users: std::collections::BTreeSet::new(),
             user_search_gen: 0,
             user_search_debounce: None,
+            dir_search_gen: 0,
+            dir_search_debounce: None,
             devices: Default::default(),
         }
     }
@@ -507,10 +545,10 @@ impl App {
                     .iter()
                     .enumerate()
                     .filter(|(_, room)| room.kind == *kind)
-                    // Invitations are shown in every space: they belong to none yet.
+                    // Invitations and pending knocks are shown in every space: they belong to none yet.
                     .filter(|(_, room)| {
                         self.space.is_none()
-                            || room.kind == RoomKind::Invite
+                            || room.is_pending()
                             || self.space_rooms.contains(&room.id)
                     })
                     .filter(|(i, room)| {
@@ -1080,9 +1118,9 @@ impl App {
             return crate::notify::NotifyIcon::Generic;
         }
         let room = self.rooms.iter().find(|r| r.id == notice.room_id);
-        // Never download media for unaccepted invitations.
-        let is_invite = room.is_some_and(|r| r.kind == RoomKind::Invite);
-        let avatar = if is_invite {
+        // Never download media for unaccepted invitations or pending knocks.
+        let is_pending = room.is_some_and(|r| r.is_pending());
+        let avatar = if is_pending {
             None
         } else {
             room.and_then(|r| r.avatar.clone())
@@ -1164,11 +1202,12 @@ impl App {
         self.rooms_received = false;
         self.search_gen += 1;
         self.ignored_users.clear();
-        self.user_search_gen += 1;
-        self.user_search_debounce = None;
+        bump_search_gen(&mut self.user_search_gen, &mut self.user_search_debounce);
+        bump_search_gen(&mut self.dir_search_gen, &mut self.dir_search_debounce);
         self.devices = Default::default();
         if let Some(Modal::New(popup)) = &mut self.modal {
             popup.clear_user_search();
+            popup.clear_dir_search();
         }
         if matches!(
             self.modal,
@@ -1484,11 +1523,12 @@ impl App {
         if self.composer.text().trim().is_empty() {
             return;
         }
-        if self
+        if let Some(hint) = self
             .room()
-            .is_some_and(|room| room.kind == RoomKind::Invite)
+            .filter(|room| room.is_pending())
+            .map(|room| room.kind.pending_hint())
         {
-            self.show_toast("Accept the invitation first");
+            self.show_toast(hint);
             return;
         }
         let outgoing = match self.format_outgoing(self.composer.text()) {
@@ -1610,7 +1650,7 @@ impl App {
             && (!text.starts_with('/') || text.starts_with("//") || text.starts_with("/me "))
             && self
                 .room()
-                .is_some_and(|room| room.kind != RoomKind::Invite);
+                .is_some_and(|room| !room.is_pending());
         let due = self.typing_sent.is_none_or(|sent| sent.elapsed() >= REPEAT);
         let Some(room_id) = self.room_id() else {
             return;
@@ -1632,8 +1672,7 @@ impl App {
     /// Opens the `n`th link of a message in the system browser.
     pub(super) fn find_joined_room(&self, target: &str) -> Option<usize> {
         self.rooms.iter().position(|room| {
-            room.kind != RoomKind::Invite
-                && (room.id == target || room.alias.as_deref() == Some(target))
+            !room.is_pending() && (room.id == target || room.alias.as_deref() == Some(target))
         })
     }
 
@@ -1684,8 +1723,7 @@ impl App {
                         self.sidebar.reveal_cursor = true;
                     }
                 } else {
-                    let addr = crate::manage::format_join_target(&target, &via);
-                    self.open_new_join(&addr);
+                    self.open_room_preview(&target, via);
                 }
             }
             Ok(crate::manage::Address::User(user_id)) => {
@@ -1798,8 +1836,7 @@ impl App {
                     }
                 } else if self.matrix.is_none() || self.sync == Some(SyncStatus::Synced) {
                     self.startup_target = None;
-                    let addr = crate::manage::format_join_target(&target, &via);
-                    self.open_new_join(&addr);
+                    self.open_room_preview(&target, via);
                 }
             }
             Ok(crate::manage::Address::User(user_id)) => {
@@ -1892,7 +1929,7 @@ impl App {
             _ => None,
         });
         let hidden_unread = self.room().is_some_and(|r| {
-            r.kind != RoomKind::Invite && !r.marked_unread && (r.unread > 0 || r.bold || r.mention)
+            !r.is_pending() && !r.marked_unread && (r.unread > 0 || r.bold || r.mention)
         });
         let unread_state = self
             .room()
@@ -1936,7 +1973,7 @@ impl App {
         if !(view.older_armed || filling) {
             return;
         }
-        if self.matrix.is_none() || self.room().is_none_or(|r| r.kind == RoomKind::Invite) {
+        if self.matrix.is_none() || self.room().is_none_or(|r| r.is_pending()) {
             return;
         }
         self.timeline.older_armed = false;
@@ -1967,7 +2004,7 @@ impl App {
         if !(view.newer_armed || filling) {
             return;
         }
-        if self.matrix.is_none() || self.room().is_none_or(|r| r.kind == RoomKind::Invite) {
+        if self.matrix.is_none() || self.room().is_none_or(|r| r.is_pending()) {
             return;
         }
         self.timeline.newer_armed = false;
@@ -2437,6 +2474,12 @@ impl App {
                     } else {
                         MatrixCmd::Leave { room_id }
                     });
+                }
+            }
+            Action::WithdrawKnock => {
+                let knocked = self.room().filter(|room| room.kind == RoomKind::Knock);
+                if let Some(room_id) = knocked.map(|room| room.id.clone()) {
+                    self.send_matrix(MatrixCmd::Leave { room_id });
                 }
             }
             Action::OpenEmoji => {
@@ -2985,6 +3028,11 @@ impl App {
                 generation,
                 results,
             } => self.on_user_search_results(generation, results),
+            MatrixEvent::DirectoryResults(page) => self.on_directory_results(page),
+            MatrixEvent::DirectoryError {
+                generation,
+                message,
+            } => self.on_directory_error(generation, message),
             MatrixEvent::RoomPower { room_id, power } => {
                 if let Some(room) = self.rooms.iter_mut().find(|r| r.id == room_id) {
                     room.power = power;
@@ -3023,13 +3071,9 @@ impl App {
     /// loaded messages) and keeping the same room open even if its position changed.
     fn apply_rooms(&mut self, summaries: Vec<RoomSummary>) {
         let mut open_id = self.room().map(|room| room.id.clone());
-        // Rooms arrive in batches. If all we could show so far was an invitation,
-        // look again: a real conversation is the better default.
-        if self.auto_opened
-            && self
-                .room()
-                .is_some_and(|room| room.kind == RoomKind::Invite)
-        {
+        // Rooms arrive in batches. If all we could show so far was a pending invite or
+        // knock, look again: a real conversation is the better default.
+        if self.auto_opened && self.room().is_some_and(|room| room.is_pending()) {
             open_id = None;
         }
         let cursor_id = self
@@ -3054,6 +3098,7 @@ impl App {
             .map(|summary| {
                 let kind = match summary.category {
                     RoomCategory::Invite => RoomKind::Invite,
+                    RoomCategory::Knock => RoomKind::Knock,
                     RoomCategory::Favourite => RoomKind::Favourite,
                     RoomCategory::Person => RoomKind::Person,
                     RoomCategory::Room => RoomKind::Room,
@@ -3064,7 +3109,7 @@ impl App {
                 // notification. A count that went up is news, on any server.
                 if let Some(room) = &known
                     && had_rooms
-                    && kind != RoomKind::Invite
+                    && !kind.is_pending()
                     && summary.server_notifications > room.server_count
                     && self
                         .session_started
@@ -3115,10 +3160,10 @@ impl App {
             id.as_ref()
                 .and_then(|id| rooms.iter().position(|room| room.id == *id))
         };
-        let was_invite = open_id
+        let was_pending = open_id
             .as_ref()
             .and_then(|id| old_kinds.get(id))
-            .is_some_and(|kind| *kind == RoomKind::Invite);
+            .is_some_and(|kind| kind.is_pending());
         match position(&self.rooms, &open_id) {
             Some(index) => {
                 self.active = index;
@@ -3129,8 +3174,8 @@ impl App {
                 {
                     self.timeline.hidden_read_state = None;
                 }
-                // An accepted invitation becomes a room with messages to load.
-                if was_invite && self.rooms[index].kind != RoomKind::Invite {
+                // An accepted invitation or approved knock becomes a room with messages to load.
+                if was_pending && !self.rooms[index].is_pending() {
                     self.timeline = TimelineState::default();
                     self.begin_unread_line();
                     self.request_timeline();
@@ -3146,7 +3191,7 @@ impl App {
                 self.active = self
                     .rooms
                     .iter()
-                    .position(|room| room.kind != RoomKind::Invite)
+                    .position(|room| !room.is_pending())
                     .unwrap_or(0);
                 self.timeline = TimelineState::default();
                 if matches!(self.compose_mode, ComposeMode::Edit(_)) {
@@ -3462,7 +3507,9 @@ impl App {
             }
             Some(Modal::Search(_)) => return self.search_paste(first_line),
             Some(Modal::GlobalSearch(_)) => return self.global_search_paste(first_line),
-            Some(Modal::New(_) | Modal::RoomInfo(_)) => return self.on_manage_paste(first_line),
+            Some(Modal::New(_) | Modal::RoomInfo(_)) => {
+                return self.on_manage_paste(&text, first_line);
+            }
             // A paste is not an answer to a menu.
             Some(Modal::Menu(_)) => return,
             Some(Modal::Keybinds(_)) => return,
@@ -3775,6 +3822,20 @@ impl App {
                 }
                 self.dirty = true;
             }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if matches!(
+                    self.modal,
+                    Some(Modal::New(ref popup)) if popup.stage == crate::manage::Stage::Browse
+                ) =>
+            {
+                let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                    -1
+                } else {
+                    1
+                };
+                self.scroll_dir_browse(delta);
+                self.dirty = true;
+            }
             // In the find bar the wheel goes from match to match, wherever the pointer
             // is: the bar owns the keyboard in the same way.
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
@@ -3959,6 +4020,39 @@ impl App {
                     popup.avatar_path.place(rel_col, false);
                 }
             }
+            InputTarget::RoomSettingEncrypt => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && let Some(crate::manage::SettingSubview::EncryptConfirm {
+                        confirm,
+                        focus,
+                        ..
+                    }) = &mut info.setting_view
+                {
+                    *focus = 0;
+                    confirm.place(rel_col, false);
+                }
+            }
+            InputTarget::RoomSettingAvatar => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && let Some(crate::manage::SettingSubview::Picture { path, focus, .. }) =
+                        &mut info.setting_view
+                {
+                    *focus = 0;
+                    path.place(rel_col, false);
+                }
+            }
+            InputTarget::RoomSettingAlias => {
+                if let Some(Modal::RoomInfo(info)) = &mut self.modal
+                    && info.busy.is_none()
+                    && let Some(crate::manage::SettingSubview::Addresses { input, focus, .. }) =
+                        &mut info.setting_view
+                {
+                    *focus = 0;
+                    input.place(rel_col, false);
+                }
+            }
         }
     }
 
@@ -3982,6 +4076,87 @@ impl App {
             self.dirty = true;
         }
     }
+}
+
+const PATH_OPTIONS_SHOWN: usize = 6;
+
+/// Formats up to [`PATH_OPTIONS_SHOWN`] file completion candidates for a notice or toast.
+pub(super) fn format_completion_options(options: &[String]) -> Option<String> {
+    if options.is_empty() {
+        return None;
+    }
+    let shown = options.len().min(PATH_OPTIONS_SHOWN);
+    let mut choices = options[..shown].join("  ");
+    if options.len() > shown {
+        choices.push_str(&format!("  … and {} more", options.len() - shown));
+    }
+    Some(choices)
+}
+
+/// Outcome of Tab-completing a single-file [`LineEdit`] path field.
+pub(super) enum PathCompleteResult {
+    /// Empty input: caller falls through to normal Tab navigation.
+    Empty,
+    /// Matched one or more candidates (updates `field` when `changed` is true).
+    Handled {
+        notice: Option<String>,
+        changed: bool,
+        has_options: bool,
+    },
+    /// Nothing on disk matched.
+    NoMatch,
+}
+
+/// Tab-completes a single-file path input via [`crate::upload::complete`].
+pub(super) fn complete_path_field(field: &mut LineEdit) -> PathCompleteResult {
+    let current = field.as_str().to_owned();
+    if current.is_empty() {
+        return PathCompleteResult::Empty;
+    }
+    match crate::upload::complete(&current) {
+        Some(completion) => {
+            let changed = completion.text != current;
+            let has_options = !completion.options.is_empty();
+            if changed {
+                field.set(&completion.text);
+            }
+            PathCompleteResult::Handled {
+                notice: format_completion_options(&completion.options),
+                changed,
+                has_options,
+            }
+        }
+        None => PathCompleteResult::NoMatch,
+    }
+}
+
+/// Extracts a single dropped image file path from a terminal paste, if any.
+pub(super) fn dropped_single_image_path(full_text: &str) -> Result<Option<String>, &'static str> {
+    let Some(paths) = crate::upload::dropped_files(full_text) else {
+        return Ok(None);
+    };
+    if paths.len() > 1 {
+        return Err("Drop one image file.");
+    }
+    Ok(paths.into_iter().next().map(|p| p.display().to_string()))
+}
+
+/// Validates a typed or dropped path as a single supported image within the server limit.
+pub(super) fn validate_avatar_path(raw: &str, limit: Option<u64>) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("Enter an image file path first.".to_owned());
+    }
+    let files = crate::upload::command_files(raw)?;
+    if files.len() != 1 {
+        return Err("Choose a single image file.".to_owned());
+    }
+    let path = &files[0].path;
+    let prepared = crate::upload::prepare(path, limit)?;
+    if prepared.picture.is_none() || !prepared.mime.starts_with("image/") {
+        return Err(format!("{} is not a supported image", prepared.name));
+    }
+    Ok(path.clone())
 }
 
 /// Best effort; the login form also shows the address to open by hand.
@@ -4106,18 +4281,9 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             _ = theme_watch.changed() => app.reload_theme(),
             scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),
-            _ = async {
-                match app.search_debounce_deadline() {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => std::future::pending().await,
-                }
-            } => app.tick_global_search(),
-            _ = async {
-                match app.user_search_debounce_deadline() {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => std::future::pending().await,
-                }
-            } => app.tick_user_search(),
+            _ = wait_deadline(app.search_debounce_deadline()) => app.tick_global_search(),
+            _ = wait_deadline(app.user_search_debounce_deadline()) => app.tick_user_search(),
+            _ = wait_deadline(app.dir_search_debounce_deadline()) => app.tick_dir_search(),
             _ = tick.tick() => app.on_tick(),
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
             _ = sigterm.recv() => app.should_quit = true,
@@ -6151,7 +6317,7 @@ mod tests {
         ]));
         assert_eq!(app.space_name().as_deref(), Some("Two › Shared"));
         app.select_space(Some(4));
-        app.rooms.retain(|room| room.kind != RoomKind::Invite);
+        app.rooms.retain(|room| !room.is_pending());
         redraw(&mut app, &mut terminal);
         find(&terminal, "no rooms here");
 
@@ -7242,20 +7408,26 @@ mod tests {
         assert_eq!(app.active, 1);
         drain(&mut commands);
 
-        // 5. Unjoined room with ?via= -> Stage::Join prefilled.
+        // 5. Unjoined room with ?via= -> Stage::Preview (never joins sight unseen).
         assert!(app.try_open_matrix_link(
             "https://matrix.to/#/%23public:example.org?via=one.org&via=two.org"
         ));
         match &app.modal {
             Some(Modal::New(popup)) => {
-                assert_eq!(popup.stage, crate::manage::Stage::Join);
+                assert_eq!(popup.stage, crate::manage::Stage::Preview);
+                assert_eq!(popup.preview_target, "#public:example.org");
                 assert_eq!(
-                    popup.address.as_str(),
-                    "#public:example.org one.org two.org"
+                    popup.preview_via,
+                    vec!["one.org".to_owned(), "two.org".to_owned()]
                 );
+                assert!(popup.preview_loading);
             }
-            other => panic!("expected Join modal, got {other:?}"),
+            other => panic!("expected Preview modal, got {other:?}"),
         }
+        assert_eq!(
+            drain(&mut commands),
+            vec!["Manage(Preview(request 1, via 2 servers))".to_owned()]
+        );
         app.modal = None;
 
         // 6. User link -> UserInfo modal for that user.
