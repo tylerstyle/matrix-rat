@@ -363,10 +363,18 @@ mod tests {
 
         let (mut app, mut commands) = app_with(vec![voice, video, loc]);
 
-        // Enter on voice plays it (`open: true`) rather than starting a reply.
+        // Enter replies, as on every message; `o` plays (`open: true`).
         app.timeline.selected = Some(0);
         app.on_event(key(KeyCode::Enter));
-        assert_eq!(app.compose_mode, crate::app::ComposeMode::Normal);
+        assert!(matches!(
+            app.compose_mode,
+            crate::app::ComposeMode::Reply(_)
+        ));
+        assert!(saves(&mut commands).is_empty());
+        app.on_event(key(KeyCode::Esc));
+        app.focus = crate::app::Pane::Timeline;
+        app.timeline.selected = Some(0);
+        app.on_event(key(KeyCode::Char('o')));
         assert_eq!(
             saves(&mut commands),
             [("voice.ogg".to_owned(), app.download_dir(), true)]

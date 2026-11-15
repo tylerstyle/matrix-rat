@@ -2488,7 +2488,16 @@ impl App {
                         // A file or playable media message is about its file, even with
                         // a video thumbnail or a link in the caption.
                         let has_file = self.messages().get(i).is_some_and(|m| m.file.is_some());
-                        if has_file {
+                        let votable = self.messages().get(i).is_some_and(|m| {
+                            m.poll.is_some()
+                                && m.kind != MsgKind::Redacted
+                                && m.state == SendState::Sent
+                        });
+                        if votable {
+                            // Opening a poll is voting in it.
+                            self.open_poll_vote(i);
+                            true
+                        } else if has_file {
                             self.save_attachment(true)
                         } else {
                             self.open_image(i) || self.open_link(i, 0)
@@ -3425,31 +3434,6 @@ impl App {
         }
         if self.focus == Pane::Composer && self.attach_key(code, mods) {
             self.cancel_pending_jump();
-            return;
-        }
-        if self.focus == Pane::Timeline
-            && (code, mods) == (KeyCode::Enter, KeyModifiers::NONE)
-            && let Some(i) = self.timeline.selected
-            && self.messages().get(i).is_some_and(|m| {
-                m.poll.is_some() && m.kind != MsgKind::Redacted && m.state == SendState::Sent
-            })
-        {
-            self.cancel_pending_jump();
-            self.open_poll_vote(i);
-            return;
-        }
-        if self.focus == Pane::Timeline
-            && (code, mods) == (KeyCode::Enter, KeyModifiers::NONE)
-            && self
-                .timeline
-                .selected
-                .and_then(|i| self.messages().get(i))
-                .is_some_and(|m| {
-                    m.is_playable() && m.kind != MsgKind::Redacted && m.state != SendState::Failed
-                })
-        {
-            self.cancel_pending_jump();
-            self.save_attachment(true);
             return;
         }
         if let Some(action) = self.keymap.lookup(context, key) {
