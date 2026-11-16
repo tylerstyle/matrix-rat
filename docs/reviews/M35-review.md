@@ -92,3 +92,21 @@
   - **Finding 4:** Left as-is by decision (noted as negligible in normal runs; `Stop` and `Drop` signal `-self.group` prior to reaping).
 
 **M35 ok**
+
+---
+
+## Release 0.8.0
+
+Checked `main` at `c33bc5c` (`Version 0.8.0`) against `v0.7.0..c33bc5c`:
+
+- **`Cargo.toml` & `Cargo.lock`:** Both set `matrix-rat` to `0.8.0` (`Cargo.toml:3`, `Cargo.lock:2891`). `Cargo.toml:23` adds only `tokio` features `process`, `net`, and `io-util` (no audio libraries linked). `default.nix:12` reads `Cargo.toml` directly without new system audio dependencies, and `.github/workflows/release-binaries.yml` validates tag `v0.8.0` against `Cargo.toml`.
+- **`README.md` vs code:**
+  - **Install archive example (`91`):** Updated to `matrix-rat-0.8.0-x86_64-unknown-linux-gnu`.
+  - **Everyday keys table (`167, 170, 180`):** Accurately documents `x`, `Space`, `←`, `→` (`PlayAudio`, `PauseAudio`, `SeekAudio` ±5 s via `mpv`), layered `Esc` closing down to no open chat (`esc_closes_chat` / `"Esc closes the chat"`), and `Ctrl-B` interaction.
+  - **Action names & `vim` preset (`369-380`):** All 84 named actions in `src/keymap.rs:138-223` match across `global` (47, including `doctor`), `sidebar` (5), `timeline` (26, including `play_audio`, `pause_audio`, `audio_back`, `audio_forward`), and `composer` (6); `vim` preset (`380`, `src/keymap.rs:930-936`) accurately notes `Esc` does not close the chat without rebinding `back`.
+  - **Settings table (`386-405`):** Matches `src/config.rs:12-64` and `src/modal.rs:586-613`, including `window_title` (`"Unread count in title"`, default `true`), `esc_closes_chat` (`"Esc closes the chat"`, default `true`), `audio_player` (`"Audio player"`, default `"auto"`), and partial-recovery startup behaviour (`315-317`).
+  - **Audio & `doctor` sections (`500-526, 562-574`):** Matches `src/audio*.rs`, `src/doctor.rs`, `src/main.rs:55-130`, and `src/terminal.rs` accurately (SSH refusal, 100 MB cap, private runtime temp dir, `mpv` IPC vs clock fallback, non-locking `matrix-rat doctor`, TTY-gated probes, redacted output). Minor non-blocking nits: `503` says "accent colour" (`ui::audio` uses `Role::BorderFocused`), and `564-568` omits the new voice-player check from the doctor bullet list while documenting it under `audio_player`.
+- **`docs/PLAN.md` (`12, 41, 50, 172-176`):** Updated to `2026-11-16, with 0.8.0`; release table summarizes M33–M35, `§3` notes `1034 and 44 at 0.8.0`, and `§6a` marks pieces A–E merged (`~127,000` line count on `49` is from 0.7.0 vs ~135,400 now, non-blocking).
+- **Release blockers:** None found (all M33–M35 review findings closed and recorded in `docs/REVIEW-LOG.md:74-76`).
+
+release 0.8.0 ok
