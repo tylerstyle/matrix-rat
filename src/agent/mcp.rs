@@ -16,7 +16,7 @@
 //! the texts in it are: data that a person or a program wrote, never instructions,
 //! unless the message is marked as the configured user's (`--from`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -106,6 +106,89 @@ enum Anchor {
     Beginning,
 }
 
+/// The newest so many ids with what is kept of each; the oldest make way.
+struct Bounded<V> {
+    kept: HashMap<String, V>,
+    order: VecDeque<String>,
+    most: usize,
+}
+
+impl<V> Bounded<V> {
+    fn new(most: usize) -> Self {
+        Self {
+            kept: HashMap::new(),
+            order: VecDeque::new(),
+            most,
+        }
+    }
+
+    fn put(&mut self, id: &str, value: V) {
+        if self.kept.insert(id.to_owned(), value).is_none() {
+            self.order.push_back(id.to_owned());
+            while self.order.len() > self.most {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.kept.remove(&oldest);
+                }
+            }
+        }
+    }
+}
+
+/// What the server remembers of the room's messages, to tell what is news to the
+/// agent. Where a message stands in the room is not enough for that: older messages
+/// are loaded later, an answer missed in a gap of the sync turns up between messages
+/// seen long ago, and a message handed over can change afterwards.
+struct Ledger {
+    /// Every message a look at the room has shown (read or heard). A look takes
+    /// the room's newest [`proto::READ_MAX`], so what is known has no holes of its
+    /// own: a message that is not known but stands after one that is was not there
+    /// at the time.
+    known: Bounded<()>,
+    /// Messages that named the configured user as their sender and were not handed
+    /// over, because they did not count as the user's (not verified, not readable):
+    /// once they do, they are news wherever they stand.
+    passed: Bounded<()>,
+    /// What was handed to the agent, with a mark of what each said then: one that
+    /// says something else now (edited, deleted, readable at last) is news again.
+    handed: Bounded<u64>,
+}
+
+impl Ledger {
+    fn new() -> Self {
+        Self {
+            known: Bounded::new(KNOWN_MAX),
+            passed: Bounded::new(OPEN_MAX),
+            handed: Bounded::new(OPEN_MAX),
+        }
+    }
+
+    /// Whether `message` was handed over saying something else than it does now.
+    fn changed(&self, message: &Msg) -> bool {
+        self.handed
+            .kept
+            .get(&message.event_id)
+            .is_some_and(|said| *said != said_by(message))
+    }
+}
+
+/// What a message says, as one number.
+fn said_by(message: &Msg) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        &message.kind,
+        &message.body,
+        message.edited,
+        message.truncated,
+    )
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// How many messages are remembered as seen, and as passed over or handed over.
+const KNOWN_MAX: usize = 4000;
+const OPEN_MAX: usize = 1000;
+
 pub struct Server {
     config: Config,
     /// The id of the room, from the first time `serve` said which room the command
@@ -115,6 +198,7 @@ pub struct Server {
     /// What `wait_for_message` takes as seen when it is not told. `None` until the
     /// room has been looked at for the first time.
     seen: Mutex<Option<Anchor>>,
+    ledger: Mutex<Ledger>,
     /// How long a message that cannot be decrypted yet is held back for its key.
     grace: Duration,
     /// How often a waiting call tells the client that it is still waiting.
@@ -142,6 +226,7 @@ impl Server {
             config,
             room_id: Mutex::new(None),
             seen: Mutex::new(None),
+            ledger: Mutex::new(Ledger::new()),
             grace: Duration::from_secs(10),
             progress: Duration::from_secs(15),
         }
@@ -430,7 +515,8 @@ impl Server {
                 "description": format!(
                     "Wait until a new message arrives in the bound room {waking}, or until \
                      the time is up. New means: after the last message this server sent or \
-                     handed to you (or after after_event_id). Returns \
+                     handed to you (or after after_event_id); a message handed to you \
+                     that was edited or deleted since is new again. Returns \
                      {{\"status\":\"new\",\"messages\":[…]}} (at most {WAIT_MESSAGES} at a \
                      time, the newest; read_messages has the rest) or \
                      {{\"status\":\"nothing new\",\"messages\":[]}}.{doubts} Nothing wakes you \
@@ -526,6 +612,66 @@ impl Server {
         }
     }
 
+    /// A look at the room showed `messages` (its newest, oldest first): they are
+    /// known from now on. Says of each whether it was known before.
+    fn look(&self, messages: &[Msg]) -> Vec<bool> {
+        let Ok(mut ledger) = self.ledger.lock() else {
+            return vec![true; messages.len()];
+        };
+        messages
+            .iter()
+            .map(|message| {
+                let known = ledger.known.kept.contains_key(&message.event_id);
+                ledger.known.put(&message.event_id, ());
+                known
+            })
+            .collect()
+    }
+
+    /// Whether `message`, wherever it stands, is news again: handed over saying
+    /// something else, or passed over then and the user's word now.
+    fn reopened(&self, message: &Msg) -> bool {
+        let Ok(ledger) = self.ledger.lock() else {
+            return false;
+        };
+        ledger.changed(message)
+            || (ledger.passed.kept.contains_key(&message.event_id) && self.weigh(message).is_ok())
+    }
+
+    /// `messages` are shown to the agent as they are now. One that names the user
+    /// as its sender without counting as theirs is not taken as handed over: it is
+    /// news once it counts.
+    fn hand(&self, messages: &[Msg]) {
+        if let Ok(mut ledger) = self.ledger.lock() {
+            for message in messages {
+                if matches!(self.weigh(message), Err(Some(_))) {
+                    if !ledger.handed.kept.contains_key(&message.event_id) {
+                        ledger.passed.put(&message.event_id, ());
+                    }
+                    continue;
+                }
+                ledger.passed.kept.remove(&message.event_id);
+                let said = said_by(message);
+                ledger.handed.put(&message.event_id, said);
+                // `put` keeps what is there: what it says now is what was handed.
+                if let Some(kept) = ledger.handed.kept.get_mut(&message.event_id) {
+                    *kept = said;
+                }
+            }
+        }
+    }
+
+    /// These named the user as their sender and were not handed over.
+    fn pass(&self, ids: impl Iterator<Item = String>) {
+        if let Ok(mut ledger) = self.ledger.lock() {
+            for id in ids {
+                if !ledger.handed.kept.contains_key(&id) {
+                    ledger.passed.put(&id, ());
+                }
+            }
+        }
+    }
+
     /// The room as `serve` is asked for it: by its id once that is known, until
     /// then by what the command line says.
     fn room(&self) -> String {
@@ -612,10 +758,11 @@ impl Server {
         // wait is for.
         if self.seen().is_none() {
             let (room_id, newest) = conn
-                .read(&self.room(), 1)
+                .read(&self.room(), proto::READ_MAX)
                 .await
                 .map_err(|err| self.told(err))?;
             self.pin(&room_id);
+            self.look(&newest);
             self.set_seen(match newest.last() {
                 Some(newest) => Anchor::After(newest.event_id.clone()),
                 None => Anchor::Beginning,
@@ -645,17 +792,22 @@ impl Server {
         let (room_id, messages) = Conn::open(&self.config.socket)
             .await
             .map_err(|err| self.told(err))?
-            .read(&self.room(), limit)
+            // All a look takes, whatever is asked for: what is known of the room
+            // has no holes then (see `Ledger`).
+            .read(&self.room(), proto::READ_MAX)
             .await
             .map_err(|err| self.told(err))?;
         self.pin(&room_id);
+        self.look(&messages);
+        let messages = &messages[messages.len().saturating_sub(limit)..];
+        self.hand(messages);
         // The newest of the room is among them: all of it has been seen now.
         match messages.last() {
             Some(newest) => self.set_seen(Anchor::After(newest.event_id.clone())),
             None if self.seen().is_none() => self.set_seen(Anchor::Beginning),
             None => {}
         }
-        Ok(json!({ "messages": self.all_shown(&messages) }))
+        Ok(json!({ "messages": self.all_shown(messages) }))
     }
 
     async fn wait_for_message(
@@ -709,6 +861,9 @@ impl Server {
                 })
         };
         let seen = self.seen();
+        // Which of what was read was known before this look.
+        let known = self.look(&latest);
+        let first_known = known.iter().position(|known| *known);
         // Up to where the room has been seen: `None` for before all that was read.
         let seen_at = match &seen {
             Some(Anchor::After(id)) => place(id, &heard),
@@ -751,8 +906,21 @@ impl Server {
                 Err(None) => {}
             }
         };
-        for message in latest.iter().skip(start) {
-            sort_in(message.clone(), &mut found, &mut doubted);
+        for (at, message) in latest.iter().enumerate() {
+            // From where the room has been seen. Before that, unless the call says
+            // itself from where: what is news again, and what was not there when
+            // the room was looked at (it stands after a message known since then
+            // and is not known itself: an answer missed in a gap of the sync,
+            // loaded now). Older messages loaded for the first time stand before
+            // all that is known, and are history.
+            let news = at >= start
+                || (after.is_none()
+                    && seen.is_some()
+                    && (self.reopened(message)
+                        || (!known[at] && first_known.is_some_and(|first| at > first))));
+            if news {
+                sort_in(message.clone(), &mut found, &mut doubted);
+            }
         }
         // Once something is found while something else cannot be read yet: until
         // when its key may still come.
@@ -773,8 +941,20 @@ impl Server {
             tokio::select! {
                 next = listener.next() => {
                     let message = next.map_err(|err| self.told(err))?;
-                    if place(&message.event_id, &heard).is_none() {
+                    let at = place(&message.event_id, &heard);
+                    if at.is_none() {
                         heard.push(message.event_id.clone());
+                    }
+                    self.look(std::slice::from_ref(&message));
+                    // What stands before where the room has been seen is told
+                    // again by `serve` when it changes, and for less (a sender
+                    // trusted differently, history that could not be read at
+                    // first). It is news only if it is being weighed already, was
+                    // passed over, or was handed over saying something else.
+                    let weighed = found.iter().any(|known| known.event_id == message.event_id)
+                        || doubted.iter().any(|(known, _)| *known == message.event_id);
+                    if at.is_some_and(|at| at < start) && !weighed && !self.reopened(&message) {
+                        continue;
                     }
                     sort_in(message, &mut found, &mut doubted);
                 }
@@ -800,12 +980,14 @@ impl Server {
             self.set_seen(Anchor::After(id.clone()));
         }
 
+        self.pass(doubted.iter().map(|(id, _)| id.clone()));
         let mut answer = if found.is_empty() {
             json!({ "status": "nothing new", "messages": [] })
         } else {
             // A long backlog is not poured out at once: `read_messages` has the rest.
             let earlier = found.len().saturating_sub(WAIT_MESSAGES);
             found.drain(..earlier);
+            self.hand(&found);
             let mut woken = json!({ "status": "new", "messages": self.all_shown(&found) });
             if earlier > 0 {
                 woken["earlier_messages_not_shown"] = earlier.into();

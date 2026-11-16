@@ -240,10 +240,22 @@ Tried with Claude Code as the MCP client (the server reached over ssh, a second 
 answering after 50 seconds): it found the three tools, sent, was refused a `room` argument,
 and waited 47 seconds for the right answer. The first try found a fault, fixed on
 `leftovers-09`: older messages that a `read` loaded into a watched room were told to
-listeners as new, so `wait_for_message` came back at once with an old message. `serve` now
-takes a message it did not know for news only if it stands after the newest one it knew.
-Still open: a real answer that arrived during a gap in the sync and is loaded later counts
-as history for `listen`; `wait_for_message` finds it anyway, through its own reading.
+listeners as new, so `wait_for_message` came back at once with an old message. Two things
+were done about it, the second after an independent review of the first:
+
+- `serve` takes a message it did not know for news only if it stands after the newest one
+  it knew, and a watch loads older messages first until the room shows one.
+- The MCP server no longer goes by a message's place alone. It remembers what each look at
+  the room showed, what it handed to the agent and what it passed over. Before the point the
+  agent has seen, a message is news only if it was not there at the time (an answer missed
+  in a gap of the sync and loaded later), if it was handed over and says something else now,
+  or if it was passed over as not the user's and counts as theirs now.
+
+Still open: `listen` on the command line does not tell an answer that arrived during a gap
+in the sync and is loaded later; a `wait_for_message` that is already waiting does not
+either, the next call does, if the answer is among the room's newest hundred. A message
+that the bot's own account could not be shown at all when a watch began (nothing loaded
+within three pages) can still be told as new once.
 
 **Also in 0.9:** what the user's testing of 0.8 turns up (nothing reported yet). Done on the
 branch `leftovers-09`: the three open notes of the 0.8 reviews (a playing message inside a

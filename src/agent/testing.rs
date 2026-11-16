@@ -285,6 +285,19 @@ impl World {
         tell_watched(&state, &self.fake.events);
     }
 
+    /// Older messages are loaded into the room, or one missed in a gap of the sync:
+    /// `message` appears before the one with the id `before`.
+    pub fn insert_before(&self, before: &str, message: Msg) {
+        let mut state = self.state.lock().unwrap();
+        let at = state
+            .messages
+            .iter()
+            .position(|known| known.event_id == before)
+            .expect("the message is in the room");
+        state.messages.insert(at, message);
+        tell_watched(&state, &self.fake.events);
+    }
+
     /// A message changes (edited, deleted, decrypted at last).
     pub fn change(&self, event_id: &str, change: impl FnOnce(&mut Msg)) {
         let mut state = self.state.lock().unwrap();
