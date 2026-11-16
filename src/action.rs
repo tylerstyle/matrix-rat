@@ -173,6 +173,9 @@ pub enum Action {
     PauseAudio,
     /// Jump back (`Left`) or forward (`Right`) in what plays (mpv only).
     SeekAudio(Dir),
+    /// Show what the app found where it runs (terminal, pictures, the desktop's
+    /// helpers, keys, config), to be copied into a bug report.
+    Doctor,
 }
 
 impl Action {
@@ -279,7 +282,9 @@ impl Action {
             | Action::ContextMenu
             | Action::MarkAllRead
             | Action::OpenThreads
-            | Action::Devices(_) => false,
+            | Action::Devices(_)
+            // About the app and the terminal, not about a room.
+            | Action::Doctor => false,
         }
     }
 }

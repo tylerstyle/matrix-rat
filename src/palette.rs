@@ -358,6 +358,8 @@ pub struct PaletteContext {
     pub typing_notices: bool,
     pub read_receipts: bool,
     pub do_not_disturb: bool,
+    /// The `window_title` setting: the unread count in the terminal's title.
+    pub window_title: bool,
     pub read_markers: bool,
     pub room_previews: bool,
     pub link_previews: crate::config::LinkPreviews,
@@ -411,6 +413,7 @@ impl std::fmt::Debug for PaletteContext {
             .field("typing_notices", &self.typing_notices)
             .field("read_receipts", &self.read_receipts)
             .field("do_not_disturb", &self.do_not_disturb)
+            .field("window_title", &self.window_title)
             .field("read_markers", &self.read_markers)
             .field("room_previews", &self.room_previews)
             .field("link_previews", &self.link_previews)
@@ -781,6 +784,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         Action::OpenStickers,
         // Named after the space, with the spaces.
         Action::SpaceInfo,
+        Action::Doctor,
     ];
     for binding in active_bindings {
         if include_keymap_action(binding.action) == ActionInclusion::Skip {
@@ -969,6 +973,26 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         &["sticker", "image pack", "emote"],
         action_enabled(Action::OpenStickers, ctx),
         0,
+    );
+    // No key by default: it is looked for when something does not work.
+    let doctor = keymap::action_spec(Action::Doctor).map_or("", |spec| spec.description);
+    push_entry(
+        out,
+        Target::Action(Action::Doctor),
+        Category::Action,
+        doctor,
+        key_of(Action::Doctor),
+        doctor,
+        &[
+            "doctor",
+            "diagnostics",
+            "troubleshooting",
+            "bug report",
+            "terminal",
+            "does not work",
+        ],
+        true,
+        1,
     );
 }
 
@@ -1469,6 +1493,13 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::WindowTitle)),
+            title: Setting::WindowTitle.label(),
+            hint: Some(switch(ctx.window_title)),
+            aliases: &["window title", "terminal title", "unread count", "setting"],
+            enabled: true,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::Keywords)),
             title: Setting::Keywords.label(),
             hint: None,
@@ -1769,6 +1800,7 @@ mod tests {
             typing_notices: true,
             read_receipts: true,
             do_not_disturb: false,
+            window_title: true,
             read_markers: true,
             room_previews: true,
             link_previews: crate::config::LinkPreviews::Off,

@@ -164,6 +164,8 @@ pub enum HitId {
     DetailsFlip,
     /// "Copy event ID" / "Copy JSON" in the message details popup.
     DetailsCopy,
+    /// "Copy as text" in the doctor's popup.
+    DoctorCopy,
     /// A thread in the threads popup (index into what it shows); clicking opens it.
     ThreadRow(usize),
     /// The row after the threads in the threads popup that loads more of them.

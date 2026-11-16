@@ -118,13 +118,18 @@ impl NotifyMode {
             return self;
         }
         let remote = crate::portal::in_ssh_session();
-        let bus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some();
-        if bus && !remote {
+        if session_bus() && !remote {
             NotifyMode::Desktop
         } else {
             NotifyMode::Terminal
         }
     }
+}
+
+/// Whether a session bus is announced (`DBUS_SESSION_BUS_ADDRESS`): what `Auto` goes
+/// by to use the desktop's notification service (see [`NotifyMode::resolved`]).
+pub fn session_bus() -> bool {
+    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
 }
 
 /// Title and text as shown: "sender in room" for rooms, the person for direct chats.

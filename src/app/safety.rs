@@ -658,6 +658,8 @@ mod tests {
         drain_cmds(&mut commands);
 
         app.on_event(key(KeyCode::F(2)));
+        // From the first row up to the last: the menu scrolls down to the account's rows.
+        app.on_event(key(KeyCode::Up));
         let text = screen(&mut app, &mut terminal);
         find(&text, "2 users");
         let (col, row) = find(&text, "Ignored users");

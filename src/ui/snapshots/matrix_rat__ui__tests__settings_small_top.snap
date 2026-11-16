@@ -19,9 +19,9 @@ expression: top
 "│        │   Read markers          ● on                               │       ┃│"
 "│        │   Notifications         ○ off                              │       ┃│"
 "│        │   Do not disturb        ○ off                              │       ┃│"
-"│        │   Notification keywords Enter to view                      │       ┃│"
-"│        │   Download folder       ~/Downloads                        │ 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
-"│        │   Audio player          auto: none found                 ▼ │────────╯"
+"│        │   Unread count in title ● on                               │       ┃│"
+"│        │   Notification keywords Enter to view                      │ 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
+"│        │   Download folder       ~/Downloads                      ▼ │────────╯"
 "│        │ F3 cycles this, or the active dark/light slot when paired; │────────╮"
 "│        │ themes/ files reload live.                                 │  📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
 "╰────────╰───────────────── ↑↓ select · ←→ change · Enter · Esc close ╯────────╯"

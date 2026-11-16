@@ -180,6 +180,7 @@ action_table! {
     Action::JumpToUnread => ("jump_to_unread", Context::Global, "Jump to first unread"),
     Action::ToggleUnread => ("toggle_unread", Context::Global, "Mark room as read or unread"),
     Action::MarkAllRead => ("mark_all_read", Context::Global, "Mark all rooms as read"),
+    Action::Doctor => ("doctor", Context::Global, "What the app found here"),
     Action::SidebarUp => ("sidebar_up", Context::Sidebar, "Previous room"),
     Action::SidebarDown => ("sidebar_down", Context::Sidebar, "Next room"),
     Action::SidebarTop => ("sidebar_top", Context::Sidebar, "First room"),

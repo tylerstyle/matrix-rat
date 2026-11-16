@@ -93,6 +93,7 @@ impl App {
             typing_notices: self.typing_notices,
             read_receipts: self.read_receipts,
             do_not_disturb: self.do_not_disturb,
+            window_title: self.window_title,
             read_markers: self.read_markers,
             room_previews: self.room_previews,
             link_previews: self.link_previews,
@@ -276,6 +277,7 @@ impl App {
             | Setting::TypingNotices
             | Setting::ReadReceipts
             | Setting::DoNotDisturb
+            | Setting::WindowTitle
             | Setting::ReadMarkers
             | Setting::RoomPreviews
             | Setting::LinkPreviews
@@ -298,6 +300,7 @@ impl App {
                 self.open_modal(Modal::Settings(menu));
             }
             Setting::Keys => self.change_setting(Setting::Keys, 0),
+            Setting::Doctor => self.change_setting(Setting::Doctor, 0),
             Setting::Profile => self.open_own_profile(),
             Setting::Encryption => self.start_verification(),
             Setting::IgnoredUsers => self.change_setting(Setting::IgnoredUsers, 0),
