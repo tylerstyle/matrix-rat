@@ -230,6 +230,12 @@ user, so handing an agent the whole instance is acceptable (the user's decision)
 - Nothing of it is logged beyond kinds and counts, as everywhere.
 - An idle agent cannot be woken by this; that limit is known and accepted for now.
 
+**State (2026-11-16):** built, reviewed (M36) and merged. Tried by hand against the test
+homeserver: a bot profile logged in with the normal app, `serve`, `rooms`, `send`, `read`,
+`listen` and the MCP server over a pipe all work, and `serve` ends cleanly on SIGTERM. Not
+yet tried with a real MCP client. Seen once and not again in seven tries: a `read` right
+after the first `send` of a fresh `serve` listed the new message twice.
+
 **Also in 0.9:** what the user's testing of 0.8 turns up; the three open notes of the 0.8
 reviews (a playing message inside a thread view, empty continuation rows of a playing row
 with a long name, the doctor breaking `Alt-Enter` across lines); stricter build checks (no
