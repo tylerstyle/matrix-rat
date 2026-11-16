@@ -22,6 +22,9 @@ pub struct Config {
     pub sidebar_hidden: bool,
     /// Capture the mouse. Turn off to use the terminal's own text selection.
     pub mouse: bool,
+    /// `Esc` in the composer, with nothing left to cancel, closes the chat: no room is
+    /// open then, and the room list has the focus. Off: `Esc` stops at the composer.
+    pub esc_closes_chat: bool,
     /// Let others see when you are typing.
     pub typing_notices: bool,
     /// Let others see how far you have read. When off, the server still learns it
@@ -76,6 +79,7 @@ impl std::fmt::Debug for Config {
             .field("sidebar_width", &self.sidebar_width)
             .field("sidebar_hidden", &self.sidebar_hidden)
             .field("mouse", &self.mouse)
+            .field("esc_closes_chat", &self.esc_closes_chat)
             .field("typing_notices", &self.typing_notices)
             .field("read_receipts", &self.read_receipts)
             .field("do_not_disturb", &self.do_not_disturb)
@@ -199,6 +203,7 @@ impl Default for Config {
             sidebar_width: 24,
             sidebar_hidden: false,
             mouse: true,
+            esc_closes_chat: true,
             typing_notices: true,
             read_receipts: true,
             do_not_disturb: false,
@@ -727,6 +732,9 @@ mod tests {
         assert!(config.read_markers);
         let config: Config = toml::from_str("read_markers = false").unwrap();
         assert!(!config.read_markers);
+        assert!(config.esc_closes_chat);
+        let config: Config = toml::from_str("esc_closes_chat = false").unwrap();
+        assert!(!config.esc_closes_chat);
         assert!(config.read_receipts);
         assert_eq!(config.images, ImageMode::Auto);
     }

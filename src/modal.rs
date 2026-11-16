@@ -546,6 +546,8 @@ pub enum Setting {
     /// Previews of the first link of a message, asked of the homeserver.
     LinkPreviews,
     Mouse,
+    /// Whether `Esc` in the composer, with nothing left to cancel, closes the chat.
+    EscClosesChat,
     TypingNotices,
     ReadReceipts,
     /// No notifications for now.
@@ -575,7 +577,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 22] = [
+    pub const ALL: [Setting; 23] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -584,6 +586,7 @@ impl Setting {
         Setting::RoomPreviews,
         Setting::LinkPreviews,
         Setting::Mouse,
+        Setting::EscClosesChat,
         Setting::TypingNotices,
         Setting::ReadReceipts,
         Setting::ReadMarkers,
@@ -621,6 +624,7 @@ impl Setting {
             Setting::RoomPreviews => "Room previews",
             Setting::LinkPreviews => "Link previews",
             Setting::Mouse => "Mouse",
+            Setting::EscClosesChat => "Esc closes the chat",
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
             Setting::ReadMarkers => "Read markers",
@@ -654,6 +658,9 @@ impl Setting {
                 "Under a message, what its first link is about. Your homeserver fetches the link, so it learns it; in encrypted rooms only with \"all rooms\"."
             }
             Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
+            Setting::EscClosesChat => {
+                "Esc in the composer, with nothing left to cancel, closes the chat and goes to the room list. Off: Esc stops at the composer."
+            }
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",
             Setting::ReadMarkers => "Show under messages who has read up to there.",

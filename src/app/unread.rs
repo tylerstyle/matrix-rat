@@ -301,7 +301,7 @@ impl App {
         if self.matrix.is_none() {
             return;
         }
-        let Some(room) = self.rooms.get_mut(self.active) else {
+        let Some(room) = self.open_index().and_then(|open| self.rooms.get_mut(open)) else {
             self.unread.line = Line::Off;
             self.unread.pending_mark = None;
             return;
@@ -319,6 +319,13 @@ impl App {
             early: self.unread.catching_up,
         };
         self.timeline_rev += 1;
+    }
+
+    /// The chat was closed: there is no open room whose line could be placed, and
+    /// none that waits to be marked as read on its first view.
+    pub(super) fn no_unread_line(&mut self) {
+        self.unread.line = Line::Off;
+        self.unread.pending_mark = None;
     }
 
     /// Whether the open room still waits for the messages that say where its "new"
@@ -347,7 +354,9 @@ impl App {
             self.unread.read.insert(room_id, newest.to_owned());
         }
         // Reading on takes back a mark set by hand; the worker does so on the server.
-        self.unmark_unread(self.active);
+        if let Some(open) = self.open_index() {
+            self.unmark_unread(open);
+        }
     }
 
     /// Puts the "new" line into the messages of an update for the open room, in
@@ -453,7 +462,7 @@ impl App {
             return;
         }
         prune_ignored_targets(&mut self.unread.line, &self.ignored_users);
-        let Some(room) = self.rooms.get(self.active) else {
+        let Some(room) = self.room() else {
             return;
         };
         let mut messages = room.messages.clone();
@@ -588,7 +597,7 @@ impl App {
 
     /// The open room: read if it shows as unread, unread if it does not.
     pub(super) fn toggle_unread(&mut self) {
-        let Some(room) = self.room() else {
+        let (Some(open), Some(room)) = (self.open_index(), self.room()) else {
             return;
         };
         if room.is_pending() {
@@ -596,10 +605,10 @@ impl App {
             return self.show_toast(hint);
         }
         if room.shows_unread() {
-            self.mark_room_read(self.active);
+            self.mark_room_read(open);
             self.show_toast("Marked as read");
         } else {
-            self.mark_room_unread(self.active);
+            self.mark_room_unread(open);
             self.show_toast("Marked as unread");
         }
     }
@@ -608,7 +617,7 @@ impl App {
     /// "new" line is still to be decided, there will be none: the read marker that
     /// arrives with its messages may be the old one, from before the server heard.
     pub(super) fn no_unread_line_after_marking_read(&mut self, index: usize) {
-        if index == self.active && matches!(self.unread.line, Line::Waiting { .. }) {
+        if Some(index) == self.open_index() && matches!(self.unread.line, Line::Waiting { .. }) {
             self.unread.line = Line::Off;
         }
         if self
@@ -630,7 +639,9 @@ impl App {
             .collect();
         // The open room counts as read since it was opened, so it is not in that
         // list; its line, if still to be decided, is called off all the same.
-        self.no_unread_line_after_marking_read(self.active);
+        if let Some(open) = self.open_index() {
+            self.no_unread_line_after_marking_read(open);
+        }
         if unread.is_empty() {
             return self.show_toast("Nothing is unread");
         }

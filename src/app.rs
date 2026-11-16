@@ -237,6 +237,13 @@ pub struct App {
     next_gen: u64,
     /// The open room was picked by the app, not by the user.
     auto_opened: bool,
+    /// No chat is open: the user closed it (see `close_chat`). `active` then only
+    /// remembers the room that was left, for the room list's cursor; nothing treats
+    /// it as open (see `open_index`).
+    chat_closed: bool,
+    /// The `esc_closes_chat` setting: `Esc` in the composer, with nothing left to
+    /// cancel, closes the chat.
+    pub esc_closes_chat: bool,
     /// False while the terminal window is in the background.
     window_focused: bool,
     /// The draft that was in the composer when an edit started.
@@ -396,6 +403,7 @@ impl std::fmt::Debug for App {
         f.debug_struct("App")
             .field("rooms", &self.rooms.len())
             .field("active", &self.active)
+            .field("chat_closed", &self.chat_closed)
             .field("focus", &self.focus)
             .field("sidebar", &self.sidebar)
             .field("timeline", &self.timeline)
@@ -513,6 +521,7 @@ impl App {
         app.read_receipts = config.read_receipts;
         app.do_not_disturb = config.do_not_disturb;
         app.read_markers = config.read_markers;
+        app.esc_closes_chat = config.esc_closes_chat;
         app.mouse = config.mouse;
         app.download_dir = config.download_dir.clone();
         app.notification_click_command = Some(config.notification_click_command.clone());
@@ -590,6 +599,8 @@ impl App {
             generation: 0,
             next_gen: 0,
             auto_opened: true,
+            chat_closed: false,
+            esc_closes_chat: true,
             window_focused: true,
             edit_stash: None,
             typing_sent: None,
@@ -684,6 +695,7 @@ impl App {
     /// Rooms that pass the filter, in the order the sidebar shows them.
     pub fn visible_rooms(&self) -> Vec<usize> {
         let needle = self.sidebar.filter.to_lowercase();
+        let open = self.open_index();
         RoomKind::SECTIONS
             .iter()
             .flat_map(|kind| {
@@ -697,8 +709,9 @@ impl App {
                             || room.is_pending()
                             || self.space_rooms.contains(&room.id)
                     })
+                    // The open room stays in the list whatever the quick filters say.
                     .filter(|(i, room)| {
-                        *i == self.active
+                        Some(*i) == open
                             || ((!self.sidebar.unread_only || room.shows_unread())
                                 && (!self.sidebar.people_only || room.direct))
                     })
@@ -734,9 +747,23 @@ impl App {
             .copied()
     }
 
-    /// The open room. `None` when there are no rooms (before the first sync).
+    /// Where the open room is in `rooms`. `None` when there are no rooms (before the
+    /// first sync) and while no chat is open. Everything that means "the open room"
+    /// asks here (or `room`), never `active` itself.
+    pub fn open_index(&self) -> Option<usize> {
+        (!self.chat_closed && self.active < self.rooms.len()).then_some(self.active)
+    }
+
+    /// The open room. `None` when there are no rooms (before the first sync) and
+    /// while no chat is open.
     pub fn room(&self) -> Option<&Room> {
-        self.rooms.get(self.active)
+        self.open_index().and_then(|index| self.rooms.get(index))
+    }
+
+    /// The user closed the chat and has not opened one since: the chat area shows no
+    /// room, and the room list has the focus.
+    pub fn chat_closed(&self) -> bool {
+        self.chat_closed
     }
 
     fn messages(&self) -> &[Message] {
@@ -745,9 +772,8 @@ impl App {
 
     fn messages_mut(&mut self) -> Option<&mut Vec<Message>> {
         self.timeline_rev += 1;
-        self.rooms
-            .get_mut(self.active)
-            .map(|room| &mut room.messages)
+        let open = self.open_index()?;
+        self.rooms.get_mut(open).map(|room| &mut room.messages)
     }
 
     // ----- state changes -------------------------------------------------------------
@@ -994,6 +1020,7 @@ impl App {
             Setting::RoomPreviews => switch(self.room_previews),
             Setting::LinkPreviews => self.link_previews.label().to_owned(),
             Setting::Mouse => switch(self.mouse),
+            Setting::EscClosesChat => switch(self.esc_closes_chat),
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
             Setting::ReadMarkers => switch(self.read_markers),
@@ -1043,6 +1070,22 @@ impl App {
                     self.dragging_splitter = false;
                 }
                 self.save_setting("mouse", self.mouse);
+            }
+            Setting::EscClosesChat => {
+                self.esc_closes_chat = !self.esc_closes_chat;
+                self.save_setting("esc_closes_chat", self.esc_closes_chat);
+                // Switched off, there is no such thing as no chat open: the room
+                // that was left is back (with no rooms at all, the first one that
+                // comes opens as at the start).
+                if !self.esc_closes_chat && self.chat_closed {
+                    if self.active < self.rooms.len() {
+                        // `show_room`: the list follows, out of a space the room is
+                        // not in.
+                        self.show_room(self.active);
+                    } else {
+                        self.chat_closed = false;
+                    }
+                }
             }
             Setting::TypingNotices => {
                 self.typing_notices = !self.typing_notices;
@@ -1232,7 +1275,7 @@ impl App {
         // Already there: nothing moves, a thread stays open, the place in the
         // messages is kept. Only a view of some older part of the room (after a
         // jump to a message) goes back to the newest messages, where the news is.
-        if index == self.active && self.room().is_some() {
+        if Some(index) == self.open_index() {
             if self.timeline.detached {
                 self.return_to_live();
             }
@@ -1341,6 +1384,8 @@ impl App {
     pub(crate) fn reset_session(&mut self) {
         self.rooms.clear();
         self.active = 0;
+        // The next session starts as every one does: its first room opens by itself.
+        self.chat_closed = false;
         self.timeline = TimelineState::default();
         self.composer.take();
         self.compose_mode = ComposeMode::Normal;
@@ -1420,6 +1465,15 @@ impl App {
     }
 
     fn set_focus(&mut self, pane: Pane) {
+        if self.chat_closed {
+            // No chat is open: there are no messages and no composer to go to, and
+            // the list's cursor stays where the user has it.
+            self.focus = Pane::Sidebar;
+            self.timeline.selected = None;
+            self.sidebar.reveal_cursor = true;
+            self.sync_completion();
+            return;
+        }
         self.focus = pane;
         match pane {
             Pane::Timeline => {
@@ -1434,7 +1488,8 @@ impl App {
             }
             Pane::Sidebar => {
                 self.timeline.selected = None;
-                if let Some(at) = self.visible_rooms().iter().position(|i| *i == self.active) {
+                let open = self.open_index();
+                if let Some(at) = self.visible_rooms().iter().position(|i| Some(*i) == open) {
                     self.sidebar.cursor = at;
                 }
                 self.sidebar.reveal_cursor = true;
@@ -1452,32 +1507,18 @@ impl App {
             return;
         }
         self.auto_opened = false;
-        let fresh = opened || index != self.active;
-        if index != self.active {
-            if self.typing_sent.take().is_some()
-                && let Some(room_id) = self.room_id()
-            {
-                self.send_matrix(MatrixCmd::Typing {
-                    room_id,
-                    typing: false,
-                });
-            }
-            // What is unsent here goes to the store, in case we do not come back.
-            self.save_draft();
-            // An edit belongs to its room; a plain draft waits there until we come back.
-            self.cancel_compose();
-            let draft = self.composer.take();
-            if let Some(room) = self.rooms.get_mut(self.active) {
-                let old_id = room.id.clone();
-                room.draft = draft;
-                self.save_room_marks(&old_id);
-            }
+        // With no chat open every room is another one, the one that was left too.
+        let other = Some(index) != self.open_index();
+        let fresh = opened || other;
+        if other {
+            self.leave_open_room();
             let new_id = self.rooms[index].id.clone();
             let draft = std::mem::take(&mut self.rooms[index].draft);
             self.composer.set_text(&draft);
             self.restore_room_marks(&new_id);
         }
         self.active = index;
+        self.chat_closed = false;
         // Before the count is cleared: it helps to place the "new" line.
         if fresh {
             self.begin_unread_line();
@@ -1489,6 +1530,63 @@ impl App {
         self.clear_marked_unread(index);
         self.sidebar.filter.clear();
         self.request_members_for_open_room();
+    }
+
+    /// What is being written in the open room stays with it when the room is left,
+    /// for another room or for none: the typing notice is taken back, the unsent text
+    /// goes to the store and waits with the room, an edit is given up.
+    fn leave_open_room(&mut self) {
+        if self.typing_sent.take().is_some()
+            && let Some(room_id) = self.room_id()
+        {
+            self.send_matrix(MatrixCmd::Typing {
+                room_id,
+                typing: false,
+            });
+        }
+        // What is unsent here goes to the store, in case we do not come back.
+        self.save_draft();
+        // An edit belongs to its room; a plain draft waits there until we come back.
+        self.cancel_compose();
+        let draft = self.composer.take();
+        if let Some(room) = self.open_index().and_then(|open| self.rooms.get_mut(open)) {
+            let old_id = room.id.clone();
+            room.draft = draft;
+            self.save_room_marks(&old_id);
+        }
+    }
+
+    /// Closes the chat: no room is open afterwards, and the room list has the focus
+    /// with its cursor on the room that was left. What was being written there waits
+    /// for the return as after a room switch. Nothing of the room is on screen from
+    /// here on, so nothing in it is read (no receipt goes out, and a message there
+    /// notifies like one anywhere else) until a room is opened again.
+    fn close_chat(&mut self) {
+        let Some(left) = self.open_index() else {
+            return;
+        };
+        self.cancel_pending_jump();
+        // A thread belongs to its room.
+        self.leave_thread();
+        self.leave_open_room();
+        self.chat_closed = true;
+        self.auto_opened = false;
+        self.timeline = TimelineState::default();
+        self.row_cache = None;
+        self.timeline_rev += 1;
+        self.no_unread_line();
+        // A new generation: late updates for the room are dropped from here on. The
+        // worker stops making them.
+        self.generation = self.allocate_gen();
+        self.send_matrix(MatrixCmd::CloseRoom);
+        // The room list is shown also where it was put away or the window is narrow:
+        // with the focus, it is the one pane there is.
+        self.set_focus(Pane::Sidebar);
+        if let Some(at) = self.visible_rooms().iter().position(|i| *i == left) {
+            self.sidebar.cursor = at;
+        }
+        // Everything moves: the chat makes way.
+        self.repaint = true;
     }
 
     fn open_room(&mut self, index: usize) {
@@ -1677,20 +1775,30 @@ impl App {
         if rooms.is_empty() {
             return;
         }
-        let next = match rooms.iter().position(|index| *index == self.active) {
+        // With no chat open the list's cursor is what there is to step from.
+        let from = match self.open_index() {
+            Some(open) => rooms.iter().position(|index| *index == open),
+            None => Some(self.sidebar.cursor.min(rooms.len() - 1)),
+        };
+        let next = match from {
             Some(at) => (at as isize + delta).rem_euclid(rooms.len() as isize) as usize,
             None => 0,
         };
-        let focus = self.focus;
-        self.open_room(rooms[next]);
+        // The focus the user chose stays; the one the closed chat left in the room
+        // list was not chosen, and the room that opens is to be seen.
+        let focus = (!self.chat_closed).then_some(self.focus);
+        let opened = rooms[next];
+        self.open_room(opened);
         // The list follows, so the open room is always in view.
         self.sidebar.cursor = self
             .visible_rooms()
             .iter()
-            .position(|index| *index == self.active)
+            .position(|index| *index == opened)
             .unwrap_or(0);
         self.sidebar.reveal_cursor = true;
-        if focus != Pane::Composer {
+        if let Some(focus) = focus
+            && focus != Pane::Composer
+        {
             self.set_focus(focus);
         }
     }
@@ -1768,7 +1876,9 @@ impl App {
             };
             self.send_matrix(command);
             // Whoever writes in a room has read it.
-            self.clear_marked_unread(self.active);
+            if let Some(open) = self.open_index() {
+                self.clear_marked_unread(open);
+            }
             self.composer.take();
             self.clear_completion_marks();
             if matches!(self.compose_mode, ComposeMode::Edit(_)) {
@@ -2136,6 +2246,11 @@ impl App {
     /// the messages are on screen, at the newest live message, nothing covers them and the
     /// terminal window has the focus. Once per newest message.
     fn maybe_mark_read(&mut self) {
+        // No chat is open: nothing is on screen to have been read.
+        if self.chat_closed {
+            self.timeline.drawn = false;
+            return;
+        }
         let seen = std::mem::take(&mut self.timeline.drawn)
             && !self.timeline.detached
             && self.timeline.scroll == 0
@@ -2487,6 +2602,26 @@ impl App {
             Action::Quit | Action::Suspend | Action::Open | Action::JumpToReply
         ) {
             self.cancel_pending_jump();
+        }
+        if self.chat_closed && action.needs_open_chat() {
+            // No chat is open, so there is nothing for it to act on. Moving about
+            // just does not happen; a command says why nothing did.
+            if !matches!(
+                action,
+                Action::FocusNext
+                    | Action::FocusPrev
+                    | Action::Focus(_)
+                    | Action::FocusDir(_)
+                    | Action::PageUp
+                    | Action::PageDown
+                    | Action::JumpToNewest
+                    | Action::JumpToOldest
+                    | Action::SelectOlder
+                    | Action::SelectNewer
+            ) {
+                self.show_toast("No chat is open");
+            }
+            return;
         }
         match action {
             Action::Quit => self.should_quit = true,
@@ -3286,13 +3421,13 @@ impl App {
                 reached_start,
             } => {
                 if generation == self.generation {
+                    // Did this request bring anything to show?
+                    // (The messages on screen: a thread's while one is open.)
+                    let shown = self.messages().len();
                     let view = &mut self.timeline;
                     view.loading_older = false;
                     view.reached_start |= reached_start;
-                    // Did this request bring anything to show?
-                    // (The messages on screen: a thread's while one is open.)
-                    let grew = self.rooms.get(self.active).map_or(0, |r| r.messages.len())
-                        > view.count_at_request;
+                    let grew = shown > view.count_at_request;
                     view.empty_batches = if grew { 0 } else { view.empty_batches + 1 };
                     self.search_after_load();
                 }
@@ -3302,11 +3437,11 @@ impl App {
                 reached_end,
             } => {
                 if generation == self.generation {
+                    let shown = self.messages().len();
                     let view = &mut self.timeline;
                     view.loading_newer = false;
                     view.reached_end |= reached_end;
-                    let grew = self.rooms.get(self.active).map_or(0, |r| r.messages.len())
-                        > view.forward_count_at_request;
+                    let grew = shown > view.forward_count_at_request;
                     view.empty_forward_batches = if grew {
                         0
                     } else {
@@ -3316,7 +3451,7 @@ impl App {
             }
             MatrixEvent::Typing { generation, names } => {
                 if generation == self.generation
-                    && let Some(room) = self.rooms.get_mut(self.active)
+                    && let Some(room) = self.open_index().and_then(|open| self.rooms.get_mut(open))
                 {
                     room.typing = (!names.is_empty()).then(|| names.join(", "));
                 }
@@ -3447,6 +3582,13 @@ impl App {
     /// loaded messages) and keeping the same room open even if its position changed.
     fn apply_rooms(&mut self, summaries: Vec<RoomSummary>) {
         let mut open_id = self.room().map(|room| room.id.clone());
+        // With no chat open, `active` is the room that was left: followed to its new
+        // place like the open one, but never opened.
+        let left_id = self
+            .chat_closed
+            .then(|| self.rooms.get(self.active))
+            .flatten()
+            .map(|room| room.id.clone());
         // Rooms arrive in batches. If all we could show so far was a pending invite or
         // knock, look again: a real conversation is the better default.
         if self.auto_opened && self.room().is_some_and(|room| room.is_pending()) {
@@ -3559,6 +3701,9 @@ impl App {
                     self.request_members_for_open_room();
                 }
             }
+            // The user closed the chat: a new list opens none, whatever became of the
+            // room that was left (its place is found below, with the cursor's).
+            None if self.chat_closed => {}
             None => {
                 // The open room is gone (or this is the first list): show the first one
                 // that is a real conversation, with its own draft. A draft for the
@@ -3599,9 +3744,18 @@ impl App {
         {
             self.sidebar.cursor = at;
         }
+        if self.chat_closed {
+            // The room that was left, where it is now; if it is gone, the one under
+            // the cursor is as good a place to remember.
+            self.active = position(&self.rooms, &left_id)
+                .or_else(|| self.cursor_room())
+                .unwrap_or(0);
+        }
     }
 
-    /// Esc: undo the most recent "mode" first, then head back to the composer.
+    /// Esc: undo the most recent "mode" first, then head back to the composer; from
+    /// there, with nothing left to cancel and no thread open, the chat closes (the
+    /// `esc_closes_chat` setting).
     fn back(&mut self) {
         if self.help_open {
             self.help_open = false;
@@ -3615,12 +3769,16 @@ impl App {
             self.sidebar.people_only = false;
             self.sidebar.cursor = 0;
             self.sidebar.reveal_cursor = true;
+        } else if self.chat_closed {
+            // Nothing is left to step back from: the room list is all there is.
         } else if self.focus != Pane::Composer {
             self.set_focus(Pane::Composer);
         } else if self.compose_mode != ComposeMode::Normal {
             self.cancel_compose();
-        } else {
+        } else if self.thread_open() {
             self.close_thread();
+        } else if self.esc_closes_chat {
+            self.close_chat();
         }
     }
 
@@ -5305,6 +5463,732 @@ mod tests {
         assert_eq!(app.focus, Pane::Sidebar);
         app.on_event(key(KeyCode::Esc));
         assert_eq!(app.focus, Pane::Composer);
+    }
+
+    #[test]
+    fn escape_closes_one_layer_at_a_time_down_to_no_chat() {
+        let (mut app, mut terminal) = drawn();
+        let left = app.active;
+        assert!(
+            screen_text(&terminal).contains('▌'),
+            "the open room is marked"
+        );
+
+        // The help first.
+        app.on_event(key(KeyCode::F(1)));
+        app.on_event(key(KeyCode::Esc));
+        assert!(!app.help_open && !app.chat_closed());
+        // From the messages back to the composer.
+        app.on_event(alt_up());
+        assert_eq!(app.focus, Pane::Timeline);
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.focus, Pane::Composer);
+        assert!(!app.chat_closed());
+        // A reply that was begun is given up.
+        app.on_event(alt_up());
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(app.compose_mode, ComposeMode::Reply(_)));
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(!app.chat_closed());
+        // A thread is left for its room, where the focus was.
+        app.on_event(alt_up());
+        app.perform(Action::OpenThread);
+        assert!(app.thread_open());
+        assert_eq!(app.focus, Pane::Composer);
+        app.on_event(key(KeyCode::Esc));
+        assert!(!app.thread_open() && !app.chat_closed());
+        assert_eq!(app.focus, Pane::Timeline);
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.focus, Pane::Composer);
+        assert!(!app.chat_closed());
+
+        // Nothing is left to cancel: the chat closes.
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        assert!(app.room().is_none() && app.room_id().is_none());
+        assert_eq!(app.focus, Pane::Sidebar);
+        // The cursor is on the room that was left, and no room is the open one.
+        assert_eq!(app.cursor_room(), Some(left));
+        assert_eq!(app.open_index(), None);
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "No chat open");
+        let screen = screen_text(&terminal);
+        assert!(!screen.contains('▌'), "{screen}");
+        assert!(!screen.contains("Type a message"), "{screen}");
+
+        // Once more changes nothing...
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        assert_eq!((app.focus, app.cursor_room()), (Pane::Sidebar, Some(left)));
+        // ...but for a filter of the room list, which it clears as ever.
+        type_text(&mut app, "bo");
+        assert_eq!(app.visible_rooms().len(), 1);
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.sidebar.filter.is_empty());
+        assert!(app.chat_closed());
+        assert_eq!(app.focus, Pane::Sidebar);
+    }
+
+    #[test]
+    fn with_the_vim_preset_stepping_back_from_the_composer_needs_a_key_of_its_own() {
+        let (mut app, _terminal) = drawn();
+        let config =
+            Config::parse("preset = \"vim\"\n[keys.composer]\nback = \"alt-q\"\n").unwrap();
+        app.keymap = Keymap::from_config(&config).0;
+        // Esc is the way to the messages there, and from the messages back.
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.focus, Pane::Timeline);
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.focus, Pane::Composer);
+        assert!(!app.chat_closed());
+        // The key given to `back` in the composer closes the chat.
+        app.on_event(alt('q'));
+        assert!(app.chat_closed());
+        assert_eq!(app.focus, Pane::Sidebar);
+    }
+
+    #[test]
+    fn the_room_that_was_left_is_filtered_like_any_other() {
+        let (mut app, _terminal) = drawn();
+        let left = app.active;
+        assert!(!app.rooms[left].shows_unread());
+        // Open, it stays in the list whatever the quick filters say...
+        app.perform(Action::FilterUnread);
+        assert!(app.visible_rooms().contains(&left));
+        app.perform(Action::FilterUnread);
+        // ...left, it is a room like the others.
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        assert_eq!(app.cursor_room(), Some(left));
+        app.perform(Action::FilterUnread);
+        assert!(!app.visible_rooms().contains(&left));
+        assert!(app.cursor_room().is_some_and(|room| room != left));
+        // Closed with the filter on, the cursor is on a room that is listed.
+        let (mut app, _terminal) = drawn();
+        app.perform(Action::FilterUnread);
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        assert!(app.cursor_room().is_some_and(|room| room != left));
+    }
+
+    /// The rooms of `connected`, with no chat open and nothing waiting to be read
+    /// from the worker's side.
+    fn closed() -> (
+        App,
+        Terminal<TestBackend>,
+        tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>,
+    ) {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        redraw(&mut app, &mut terminal);
+        drain(&mut commands);
+        (app, terminal, commands)
+    }
+
+    fn open_id(app: &App) -> Option<&str> {
+        app.room().map(|room| room.id.as_str())
+    }
+
+    #[test]
+    fn a_closed_chat_keeps_its_draft_and_gives_it_back() {
+        let (mut app, mut terminal, mut commands) = connected();
+        drain(&mut commands);
+        type_text(&mut app, "half");
+        assert_eq!(drain(&mut commands), ["Typing(!a, true)"]);
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        // As a room switch does it: the typing notice is taken back, the draft goes
+        // to the store and waits with its room. The worker stops the room's timeline.
+        assert_eq!(
+            drain(&mut commands),
+            ["Typing(!a, false)", "SaveDraft(!a, 4 bytes)", "CloseRoom"]
+        );
+        assert!(app.composer.is_empty());
+        assert_eq!(app.rooms[0].draft, "half");
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+
+        // Enter on the room that was left (the cursor is on it): the draft is back,
+        // with the cursor at its end.
+        app.on_event(key(KeyCode::Enter));
+        assert!(!app.chat_closed());
+        assert_eq!(open_id(&app), Some("!a"));
+        assert_eq!(app.focus, Pane::Composer);
+        assert_eq!(app.composer.text(), "half");
+        assert_eq!(app.composer.cursor(), 4);
+        assert!(app.rooms[0].draft.is_empty());
+        let seen = drain(&mut commands);
+        assert!(seen.contains(&"OpenRoom(!a)".to_owned()), "{seen:?}");
+        // Nothing was written meanwhile: nothing is saved again.
+        assert!(!seen.iter().any(|c| c.starts_with("SaveDraft")), "{seen:?}");
+
+        // The same by a click on its row.
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        redraw(&mut app, &mut terminal);
+        let (col, row) = find(&terminal, "Alpha");
+        app.on_event(click(col, row));
+        assert_eq!(open_id(&app), Some("!a"));
+        assert_eq!(app.composer.text(), "half");
+        assert_eq!(app.focus, Pane::Composer);
+
+        // An edit that was begun is given up before the chat can close, and the
+        // draft behind it is what waits.
+        app.on_matrix(timeline(&app, vec![remote("1", "me", "mine")]));
+        app.on_event(alt_up());
+        app.on_event(key(KeyCode::Char('e')));
+        assert!(matches!(app.compose_mode, ComposeMode::Edit(_)));
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(!app.chat_closed());
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        assert_eq!(app.rooms[0].draft, "half");
+    }
+
+    #[test]
+    fn no_chat_opens_by_itself_when_the_room_list_changes() {
+        let (mut app, mut terminal, mut commands) = closed();
+        let invited = || summary("!i", "Invited", RoomCategory::Invite, 0);
+        // The list in another order, with news in the room that was left: its
+        // count grows like any other room's.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!b", "Beta", RoomCategory::Room, 0),
+            summary("!a", "Alpha", RoomCategory::Room, 3),
+            invited(),
+        ]));
+        assert!(app.chat_closed());
+        assert_eq!(app.rooms[app.active].id, "!a");
+        assert_eq!(app.rooms[app.active].unread, 3);
+        assert_eq!(app.cursor_room(), Some(app.active));
+        assert_eq!(app.focus, Pane::Sidebar);
+
+        // The room that was left is gone (left elsewhere, or removed from it).
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!b", "Beta", RoomCategory::Room, 0),
+            invited(),
+        ]));
+        assert!(app.chat_closed());
+        assert!(app.room().is_none());
+        assert!(app.active < app.rooms.len());
+        assert_eq!(app.cursor_room(), Some(app.active));
+        assert!(app.composer.is_empty());
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        find(&terminal, "No chat open");
+
+        // Not even the first list after an empty one opens a room.
+        app.on_matrix(MatrixEvent::Rooms(Vec::new()));
+        assert!(app.chat_closed());
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        find(&terminal, "no rooms yet");
+        find(&terminal, "No chat open");
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!b",
+            "Beta",
+            RoomCategory::Room,
+            0,
+        )]));
+        assert!(app.chat_closed());
+        let seen = drain(&mut commands);
+        assert!(
+            !seen
+                .iter()
+                .any(|c| c.starts_with("OpenRoom") || c.starts_with("MarkRead")),
+            "{seen:?}"
+        );
+
+        // The user opens one: the room under the cursor.
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(open_id(&app), Some("!b"));
+        assert_eq!(drain(&mut commands), ["FetchMembers(!b)", "OpenRoom(!b)"]);
+    }
+
+    #[test]
+    fn nothing_is_read_while_no_chat_is_open() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let many = |n: usize| -> Vec<Message> {
+            (0..n)
+                .map(|i| remote(&i.to_string(), "ann", &format!("message {i}")))
+                .collect()
+        };
+        app.timeline.reached_start = true;
+        drain(&mut commands);
+        app.on_matrix(timeline(&app, many(5)));
+        frame(&mut app, &mut terminal);
+        frame(&mut app, &mut terminal);
+        assert_eq!(marked_read(&mut commands), 1);
+
+        // More arrives for the room after it was closed: updates that were on
+        // their way, and one that claims to be current.
+        let late = timeline(&app, many(6));
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        assert_eq!(drain(&mut commands), ["CloseRoom"]);
+        app.on_matrix(late);
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: app.generation,
+            messages: many(7),
+            reached_start: false,
+            detached: None,
+        });
+        app.on_matrix(MatrixEvent::Paginated {
+            generation: app.generation,
+            reached_start: false,
+        });
+        assert_eq!(
+            app.rooms[0].messages.len(),
+            5,
+            "nothing is put into the room"
+        );
+        // The server counts what is unread there, and the list shows it.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 2),
+            summary("!b", "Beta", RoomCategory::Room, 0),
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+        ]));
+        for _ in 0..3 {
+            frame(&mut app, &mut terminal);
+        }
+        assert_eq!(app.rooms[0].unread, 2);
+        assert!(app.rooms[0].bold);
+        // No receipt, no request for history, nothing at all.
+        assert_eq!(drain(&mut commands), Vec::<String>::new());
+
+        // Opened again and seen, it is read.
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(open_id(&app), Some("!a"));
+        app.timeline.reached_start = true;
+        app.on_matrix(timeline(&app, many(7)));
+        frame(&mut app, &mut terminal);
+        frame(&mut app, &mut terminal);
+        assert!(marked_read(&mut commands) >= 1);
+    }
+
+    #[test]
+    fn a_message_in_the_room_that_was_left_notifies_like_any_other() {
+        use crate::matrix::Notice;
+        use crate::notify::NotifyMode;
+        let (mut app, _terminal, _commands) = connected();
+        app.notify_mode = NotifyMode::Terminal;
+        let notice = |room: &str| {
+            MatrixEvent::Notice(Notice {
+                room_id: room.into(),
+                room: "Alpha".into(),
+                sender: "ann".into(),
+                body: "hello".into(),
+                highlight: false,
+                thread: None,
+            })
+        };
+        // Open and on screen: the message is being watched.
+        app.on_matrix(notice("!a"));
+        assert!(app.pending_notices.is_empty());
+        // Closed: nobody is looking at it.
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        app.on_matrix(notice("!a"));
+        let (notices, ..) = app.take_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].room_id, "!a");
+
+        // A count that rose there is news as well.
+        app.detailed_notices.clear();
+        app.shown_notices.clear();
+        app.session_started = Instant::now().checked_sub(SESSION_SETTLE);
+        let mut alpha = summary("!a", "Alpha", RoomCategory::Room, 2);
+        alpha.server_notifications = 2;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            alpha,
+            summary("!b", "Beta", RoomCategory::Room, 0),
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+        ]));
+        app.release_count_notices(Duration::ZERO);
+        let (notices, ..) = app.take_notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].body, "2 new messages");
+    }
+
+    #[test]
+    fn the_room_list_keeps_the_focus_while_no_chat_is_open() {
+        let (mut app, mut terminal) = drawn();
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        redraw(&mut app, &mut terminal);
+        let cursor = app.sidebar.cursor;
+        for event in [
+            key(KeyCode::Tab),
+            key(KeyCode::BackTab),
+            key_mod(KeyCode::Left, KeyModifiers::ALT),
+            key_mod(KeyCode::Right, KeyModifiers::ALT),
+            key_mod(KeyCode::Up, KeyModifiers::ALT),
+            key_mod(KeyCode::Down, KeyModifiers::ALT),
+            alt('1'),
+            alt('2'),
+            alt('3'),
+            key(KeyCode::PageUp),
+            key(KeyCode::PageDown),
+        ] {
+            app.on_event(event.clone());
+            assert_eq!(app.focus, Pane::Sidebar, "{event:?}");
+            assert!(app.chat_closed(), "{event:?}");
+            // Going nowhere does not move the list's cursor either.
+            assert_eq!(app.sidebar.cursor, cursor, "{event:?}");
+            assert_eq!(app.timeline.selected, None, "{event:?}");
+        }
+        // Moving about says nothing.
+        assert!(app.toast.is_none());
+
+        // A click where the chat was hits nothing.
+        let (col, row) = find(&terminal, "No chat open");
+        for (col, row) in [(col, row), (col + 20, row + 2), (col + 20, 27)] {
+            app.on_event(click(col, row));
+            app.on_event(mouse(MouseEventKind::ScrollUp, col, row));
+            app.on_event(mouse(MouseEventKind::Down(MouseButton::Right), col, row));
+            assert_eq!(app.focus, Pane::Sidebar);
+            assert!(app.chat_closed() && app.modal.is_none());
+        }
+        assert_eq!(app.timeline.scroll, 0);
+
+        // Letters go where they go in the room list, its filter; a paste too.
+        // Nothing lands in a draft nobody sees.
+        type_text(&mut app, "bo");
+        assert_eq!(app.sidebar.filter.as_str(), "bo");
+        app.on_event(Event::Paste("b".into()));
+        assert_eq!(app.sidebar.filter.as_str(), "bob");
+        assert!(app.composer.is_empty());
+        assert!(app.attachments().is_empty());
+        // Ctrl-C has no draft to clear.
+        app.on_event(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.chat_closed());
+        assert!(app.rooms.iter().all(|room| room.draft.is_empty()));
+    }
+
+    #[test]
+    fn what_needs_an_open_chat_does_nothing_without_one() {
+        // Every action that has a name, on the demo: none panics, and those about
+        // the open chat leave everything as it is.
+        for spec in keymap::ACTIONS {
+            let (mut app, mut terminal) = drawn();
+            app.on_event(key(KeyCode::Esc));
+            assert!(app.chat_closed());
+            app.perform(spec.action);
+            redraw(&mut app, &mut terminal);
+            app.after_draw();
+            if spec.action.needs_open_chat() {
+                assert!(app.chat_closed(), "{}", spec.name);
+                assert!(app.modal.is_none(), "{}", spec.name);
+                assert!(app.composer.is_empty(), "{}", spec.name);
+                assert_eq!(app.focus, Pane::Sidebar, "{}", spec.name);
+                assert_eq!(app.timeline.selected, None, "{}", spec.name);
+                assert!(app.attachments().is_empty(), "{}", spec.name);
+                assert!(app.editor_request.is_none(), "{}", spec.name);
+                assert!(app.pending_copy.is_none(), "{}", spec.name);
+            }
+        }
+        // With an account: none of them sends anything.
+        for spec in keymap::ACTIONS
+            .iter()
+            .filter(|spec| spec.action.needs_open_chat())
+        {
+            let (mut app, mut terminal, mut commands) = closed();
+            app.perform(spec.action);
+            frame(&mut app, &mut terminal);
+            assert_eq!(drain(&mut commands), Vec::<String>::new(), "{}", spec.name);
+            assert!(app.chat_closed(), "{}", spec.name);
+        }
+        // A command says why nothing happened.
+        let (mut app, _terminal, _commands) = closed();
+        app.perform(Action::Search);
+        assert_eq!(toast_text(&app), Some("No chat is open"));
+
+        // The room-level ones are about the room under the cursor, as always in
+        // the room list.
+        let (mut app, _terminal, _commands) = closed();
+        app.perform(Action::RoomInfo);
+        match &app.modal {
+            Some(Modal::RoomInfo(info)) => assert_eq!(info.room_id, "!a"),
+            other => panic!("no room info: {other:?}"),
+        }
+        assert!(app.chat_closed());
+    }
+
+    #[test]
+    fn the_palette_offers_nothing_about_a_chat_that_is_not_open() {
+        use crate::palette::Target;
+        let (mut app, _terminal) = drawn();
+        app.on_event(key(KeyCode::Esc));
+        app.perform(Action::OpenPalette);
+        let Some(Modal::Palette(palette)) = &app.modal else {
+            panic!("no palette");
+        };
+        let entries: Vec<_> = (0..).map_while(|at| palette.entry_at(at)).collect();
+        for entry in &entries {
+            if let Target::Action(action) = entry.target
+                && action.needs_open_chat()
+            {
+                assert!(!entry.enabled, "{}", entry.title);
+            }
+        }
+        let enabled = |action: Action| {
+            entries
+                .iter()
+                .find(|entry| matches!(entry.target, Target::Action(a) if a == action))
+                .unwrap_or_else(|| panic!("no entry for {action:?}"))
+                .enabled
+        };
+        assert!(!enabled(Action::Attach));
+        assert!(!enabled(Action::OpenEmoji));
+        assert!(!enabled(Action::Search));
+        assert!(!enabled(Action::Focus(Pane::Composer)));
+        assert!(!enabled(Action::ToggleUnread));
+        assert!(enabled(Action::SearchEverywhere));
+        assert!(enabled(Action::FocusRoomFilter));
+        assert!(enabled(Action::RoomInfo));
+        assert!(enabled(Action::NewRoom));
+        // No room is "the current one".
+        for entry in &entries {
+            if matches!(entry.target, Target::Room(_)) {
+                assert_ne!(entry.hint.as_deref(), Some("current"), "{}", entry.title);
+            }
+        }
+    }
+
+    #[test]
+    fn everything_that_opens_a_room_opens_one_again() {
+        // The notification of another room, and of the room that was left.
+        for room in ["!b", "!a"] {
+            let (mut app, _terminal, mut commands) = closed();
+            app.on_matrix(MatrixEvent::NoticeClicked {
+                room_id: room.into(),
+            });
+            assert_eq!(open_id(&app), Some(room));
+            assert_eq!(app.focus, Pane::Composer);
+            let seen = drain(&mut commands);
+            assert!(seen.contains(&format!("OpenRoom({room})")), "{seen:?}");
+        }
+
+        // A link to a room.
+        let (mut app, _terminal, mut commands) = closed();
+        app.rooms[1].id = "!b:example.org".into();
+        assert!(app.try_open_matrix_link("https://matrix.to/#/%21b:example.org"));
+        assert_eq!(open_id(&app), Some("!b:example.org"));
+        assert!(drain(&mut commands).contains(&"OpenRoom(!b:example.org)".to_owned()));
+
+        // The command palette's list of rooms.
+        let (mut app, _terminal, mut commands) = closed();
+        app.on_event(key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        type_text(&mut app, "Beta");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(open_id(&app), Some("!b"));
+        assert_eq!(app.focus, Pane::Composer);
+        assert!(drain(&mut commands).contains(&"OpenRoom(!b)".to_owned()));
+
+        // The room list's filter, then Enter.
+        let (mut app, _terminal, _commands) = closed();
+        app.on_event(key_mod(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        type_text(&mut app, "bet");
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(open_id(&app), Some("!b"));
+
+        // Ctrl-↓ and Ctrl-↑ step from the list's cursor, which is on the room that
+        // was left, and the room that opens is the one to write in.
+        let (mut app, _terminal, mut commands) = closed();
+        app.on_event(key_mod(KeyCode::Down, KeyModifiers::CONTROL));
+        assert_eq!(open_id(&app), Some("!b"));
+        assert_eq!(app.focus, Pane::Composer);
+        assert_eq!(app.cursor_room(), app.open_index());
+        assert!(drain(&mut commands).contains(&"OpenRoom(!b)".to_owned()));
+        let (mut app, _terminal, _commands) = closed();
+        app.on_event(key_mod(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(open_id(&app), Some("!i"));
+        assert_eq!(app.cursor_room(), app.open_index());
+
+        // A jump to a message (a search hit, a link to a message): in another room,
+        // and in the room that was left, whose messages are not on screen.
+        for room in ["!b", "!a"] {
+            let (mut app, _terminal, mut commands) = closed();
+            app.rooms[0].messages = vec![remote("1", "ann", "already loaded")];
+            app.jump_to_event(room.into(), "$ev1".into(), None);
+            let generation = app.next_gen;
+            assert_eq!(
+                drain(&mut commands),
+                [format!("OpenEvent({room}, generation {generation})")]
+            );
+            // Until it arrives nothing changes.
+            assert!(app.chat_closed());
+            assert_eq!(app.timeline.selected, None);
+            app.on_matrix(MatrixEvent::Timeline {
+                room_id: room.into(),
+                generation,
+                messages: vec![remote("1", "ann", "the one")],
+                reached_start: true,
+                detached: None,
+            });
+            assert_eq!(open_id(&app), Some(room));
+            assert_eq!(app.focus, Pane::Timeline);
+            assert_eq!(app.timeline.selected, Some(0));
+            assert_eq!(app.messages().len(), 1);
+        }
+
+        // An invitation: opened from the list, then accepted.
+        let (mut app, _terminal, mut commands) = closed();
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(open_id(&app), Some("!i"));
+        drain(&mut commands);
+        app.perform(Action::AcceptInvite);
+        assert_eq!(drain(&mut commands), ["Join(!i)"]);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            summary("!b", "Beta", RoomCategory::Room, 0),
+            summary("!i", "Invited", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(open_id(&app), Some("!i"));
+        assert!(drain(&mut commands).contains(&"OpenRoom(!i)".to_owned()));
+
+        // A room that was asked for (joined by a command, created, a chat begun)
+        // opens when the list has it.
+        let (mut app, _terminal, mut commands) = closed();
+        app.manage.record_pending_open("!n".into());
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            summary("!b", "Beta", RoomCategory::Room, 0),
+            summary("!n", "New", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(open_id(&app), Some("!n"));
+        assert_eq!(app.focus, Pane::Composer);
+        assert!(drain(&mut commands).contains(&"OpenRoom(!n)".to_owned()));
+
+        // In the demo, a thread from the list of a room's threads.
+        let (mut app, _terminal) = drawn();
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        let left = app.active;
+        app.jump_to_event(app.rooms[left].id.clone(), "demo:0".into(), None);
+        assert_eq!(app.open_index(), Some(left));
+        assert_eq!(app.timeline.selected, Some(0));
+    }
+
+    #[test]
+    fn with_the_setting_off_escape_stops_at_the_composer() {
+        use crate::modal::Setting;
+        let config = Config {
+            esc_closes_chat: false,
+            ..Config::default()
+        };
+        assert!(!App::new(&config, std::path::PathBuf::new(), None).esc_closes_chat);
+        assert!(App::new(&Config::default(), std::path::PathBuf::new(), None).esc_closes_chat);
+
+        let (mut app, mut terminal, mut commands) = connected();
+        let dir = std::env::temp_dir().join(format!("matrix-rat-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("config.toml");
+        app.config_file = Some(file.clone());
+        // The settings row (and the palette's entry) writes it to the configuration.
+        app.perform(Action::Setting(Setting::EscClosesChat));
+        assert!(!app.esc_closes_chat);
+        assert!(!Config::load(&file).unwrap().esc_closes_chat);
+        assert_eq!(app.setting_value(Setting::EscClosesChat), "off");
+
+        drain(&mut commands);
+        type_text(&mut app, "x");
+        drain(&mut commands);
+        for _ in 0..3 {
+            app.on_event(key(KeyCode::Esc));
+            assert!(!app.chat_closed());
+            assert_eq!(app.focus, Pane::Composer);
+            assert_eq!(open_id(&app), Some("!a"));
+            assert_eq!(app.composer.text(), "x");
+        }
+        assert_eq!(drain(&mut commands), Vec::<String>::new());
+        // The steps before it are as they are with it on.
+        app.on_event(alt('1'));
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.focus, Pane::Composer);
+        redraw(&mut app, &mut terminal);
+        find(&terminal, "Alpha");
+
+        // On again, the chat closes; switched off with no chat open, the room that
+        // was left is back: there is no such state without the setting.
+        app.perform(Action::Setting(Setting::EscClosesChat));
+        assert!(Config::load(&file).unwrap().esc_closes_chat);
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        app.perform(Action::Setting(Setting::EscClosesChat));
+        assert!(!app.chat_closed());
+        assert_eq!(open_id(&app), Some("!a"));
+        assert_eq!(app.composer.text(), "x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn closing_the_chat_shows_a_room_list_that_was_put_away() {
+        let (mut app, mut terminal) = drawn();
+        app.perform(Action::ToggleSidebar);
+        assert!(app.sidebar.hidden);
+        redraw(&mut app, &mut terminal);
+        assert!(!screen_text(&terminal).contains("1 Rooms"));
+
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        assert_eq!(app.focus, Pane::Sidebar);
+        redraw(&mut app, &mut terminal);
+        let screen = screen_text(&terminal);
+        // The list is the one pane there is; the setting is as the user left it.
+        assert!(screen.contains("1 Rooms"), "{screen}");
+        assert!(!screen.contains("Type a message"), "{screen}");
+        assert!(app.sidebar.hidden);
+
+        // Shown again by its key, the list keeps the focus, next to the empty chat
+        // area; put away again, it stays: it is all there is to see.
+        app.perform(Action::ToggleSidebar);
+        redraw(&mut app, &mut terminal);
+        let screen = screen_text(&terminal);
+        assert!(screen.contains("1 Rooms") && screen.contains("No chat open"));
+        app.perform(Action::ToggleSidebar);
+        assert_eq!(app.focus, Pane::Sidebar);
+        redraw(&mut app, &mut terminal);
+        assert!(screen_text(&terminal).contains("1 Rooms"));
+
+        // A room is opened: the list is put away again.
+        app.on_event(key(KeyCode::Enter));
+        assert!(!app.chat_closed());
+        redraw(&mut app, &mut terminal);
+        let screen = screen_text(&terminal);
+        assert!(!screen.contains("1 Rooms"), "{screen}");
+        assert!(screen.contains("Type a message"), "{screen}");
+
+        // In a narrow window the list takes the chat's place in the same way.
+        let (mut app, _) = drawn();
+        let mut narrow = Terminal::new(TestBackend::new(50, 20)).unwrap();
+        redraw(&mut app, &mut narrow);
+        assert!(!screen_text(&narrow).contains("1 Rooms"));
+        app.on_event(key(KeyCode::Esc));
+        redraw(&mut app, &mut narrow);
+        let screen = screen_text(&narrow);
+        assert!(screen.contains("1 Rooms"), "{screen}");
+        assert!(!screen.contains("No chat open"), "{screen}");
+    }
+
+    #[test]
+    fn a_new_session_starts_with_a_room_open_again() {
+        let (mut app, _terminal, mut commands) = closed();
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert!(!app.chat_closed());
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@me:example.org".into(),
+        });
+        drain(&mut commands);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!a", "Alpha", RoomCategory::Room, 0),
+            summary("!b", "Beta", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(open_id(&app), Some("!a"));
+        assert!(drain(&mut commands).contains(&"OpenRoom(!a)".to_owned()));
     }
 
     #[test]

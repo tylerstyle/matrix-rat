@@ -398,11 +398,11 @@ impl App {
             return;
         }
 
-        let in_target_thread = thread_root.is_some()
-            && room_index == self.active
-            && self.thread_key() == thread_root.as_deref();
-        let in_target_room =
-            thread_root.is_none() && room_index == self.active && !self.thread_open();
+        // With no chat open the room is not on screen, whichever it is.
+        let open_here = Some(room_index) == self.open_index();
+        let in_target_thread =
+            thread_root.is_some() && open_here && self.thread_key() == thread_root.as_deref();
+        let in_target_room = thread_root.is_none() && open_here && !self.thread_open();
         if (in_target_thread || in_target_room)
             && let Some(pos) = find_target_message(
                 self.messages(),
@@ -421,7 +421,7 @@ impl App {
         // An event link without a thread root can still point to a message (or the root)
         // in the currently open thread; select it right here if loaded.
         if thread_root.is_none()
-            && room_index == self.active
+            && open_here
             && self.thread_open()
             && let Some(pos) = find_target_message(self.messages(), &event_id, false, true)
         {
@@ -463,10 +463,10 @@ impl App {
         if self.space.is_some() && !self.space_rooms.contains(room_id) {
             self.select_space(None);
         }
+        let open_here = Some(room_index) == self.open_index();
         let in_target_thread =
-            thread_root.is_some() && room_index == self.active && self.thread_key() == thread_root;
-        let in_target_room =
-            thread_root.is_none() && room_index == self.active && !self.thread_open();
+            thread_root.is_some() && open_here && self.thread_key() == thread_root;
+        let in_target_room = thread_root.is_none() && open_here && !self.thread_open();
         if !in_target_thread && !in_target_room {
             self.open_room(room_index);
             if let Some(at) = self.visible_rooms().iter().position(|i| *i == room_index) {
@@ -528,8 +528,8 @@ impl App {
 
         match want_thread {
             Some(root) => {
-                let same_thread =
-                    room_index == self.active && self.threads.open_root() == Some(root.as_str());
+                let same_thread = Some(room_index) == self.open_index()
+                    && self.threads.open_root() == Some(root.as_str());
                 if !same_thread {
                     self.leave_thread();
                     self.switch_room_state(room_index, false);
@@ -575,7 +575,8 @@ impl App {
         timeline.selected = find_target_message(&messages, target_id, false, self.thread_open());
         timeline.reveal_selected = timeline.selected.is_some();
 
-        self.rooms[self.active].messages = messages;
+        // The room is the open one now, whatever was open (or not) before.
+        self.rooms[room_index].messages = messages;
         self.sync_pinned_flags(&room_id);
         self.timeline = timeline;
         self.timeline_rev += 1;

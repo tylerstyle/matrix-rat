@@ -541,10 +541,12 @@ mod tests {
         app.on_event(key(KeyCode::Tab));
         assert_eq!(app.focus, Pane::Sidebar);
 
-        // Returning to Composer and pressing Esc returns to Composer/normal mode, not swallowed.
+        // Returning to Composer and pressing Esc is not swallowed: it steps back as
+        // ever, which from the composer with nothing to cancel closes the chat.
         app.perform(Action::Focus(Pane::Composer));
         app.on_event(key(KeyCode::Esc));
-        assert_eq!(app.focus, Pane::Composer);
+        assert!(app.chat_closed());
+        assert_eq!(app.focus, Pane::Sidebar);
     }
 
     #[test]
@@ -579,9 +581,14 @@ mod tests {
         assert!(app.complete.active.is_none());
         assert_eq!(app.composer.text(), "hi @a");
 
-        // Next Esc works as before (reply/edit/thread/composer).
+        // Next Esc works as before (reply/edit/thread); with none of those it closes
+        // the chat, and the draft is back when the room is opened again.
         app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        assert!(app.composer.is_empty());
+        app.on_event(key(KeyCode::Enter));
         assert_eq!(app.focus, Pane::Composer);
+        assert_eq!(app.composer.text(), "hi @a");
 
         // Typing another char opens and narrows again; Tab accepts display name and marks user.
         type_text(&mut app, "l");

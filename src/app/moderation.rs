@@ -291,8 +291,17 @@ impl App {
         self.sync_open_thread_pinned_flags(room_id);
     }
 
+    /// The open room's pinned messages.
     pub(super) fn open_pinned(&mut self) {
-        let Some(room) = self.room() else {
+        if let Some(room_id) = self.room_id() {
+            self.open_pinned_of(&room_id);
+        }
+    }
+
+    /// The pinned messages of any room in the list: the room info asks for the room it
+    /// is about, which need not be the open one (and none may be open).
+    pub(super) fn open_pinned_of(&mut self, room_id: &str) {
+        let Some(room) = self.rooms.iter().find(|room| room.id == room_id) else {
             return;
         };
         if room.is_pending() {

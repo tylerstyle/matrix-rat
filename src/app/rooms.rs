@@ -76,7 +76,7 @@ impl App {
         if self.focus == Pane::Sidebar {
             self.cursor_room()
         } else {
-            (self.active < self.rooms.len()).then_some(self.active)
+            self.open_index()
         }
     }
 
@@ -1366,8 +1366,7 @@ impl App {
             Click::LowPriority => self.toggle_room_tag(true),
             // The name above the messages is the open room's, wherever the focus is.
             Click::OpenInfo => {
-                let open = (self.active < self.rooms.len()).then_some(self.active);
-                self.open_info(open, None);
+                self.open_info(self.open_index(), None);
             }
             Click::SettingChoice(idx) => self.on_setting_choice(idx),
             Click::SettingSlot(slot) => self.on_setting_slot(slot),
@@ -1562,7 +1561,7 @@ impl App {
                 info.editing = Some((row, LineEdit::with_text(current).with_max_bytes(FIELD_MAX)));
                 return;
             }
-            InfoRow::Pinned => return self.open_pinned(),
+            InfoRow::Pinned => return self.open_pinned_of(&room_id),
             InfoRow::Invite => return self.open_new(Stage::Invite),
             InfoRow::Leave => {
                 if confirmed != Some(Confirm::Leave) {
@@ -2443,7 +2442,7 @@ impl App {
             return;
         };
         self.manage.pending_open = None;
-        if index != self.active || self.thread_open() {
+        if Some(index) != self.open_index() || self.thread_open() {
             self.open_room(index);
         }
         if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
@@ -4425,6 +4424,26 @@ mod tests {
         app.perform(Action::NewRoom);
         app.perform(Action::RoomInfo);
         assert!(matches!(app.modal, Some(Modal::Settings(_))));
+    }
+
+    #[test]
+    fn the_room_info_shows_the_pinned_messages_of_its_own_room_with_no_chat_open() {
+        let mut app = App::demo();
+        for _ in 0..3 {
+            app.on_event(key(KeyCode::Esc));
+        }
+        assert!(app.chat_closed());
+        // Another room than the one that was left.
+        app.on_event(key(KeyCode::Down));
+        let under_cursor = app.rooms[app.cursor_room().unwrap()].id.clone();
+        app.perform(Action::RoomInfo);
+        assert!(info(&app).rows().contains(&InfoRow::Pinned));
+        app.info_activate(InfoRow::Pinned, 1);
+        let Some(Modal::Pinned(pinned)) = &app.modal else {
+            panic!("the pinned messages did not open");
+        };
+        assert_eq!(pinned.room_id, under_cursor);
+        assert!(app.chat_closed());
     }
 
     #[test]

@@ -282,14 +282,15 @@ impl App {
             self.show_toast("That room is no longer available");
             return;
         };
-        if index == self.active && self.thread_key() == Some(root.as_str()) {
+        let open_here = Some(index) == self.open_index();
+        if open_here && self.thread_key() == Some(root.as_str()) {
             return;
         }
         if self.matrix.is_none() {
             self.open_demo_thread(index, &root);
             return;
         }
-        let loaded = (index == self.active)
+        let loaded = open_here
             .then(|| {
                 self.room_messages_of(index)
                     .iter()
@@ -314,7 +315,7 @@ impl App {
         else {
             return;
         };
-        if index != self.active || self.thread_open() {
+        if Some(index) != self.open_index() || self.thread_open() {
             self.open_room(index);
             if let Some(row) = self.visible_rooms().iter().position(|i| *i == index) {
                 self.sidebar.cursor = row;
