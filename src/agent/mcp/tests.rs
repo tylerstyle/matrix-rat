@@ -1124,7 +1124,10 @@ async fn a_room_that_showed_nothing_does_not_make_its_history_news() {
         .await;
     assert_eq!(ids(&woken), ["$answer"]);
 
-    // The same when the first thing done is to wait, or to read.
+    // The same when the first thing done is to wait, or to read. (The price: in a
+    // room that really is empty, what is written between such a first call and the
+    // next one is not news either. Whether a room is empty or not loaded cannot be
+    // told from here.)
     for first in ["wait_for_message", "read_messages"] {
         let world = World::start("mcp-unloaded-first", Vec::new()).await;
         let mut session = Session::start(world.socket(), Some(ANN));
@@ -1144,6 +1147,43 @@ async fn a_room_that_showed_nothing_does_not_make_its_history_news() {
         session.end().await;
         world.stop().await;
     }
+    session.end().await;
+    world.stop().await;
+}
+
+/// A read while a wait is on moves the point the room has been seen up to; the wait
+/// moves it on from there, so that its answer is not handed over a second time.
+#[tokio::test]
+async fn an_answer_is_handed_over_once_also_when_a_read_came_in_between() {
+    let world = World::start("mcp-overlap", vec![message("$first", EVE, "hi")]).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session
+        .ok("send_message", json!({ "text": "merge or wait?" }))
+        .await;
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    let read = session.begin("read_messages", json!({ "limit": 1 })).await;
+    let (_, shown) = session.result(read).await;
+    assert_eq!(ids(&shown), ["$sent-1"]);
+    world.post(message("$answer", ANN, "merge"));
+    let (_, woken) = session.result(id).await;
+    assert_eq!(ids(&woken), ["$answer"]);
+    session
+        .ok("send_message", json!({ "text": "and tag it?" }))
+        .await;
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+
+    // What a read does not show of what came since is owed, not lost.
+    world.post(message("$one", ANN, "yes"));
+    world.post(message("$two", ANN, "today"));
+    let read = session.ok("read_messages", json!({ "limit": 1 })).await;
+    assert_eq!(ids(&read), ["$two"]);
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$one"]);
     session.end().await;
     world.stop().await;
 }

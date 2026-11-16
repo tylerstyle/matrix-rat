@@ -254,8 +254,9 @@ were done about it, the second after an independent review of the first:
   loses nothing. A room that showed no message is not taken for an empty one (a failed
   load looks the same), so its history is not news later.
 
-Reviewed twice by an independent reviewer of `matrix-claude` (agy was out of credits; the
-user said to go on without it); both rounds asked for changes, which are in.
+Reviewed by independent reviewers of `matrix-claude`, each starting from the code alone (agy
+was out of credits; the user said to go on without it). Three rounds asked for changes,
+which are in.
 
 Still open:
 
@@ -263,9 +264,16 @@ Still open:
   sync and is loaded later, and in a room that shows no message within three pages when a
   watch begins it can tell loaded history as new once. The MCP tools do neither.
 - A `wait_for_message` that is already waiting does not see an answer loaded from a gap;
-  the next call (a wait or a read) does, if the answer is among the room's newest hundred.
-- When the user verifies a device, messages that were shown as untrusted before are handed
-  over as theirs, however old; the tool's description tells the agent to look at the time.
+  the next wait hands it over (a read in between that does not show it keeps it owed), if
+  the answer is among the room's newest hundred.
+- In a room that holds no message at all, what is written between an agent's first wait or
+  read and its next call is not handed over, unless the agent sent something first. The MCP
+  server cannot tell an empty room from one whose messages could not be loaded, and taking
+  the second for the first made old history news. `serve` would have to say whether a read
+  reached the room's start.
+- When the user verifies a device, or a key comes late, messages that were shown as
+  untrusted or unreadable before are handed over as theirs, however old; the tool's
+  description tells the agent to look at the time.
 - A wait hands over twenty messages at most; with more, the older ones of the backlog are
   left to `read_messages` (as designed), except those owed, which come with the next wait.
 

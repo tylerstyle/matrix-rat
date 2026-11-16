@@ -525,8 +525,9 @@ impl Server {
                 "name": "wait_for_message",
                 "description": format!(
                     "Wait until a new message arrives in the bound room {waking}, or until \
-                     the time is up. New means: after the last message this server sent or \
-                     handed to you (or after after_event_id); a message handed to you \
+                     the time is up. New means: after what you have seen of the room, which \
+                     is up to your first send_message, your last read_messages or the \
+                     last message handed to you (or after after_event_id); a message handed to you \
                      that was edited since is new again, and so is an older one that \
                      only now arrived or only now counts as the user's (look at its \
                      timestamp_ms: it may answer an earlier question). Returns \
@@ -644,6 +645,17 @@ impl Server {
                 turned_up
             })
             .collect()
+    }
+
+    /// Which of `messages` a look at the room has shown before.
+    fn known(&self, messages: &[Msg]) -> Vec<bool> {
+        match self.ledger.lock() {
+            Ok(ledger) => messages
+                .iter()
+                .map(|message| ledger.known.has(&message.event_id))
+                .collect(),
+            Err(_) => vec![true; messages.len()],
+        }
     }
 
     /// Whether `message`, wherever it stands, is news: handed over saying something
@@ -827,14 +839,26 @@ impl Server {
             .await
             .map_err(|err| self.told(err))?;
         self.pin(&room_id);
+        let was_known = self.known(&messages);
         let turned_up = self.look(&messages);
         let shown_from = messages.len().saturating_sub(limit);
+        // Where the room had been seen up to, among what was read.
+        let seen = self.seen();
+        let seen_at = seen.as_ref().and_then(|Anchor::After(id)| {
+            messages.iter().position(|message| message.event_id == *id)
+        });
         // What is not shown and the agent has not had: a wait hands it over. (What
-        // turned up among the messages seen before, and what names the user as its
-        // sender and does not count as theirs yet.)
-        for (message, turned_up) in messages.iter().zip(turned_up).take(shown_from) {
+        // came after the point the room was seen up to, what turned up before it
+        // among the messages seen, and what names the user as its sender and does
+        // not count as theirs yet.)
+        for (at, message) in messages.iter().enumerate().take(shown_from) {
+            let unseen = match (&seen, seen_at) {
+                (None, _) => false,
+                (Some(_), Some(seen_at)) => at > seen_at || turned_up[at],
+                (Some(_), None) => !was_known[at],
+            };
             match self.weigh(message) {
-                Ok(()) if turned_up => self.owe(message),
+                Ok(()) if unseen => self.owe(message),
                 Err(Some(_)) => self.doubt(message),
                 _ => {}
             }
@@ -900,13 +924,12 @@ impl Server {
         };
         let seen = self.seen();
         // Which of what was read is known already, and which turned up among it.
-        let was_known: Vec<bool> = match self.ledger.lock() {
-            Ok(ledger) => latest
-                .iter()
-                .map(|message| ledger.known.has(&message.event_id))
-                .collect(),
-            Err(_) => vec![true; latest.len()],
-        };
+        let ever_looked = self
+            .ledger
+            .lock()
+            .is_ok_and(|ledger| !ledger.known.kept.is_empty());
+        let was_known = self.known(&latest);
+        let none_known = !was_known.iter().any(|known| *known);
         let turned_up = self.look(&latest);
         // Up to where the room has been seen: `None` for before all that was read.
         let seen_at = match &seen {
@@ -914,17 +937,18 @@ impl Server {
             // Looked at for the first time: what is there now is not news.
             None => latest.len().checked_sub(1),
         };
-        // The point is not among what was read: so much came since that it is
-        // further back, and all that was read is news. Unless it is gone for
-        // another reason (its sender is ignored now): then what was known is not.
-        let lost = seen.is_some() && seen_at.is_none();
+        // The point is not among what was read. So much came since that it is
+        // further back: then none of what was read is known, and all of it is news.
+        // Or it is gone for another reason (its sender is ignored now, and older
+        // messages took the place of theirs): then only what stands after a known
+        // message and is not known is news.
+        let lost = seen.is_some() && seen_at.is_none() && after.is_none();
         if seen.is_none()
             && let Some(newest) = latest.last()
         {
             self.set_seen(Anchor::After(newest.event_id.clone()));
         }
-        // Moved by another call while this one waits, it is left alone at the end.
-        let seen_now = self.seen();
+
         let start = match after {
             Some(after) => match place(after, &heard) {
                 Some(at) => at + 1,
@@ -936,6 +960,10 @@ impl Server {
                     ));
                 }
             },
+            // No look has ever shown anything (the first one failed, and the point
+            // is the question sent, which is not here yet): what is read now is
+            // what the room held before, as on a first look.
+            None if lost && !ever_looked => latest.len(),
             None => seen_at.map_or(0, |at| at + 1),
         };
 
@@ -959,11 +987,10 @@ impl Server {
             }
         };
         for (at, message) in latest.iter().enumerate() {
-            if at >= start {
-                // From where the room has been seen.
-                if !(lost && after.is_none() && was_known[at]) {
-                    sort_in(message.clone(), &mut found, &mut doubted);
-                }
+            // From where the room has been seen.
+            let fresh = at >= start && (!lost || (!was_known[at] && (turned_up[at] || none_known)));
+            if fresh {
+                sort_in(message.clone(), &mut found, &mut doubted);
                 continue;
             }
             if after.is_some() || seen.is_none() {
@@ -973,7 +1000,7 @@ impl Server {
             // there when the room was looked at (an answer missed in a gap of the
             // sync, loaded now) is owed from here on, until it is handed over; and
             // what is owed or changed is news.
-            if turned_up[at] && !matches!(self.weigh(message), Err(None)) {
+            if at < start && turned_up[at] && !matches!(self.weigh(message), Err(None)) {
                 self.owe(message);
             }
             if self.reopened(message) {
@@ -1032,9 +1059,14 @@ impl Server {
             .filter_map(|message| Some((place(&message.event_id, &heard)?, &message.event_id)))
             .filter(|(at, _)| *at >= start)
             .max_by_key(|(at, _)| *at);
+        // (Where it is now, not where it was when the wait began: a read may have
+        // moved it meanwhile, on or not as far.)
+        let now_at = self
+            .seen()
+            .and_then(|Anchor::After(now)| place(&now, &heard));
         if let Some((at, id)) = reached
             && Some(at) > seen_at
-            && self.seen() == seen_now
+            && Some(at) > now_at
         {
             self.set_seen(Anchor::After(id.clone()));
         }
