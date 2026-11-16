@@ -477,20 +477,23 @@ async fn watch_room(
         {
             break;
         }
-        match tokio::time::timeout_at(give_up, timeline.paginate_backwards(PAGE)).await {
-            Ok(Ok(false)) => {}
-            Ok(Ok(true)) => break,
+        let done = match tokio::time::timeout_at(give_up, timeline.paginate_backwards(PAGE)).await {
+            Ok(Ok(reached_start)) => reached_start,
             Ok(Err(err)) => {
                 tracing::debug!(why = %logsafe::kind(&err), "agent: could not load a watched room's latest messages");
                 break;
             }
             Err(_) => break,
-        }
-        // What was loaded reaches the timeline a moment later.
+        };
+        // What was loaded reaches the timeline a moment later, also when it was
+        // all the room has.
         if let Ok(Some(diffs)) = tokio::time::timeout(SETTLE, changes.next()).await {
             for diff in diffs {
                 diff.apply(&mut items);
             }
+        }
+        if done {
+            break;
         }
     }
     while let Some(Some(diffs)) = changes.next().now_or_never() {

@@ -246,16 +246,28 @@ were done about it, the second after an independent review of the first:
 - `serve` takes a message it did not know for news only if it stands after the newest one
   it knew, and a watch loads older messages first until the room shows one.
 - The MCP server no longer goes by a message's place alone. It remembers what each look at
-  the room showed, what it handed to the agent and what it passed over. Before the point the
-  agent has seen, a message is news only if it was not there at the time (an answer missed
-  in a gap of the sync and loaded later), if it was handed over and says something else now,
-  or if it was passed over as not the user's and counts as theirs now.
+  the room showed, what it handed to the agent and what the agent is still owed. Before the
+  point the agent has seen, a message is news only if it was not there at the time (an
+  answer missed in a gap of the sync and loaded later), if it was handed over and was edited
+  since, or if it named the user without counting as theirs and counts now. What is owed
+  stays owed until it is handed over: a read that does not show it or a cancelled wait
+  loses nothing. A room that showed no message is not taken for an empty one (a failed
+  load looks the same), so its history is not news later.
 
-Still open: `listen` on the command line does not tell an answer that arrived during a gap
-in the sync and is loaded later; a `wait_for_message` that is already waiting does not
-either, the next call does, if the answer is among the room's newest hundred. A message
-that the bot's own account could not be shown at all when a watch began (nothing loaded
-within three pages) can still be told as new once.
+Reviewed twice by an independent reviewer of `matrix-claude` (agy was out of credits; the
+user said to go on without it); both rounds asked for changes, which are in.
+
+Still open:
+
+- `listen` on the command line does not tell an answer that arrived during a gap in the
+  sync and is loaded later, and in a room that shows no message within three pages when a
+  watch begins it can tell loaded history as new once. The MCP tools do neither.
+- A `wait_for_message` that is already waiting does not see an answer loaded from a gap;
+  the next call (a wait or a read) does, if the answer is among the room's newest hundred.
+- When the user verifies a device, messages that were shown as untrusted before are handed
+  over as theirs, however old; the tool's description tells the agent to look at the time.
+- A wait hands over twenty messages at most; with more, the older ones of the backlog are
+  left to `read_messages` (as designed), except those owed, which come with the next wait.
 
 **Also in 0.9:** what the user's testing of 0.8 turns up (nothing reported yet). Done on the
 branch `leftovers-09`: the three open notes of the 0.8 reviews (a playing message inside a
