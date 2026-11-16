@@ -2,7 +2,8 @@
 //! `■ 0:05 / 0:12 · 🎤 note.ogg` (the `■` stops it), and its waveform shows how far it
 //! has played: the played part in the theme's primary colour, the rest dimmed. Without
 //! a waveform a plain bar of the same width goes into the first row; without a known
-//! length only the position is shown.
+//! length only the position is shown. A name so long that the message's first line took
+//! several rows goes on over those rows.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -10,7 +11,7 @@ use ratatui::text::{Line, Span};
 use crate::app::AudioView;
 use crate::audio::{self, WAVE_BARS};
 use crate::model::{Attachment, MediaKind};
-use crate::text::{truncate, width};
+use crate::text::{split_at_width, truncate, width};
 use crate::theme::{Role, Theme};
 
 /// The colour of a role, without its background (the row's selection shows through).
@@ -28,6 +29,7 @@ fn played_style(theme: &Theme) -> Style {
 
 /// The first row, `max_width` columns wide, starting with `indent`. `spinner`: the
 /// loading indicator's current frame.
+#[cfg(test)]
 pub fn head(
     view: AudioView,
     file: &Attachment,
@@ -36,13 +38,101 @@ pub fn head(
     spinner: &str,
     theme: &Theme,
 ) -> Line<'static> {
+    let at = HeadRow {
+        nth: 0,
+        of: 1,
+        full: max_width,
+    };
+    head_row(view, file, indent, max_width, spinner, theme, at)
+}
+
+/// Which of the rows that the message's first line took, and how wide those before it
+/// are. A long file name took several: the name goes on over them.
+#[derive(Debug, Clone, Copy)]
+pub struct HeadRow {
+    pub nth: usize,
+    pub of: usize,
+    /// Columns of each row before this one.
+    pub full: usize,
+}
+
+/// Row `at.nth` of the first line, `max_width` columns wide, starting with `indent`.
+/// `spinner`: the loading indicator's current frame.
+pub fn head_row(
+    view: AudioView,
+    file: &Attachment,
+    indent: &str,
+    max_width: usize,
+    spinner: &str,
+    theme: &Theme,
+    at: HeadRow,
+) -> Line<'static> {
+    let muted = fg(theme, Role::Muted);
+    let last = at.nth + 1 >= at.of;
+    // The first row decides where the name starts, whichever row is asked for.
+    let first_width = if at.nth == 0 { max_width } else { at.full };
+    let (mut spans, used) = status(view, file, indent, first_width, spinner, theme);
+    let icon = match file.kind {
+        MediaKind::Voice => "🎤",
+        _ => "🔊",
+    };
+    let room = first_width.saturating_sub(used);
+    // Only where a few letters of it fit: an icon and a cut alone say nothing.
+    let on_first = room >= 10;
+    let name = if on_first {
+        format!(" · {icon} {}", file.name)
+    } else {
+        format!("{icon} {}", file.name)
+    };
+    let mut rest = name.as_str();
+    if on_first {
+        if at.nth == 0 {
+            let shown = if last {
+                truncate(rest, room)
+            } else {
+                split_at_width(rest, room).0.to_owned()
+            };
+            spans.push(Span::styled(shown, muted));
+            return Line::from(spans);
+        }
+        rest = split_at_width(rest, room).1;
+    } else if at.nth == 0 {
+        return Line::from(spans);
+    }
+    // The rows between the first and this one, each as wide as a row is.
+    let between = at.full.saturating_sub(width(indent));
+    for _ in 1..at.nth {
+        rest = split_at_width(rest, between).1;
+    }
+    let here = max_width.saturating_sub(width(indent));
+    let shown = if last {
+        truncate(rest, here)
+    } else {
+        split_at_width(rest, here).0.to_owned()
+    };
+    Line::from(vec![
+        Span::raw(indent.to_owned()),
+        Span::styled(shown, muted),
+    ])
+}
+
+/// What the first row says before the name, and the columns it takes.
+fn status(
+    view: AudioView,
+    file: &Attachment,
+    indent: &str,
+    max_width: usize,
+    spinner: &str,
+    theme: &Theme,
+) -> (Vec<Span<'static>>, usize) {
     let muted = fg(theme, Role::Muted);
     let mark = fg(theme, Role::Link).add_modifier(Modifier::BOLD);
     let mut spans = vec![Span::raw(indent.to_owned())];
     let mut used = width(indent);
     let room = |used: usize| max_width.saturating_sub(used);
     if room(used) < 2 {
-        return Line::from(spans);
+        // Nothing fits, a name neither.
+        return (spans, max_width);
     }
     spans.push(Span::styled("■ ", mark));
     used += 2;
@@ -84,16 +174,7 @@ pub fn head(
         spans.push(Span::styled("─".repeat(cells - done), muted));
         used += 1 + cells;
     }
-    let icon = match file.kind {
-        MediaKind::Voice => "🎤",
-        _ => "🔊",
-    };
-    let name = format!(" · {icon} {}", file.name);
-    // Only where a few letters of it fit: an icon and a cut alone say nothing.
-    if room(used) >= 10 {
-        spans.push(Span::styled(truncate(&name, room(used)), muted));
-    }
-    Line::from(spans)
+    (spans, used)
 }
 
 /// The waveform's row: the bars it has at rest, those played in the primary colour.
@@ -204,6 +285,47 @@ mod tests {
             for view in [playing(5, Some(12)), playing(5, None), AudioView::Loading] {
                 let shown = head(view, &wave, "  ", width, "⠋", &theme);
                 assert!(shown.width() <= width.max(2), "{width}: {shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_name_goes_on_over_the_rows_its_line_took() {
+        let theme = theme();
+        let mut long = file(vec![100; 24]);
+        long.name = "a_recording_with_quite_a_long_name.ogg".into();
+        let row = |nth, of, width| {
+            let at = HeadRow { nth, of, full: 30 };
+            head_row(playing(5, Some(12)), &long, "  ", width, "", &theme, at).to_string()
+        };
+        // Three rows of 30 columns: nothing is cut, nothing said twice.
+        assert_eq!(row(0, 3, 30), "  ■ 0:05 / 0:12 · 🎤 a_recordi");
+        assert_eq!(row(1, 3, 30), "  ng_with_quite_a_long_name.og");
+        assert_eq!(row(2, 3, 30), "  g");
+        // Two rows, the last one shorter (a read marker at its end): cut there.
+        assert_eq!(row(0, 2, 30), "  ■ 0:05 / 0:12 · 🎤 a_recordi");
+        assert_eq!(row(1, 2, 20), "  ng_with_quite_a_l…");
+        // One row: as before.
+        assert_eq!(row(0, 1, 30), "  ■ 0:05 / 0:12 · 🎤 a_record…");
+        // No room for a name in the first row: it starts in the second.
+        let at = |nth| HeadRow {
+            nth,
+            of: 3,
+            full: 22,
+        };
+        let narrow = |nth| head_row(playing(5, Some(12)), &long, "  ", 22, "", &theme, at(nth));
+        assert_eq!(narrow(0).to_string(), "  ■ 0:05 / 0:12");
+        assert_eq!(narrow(1).to_string(), "  🎤 a_recording_with_");
+        assert_eq!(narrow(2).to_string(), "  quite_a_long_name.o…");
+        for width in 0..40 {
+            for nth in 0..4 {
+                let at = HeadRow {
+                    nth,
+                    of: 4,
+                    full: width,
+                };
+                let shown = head_row(playing(5, Some(12)), &long, "  ", width, "", &theme, at);
+                assert!(shown.width() <= width.max(2), "{width}/{nth}: {shown}");
             }
         }
     }

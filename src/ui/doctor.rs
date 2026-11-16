@@ -11,7 +11,7 @@ use super::hit::HitId;
 use super::modal::{centered, popup};
 use crate::app::App;
 use crate::doctor::{Level, Popup};
-use crate::text::{truncate, width, wrap};
+use crate::text::{truncate, width, wrap_at_spaces};
 use crate::theme::{Role, Theme};
 
 /// The popup's width, where the screen has it.
@@ -89,7 +89,10 @@ fn report_lines(theme: &Theme, doctor: &Popup, room: usize) -> Vec<Line<'static>
             };
             let shown_label = truncate(line.label, label.saturating_sub(1));
             let padding = " ".repeat(label.saturating_sub(width(&shown_label)));
-            for (part_at, part) in wrap(&line.value, value_room).into_iter().enumerate() {
+            for (part_at, part) in wrap_at_spaces(&line.value, value_room)
+                .into_iter()
+                .enumerate()
+            {
                 let mut spans = Vec::with_capacity(4);
                 if part_at == 0 {
                     spans.push(Span::styled(mark, mark_style));
@@ -104,7 +107,7 @@ fn report_lines(theme: &Theme, doctor: &Popup, room: usize) -> Vec<Line<'static>
                 out.push(Line::from(spans));
             }
             if let Some(hint) = &line.hint {
-                for part in wrap(hint, value_room) {
+                for part in wrap_at_spaces(hint, value_room) {
                     out.push(Line::from(vec![
                         Span::raw(indent.clone()),
                         Span::styled(part, theme.style(Role::Muted)),

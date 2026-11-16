@@ -50,6 +50,9 @@ struct AudioPart {
     head: bool,
     /// The first row of that line (a long one takes more).
     first: bool,
+    /// Which row of that line, and how many rows it took.
+    nth: u16,
+    of: u16,
     /// Columns at the row's end that a read marker takes (see `receipts`): it stays.
     marker: u16,
 }
@@ -162,13 +165,15 @@ fn marker(message: &Message, repeated_shield: bool) -> Option<(String, Role)> {
 }
 
 /// What a row of the sound's message shows while it loads or plays, in `width`
-/// columns; `None` where the row stays as it is. A first line or a waveform that took
-/// more than one row says all in its first; the others are left empty.
+/// columns (`full`: those of a row without a read marker); `None` where the row stays
+/// as it is. A name too long for the first row goes on over the rows the first line
+/// took; a waveform that took more than one row says all in its first, the others are
+/// left empty.
 fn sound_row(
     part: AudioPart,
     view: crate::app::AudioView,
     message: &Message,
-    width: usize,
+    (width, full): (usize, usize),
     theme: &Theme,
     images: &mut ImageStore,
 ) -> Option<Line<'static>> {
@@ -178,17 +183,21 @@ fn sound_row(
         .as_ref()
         .map_or(&[][..], |meta| meta.waveform.as_slice());
     match (part.head, part.first) {
-        (true, true) => {
+        (true, _) => {
             let spinner = if view == crate::app::AudioView::Loading {
                 images.spinner()
             } else {
                 ""
             };
-            Some(super::audio::head(
-                view, file, INDENT, width, spinner, theme,
+            let at = super::audio::HeadRow {
+                nth: usize::from(part.nth),
+                of: usize::from(part.of),
+                full,
+            };
+            Some(super::audio::head_row(
+                view, file, INDENT, width, spinner, theme, at,
             ))
         }
-        (true, false) => Some(Line::default()),
         (false, true) => super::audio::wave(view, waveform, INDENT, width, theme),
         (false, false) => {
             super::audio::wave(view, waveform, INDENT, width, theme).map(|_| Line::default())
@@ -613,6 +622,7 @@ pub fn build_layout(
                 // A voice or audio message: its first line and its waveform change
                 // while it loads or plays (they are drawn over, see `draw`).
                 let sound = sound_rows(message, &rich);
+                let head_rows = wrapped.iter().filter(|row| row.line == 0).count() as u16;
                 let mut wave_seen = false;
                 let play_style = Style {
                     fg: theme.style(Role::Link).fg,
@@ -631,11 +641,15 @@ pub fn build_layout(
                         0 => Some(AudioPart {
                             head: true,
                             first: n == 0,
+                            nth: n as u16,
+                            of: head_rows,
                             marker: 0,
                         }),
                         1 if waveform => Some(AudioPart {
                             head: false,
                             first: !std::mem::replace(&mut wave_seen, true),
+                            nth: 0,
+                            of: 1,
                             marker: 0,
                         }),
                         _ => None,
@@ -1495,7 +1509,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
             .filter(|(_, (at, _))| *at == row.source)
             .and_then(|(part, (at, view))| {
                 let message = room.messages.get(at)?;
-                sound_row(part, view, message, room_left, theme, &mut app.images)
+                let widths = (room_left, usize::from(rect.width));
+                sound_row(part, view, message, widths, theme, &mut app.images)
             });
         match &sounding {
             Some(line) => {

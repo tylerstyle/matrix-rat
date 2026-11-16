@@ -133,6 +133,50 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Like [`wrap`], but a line ends only at a space: `Alt-Enter` and `--profile` stay in
+/// one piece. Only what is wider than a line by itself (a long path) is split.
+pub fn wrap_at_spaces(text: &str, max: usize) -> Vec<String> {
+    let max = max.max(1);
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split(' ').filter(|word| !word.is_empty()) {
+            let gap = usize::from(!line.is_empty());
+            if width(&line) + gap + width(word) <= max {
+                if gap == 1 {
+                    line.push(' ');
+                }
+                line.push_str(word);
+                continue;
+            }
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            if width(word) <= max {
+                line.push_str(word);
+                continue;
+            }
+            let mut parts = wrap(word, max);
+            line = parts.pop().unwrap_or_default();
+            lines.extend(parts);
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// `s` in two: what fits into `max` columns, and the rest. Nothing is added or dropped.
+pub fn split_at_width(s: &str, max: usize) -> (&str, &str) {
+    let mut used = 0;
+    for (at, g) in s.grapheme_indices(true) {
+        used += width(g);
+        if used > max {
+            return s.split_at(at);
+        }
+    }
+    (s, "")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +257,42 @@ mod tests {
         assert_eq!(truncate("hello world", 6), "hello…");
         assert_eq!(truncate("hello", 0), "");
         assert!(width(&truncate("日本語のテキスト", 5)) <= 5);
+    }
+
+    #[test]
+    fn split_at_width_keeps_everything() {
+        assert_eq!(split_at_width("hello", 3), ("hel", "lo"));
+        assert_eq!(split_at_width("hello", 5), ("hello", ""));
+        assert_eq!(split_at_width("hello", 0), ("", "hello"));
+        // A wide character that does not fit whole goes to the rest.
+        assert_eq!(split_at_width("a🎤b", 2), ("a", "🎤b"));
+        assert_eq!(split_at_width("a🎤b", 3), ("a🎤", "b"));
+    }
+
+    #[test]
+    fn wrap_at_spaces_keeps_hyphenated_words_whole() {
+        let text = "Shift-Enter cannot be told from Enter here; Alt-Enter makes a new line";
+        for max in 12..60 {
+            let lines = wrap_at_spaces(text, max);
+            assert_eq!(lines.join(" "), text, "{max}");
+            assert!(lines.iter().all(|line| width(line) <= max), "{max}");
+        }
+        // `wrap` would end a line after "Alt-".
+        assert_eq!(
+            wrap_at_spaces("here; Alt-Enter makes", 12),
+            ["here;", "Alt-Enter", "makes"]
+        );
+        // What is wider than a line is split, and nothing is lost.
+        assert_eq!(
+            wrap_at_spaces("in /a/very/long/path here", 8).concat(),
+            "in/a/very/long/pathhere"
+        );
+        assert!(
+            wrap_at_spaces("in /a/very/long/path here", 8)
+                .iter()
+                .all(|line| width(line) <= 8)
+        );
+        assert_eq!(wrap_at_spaces("", 8), [""]);
+        assert_eq!(wrap_at_spaces("a\nb", 8), ["a", "b"]);
     }
 }
