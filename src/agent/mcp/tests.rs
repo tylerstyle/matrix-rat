@@ -693,6 +693,31 @@ async fn an_answer_that_came_before_the_wait_is_not_lost() {
 }
 
 #[tokio::test]
+async fn a_wait_hands_over_the_newest_of_a_long_backlog() {
+    let mut history = vec![message("$first", ANN, "start")];
+    history.extend((0..30).map(|n| message(&format!("$m{n}"), ANN, "one of many")));
+    let world = World::start("mcp-backlog", history).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    let woken = session
+        .ok(
+            "wait_for_message",
+            json!({ "timeout_seconds": 5, "after_event_id": "$first" }),
+        )
+        .await;
+    let handed = ids(&woken);
+    assert_eq!(handed.len(), 20);
+    assert_eq!((handed[0], handed[19]), ("$m10", "$m29"));
+    assert_eq!(woken["earlier_messages_not_shown"], 10);
+    // All of it counts as seen.
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+    session.end().await;
+    world.stop().await;
+}
+
+#[tokio::test]
 async fn a_message_that_cannot_be_decrypted_yet_is_held_back_for_its_key() {
     let world = World::start("mcp-utd", Vec::new()).await;
     let mut session = Session::start(world.socket(), Some(ANN));

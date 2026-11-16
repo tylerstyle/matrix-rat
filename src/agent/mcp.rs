@@ -42,6 +42,8 @@ pub const MAX_AGENT_NAME: usize = 40;
 const WAIT_DEFAULT: u64 = 300;
 /// The longest it waits.
 const WAIT_MAX: u64 = 600;
+/// The most messages a wait hands over at once: of a longer backlog, the newest.
+const WAIT_MESSAGES: usize = 20;
 
 // JSON-RPC's error codes.
 const PARSE_ERROR: i64 = -32700;
@@ -378,7 +380,8 @@ impl Server {
                     "Wait until a new message arrives in the bound room {waking}, or until \
                      the time is up. New means: after the last message this server sent or \
                      handed to you (or after after_event_id). Returns \
-                     {{\"status\":\"new\",\"messages\":[…]}} or \
+                     {{\"status\":\"new\",\"messages\":[…]}} (at most {WAIT_MESSAGES} at a \
+                     time, the newest; read_messages has the rest) or \
                      {{\"status\":\"nothing new\",\"messages\":[]}}. Nothing wakes you while \
                      you are not waiting: call it again to go on waiting. {caution}"
                 ),
@@ -680,11 +683,17 @@ impl Server {
         if let Some(newest) = newest {
             self.set_seen(Anchor::After(newest));
         }
-        Ok(if found.is_empty() {
-            json!({ "status": "nothing new", "messages": [] })
-        } else {
-            json!({ "status": "new", "messages": self.all_shown(&found) })
-        })
+        if found.is_empty() {
+            return Ok(json!({ "status": "nothing new", "messages": [] }));
+        }
+        // A long backlog is not poured out at once: `read_messages` has the rest.
+        let earlier = found.len().saturating_sub(WAIT_MESSAGES);
+        found.drain(..earlier);
+        let mut woken = json!({ "status": "new", "messages": self.all_shown(&found) });
+        if earlier > 0 {
+            woken["earlier_messages_not_shown"] = earlier.into();
+        }
+        Ok(woken)
     }
 }
 
