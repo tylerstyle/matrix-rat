@@ -1,607 +1,229 @@
-# matrix-rat — implementation plan
+# matrix-rat: plan and state
 
-A mouse-friendly, themeable, image-capable Matrix client for the terminal, built on ratatui.
+A mouse-friendly, themeable Matrix client for the terminal, built on ratatui.
 
-Status: **revision 2** (2026-11-12) — reviewed by `matrix-agy`, verdict *approve with changes*;
-all eight findings are folded in (see §14 and `docs/reviews/PLAN-review.md`).
-Versions quoted below were checked on crates.io on 2026-11-12; items marked *(verify)* came from
-research that could not be confirmed at source and must be checked in the milestone that uses them.
+This file says where the project stands, how it is built and worked on, what was decided, and
+what comes next. It is kept current. Two things that used to live here have their own files:
 
-## 1. Goals
+- the plan as written before any code existed: [`docs/history/original-plan.md`](history/original-plan.md);
+- the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
+  [`docs/reviews/`](reviews/).
 
-| Goal | What "done" means |
+Last brought up to date: 2026-11-16, after 0.7.0.
+
+## 1. What it is for
+
+| Goal | State |
 |---|---|
-| Fixed, readable layout | Room list sidebar on the left, timeline on the right, composer at the bottom, status line. No vim window tree. |
-| Mouse first-class | Click to focus any pane, click a room to open it, wheel scrolls the pane under the pointer, drag the sidebar splitter, click links/images/buttons. Everything also reachable by keyboard. |
-| Logical keybinds | Non-modal by default (type to write, `Ctrl`/`Alt` chords to navigate), discoverable through a help overlay and a command palette, fully rebindable. |
-| Options menu | In-app settings screen for account, appearance, notifications, media, keybinds, encryption. Writes back to the config file. |
-| Modern theming | Semantic theme files, bundled popular palettes, a "terminal" theme that inherits ANSI colors, dark/light auto-switch, live reload, and templates so Noctalia / matugen / DMS / wallust / pywal can recolor the app automatically. |
-| Images in the terminal | Inline thumbnails in the timeline (kitty / sixel / iTerm2, halfblock fallback), a full-size viewer, avatars. |
-| Polish | Spinners, progress bars for sync / upload / download, toasts, rounded borders, optional subtle transitions. |
-| Correct Matrix | E2EE with verification and recovery, OAuth (MAS) login, sliding sync, replies, edits, reactions, redactions, threads, spaces, receipts, typing. |
+| A fixed, readable layout: room list, chat, composer, status line | Done. Below 60 columns, or with `Ctrl-B`, one pane fills the window. |
+| The mouse is a first-class way in; everything also works by keyboard | Done. Every click and every key resolves to the same actions. |
+| Few keys, none modal, all rebindable; a help overlay and a command palette | Done. A `vim` preset exists. |
+| Settings in the app, written back to the config file | Done. |
+| Themes: semantic theme files, built-in palettes, a theme that follows the terminal, dark/light pairing, live reload, templates for wallpaper-driven tools | Done: twelve built-in themes, templates for Noctalia, matugen, wallust, pywal. |
+| Pictures in the terminal | Done for the kitty graphics protocol, with coloured blocks elsewhere. Other protocols: decided against for now (§5). |
+| Correct Matrix: encryption with verification and recovery, browser login, sliding sync, replies, edits, reactions, threads, spaces, receipts, typing | Done, with the limits listed in §7. |
 
-Non-goals for v1: voice/video calls, widgets, multi-account in one window (multiple profiles are fine), room administration beyond basics.
+Not goals: calls, widgets, creating or deactivating accounts, a Windows build.
 
-## 2. Decision: write from scratch, borrow from iamb
+## 2. Releases
 
-Forking iamb (Apache-2.0, 0.14.0-alpha, ~31k LOC) was evaluated and rejected:
-
-- Its UI is built on `modalkit` (vim modes, window tree, command bar). 18 source files depend on it,
-  and the scrollback, composer, commands and keybindings are all modalkit types. Replacing that with
-  a fixed layout and click-to-focus means rewriting 10k+ LOC of core UI.
-- Mouse support is scroll-only; every other mouse event is dropped.
-- It keeps its own timeline (`BTreeMap` of messages on classic `/sync`) and does not use
-  `matrix-sdk-ui`. No sliding sync; slow startup and high RAM are long-standing issues.
-
-What we do take from iamb, adapted to our types, with attribution in `NOTICE`:
-
-| iamb source | Use |
-|---|---|
-| `src/message/html.rs` | Matrix HTML → styled ratatui `Text` (lists, links, tables, code). Highest-value reuse. |
-| `src/message/printer.rs` | Message wrapping/layout reference. |
-| `src/preview.rs` | Picker setup, fallback logic, download/resize pipeline for images. |
-| `src/oauth.rs`, `src/worker.rs` (login, store, backup setup) | Reference for SDK setup and login flows. |
-| `src/verifications.rs`, `src/windows/verify.rs` | SAS flow reference. |
-| `src/config/theme.rs`, `themes/*.toml` (~65 palettes) | Palette values for bundled themes (converted to our schema). |
-
-License for matrix-rat: **Apache-2.0** (matches iamb and matrix-rust-sdk; needed for the borrowed code).
-
-## 3. Stack
-
-| Concern | Choice | Notes |
+| Version | Date | What it brought |
 |---|---|---|
-| Matrix | `matrix-sdk` 0.19.1 + `matrix-sdk-ui` 0.19.1 | Features: default (`e2e-encryption`, `sqlite`, `rustls-aws-lc-rs`) + `bundled-sqlite`, `sso-login` (implies `local-server`), `socks`, `qrcode`. MSRV 1.96; machine has rustc 1.99.1. Pin exact versions — every minor release breaks APIs. |
-| Sync / rooms / timeline | `SyncService`, `RoomListService`, `Timeline` from `matrix-sdk-ui` | Same stack as Element X. Gives sliding sync, `VectorDiff` streams, local echo, send queue, date dividers, read marker, thread focus. |
-| TUI | `ratatui` 0.30.2, `crossterm` 0.29 (`event-stream`) | |
-| Async | `tokio` multi-thread | |
-| Images | `ratatui-image` 11.1.0, `image` 0.25 | `Picker::from_query_stdio()` once before the event stream starts. |
-| Composer | `ratatui-textarea` 0.9.4 | Successor to tui-textarea. Soft-wrap and mouse cursor placement *(verify)*; fall back to a small own widget if missing. |
-| HTML / markdown | `html5ever` (via borrowed renderer), `comrak` for compose (see §6a) | |
-| Code highlighting | `syntect` 5.3 + `two-face` | Lazy-loaded. |
-| Text utils | `unicode-width`, `unicode-segmentation`, `linkify`, `emojis` | |
-| Fuzzy | `nucleo-matcher` | Room switcher, command palette, completions. |
-| Config | `serde` + `toml` 1.x, `toml_edit` for write-back, `etcetera` for paths | |
-| Keybind parsing | `crokey` | `"ctrl-k"` strings ↔ key combinations. |
-| Theme extras | `notify` 8 (file watch), `terminal-colorsaurus` (dark/light), `signal-hook` (SIGUSR1) | |
-| Desktop | `notify-rust` (notifications), `arboard` + OSC 52 (clipboard), `keyring` for the store passphrase *(verify choice)* | |
-| Eye candy | `throbber-widgets-tui` 0.11 (or a small own braille spinner), built-in `Gauge`/`LineGauge`, `tachyonfx` (optional, off-switch in settings) | |
-| Logging / tests | `tracing` + `tracing-appender` (file only), `insta` + `TestBackend` | |
-| Dev env | `shell.nix` (user is on flakeless NixOS) with rust toolchain, `pkg-config`, C toolchain for aws-lc-rs/sqlite | |
+| 0.1.0 | 2026-11-13 | The client: layout and mouse, themes, password and browser login, room list with spaces, timeline with replies, edits, reactions and threads, Markdown composer with completions, encryption (verification, recovery key), pictures and files both ways, settings, key-binding editor, command palette, notifications. |
+| 0.1.1 | 2026-11-14 | Proper text inputs everywhere, search across all rooms, install from the NUR with a binary cache. |
+| 0.2.0 | 2026-11-14 | Jump to a message that is not loaded (Matrix links, replied-to messages, search hits), unread handling with a "new" line, a notification click opens its room, drafts per room. |
+| 0.3.0 | 2026-11-14 | Ignore and report, room list filters, moderation basics, pinned messages, forwarding, the window comes to the front after a notification click, `↑` from the composer selects messages. |
+| 0.4.0 | 2026-11-15 | User info and own profile, sessions (rename, verify, sign out), key backup status, key export and import, reasons for undecryptable messages, the public room directory with previews, room settings for admins. |
+| 0.5.0 | 2026-11-15 | Polls, voice messages, audio and video (played by the system), places, stickers, custom emoji as text, link previews, coloured code blocks, copying one code block, writing in `$EDITOR`, the icon and a launcher entry. |
+| 0.6.0 | 2026-11-15 | Room commands (`/join`, `/kick`, `/topic`, …), message details with the event source, a list of a room's threads, notification keywords, do not disturb, pasting a picture from the clipboard, `NO_COLOR`, a high-contrast theme. Logs no longer hold raw error text. |
+| 0.6.1 | 2026-11-15 | A code block typed on one line keeps its code; `/code`. |
+| 0.7.0 | 2026-11-15 | Space management, custom emoji as pictures and in reactions, `O` for the system's viewer, `Ctrl-B` for the room list, ready-made Linux binaries, running under WSL described. A room that was left stays gone; a muted room shows as muted at once. The rest of the debug output is free of private data. |
 
-## 4. Architecture
+Each release is a tag, a GitHub release with notes, the Nix package in the NUR with a binary
+cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
+`.github/workflows/release-binaries.yml`.
 
-Single binary crate to start (`src/` modules below); split into a workspace only if compile times demand it.
+## 3. How it is built
 
-```
-src/
-  main.rs            arg parsing, terminal init/restore, panic hook
-  app.rs             App state, event loop, Action dispatch
-  action.rs          Action enum (every user-visible command), names for keybinds/palette
-  event.rs           AppEvent: Term(crossterm) | Matrix(MatrixEvent) | Tick | ThemeChanged | ...
-  matrix/
-    mod.rs           MatrixHandle (cmd sender) + worker task
-    session.rs       login (password, SSO, OAuth), restore, token-refresh persistence
-    rooms.rs         RoomListService stream → RoomListUpdate
-    timeline.rs      per-room Timeline subscription → TimelineUpdate, send/edit/react/redact
-    media.rs         thumbnail/full fetch, upload with progress
-    crypto.rs        verification (SAS), recovery, backup state
-  ui/
-    mod.rs           root draw(), layout, focus ring
-    hit.rs           HitMap: per-frame (Rect, HitId, z) registry + lookup
-    sidebar.rs       room list (spaces, sections, unread badges, avatars, filter)
-    timeline.rs      virtualized message list, selection, scroll anchoring
-    message.rs       one message → lines (header, body, reactions, reply quote, media slot)
-    html.rs          Matrix HTML → Text (adapted from iamb)
-    composer.rs      textarea, reply/edit banner, completions popup, attachment chips
-    statusline.rs    sync state, typing, E2EE shield, key hints
-    overlay/         settings, command palette, room switcher, help, image viewer,
-                     verification, login, emoji/reaction picker, toasts, context menu
-    widgets/         avatar, badge, progress, spinner wrappers
-  theme/
-    mod.rs           Theme (semantic roles → Style), resolution, color-depth downgrade
-    load.rs          TOML parse, inherits, built-ins (include_str!), user dir
-    watch.rs         notify watcher + SIGUSR1 + dark/light detection
-    integrations/    template files (noctalia v4/v5, matugen, wallust), pywal reader
-  config/            Config struct, defaults, load, write-back, keymap
-  images/            picker, decode/resize pool, protocol cache (LRU)
-  notify.rs          desktop notifications, bell, terminal title unread count
-```
+One binary crate, about 127,000 lines of Rust with its tests (945 unit tests and 43 tests against
+a real homeserver at 0.7.0).
 
-### Data flow
+**Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.19.1, pinned exactly (every minor
+release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`; `ratatui-image` and `image` for
+pictures; `comrak` for Markdown; `syntect` (pure-Rust matcher) for code colours; `nucleo-matcher`
+for fuzzy search; `toml` and `toml_edit` for the config (comments survive a write-back); `zbus`
+and `notify-rust` for the desktop; `notify` for watching theme files; `insta` for snapshots.
+Rust 1.96 or newer.
 
-- **UI thread owns all UI state.** No shared mutex store (iamb's design). The Matrix worker runs on
-  tokio and talks to the UI over channels:
-  - UI → worker: `MatrixCmd` (`OpenRoom`, `Send`, `Paginate`, `ToggleReaction`, `FetchMedia`, …).
-  - worker → UI: `MatrixEvent` (`RoomList(Vec<VectorDiff>)`, `Timeline{room_id, generation, diffs}`,
-    `SyncState`, `Media{id, result}`, `UploadProgress`, `Verification(..)`, `Error(..)`).
-    The UI drops timeline batches whose `generation` is not the current subscription's.
-- **Session init order:** restore/login → `client.event_cache().subscribe()` *(verify it is still
-  mandatory in 0.19.1)* → start `SyncService` → build timelines.
-- **Timeline lifecycle:** the worker keeps a bounded LRU (5–8) of live `Timeline`s so switching back
-  to a recent room is instant and keeps its pagination; only the visible room's diff stream is
-  forwarded to the UI.
-- **Sidebar freshness:** besides the room-list diff stream, observe per-room info (unread counts,
-  name, avatar, latest event) so badges and previews never go stale.
-- The UI keeps lightweight view models (`RoomEntry`, `MsgItem`) built from the diffs; SDK types do
-  not leak into `ui/` beyond IDs.
-- **Event loop:** `tokio::select!` over crossterm `EventStream`, the `MatrixEvent` channel, and a
-  tick (~30 fps while animations/spinners are active, idle otherwise). Draw only when dirty.
-- **Actions:** every key, mouse click, palette entry and menu item resolves to an `Action`. One
-  dispatch path means keybinds, mouse and palette can never drift apart.
+**The two halves.**
 
-### Mouse
+- The **UI thread owns all state** (`App`, in `src/app.rs` and `src/app/*.rs`) and draws
+  (`src/ui/*.rs`). Popups are the `Modal` enum (`src/modal.rs`); text fields are `LineEdit`
+  (`src/lineedit.rs`).
+- The **worker** (`src/matrix/*.rs`) runs on tokio and owns the SDK. The two talk only through
+  `MatrixCmd` (UI to worker) and `MatrixEvent` (worker to UI). SDK types stay in the worker.
+- Requests carry a number or a generation, and an answer that no longer belongs to what is on
+  screen is dropped.
 
-- `HitMap` is cleared and refilled during each draw: widgets register `(Rect, HitId, z)`.
-  Mouse events are resolved against the last frame's map, top-most first, so overlays win.
-- `HitId` examples: `Pane(Sidebar)`, `Room(idx)`, `Message(idx)`, `Link(msg, n)`, `Image(msg)`,
-  `Reaction(msg, key)`, `Splitter`, `ScrollbarThumb(pane)`, `Button(id)`, `SettingsRow(n)`.
-- Behaviors: left click focuses + activates; wheel scrolls the hovered pane without changing focus;
-  drag on the splitter resizes the sidebar (persisted); hover highlights rows; right click opens a
-  context menu (reply / edit / react / copy / redact).
-- Text selection: mouse capture blocks native selection, so we provide copy actions (message, link,
-  code block) and document Shift-drag. A setting disables mouse capture entirely.
-- Links are clickable through the `HitMap` (hover underline, URL shown in the status line).
-  OSC 8 hyperlinks are emitted only when mouse capture is off, and only if it can be done without
-  corrupting cell widths *(verify)*.
-- **Startup order (strict):** raw mode → `Picker::from_query_stdio()` (timeout → halfblocks) →
-  dark/light query → alternate screen + mouse capture + keyboard enhancement → `EventStream`.
-  Terminal queries never run once the event stream exists.
-- **`TerminalGuard` (RAII):** one place that enters and restores the terminal (pop keyboard
-  enhancement flags, disable mouse capture, leave alternate screen); used by normal exit, the panic
-  hook and `SIGTSTP`/`SIGCONT`.
+**Rules that hold everywhere.**
 
-### Timeline rendering
+- **One way in.** Every key, click, palette entry, menu item and slash command resolves to an
+  `Action` (`src/action.rs`, `src/keymap.rs`). A second way to do something is another way to
+  the same action, with the same confirmation and the same rights check, never a second
+  implementation. No key is handled outside the keymap.
+- **Mouse** goes through a per-frame `HitMap` (`src/ui/hit.rs`): what was drawn says what a
+  click on it means.
+- **Nothing private in logs or debug output**: no message text, typed text, secrets, ids,
+  paths, addresses, keywords, or error text as the SDK or a server worded it. Errors are logged
+  by kind (`src/logsafe.rs`); types that hold private data have hand-written `Debug`. One test
+  fills the app and looks at its whole debug output.
+- **Everything from the network is hostile**: counts and lengths are bounded, text is made safe
+  for the terminal (`src/text.rs`), addresses are validated, and work on other people's content
+  has a time or size budget.
+- **Popups work at 80x24**: they scroll and keep their hint line.
+- **Never offer what will be refused**: an action the user lacks the right for is left out or
+  greyed, with the reason.
+- The worker's command handler stays small: new work goes into its own function and is
+  spawned or boxed (a debug build once overflowed a worker's stack).
 
-- Virtualized: only lay out what is near the viewport. Each `MsgItem` carries the SDK's
-  `unique_id` (exists for local echoes and virtual items too), a `content_rev` bumped on every
-  `VectorDiff::Set` and on media/avatar decode completion, and a `show_header` flag recomputed for
-  neighbours whenever diffs are applied. Line cache key:
-  `(unique_id, content_rev, show_header, width, theme_rev)`.
-- Scroll position is anchored to a `unique_id`, not a line offset, so pagination and incoming
-  messages don't jump the view.
-- HTML is parsed into an intermediate rich document (blocks/spans tagged `Link`, `CodeBlock`,
-  `Mention`, `Spoiler`, quote depth). We wrap it ourselves (`unicode-width`/`-segmentation`) and
-  produce both `Line`s and item-relative hit rects, which the draw pass offsets into the `HitMap`.
-  `Paragraph::wrap` is not used for messages because it cannot report span positions.
-- "Jump to bottom" pill with unread count when scrolled up; read marker line; date dividers;
-  grouped consecutive messages from one sender; per-user stable name colors from the theme palette.
-- Back-pagination at the top shows a spinner row.
+**Where things are.**
 
-### Images
-
-- Detect protocol once at startup; setting to force `kitty | sixel | iterm2 | halfblocks | off`.
-- Pipeline: timeline item with media → placeholder box (blurhash-tinted if available, with spinner)
-  → fetch thumbnail via SDK media API (cached in SDK media store) → decode + resize on a blocking
-  pool → cache encoded `Protocol` in an LRU keyed by `(mxc, cell size)` → render.
-- Keep the decoded, downscaled `DynamicImage` in a memory-bounded LRU alongside the encoded
-  protocol. Fully visible image → cached protocol. Clipped by the top/bottom edge → halfblocks
-  (clips cleanly per cell) or a re-encoded crop / ratatui-image sliced rendering if that proves
-  good enough *(verify)*. A graphics image must never draw outside the timeline area.
-- Click / `Enter` on an image opens a full-screen viewer overlay (fit, zoom, save, open externally).
-- Avatars: colored initials by default; real images when a graphics protocol is available (setting).
-- tmux/zellij: detect and warn; document `allow-passthrough`.
-- User's terminal is kitty, so the kitty protocol is the primary test target.
-
-### Progress and feedback
-
-- Status line spinner + text for sync states (`SyncService` state, `RoomListService` loading state).
-- First-sync screen with a progress bar and step labels.
-- Uploads: real progress from the SDK's `TransmissionProgress` observable, shown as a gauge chip
-  above the composer with cancel. Downloads: the SDK exposes no progress observable, so show an
-  indeterminate bar unless we stream it ourselves *(verify)*.
-- Toasts for errors and background events; never silently drop a failed send (retry / discard).
-
-## 5. Layout
-
-```
-╭ Rooms ──────────────╮╭ #rust:matrix.org ─────────────── 🔒 ─ 42 members ╮
-│ 🔍 filter…          ││ ── Today ──────────────────────────────────────── │
-│ ▾ Favourites        ││ ● alice                                    10:02  │
-│   # rust        (3) ││   Has anyone tried the new event cache?           │
-│ ▾ People            ││   ╭──────────────╮                                │
-│   ● bob          •  ││   │   (image)    │   👍 2  🎉 1                   │
-│ ▾ Rooms             ││   ╰──────────────╯                                │
-│   # matrix-rat      ││ ● bob                                      10:05  │
-│ ▸ Spaces            ││   ┃ alice: Has anyone tried…                      │
-│                     ││   Yes — startup is instant now.                   │
-│                     │├──────────────────────────────────────────────────┤
-│                     ││ ↩ Replying to bob                             ✕   │
-│                     ││ > type a message…                                 │
-╰─────────────────────╯╰──────────────────────────────────────────────────╯
- ● synced  alice is typing…                    Ctrl-K switch · F1 help · F2 settings
-```
-
-- Sidebar is resizable and collapsible; below ~60 columns it auto-collapses to an overlay.
-- Optional right panel (member list / room info / thread) toggled per room.
-- Composer grows with content up to a max height.
-
-## 6. Keybinds (deliberately few, all rebindable)
-
-The normal flow needs almost no keys: click a room (or pick it with the arrows), the chat opens
-and the cursor is already in the composer. Type, `Enter` sends.
-
-| Key | Action |
+| Area | Files |
 |---|---|
-| `Enter` / `Shift-Enter` | Send / line break (`Alt-Enter` as fallback where the terminal cannot tell them apart) |
-| `Tab` / `Shift-Tab` | Cycle focus: sidebar → timeline → composer |
-| `Alt-←` / `Alt-→` / `Alt-↑` / `Alt-↓` | Jump focus in that direction, matching the screen: `←` room list, `→` back to the chat (composer), `↑` messages, `↓` composer. With the right panel open, `Alt-→` from the chat goes there. Word-wise cursor movement in the composer is therefore on `Ctrl-←` / `Ctrl-→` (and `Alt-B` / `Alt-F`). Zellij grabs `Alt`-arrows by default; `Alt-1…4` and `Tab` are the fallback. |
-| `Alt-1` … `Alt-4` | Jump straight to a pane: 1 room list, 2 messages, 3 composer, 4 right panel (opens it if closed). The digit is shown in each pane's border title. |
-| `Alt-R` | Jump to the room filter (type to narrow the list, `Enter` opens) |
-| `↑` / `↓` in sidebar | Move through rooms; `Enter` opens the room and focuses the composer |
-| `↑` in composer (cursor on first line) | Leave the composer and select the newest message; keep pressing to walk up |
-| `↓` past the newest message | Back to the composer |
-| On a selected message | `Enter` reply · `e` edit (own messages) · `r` react · `Del` delete (own) · `c` copy · `o` open link/image. The same actions appear as a clickable row on the selected message and in the right-click menu. |
-| `Esc` | Close overlay → cancel reply/edit → drop selection and return to the composer |
-| `PgUp` / `PgDn` | Scroll the timeline |
-| `Alt-E` (or click the ☺ at the right of the composer) | Emoji picker: search field focused, type to fuzzy-search, arrows move through the grid, `Enter` or a click inserts at the cursor and closes |
-| `Ctrl-K` | Room switcher (fuzzy) |
-| `F1` (or `?` outside the composer) | Help (lists every key) |
-| `F2` (or `Ctrl-,`) | Settings |
-| `Ctrl-Q` | Quit |
+| Event loop, state, dispatch | `src/app.rs`, `src/app/*.rs` (one file per feature) |
+| Drawing | `src/ui/*.rs`; the timeline in `src/ui/timeline.rs` with a row cache |
+| Message text | `src/rich.rs` (received HTML to styled lines), `src/format.rs` (typed Markdown to HTML), `src/highlight.rs` (code colours), `src/complete.rs` (completions) |
+| Pictures | `src/images.rs`, `src/ui/image.rs`, `src/matrix/media.rs` |
+| Worker | `src/matrix/mod.rs` (session loop), `rooms.rs` (timelines), `manage.rs` (rooms and their settings), `spaces.rs`, `left.rs` (rooms left in a session), `session.rs` and `keyring.rs` (login and the store key), `verify.rs`, `devices.rs`, `search.rs`, `notify.rs` |
+| Desktop | `src/notify.rs`, `src/portal.rs` (dark/light), `src/focus.rs` (window focus), `src/clipboard.rs`, `src/editor.rs` |
+| Config, themes, keys | `src/config.rs`, `src/theme.rs`, `themes/`, `contrib/themes/`, `src/keymap.rs` |
 
-- Message-selection mode is unmistakable: the selected message is highlighted, the composer is
-  visibly dimmed, and the action hints are shown in the status line. Unbound letters do nothing
-  there (they are never typed into the composer by surprise). Status-line hints are clickable.
-- Everything else (attach, toggle sidebar, command palette, next unread) is reachable by mouse,
-  slash command or the palette; it gets a key only if the user binds one.
-- Keymap is context-scoped (`global`, `sidebar`, `timeline`, `composer`, `overlay`) in config.
-- Optional `vim` preset (`j/k`, `gg/G`, `i` to enter the composer); off by default.
-- Kitty keyboard protocol is enabled when available so `Shift-Enter` is distinguishable.
+## 4. How the work is done
 
-## 6a. Writing formatted messages
+- **A branch per piece of work**, in its own worktree under `.claude/worktrees/`, never in the
+  main checkout.
+- **`scripts/check.sh` must pass**: formatting, clippy with warnings denied, all unit tests, a
+  build. The tests against a homeserver (`scripts/dev-homeserver.sh`, `cargo test -- --ignored
+  --test-threads=1`) are run before a merge that touches the worker and before every release.
+- **The other agent reviews.** `matrix-agy` reviews what `matrix-claude` (or a helper working
+  for it) wrote, and the other way round. Nothing is merged before the reviewer agrees; findings
+  are fixed, not argued away. The review gets a row in the review log.
+- **Run it.** Features are tried in a real terminal against the test homeserver before they are
+  called done. Most real bugs of 0.5 to 0.7 were found this way, not by unit tests.
+- **Every fix gets a test that fails without it**, where that is possible.
+- **A release** is: version bump, check and server tests on the release commit, the Nix build,
+  the reviewer's release check (README against the code, and blockers), tag and GitHub release
+  with notes, then the NUR package. A published tag is never moved.
+- **Tests keep away from the person running them**: no test may reach the session's keyring,
+  message bus or display (a test bus is started with `src/testbus.rs`).
 
-Matrix carries formatting as HTML (`formatted_body`, `org.matrix.custom.html`) next to a plain-text
-`body`. Bridges (mautrix-whatsapp, -signal, -telegram, -discord, …) translate that HTML into the
-remote network's own formatting, so anything we send as correct Matrix HTML also arrives formatted
-on bridged services. The question is only how the user types it. We support **both** styles, the
-way Element does — they do not conflict:
+## 5. Decisions by the user
 
-**1. Markdown as you type (default, Beeper/Discord style)**
-
-| Typed | Result | HTML sent |
-|---|---|---|
-| `**bold**`, `*italic*`, `~~strike~~` | bold, italic, strikethrough | `<strong>`, `<em>`, `<del>` |
-| `` `code` ``, fenced ``` blocks with language | inline code, highlighted block | `<code>`, `<pre><code class="language-x">` |
-| `\|\|spoiler\|\|` | hidden until clicked | `<span data-mx-spoiler>` |
-| `> quote`, `- list`, `1. list`, `# heading`, `[text](url)` | as expected | standard tags |
-| `@name`, `#room` (via completion) | mention pill | `matrix.to` link + `m.mentions` |
-| `:emoji:` | emoji character | — |
-
-- Engine: `comrak` with `default-features = false` (its defaults pull in a CLI and the C
-  Oniguruma library). We post-process its output for Matrix: spoilers become
-  `<span data-mx-spoiler>` (comrak emits `class="spoiler"`) and the outer `<p>` is stripped from
-  single-paragraph messages. The SDK's own `markdown` feature is not used.
-- Extensions (CommonMark + GFM): its `strikethrough`, `spoiler` (`||…||`), `autolink`
-  and `tasklist` extensions — this replaces `pulldown-cmark` in §3. Raw HTML in input is escaped.
-- If the text contains no formatting, only a plain `body` is sent (no redundant HTML).
-- A backslash escapes a marker (`\*not italic\*`).
-
-**2. Slash commands (Element style)** — typing `/` opens a completion popup with descriptions.
-
-| Command | Effect |
+| Date | Decision |
 |---|---|
-| `/me <text>` | Emote |
-| `/spoiler <text>` | Whole message as spoiler |
-| `/plain <text>` | Send exactly as typed, no Markdown |
-| `/html <html>` | Send raw HTML (sanitised to Matrix's allowed tags) |
-| `/shrug`, `/tableflip`, `/lenny` | Prepend the classic text faces |
-| `/rainbow <text>` | Rainbow-coloured text |
-| `/react <emoji>`, `/upload <path>`, `/join`, `/leave`, `/invite`, `/nick`, `/topic` | Client actions |
+| 2026-11-12 | Name and binary `matrix-rat`; licence Apache-2.0; public at `github.com/tylerstyle/matrix-rat`. |
+| 2026-11-12 | Keys: few, not modal, mouse and arrows first; a `vim` preset is optional. |
+| 2026-11-12 | Formatting is typed as Markdown, plus slash commands. |
+| 2026-11-14 | Work goes ahead without asking when both agents agree; every piece is checked by the other agent. |
+| 2026-11-14 | Account creation is not wanted. |
+| 2026-11-14 | `↑` from the composer selects messages; it does not start a reply or an edit. |
+| 2026-11-14 | The filter chips in the room list stay visible. |
+| 2026-11-15 | Coloured code blocks with syntect, accepting the non-standard licence of its bundled grammar files for now. |
+| 2026-11-15 | The icon: the chef rat, with a one-colour and an outline variant; a launcher entry is installed. |
+| 2026-11-15 | No Windows build. The README says how to run under WSL. |
+| 2026-11-15 | Pictures: kitty graphics and coloured blocks are enough; no sixel or iTerm2 for now. Opening a picture in the system's viewer covers the rest. |
+| 2026-11-15 | For 0.7: the sync guard, custom emoji pictures, space management, the rest of the debug hardening, prebuilt binaries. Popping out a chat, audio inside the app and several accounts wait. |
 
-`//text` sends a message that starts with a literal slash.
+## 6. What comes next
 
-**Composer feedback:** Markdown markers are lightly syntax-coloured while typing (bold shown bold,
-spoiler dimmed), and a Markdown on/off toggle lives in Settings → Composer. The timeline renders
-received spoilers as a covered block that reveals on click or `Enter`.
+See §6a for the plan that came out of looking at faro. Besides that, the list of what could
+be done, by demand:
 
-## 7. Settings menu
+- Playing audio and voice messages inside the app (asked for by the user).
+- "Popping out" a chat into a window of its own (asked for by the user). A second terminal on
+  the same account is refused today by the profile lock, so this needs a design: one program
+  serving several windows, or a second instance that only reads.
+- Several accounts in one window (shares that design).
+- QR login.
+- macOS: notifications and their click, the secret store and following dark/light are
+  Linux-only today (D-Bus); a medium piece of work, with nobody to test it.
+- More Linux packaging (AUR, a `.deb`): small now that release archives exist.
+- Other languages; exporting a chat; a gallery of a room's files.
+- Reading the shortcode a received custom-emoji reaction carries (the SDK does not expose it).
 
-Overlay with categories on the left, rows on the right; mouse and keyboard driven; changes apply
-live and are written back with `toml_edit` (preserving user comments).
+## 6a. Ideas from faro (proposed 0.8, awaiting the user's choice)
 
-- **Account** — profile, display name, devices/sessions, logout.
-- **Appearance** — theme picker with live preview, dark/light pairing, follow-system toggle,
-  density (compact/comfortable), timestamps format, nerd-font icons on/off, animations on/off,
-  rounded borders, avatar style, sidebar width/sections.
-- **Notifications** — desktop notifications, bell, mentions-only, per-room overrides.
-- **Media** — image protocol, inline previews on/off, max preview size, auto-download limits,
-  cache retention, external opener.
-- **Keybinds** — list by context, rebind by pressing the key, conflict warning, preset switch.
-- **Encryption** — device verification status, verify this device, recovery key entry/setup,
-  key backup state.
-- **Advanced** — log level, mouse capture, proxy, open config file / log dir.
+[faro](https://github.com/harababurel/faro) is a terminal Signal client on the same libraries
+(ratatui, ratatui-image, crossterm, tokio). Its design documents and source were read on
+2026-11-16 at the user's request. Its licence is AGPL-3.0 and ours is Apache-2.0: **behaviour
+and ideas are taken up, no code is copied.** Every piece below is written fresh against our
+own types.
 
-## 8. Theming
+**Already the same here:** UI thread and worker apart, one action table behind keys, mouse and
+palette, key hints read from the live keymap, live theme preview, config written back with
+comments kept, private data kept out of debug output, `↑` from the composer selecting messages,
+a panic hook that restores the terminal, a message counting as read only when it is really on screen in a focused window, release actions pinned to commits.
 
-### Theme files
+### Proposed for 0.8, in this order
 
-- Location: built-ins compiled in; user themes in `~/.config/matrix-rat/themes/<name>.toml`.
-- Schema: a small `[palette]` of named colors plus **semantic roles** that reference them, so a
-  generator only has to fill ~20 values:
-
-```toml
-name = "noctalia"
-inherits = "base-dark"        # optional
-[palette]
-bg = "#171210"
-surface = "#221a17"
-fg = "#f1dfd8"
-muted = "#a08d85"
-surface_high = "#2d2420"      # optional
-outline = "#53433d"           # optional
-primary = "#f9b991"
-on_primary = "#4b2707"        # optional, defaults to bg; guarantees readable badges
-secondary = "#e5bfa8"
-accent = "#cbc891"
-error = "#ffb4ab"
-[ui]
-border = "muted"
-border_focused = "primary"
-selection = { bg = "surface", fg = "primary" }
-unread_badge = { bg = "primary", fg = "on_primary" }
-mention = { fg = "accent", bold = true }
-# … status line, composer, scrollbar, toasts, progress, code block, link, quote, timestamps
-[users]                        # sender name colors, cycled by hash
-colors = ["primary", "secondary", "accent", "#…"]
-```
-
-- Values: `#rrggbb`, ANSI names / indices, `"reset"`, or a palette key. Unknown keys warn, never crash.
-- Bundled: catppuccin (4), tokyonight, gruvbox, nord, rosé pine, dracula, kanagawa, everforest,
-  solarized, one-dark — palettes converted from iamb's theme set — plus a house default.
-- **`terminal` theme:** only ANSI 0–15 and `Reset`. Works with every shell/generator that already
-  themes the terminal itself, and is the zero-config answer to "auto-colored".
-- Color depth: detect truecolor via `COLORTERM`; quantize to 256 colors otherwise.
-
-### Dark / light and live reload
-
-- `theme = { dark = "…", light = "…" }` pairing; mode detected at startup with
-  `terminal-colorsaurus` (OSC 11, before the event stream starts). Live mode switches arrive via
-  the generator rewriting the theme file or `SIGUSR1`; terminal mode 2031 reports are a stretch
-  goal only, because they collide with crossterm's input parsing.
-- Hot reload: `notify` watcher (debounced) on the **parent directories** (config dir and
-  `themes/`), filtered by filename, so atomic write-then-rename by generators and editors keeps
-  working. Plus `SIGUSR1`.
-- `matrix-rat --reload-theme` signals running instances found through
-  `$XDG_RUNTIME_DIR/matrix-rat/<profile>.pid` files (removed on exit).
-
-### Desktop-shell integration
-
-Shipped under `contrib/themes/` and installable with `matrix-rat theme install-template <target>`
-(prints or writes the registration snippet; never edits another tool's config without confirmation):
-
-| Target | What we ship |
-|---|---|
-| Noctalia v5 (user's setup, TOML config) — **primary target** | Template using `{{colors.primary.default.hex}}` tokens (incl. v5's `hover` and `terminal_*` tokens for the user-colour list) + `[theme.templates.user.matrix-rat]` snippet for `~/.config/noctalia/templates.toml` with `post_hook = "matrix-rat --reload-theme"`; `input_path_modes` for dark/light. Tested live on the user's machine. Later submit to the community template registry. |
-| Noctalia v4 (legacy) | Same template body + `[templates.matrix-rat]` snippet for `~/.config/noctalia/user-templates.toml`. Untested locally. |
-| matugen (also DMS, end-4, Caelestia) | Tera-syntax template + `[templates.matrix-rat]` config snippet *(verify syntax)*. |
-| wallust | Template + config entry. |
-| pywal / pywal16 | Built-in `theme = "pywal"` that reads `~/.cache/wal/colors.json` directly and watches it. |
-| base16 / tinty | `theme = "base16:<path>"` loader mapping base00–0F to roles (stretch). |
-
-Generators all write the same output: `~/.config/matrix-rat/themes/<generator>.toml`. The file
-watcher picks it up, so recoloring is instant even without the post-hook.
-
-## 9. Matrix feature scope
-
-| Area | v1 | Later |
-|---|---|---|
-| Login | OAuth/MAS via localhost redirect (`local-server`), password, SSO; session restore + refresh-token persistence | QR login |
-| Sync | `SyncService` (sliding sync); offline start from cache | |
-| Rooms | list with sections (favourites, people, rooms, low priority), spaces filter, unread/mention badges, latest-event preview, join/leave/invite handling | room directory, create room |
-| Timeline | text, formatted HTML, replies, edits, reactions, redactions, images/files/video-as-file, date dividers, read marker, receipts, typing | polls, pinned events, search, location |
-| Threads | open thread in right panel (`TimelineFocus::Thread`) | thread list |
-| E2EE | sqlite crypto store, SAS emoji verification, recovery key entry, key backup, shields on messages | cross-signing reset, QR verify |
-| Media | inline thumbnails, viewer, download/save, upload with progress | galleries, GIF animation |
-| Profiles | `--profile <name>` separate store/config | |
-
-OAuth dynamic registration needs a `client_uri` — `https://github.com/tylerstyle/matrix-rat`.
-
-One instance per profile: an exclusive `flock` on `<data_dir>/<profile>/lock` is taken before the
-SDK store is opened; a second instance exits with a clear message.
-
-Secrets: session tokens in the data dir with `0600`; sqlite store passphrase in the system keyring
-with a file fallback when no keyring service is available.
-
-## 10. Milestones and review gates
-
-Each milestone ends with: `cargo fmt`, `cargo clippy -D warnings`, tests green, a short demo note,
-then **review by `matrix-agy` before the next milestone starts**.
-
-| # | Milestone | Deliverable |
-|---|---|---|
-| M0 | Scaffold | `shell.nix`, Cargo project with pinned deps (prove the SDK builds here), CI-style check script, logging, `TerminalGuard`, profile lock, `LICENSE`/`NOTICE`. |
-| M1 | UI shell with fake data | Layout, focus ring, `HitMap` mouse (click focus, wheel, splitter drag), Action/keymap system, theme engine with 3 built-ins + `terminal`, help overlay, snapshot tests. No network. |
-| M2 | Login + sync + room list | Worker task, OAuth/password login screen, session restore, `RoomListService` → sidebar with badges and previews, first-sync progress, status line. Recovery-key entry (`recovery().recover`) so encrypted rooms decrypt on real accounts from here on. |
-| M3 | Timeline + composer | Live timeline via `Timeline` diffs, virtualized rendering, HTML rendering, pagination, send (Markdown + slash commands, §6a), spoiler rendering, local echo/retry, replies, edits, reactions, redactions, receipts, typing. Graceful "unable to decrypt" items. |
-| M4 | E2EE | Verification overlay (SAS), recovery setup/management UI, backup status, device list, shields. |
-| M5 | Media | Image pipeline, inline thumbnails, viewer, avatars, upload/download with progress, file open/save. |
-| M6 | Settings + keybind editor + palette | Settings overlay with write-back, command palette, room switcher, completions, context menu. |
-| M7 | Theming integrations | Full bundled theme set, hot reload, dark/light follow, Noctalia/matugen/wallust templates, pywal reader, `theme install-template`. |
-| M8 | Spaces, threads, notifications, polish | Space navigation, thread panel, desktop notifications, animations, README with screenshots, packaging (`default.nix`). |
-
-### M5 part 2: files and saving attachments (requested 2026-11-13)
-
-- **Shown:** `m.file`, `m.audio` and `m.video` messages appear as one attachment line
-  (`📎 name · size · type`), selectable like any message; pictures keep their inline view.
-- **Save:** `s` on a selected picture or attachment (or a click on its line / a "save" hint
-  in the status line and in the picture viewer) downloads the original file into the
-  download folder, with a progress indication on the message and a toast naming the
-  saved path. An existing file is never overwritten (`name (1).ext`).
-- **Download folder:** one setting, `download_dir`, editable in the settings menu (F2).
-  Default: the XDG download directory (`xdg-user-dir DOWNLOAD`), else `~/Downloads`.
-- **Open:** `o` on an attachment saves it (if not saved yet) and opens it with the
-  desktop's default program.
-- **Safety:** the file name comes from the sender, so only its last path component is
-  used, control characters are removed, hidden-file dots and empty names are replaced,
-  and the write goes to a temporary file that is renamed when complete. Encrypted
-  attachments are decrypted by the SDK. A size limit asks before very large downloads.
-- **Later:** sending files (`/upload path`, drag-and-drop paste of a path).
-
-M1 before any networking is deliberate: the look, mouse model and theming are the product's
-differentiators and can be reviewed with fake data in days.
-
-## 11. Testing
-
-- Unit: HTML renderer, message layout/wrapping, theme resolution, keymap parsing, hit testing.
-- Snapshot (`insta` + `TestBackend`): each pane and overlay at several sizes and themes.
-- Reducer tests: feed `VectorDiff` sequences and assert view-model state.
-- Integration: a local homeserver from nixpkgs (conduwuit/tuwunel or synapse) in a test script for
-  login, send, E2EE between two clients. Manual checklist on matrix.org for OAuth.
-- Manual terminal matrix for images: kitty (primary), foot (sixel), alacritty (halfblocks), tmux.
-
-## 12. Risks
-
-| Risk | Mitigation |
-|---|---|
-| matrix-sdk breaks API every minor release | Pin exact versions; keep SDK types inside `matrix/`; upgrade deliberately. |
-| Long compile times, C toolchain needs (aws-lc-rs, sqlite) | `shell.nix` provides them; dev profile with optimized deps; consider `mold`. |
-| Inline images while scrolling (clipping, sixel last-row scroll bug, multiplexers) | Sliced rendering, placeholder when clipped, protocol override, never draw sixel on the last row. |
-| `ratatui-textarea` lacks soft-wrap / mouse placement | Verify in M1; own minimal composer widget as fallback. |
-| Mode 2031 / OSC replies colliding with crossterm input parsing | Startup query before `EventStream`; live reports optional; file watcher is the reliable path. |
-| Noctalia v4 vs v5 template differences | v5 is primary and tested; v4 snippet shares the template body and avoids v5-only tokens via a separate file if needed. |
-| Scope creep | v1 column in §9 is the contract; "Later" items wait. |
-
-### Open requests
-
-- **Roadmap after 0.2.0 (approved by the user 2026-11-14; to be revisited release by release):**
-  - **0.3 "links, triage, safety":** low-priority rooms and "unread only" / "people only"
-    filters; unread and mention counts on spaces; pinned messages and forwarding; ignore/block
-    users and report content; moderator basics (delete others' messages, ban/unban, roles);
-    find people by name when starting a chat or inviting. (Matrix links inside the app, jump
-    to the replied-to message and mark-as-unread already came with 0.2.0.)
-  - **0.4 "people, devices, rooms":** user info and own profile; session list (rename,
-    verify, sign out another device); key backup status and key export/import; clearer
-    "unable to decrypt"; public room directory with preview; room settings for admins.
-  - **0.5 "message types and terminal comforts" (done, released as 0.5.0):** polls; voice/audio/video entries played
-    in the system player; stickers and custom emoji; link previews; code-block colours and
-    copying a block; composing in `$EDITOR`.
-  - **0.6 "finding your way" (done, released as 0.6.0; picked by matrix-claude from the
-    later list on 2026-11-15, the user said "continue with the next phase"):** room slash commands
-    (`/join`, `/leave`, `/invite`, `/nick`, `/topic`, `/kick`, `/ban`, …); message details
-    (who, when exactly, edits, who read it, the event's source); a list of a room's threads;
-    notification keywords and do-not-disturb; pasting a picture from the clipboard;
-    `NO_COLOR` and a high-contrast theme. Owed from 0.5: server tests for polls and
-    stickers, a link given at start on a fresh login, the flaky room test, the installed
-    icon in notifications (done, on main).
-  - **0.7 (done, released as 0.7.0; chosen by the user on 2026-11-15 from a ranked list):** (a) a guard against a sync
-    that has stopped delivering updates (seen rarely against the test server: notice it,
-    reconnect, say so); (b) custom emoji as pictures in messages and reactions, and reacting
-    with one; (c) space management (create a space, add and remove rooms); (d) the rest of
-    the debug-output hardening (about 40 derived types); (e) prebuilt binaries on the
-    release page, and what other systems would take. Also asked for: a rundown on picture
-    protocols other than kitty's (given in the conversation; see "Open requests" if it
-    turns into work).
-  - **Other systems, assessed for 0.7 (not built):** *macOS* would need three Linux-only
-    parts replaced: notifications and their click (D-Bus through zbus; `notify-rust` has a
-    macOS backend, the click and the picture do not carry over), the secret store
-    (Secret Service over D-Bus; Keychain there) and following the desktop's dark/light
-    setting (the settings portal); focusing the window after a click is niri-only already.
-    The terminal, pictures, the SDK and the clipboard tools (`pbpaste` in place of
-    `wl-paste`) are not the problem. A medium piece of work, and nobody to test it on.
-    *Windows* is a large one: the code uses Unix file modes, `poll` and signals in many
-    places, on top of the three parts above. The user decided on 2026-11-15: no
-    Windows build; the README says how to run it in WSL (untried by us). *Other Linux packaging* (AUR, a `.deb`) is
-    small once the prebuilt archives exist: both would wrap them.
-  - **Later, by demand:** several accounts in one window, QR login, other
-    terminals' picture protocols, languages, export, playing audio and voice messages inside the
-    app instead of in the system's player, and "popping out" a chat into a window of its own
-    (both asked for by the user on 2026-11-15; a second terminal with `matrix-rat <room link>`
-    needs several instances on one profile, which the profile lock forbids today).
-  - **Not planned:** calls (shown as events only), account deactivation, account creation.
-
-- **0.2.0 scope (agreed 2026-11-14, released):** after 0.1.1, five features, each written by one agent
-  and reviewed by the other until both agree; no further sign-off from the user needed:
-  1. jump to a message that is not loaded (event-focused timeline), so that Matrix links,
-     replied-to messages and search results open properly;
-  2. clicking a desktop notification opens its room;
-  3. unread handling: mark read/unread, jump to first unread, an unread line in the timeline;
-  4. drafts per room, kept across room switches and restarts;
-  5. Up in an empty composer edits your last message.
-
-- **For the 0.1.1 release (requested 2026-11-14, done):** add installing from the NUR to the
-  README's install section: the package `nur.repos.tylerstyle.matrix-rat`, the `tylerstyle`
-  Cachix cache with its public key so nothing is compiled, and that it needs Rust 1.96 or
-  newer (built for the unstable channels, not for `nixos-26.05`).
-
-- **Notification icon (requested 2026-11-13, done):** a desktop notification shows the picture
-  of the chat it comes from; without one, a coloured tile with the capital first letter of
-  the room name (the same tile the room list uses). Needs the picture as a file for the
-  notification service (a small cache in the runtime directory, cleaned up on exit) and a
-  drawn letter for the fallback (no font library: a small built-in bitmap alphabet).
-  Terminal notifications (OSC 99) carry no picture and stay as they are.
-
-## 13. Decisions by the user (2026-11-12)
-
-1. Name and binary: `matrix-rat`.
-2. Licence: Apache-2.0.
-3. Keybinds: minimal, non-modal, mouse-and-arrows first (§6); `vim` preset optional.
-4. Formatting input: Markdown plus slash commands (§6a).
-5. Repository: public at `https://github.com/tylerstyle/matrix-rat`.
-
-## 14. Review log
-
-| Date | Reviewer | Verdict | Outcome |
+| # | Piece | What changes | Size |
 |---|---|---|---|
-| 2026-11-12 | `matrix-agy` | Approve with changes | All 8 findings accepted: timeline cache key and header recompute (§4), event-cache init + timeline LRU + generation tags (§4), strict startup order and image clipping (§4), recovery-key entry moved to M2 (§10), `sso-login`/`socks` features and spinner pin (§3), own wrapping with hit rects and OSC 8 demoted (§4), parent-dir watching + `on_primary` + pid files + mode 2031 demoted (§8), profile lock and `TerminalGuard` (§4, §9). |
-| 2026-11-12 | `matrix-agy` | M0 + plan rev 2: approve with changes | All 5 findings accepted. Fixed in M0: SIGTERM/SIGHUP handling, terminal-restore ordering, runtime-dir fallback, case-insensitive quit, tick behaviour. Plan: word movement on `Ctrl-←/→`, help/settings aliases, clearer selection mode (§6), comrak without default features plus Matrix post-processing (§6a). Ctrl-Z suspend/resume lands in M1. |
-| 2026-11-12 | `matrix-agy` | M1: approve with changes | All 6 findings accepted. Fixed now: bounds-checked access and a calm empty state when there are no rooms, per-room drafts (an edit no longer leaks into another room), composer rows never exceed the width with wide characters, tabs/control characters sanitised on insert, clickable status-line hints and a rooms button in narrow mode, foreground inheritance, draft dimmed whenever unfocused, dimmed overlay backdrop. Deferred by design: stable room IDs replace indices in M2, stable timeline item IDs in M3. |
-| 2026-11-12 | user | Request | Emoji picker added (button in the composer, `Alt-E`, fuzzy search); built together with M2. |
-| 2026-11-12 | `matrix-agy` | M2 + emoji picker: approve with changes | All 5 findings accepted and fixed: saved sessions restore without any network request (offline start shows cached rooms; SDK offline mode reconnects by itself), old stores are set aside instead of deleted on a new login, login can be cancelled or the app quit at any stage, the worker retries after an error, emoji highlight covers both columns, stale state is cleared when a new login is needed, popups never stack, secrets are redacted from debug output, `Ctrl-Z`/`Ctrl-U` work in popups, recovery prompt has clickable buttons. Still untested against a real server: browser (OAuth) login and the recovery-key path. Deviation kept for now: store passphrase in `session.json` (0600) instead of a keyring. |
-| 2026-11-13 | `matrix-agy` | M3 part 1: approve with changes | All 6 findings accepted and fixed: read receipts are sent only for messages that were really on screen (drawn, at the newest message, no popup, window focused), once per newest message; history loading knows the start of a room from the timeline itself, runs one request at a time and cannot loop; plain paragraphs send no HTML and `/spoiler` and `/html` handle multi-line input; editing keeps the unsent draft and keeps an action an action; selection never lands on system lines and focusing the pane does not pull the view down; replies to unloaded messages are fetched; message text is kept out of debug output. |
-| 2026-11-13 | `matrix-agy` | M3 part 2 + fixes: approve with changes; M3 judged complete | All 6 findings accepted and fixed: text from other people is stripped of control characters and direction overrides before it reaches the terminal (bodies, names, room names, quotes, reaction keys, typing names, link addresses); spoiler detection matches the parser; the row cache is invalidated on any theme load; web addresses in plain messages are links, clicking a link selects its message; editing is not announced as typing and its stash is cleared on re-login or when the room vanishes; nesting depth is capped and table cells are separated. Open by design: images (M5), per-item virtualisation (whole-room row cache for now). |
-| 2026-11-13 | `matrix-agy` | M7 part 1 (theme hot reload, generator templates): approve with changes | All 6 findings accepted and fixed: a pending reload survives cancellation in the event loop; `--reload-theme` only signals a process that holds the lock on its pid file and is verified to be matrix-rat (a stale pid can no longer hit an unrelated program), and never deletes a live instance's file; templates carry no name so the theme is called after its file and `F3` cycles correctly; a changed `theme` setting in the config is followed live and a not-yet-written theme is awaited quietly; pywal instructions use a reload hook; sender colours no longer include the muted tone. Still untested against the real generators. Remaining M7 work: dark/light pairing, more bundled palettes. |
-| 2026-11-13 | `matrix-agy` | M6 part 1 (settings menu, logout, reaction picker, copy, themes, Nix package): approve with changes | All 5 findings accepted and fixed: the worker no longer panics when a command for the ended session arrives at the login wait (and the UI drops the old session at once); an explicit logout removes the now-unreadable stores; a successful logout is not shown as an error; hover and drag state are cleared when the mouse is turned off; "Nothing to copy" toast, base64 and tiny-size tests, sender colours distinct from text. `default.nix` not built yet. Remaining M6 work: keybind editor, command palette, completions, context menu. |
-| 2026-11-13 | `matrix-agy` | M11 (landing-page README, screenshot generator, spoiler bars with spaces): changes requested, then ok | Spoiler tightening reworked to leave all kinds of code, tables, escaped bars and word-end bars alone; README corrected claim by claim (keys, settings, install, what notifications and pictures really do); demo mode no longer writes the real config; screenshots use the theme's colours and show a real thread. iamb is credited as the inspiration only: no code of it is in the tree. |
-| 2026-11-13 | `matrix-agy` | M12 (release profile): approved | `lto = "fat"`, `codegen-units = 1`: same code and optimisation level, binary about 30% smaller (92 MB to 64 MB measured). A size-optimised profile (34 MB) was measured and dropped at the user's wish. `panic = "unwind"` stays, for task isolation and terminal restore. |
-| 2026-11-14 | `matrix-claude` (roles reversed) | One-line text inputs (`agy/text-input`): approved | One grapheme-aware line editor behind every one-line field (login, recovery key, settings, pickers, find bar, room forms, room filter): cursor movement, word jumps, click to place, masked secrets. Checked live by editing mid-field during a login. |
-| 2026-11-14 | `matrix-agy` | M13 (wheel in the find bar, half-visible room pictures): changes requested | Turning round to newer matches now calls off a pending look into older history; repeated wheel ticks no longer refill the search rounds. Picture cropping and its kitty bookkeeping were found sound. |
-| 2026-11-14 | `matrix-claude` (roles reversed) | Search across rooms (`agy/global-search`): changes requested, then approved | The SDK's own index, encrypted on disk, covers encrypted rooms; +5.0 MB. Hits inside threads open the thread; a jump that is still loading is dropped when the user moves on; stale indexes of left rooms are pruned at start. agy found and worked around two SDK gaps (late-decrypted messages and thread replies were not indexed). Tried live against the local server. |
-| 2026-11-14 | `matrix-agy` | M14 (drafts across restarts, Up to edit; branch `drafts-edit`): changes requested, then ok | A stored draft arriving after an edit, reply or upload command had begun was wiped: now kept. Drafts of left rooms are removed. Edit banner names the cancel key. Merged after 0.1.1, for 0.2.0. |
-| 2026-11-14 | `matrix-claude` (roles reversed) | Jump to a message that is not loaded (`agy/jump`): approved | One entry point for search hits, replied-to messages, Matrix links in messages and a link on the command line. A message outside the loaded timeline opens in a detached view with a banner and paging in both directions; End, a click on the banner or sending returns to now. 501 unit and 20 server tests; the detached path is covered by a server test with 65 messages, not tried by hand. |
-| 2026-11-14 | `matrix-agy` | M15 (unread handling, notification click; branch `unread-notify`): changes requested, then ok; release 0.2.0 signed off | The unread mark is only left unsent when the last sync and our last request both agree (a mark set by another client was otherwise never cleared); marking read loads a page when a room's timeline is empty and fails openly if nothing can be marked; marking read calls off an undecided "new" line. Known limit: on a slow start the line of the open room may settle too high. Tried live with a second user. Notification clicks are tested against a stand-in service only. |
-| 2026-11-14 | `matrix-claude` (roles reversed) | People and safety (`agy/people-safety`): sent back for the merge with 0.2.0, then approved | Ignore/block users (menu, member list, list in settings; hidden in timelines, previews, notifications, search; synced), report a message, find people by name. The merge with unread handling was done by agy with the interactions tested: the "new" line skips ignored senders and steps on when someone is ignored while the room is open; rooms whose only unread messages are hidden are marked read on opening; a jump to an ignored message fails with a clear toast. I read the changed receipt logic; 539 unit and 23 server tests. Server counts still include ignored senders until the room is read (documented). |
-| 2026-11-14 | `matrix-claude` (roles reversed) | Triage (`agy/triage`): approved | Low-priority rooms in their own section at the bottom (exclusive with favourite, synced); "unread only" and "people only" filters for the room list (`Alt-O`, `Alt-D`, chips in the list, session only); unread and mention counts on spaces, with an indicator for the other spaces, and spaces in the palette; the banner of the detached view counts new messages. 546 unit and 25 server tests. The filter chips take one row of the room list permanently: to be judged by the user. |
-| 2026-11-14 | `matrix-claude` (roles reversed) | Moderation, pins, forwarding (`agy/moderation`): sent back twice, then approved | Moderator tools shown by power level (delete others' messages with a reason, ban/unban, roles with a guard for the last admin), pinned messages with a list that jumps, forwarding as a standalone copy with attachments uploaded anew. Sent back for a member count that disagreed with the member list, then for flaky server tests (forwarded items awaited one by one; refreshes lost when a watcher was replaced; tests not cleaning up). 554 unit tests, server suite 5 of 5 by agy. |
-| 2026-11-14 | `matrix-agy` | M16 (window focus on notification click, Up selects messages again, notification timeouts): changes requested twice, then fixed | Tests can no longer raise a real window; helper programs are not waited on through unwanted output; "Edit your last message" is in the palette exactly once and says why when there is nothing to edit; after the notification service fails to answer in time nothing is sent to it for a minute. Last fix (single palette entry) awaits agy's confirmation. |
-| 2026-11-14 | `matrix-agy` | M17 (verification answers in a direct chat): approved | Root cause of a flaky server test, and a real bug: answers the SDK gives by itself to verification steps taken in a room (our key, our "done", cancellations) are only queued, and under our way of syncing the queue is sent when the encryption connection starts its next request, up to 30 s later. Now an empty message to our own device makes the server answer that poll at once. With the fix off 6 of 6 runs failed, with it 20 of 20 passed; the diagnosis was checked against the SDK source by agy. Known and left: automatic key requests for undecryptable messages wait the same way; observed on the local homeserver only. |
-| 2026-11-14 | `matrix-claude` (roles reversed) | Hardening (`agy/hardening`): approved | A second flaky server test traced to a real fault: membership and power-level events of ANY room refreshed the open room-details popup, which could then show a half-synced room (members without its address). Refresh signals are now scoped to the watched room. Verification freshness is symmetric (future timestamps rejected) and the verifier removes its handlers when dropped. 567 unit tests; server suite 3 of 3 here, 5 of 5 by agy. |
-| 2026-11-15 | `matrix-claude` (roles reversed) | People (`agy/people`, 0.4): approved | User info popup (from a name or picture, the member list, the message menu, user search, user links) with the actions that apply; own profile (display name, picture) from settings or the composer's border; your name in one room from room details, kept current through a cache of our own member events (sliding sync leaves the SDK's copy stale). Presence is left out: the server does not give it reliably. 580 unit tests, server suite twice 30 of 30 here. One follow-up asked: do not offer "Verify user" for someone already verified. |
-| 2026-11-15 | `matrix-agy` | M19 (sessions, key backup status, key files, undecryptable messages; branch `devices-keys`, 0.4): changes requested, then ok | Key export is written in a private folder and published in one step that never replaces or follows anything at the target. Secret fields take a paste as typed, leave no stray copies and wipe what is erased; login password and recovery key travel the same way; what cannot be wiped is stated. With an unverified own identity the sessions list claims nothing ("says verified"); backup status keeps the server's answer, the local state and observed uploads apart. Keys for a keyless session are asked for once per opening; watch generations drop stale answers. Key-request wakes for new undecryptable messages, bounded. Left open: sign-out on OAuth-only accounts untested against a real server; the SDK exposes no local backup version to compare; in a world-writable folder without sticky bit an export can be diverted (detected, not published). 612 unit tests, server suite 35 of 35. |
-| 2026-11-15 | `matrix-claude` (roles reversed) | Rooms (`agy/rooms`, 0.4): approved | Public room directory (this or another server) with paging; a preview before joining, also for links to rooms not joined; asking to join (knock) with pending requests in the list and withdraw; incoming requests in room details with accept / decline / ban; room settings by power level: who can join, history, encryption on (typed confirmation), picture, addresses, direct chat, permission thresholds with a guard against locking oneself out. Knock requests are read from /members because the SDK's subscription came back empty on the test server. 627 unit tests, server suite twice 39 of 39 here. |
-| 2026-11-15 | both, each reviewing the other | M20 (release review of 0.4.0): held, then fixed | agy held the release: a server test showed that the shared-rooms list in user info missed rooms whose members were not loaded (now a bounded look-up: local store first, then at most 12 rooms, small ones in full, large ones by a single state request, with a time limit and a cooldown); session ids, event ids, backup versions and failure texts could reach debug output or the log from the new devices code; the settings popup on an 80x24 terminal lost its hint line and hid rows without saying so; four README inaccuracies; a palette entry listed twice when bound. agy fixed its parts, matrix-claude the rest. 632 unit tests, server suite three times 39 of 39. Follow-up: say in the popup when the shared-rooms list may be incomplete. |
-| 2026-11-15 | matrix-claude (a helper wrote most of it), reviewed by agy | M21: copy one code block (`C`, or the label on the block), write the message in `$EDITOR` (`Alt-V`), link previews (off by default) | Approved. A live run found what the unit tests could not: after the editor closed, the program ended with a cursor error, caused by a wake-up the dropped event stream leaves behind (now taken before the terminal is set up again). Link previews were tried against a server that allows them: shown for an allowed page, silent for a refused one, nothing in the log. From the review: the editor's fallback temp file now gets an owner-only directory of its own instead of lying in the shared one. 692 unit tests. |
-| 2026-11-15 | matrix-claude, reviewed by agy | M22: colours in code blocks whose language the sender named (syntect, its bundled grammars, the pure-Rust matcher; seven theme roles `code_*`) | Approved. From the review: the time budget is now one per message and is looked at after each line, so a single slow line counts too; size and language are checked before anything is hashed or remembered; reading the grammars in is kept out of the budget. Bounds: 600 lines, 48 KB, 2000 bytes a line, 200 ms a message, off for the session after three overruns. Tried live with Rust, Python and shell blocks. The licence of the bundled grammar data is permissive but not a standard one; the user accepted it for now. 701 unit tests. |
-| 2026-11-15 | agy (polls, voice/audio/video, location, start of stickers), an Opus helper (stickers, custom emoji), matrix-claude (the rest); agy reviewed the helper's and matrix-claude's parts, matrix-claude agy's | M23: message types. Polls (shown, voted in, started with `/poll`, ended, edited while unvoted), voice messages with their waveform, audio and video played in the system's player, locations with a `geo:` link, stickers and a sticker picker, custom emoji as `:shortcode:` text with `:` completion | Approved after fixes. Found by running it: the SDK's cleaning of received HTML removes the mark of a custom emoji, so they vanished from messages (now known by a `:name:` in `alt` or `title` as well); the threads server test ended in a stack overflow of a worker thread in an unoptimised build, because the command handler had grown (polls and stickers now have a boxed function of their own). Changed in review: Enter on a poll or voice message replies as everywhere and no longer bypasses the keymap, opening (`o`) votes or plays, and the status line says so; a received poll is cut to 20 answers and 600 characters a text, the form's fields have a length; packs of rooms the account is not in are not asked for; a shortcode in an indented code block stays text; sending a sticker or poll checks that its room is still the open one. Left out on purpose: custom emoji and picker thumbnails as pictures, a custom emoji section in the emoji picker, reacting with a custom emoji. No server tests for polls and stickers yet. 729 unit tests, server suite 39 of 39. |
-| 2026-11-15 | agy drew it, the user chose it, matrix-claude did the rest; reviewed by agy | The icon (a rat in a chef's hat over a terminal window): `assets/` with the master SVG, PNG sizes, a round-safe avatar, a link preview card, a filled and a line-drawn one-colour variant; a launcher entry (`contrib/matrix-rat.desktop`, also offers matrix-rat for `matrix:` links); the Nix package installs entry and icons | Approved. Built with Nix on hpfury: the files land in `share/applications` and `share/icons/hicolor`. Open: use the installed icon in desktop notifications. |
-| 2026-11-15 | matrix-claude, reviewed by agy | Desktop notifications name matrix-rat's own icon (`notification_icon`: `color`, `outline` or `generic`) where it is installed in the icon directories, else the desktop's new-message icon as before | Approved. After 0.5.0; goes out with the next release. 731 unit tests. |
-| 2026-11-15 | matrix-claude, reviewed by agy | Owed from 0.5 and two small 0.6 items: a server test for polls and stickers; a link given at start to a room the account is in no longer shows a preview on a fresh login (the room is waited for, 4 s); `NO_COLOR` (every theme without colour, backgrounds become reversed or underlined); a built-in `high-contrast` theme | Approved. From the review: the wait does not run on behind a popup or a login. The new server test showed twice that it tests something: a vote needs the event id the server gave, not the local one. Still open: the room test that sometimes times out inside the full suite (never alone; server runs now print a backtrace). 733 unit tests. |
-| 2026-11-15 | an Opus helper wrote it, matrix-claude ran it against the server, reviewed by agy | M24: a list of the open room's threads (`T`, the palette, the room's menu): newest activity first, a filter, "only mine", pages of 25 loaded as the list is scrolled, opens a thread also when its root is not loaded | Approved. The list comes from the server through the SDK, so roots of encrypted rooms are readable; threads known from the loaded messages are listed even when the server's list fails. The server test, run for the first time, showed that the test server sends only the text of a thread's newest reply, not who wrote it or when: on such servers those two stay empty in the list. One other server test (own profile and room name) failed once in a run and not again: a second test that is sometimes too early. 746 unit tests. |
-| 2026-11-15 | an Opus helper wrote it, matrix-claude ran it live and fixed what that showed, reviewed by agy | M25: room commands (`/join`, `/leave`, `/invite`, `/kick`, `/ban`, `/unban`, `/ignore`, `/unignore`, `/nick`, `/roomnick`, `/topic`, `/roomname`, `/dm`, `/msg`, `/whois`, `/help`), each another way into an action that exists, with its confirmation and rights check; message details (`i`): who, when to the second, event id, security, delivery, readers, and the event's source | Approved. Found by running it, and older than this work: switching rooms asked for the new room's members right before opening it, and opening a room cancelled the lists being loaded, so `@` completion (and the commands' names) had nobody to offer in a room whose members were not in the store yet (in 0.5.0 as well). The lists now finish, and the server test sends the two commands in the UI's order. Also: the SDK's request layer wrote the server's answer to an ordinary failed lookup into the log, room ids included; it is left out of the default log filter. From the review: `/help` takes nothing after it, `/invite` without a room keeps the draft, a member list arriving after logout is dropped. 782 unit tests, server suite 41 of 41. |
-| 2026-11-15 | matrix-claude, reviewed by agy | A do-not-disturb switch (settings, palette `dnd`, config `do_not_disturb`): no notifications while it is on, the status line says so | Approved. From the review: count notices that were waiting are dropped as well. 783 unit tests. |
-| 2026-11-15 | an Opus helper wrote it, matrix-claude ran the server test, reviewed by agy | M26: notification keywords (settings row and palette entry; a popup to list, add and remove them). They are push rules on the server, shared with the user's other clients | Approved. A keyword made here also counts as a mention (the SDK's own rule only notifies; a second request adds the highlight). Found on the way: the worker subscribed to push-rule changes on a value it dropped at once, so the room list never refreshed when notification settings changed elsewhere; and the SDK logs a rule's id (for a keyword, the keyword) when a change fails, so that module is left out of the default log filter. From the review: the list is sent again after a failed request too. 795 unit tests, server suite 42 of 42. |
-| 2026-11-15 | an Opus helper wrote it, matrix-claude tried it against a real clipboard and reworked the send accounting, reviewed by agy | M27: paste a picture from the clipboard (`Alt-I`): `wl-paste` or `xclip` run without a shell, with a time and a size limit, the result checked to be a picture, put into the usual attach flow as a private temporary file that goes once sent or cancelled | Approved with two findings on the accounting of file sends, both fixed: with two sends out, an answer could give back the files of the other one (partly older than this work), and a send that failed after its room was left kept its files for good. Every send now has a number and its answer carries it. Tried with a real `wl-paste` in a private headless Wayland session: pasted, sent, the file gone afterwards; an empty clipboard says so. `xclip` was not tried. 811 unit tests on the branch, server suite 41 of 41. |
-| 2026-11-15 | an Opus helper (logs and debug output), matrix-claude (tests, token saver, language names), reviewed by agy | M28: hardening before 0.6.0. About 70 log calls wrote an error's text as the SDK or the server worded it (ids, addresses, paths); they now write its kind only (`HTTP 403 M_FORBIDDEN`, `io NotFound`), through one helper (`src/logsafe.rs`). A panic is logged by its place. Commands, events, messages, rooms, typed text, attachments and the store passphrase no longer print ids, text or paths in debug output; tests that compare commands use a test-only description. What the user is shown did not change | Approved, no blockers. About 40 further derived debug types (app state, palette, rich text) can still print private data; none is logged or printed today; left for later. Also here: the room test that failed now and then waited for part of the room's state only (name before topic) and took any answer for the forgotten room's; the token saver is waited for at the end of a session, so it cannot write the session file again after it was forgotten; code colours know the usual names (`shell`, `console`, `ts`), and the README says which languages have no grammar (`nix`, `toml`). 834 unit tests, server suite 42 of 42. |
-| 2026-11-15 | matrix-claude, from the user's test of 0.5.0, reviewed by agy | Signing another session out failed on the user's homeserver with `M_UNRECOGNIZED`: the server has handed its accounts to an authentication service, and the login here is not a browser login. Such an answer (or a 404/405 without a Matrix code) now leads to the account's web page, as a browser login does. A bash block "did not work": in a command line only the command was marked, in bold text colour; commands, options and variables have colours now (defaults: keyword secondary, function primary, type accent italic). README: the one-pane layout below 60 columns. To do: audio inside the app | Approved after one change (a 404 with a Matrix code such as `M_NOT_FOUND` stays an error). The sign-out path is still untried against the user's server: for the user to test again. Also confirmed by the user on 0.5.0: polls, voice/audio/video opening, the launcher entry and icon, `Alt-V`, user info and room directory, the settings on small terminals. Custom emoji and stickers: no room with packs to try. 835 unit tests. |
-| 2026-11-15 | matrix-claude, reviewed by agy | Chasing the room server test that times out now and then: the room details watcher woke only on news of the room, but the notification level is in the account's push rules; a change arriving later left the old level shown. It follows those changes now | Approved. This did not end the timeouts: in the rare failing runs the client stops receiving updates from the test server for a while (a room left and forgotten is still joined 30 s later). Looks like the sync against that server stalling; not proven; open, not held against the release by either reviewer. 835 unit tests. |
-| 2026-11-15 | matrix-claude, from the user's test of 0.6.0, reviewed by agy | 0.6.1. A code block typed on one line (three backticks, the language, the code, three backticks) was sent as an empty block: Markdown takes the rest of the opening line for the block's label, and the code was gone. Code on the opening line is now moved onto a line of its own; the first word stays the language only if it is one. New `/code [language] text` for keyboards where a backtick is three key presses | Approved after one change (`/code` kept neither the indentation of its first line nor a blank line after the language). Blocks fenced with tildes are left alone. Confirmed by the user on 0.6.0: sign-out now offers the account's page, pasting a picture, room commands, message details and the threads list, do not disturb. 838 unit tests. |
-| 2026-11-15 | matrix-claude, asked for by the user, reviewed by agy | For 0.7: `O` opens a picture (or file) in the system's viewer, also from inside the picture viewer and the message menu, and a plain open does so when pictures are off (before, a picture could only be seen in here, which outside kitty graphics means blocks). `Ctrl-B` puts the room list away or brings it back (`sidebar_hidden`), the same one-pane layout a narrow window has | Approved after one fix: what the app says (the question before a large download, how saving went) was drawn under the picture viewer and so not seen; the viewer shows it in its border now. 840 unit tests. |
-| 2026-11-15 | Opus helpers wrote and fixed it, reviewed by agy (twice) | M29: custom emoji as small pictures (2 cells wide) in message text and on reaction chips in terminals with kitty graphics, the name as before everywhere else; reacting with a custom emoji from the picker (the key is its address, the shortcode goes along) | Approved after seven changes: the picker's debug output held an event id; pictures were fetched for reactions on messages that cannot be decrypted; a chip too wide for the pane showed blanks; a picture's data travelling with a copy that a popup or a corner label then covered left the other copies as bare placeholders (what covers is now known before pictures are drawn, and painted-over data is sent again once, with no loop); emoji inside inline code became pictures; the picker's Page keys did nothing near the ends and Up/Down drifted sideways; packs loaded for one room could show in another after a quick switch. Not checked in a real kitty terminal by anyone: how the 2x1 picture really looks. 867 unit tests. |
-| 2026-11-15 | matrix-claude, reviewed by agy | Prebuilt binaries: a workflow builds matrix-rat for x86-64 and ARM64 Linux (glibc 2.35 or newer) when a release is published and attaches the archives with their checksums; run by hand it only builds. README install section; what macOS and Windows would take is written down in the open requests | Approved. From the review: building and publishing are separate jobs, so the build (which runs code of many crates) never holds a token that can write; a release whose tag is not the version in Cargo.toml fails instead of uploading archives under another name. Actions are pinned to commits. |
-| 2026-11-15 | Opus helpers wrote and fixed it, matrix-claude the last three points, reviewed by agy (three rounds) | M30: space management. Create a space (`Ctrl-N`); space info with its rooms: add one, remove one after a question, mark one as suggested, open or preview one; "Add to a space…" and "Remove from …" on rooms | Approved after eight changes and three more in the re-check. The ones that mattered: "Remove from" was offered without the right to do it; a preview of a space did not find it among the spaces; the info of a space one was removed from stayed open; a filter in room info that matched nobody let Space, Del, the arrows and Enter act on a row out of view (toggle a setting, change the notification level, leave the room). Two older bugs came out with it and are fixed: invitations and join requests to spaces were not shown anywhere, and the same filter problem in ordinary rooms could switch "Direct chat". The worker has a test-only stand-in homeserver now. 900 unit tests, server suite on the branch 43 of 43. |
-| 2026-11-15 | matrix-claude, reviewed by agy | The tests made a keyring unlock prompt appear on the desktop of the build machine. Two ways led there: forgetting a login asks the session's keyring to delete an entry, and the tests' own message bus was started as a session bus, which starts the real program for a name nobody owns (since that machine's update today there is such a program for the keyring). The keyring client connects to nothing in a test unless given an address; test buses are started with a configuration that knows no service files. The check script also cuts the tests off from the session of whoever is logged in | Approved. This also explains a keyring test that failed now and then: the real keyring could take the name before the stand-in did. 901 unit tests. |
-| 2026-11-15/16 | matrix-claude found and first fixed it, Opus helpers closed the reviews, reviewed by agy (three rounds) | M31: the server test that failed now and then was two real bugs, found with probes against the server. (1) After leaving and forgetting a room, a sync answer that was on its way made the room again, as one the user is in, for good (seen: locally a room with nobody in it, 30 s after leaving, while a fresh sync no longer knew it). Rooms left in a session are remembered (`src/matrix/left.rs`) and everything treats them as gone (the room list, spaces, notifications, opening, sending, search, shared rooms, starting a chat) until the user joins again, an invitation or knock arrives, or the server, asked after 10 s and then less and less often, lists the room. Once per start, after the first sync has caught up, the server is asked which rooms the account is in, and rooms the store has as joined that it does not list are treated the same. (2) A room's notification level was read from what the last sync had stored: after muting, the old level went on showing until the server sent the rules back (over a minute on the test server). It is read from the session's own view now, and the muted mark in the room list follows at once | Approved. Before: the leave failure about every 20 to 45 runs; after: none in 200. The test itself waited on partial state in four places. Left as it is, on the reviewer's advice: a late answer that brings a declined invitation back as an invitation is shown, since it cannot be told from a new one. 938 unit tests, server suite 43 of 43. |
-| 2026-11-16 | an Opus helper, the last point by matrix-claude, reviewed by agy | M32: the rest of the debug-output hardening left open after M28: the app and all its state, every popup (the popup type prints through a hand-written match, so a new popup has to be added there), menus, the palette, completions, rich text and rows, configuration, folders, the profile lock, themes. Sixteen types that tests compare keep their derived output in tests and a redacted one in the program. One test fills the app with private data, opens fourteen kinds of popup and looks at the whole output: the net for a field added later | Approved after one change (the key editor could show the configuration file's path after a failed save). None of these types is logged or printed today. 945 unit tests. |
-| 2026-11-13 | `matrix-claude` (roles reversed) | Session robustness, written by `matrix-agy`: approved with one change | An expired session that the server marks as a soft logout now asks to re-authenticate and keeps the device, its store and its verification; a different user or device is never mixed with the old store. The store passphrase can live in the system keyring (`secret_store`), with a migration that never leaves it nowhere. Changed on merge: the default is `file`, not `auto` - a passphrase that moved into the keyring would lock the account out when the app is started over SSH. Review depth: hand-over, the decision points in `session.rs`, the full check and all 17 server-backed tests; not read line by line. Untested live: a server-sent soft logout, browser re-authentication, a real keyring daemon. |
-| 2026-11-13 | `matrix-claude` (roles reversed) | Dark/light theme pairing, written by `matrix-agy`: changes requested, then approved | First version replaced crossterm's input reader with an own parser to receive the terminal's live colour-scheme report (crossterm stops delivering keys on that report); sent back as too risky for all input. Rework: crossterm kept, scheme detected at start (desktop portal, else the terminal's background colour, else `COLORFGBG`, else dark), live following through the XDG desktop portal on D-Bus (local sessions only). Added by me on merge: the colour-scheme report is not asked for at start either, since a late answer would freeze the keyboard. Live portal signal not exercised (no desktop here). |
-| 2026-11-13 | `matrix-agy` | M10b (right-click menu, read markers): approve with changes | All 11 findings fixed: a menu closes when its message changes state (sent, deleted) or its room leaves the list, and entries re-check before running; "Read by…" follows the read markers setting; reader names are worked out once per receipt change, refreshed when the member list arrives, with bounded eviction; the marker is drawn over the end of a full last row instead of adding a row; blank display names fall back to the id part. |
-| 2026-11-13 | `matrix-claude` (roles reversed) | Notification icons, written by `matrix-agy`: approved | Merged after the full check, the hand-over, and a look at the runtime-directory permissions and the letter bitmaps; no real notification seen on this machine. |
-| 2026-11-13 | `matrix-agy` | M10a (room previews): approve with changes | Fixed: latest-message lines are cached per room and recomputed only when that room's latest message changes, registration with the SDK runs in the background, and nothing is worked out while previews are off; wheel scrolls a room at a time; cursor reveal in very small lists; a room whose first line is scrolled out keeps its initial; the open room's line follows the loaded messages. Not done: cropping a room picture when only one of its two lines is on screen (the tile shows instead). |
-| 2026-11-13 | `matrix-claude` (roles reversed) | Configurable key bindings, written by `matrix-agy`: approved | Merged after the full check and a look at the editor, the action table and the quit safety rail; not read line by line, not tried live. |
-| 2026-11-13 | `matrix-agy` | M9 (spaces, room management, find in room): approve with changes on each | Fixed. Spaces: selection by position (a space inside two others trapped the stepping), steady cursor on background updates, parent shown for sub-spaces. Room management: no input can panic the link parser; ids validated after decoding; all typed and pasted text cleaned at ingestion; a new direct chat from a member row needs a second Enter; palette entries and the title click act on the room they name; answers are matched to the popup that asked; the member list is fetched without the SDK's full reload (which would discard the room's outgoing encryption session), bounded for very large rooms, and kept on a failed fetch; help overlay balances and scrolls so no key falls out. Find in room: every history request is answered; the bar follows message changes; the found message is shown below the bar. Not done: cursor movement inside one-line inputs; `?action=` in `matrix:` links; mouse-wheel stepping in search. |
-| 2026-11-13 | `matrix-claude` (roles reversed) | Composer completions, written by `matrix-agy`: approved | One follow-up, fixed by `matrix-agy`: one accepted completion mentions a person once, not at every later occurrence of the same word. |
-| 2026-11-13 | `matrix-agy` | M8 (notifications, threads, sending files, message shields): approve with changes on all four | Fixed. Notifications: burst limits that hold across event-loop turns, one worker for desktop notifications, escaped summary, preview-off shows nothing of the conversation, count fallback from the server's count and not during the backlog after login, invitations once per room after the session settled, "watching" requires the same thread, no overlay and the newest message in view, member fetch skips spaces and known rooms, cleanup on logout. Threads: the first message keeps its identity while the thread loads and actions on it are routed to the room until then; read marks only on success and in order; unread without touching the event cache; `reached_start` for threads. Sending files: nothing is pasted behind overlays; chips and upload drafts are scoped by room and thread; hidden chips are never sent; edit takes precedence; decoder limits; caption and reply stay with the first file and a failed first file sends nothing. Shields: "authenticity not guaranteed" is shown as a quiet remark instead of dropped; deleted messages carry none. Not done: fetching only our own member event (the SDK cannot store one); reply mode is not restored when files come back unsent. |
-| 2026-11-13 | `matrix-claude` (roles reversed) | Command palette, written by `matrix-agy`: approve with changes | 6 findings, all fixed by `matrix-agy`: merged with the new features and covers them (notifications setting, thread actions, attach, save); log out from the palette opens the settings row unarmed so the two-step confirmation stays; no palette over the picture viewer or the login, recovery and verification popups; leaving a thread through a room jump keeps drafts apart. |
-| 2026-11-13 | `matrix-agy` | M5 part 3 (room avatars, sender names, room list tiles): approve with changes | All 6 findings fixed: two rooms sharing a picture no longer re-send it every frame; invitations get no picture (it would tell a stranger's server the invite was seen) and room pictures have their own small download budget; member lists are fetched only when incomplete and stopped with the session; hero lookup without cloning the room info, also for favourite direct chats; tiles are always two columns and highlight modifiers no longer reach picture cells; avatar addresses validated, no second download after "too large". In the same commit, not reviewed: refreshed login tokens are saved by a task that listens from session start (they could be missed at startup, which logged the user out at the next start), `v` views a picture, Ctrl-↑/↓ switches rooms, accent bar on the open room. |
-| 2026-11-13 | `matrix-agy` | M5 part 1 (inline images): approve with changes | Findings 1–7 fixed: picture downloads are bounded by a real byte limit (own streaming request, `Content-Length` refused early; the sender's stated size bounds nothing); the terminal graphics query is our own `poll()`-based one that leaves no reader on stdin, and runs before mouse and focus reporting are on; logout clears pictures, viewer and running fetches; eviction of a failed picture re-lays out; remembered sizes capped; RGBA memory checked before decoding; kitty images deleted before suspend; one viewer encoding at a time. Real kitty rendering still unseen; inside herdr the app uses half blocks. |
-| 2026-11-13 | `matrix-agy` | M4 (device verification): approve with changes | Findings 1–7 fixed: masked password field when the server asks for one at cross-signing set-up (tested only with the fake worker; our server needs none); "Ask again" cancels the old request first (real-SDK test); "They match" only when all emoji are on screen, default focus never on a yes-button, Space never confirms, a 0.7 s input guard after buttons change, and a request arriving while typing waits in the status line; in-room requests only if addressed to us, declined when busy, sender keys fetched; all session tasks tracked and stopped on logout, late news ignored; cancel reason sanitised; Settings row wording and the no-device-no-recovery dead end. Message shields not done. |
-| 2026-11-13 | `matrix-agy` | M5 part 2 (saving attachments): approve with changes | All 6 findings accepted and fixed: `o` only hands viewable types (pictures, audio, video, text, PDF) to the desktop, everything else is saved and named but not launched, and a result arriving after logout opens nothing; the download folder is always absolute; files that are large or do not state a size ask first, and one save runs at a time (the SDK cannot stream, so the whole file still passes through memory); the temporary file is created exclusively and published by hard link, so no link is followed and no empty file is left; names are trimmed after cutting; saved-file memory is cleared on logout and folder change; a file's own action wins over a caption link. |
+| A | **Esc closes one layer at a time, down to "no chat open"** | Esc keeps its order (popup, completion, reply or edit, selection) and gets one more step at the end: with nothing left to cancel, it closes the chat. The draft is saved, typing notice stopped, the room list is shown (also if hidden with `Ctrl-B`) and focused with the cursor on the room just left; the chat area shows the icon and a few key hints. `Enter` or a click opens it again with the draft. While no chat is open nothing is marked read (reading already needs the chat on screen in a focused window). Today Esc in the composer moves focus to the messages; that moves to `↑` alone. On a narrow window the room list fills the window, which our one-pane mode already does. A setting keeps the old behaviour. | Small to medium |
+| B | **Voice messages and audio played from inside the app** | `x` (and the menu, and a click on `▶`) on a voice or audio message plays it; the row shows `■ 0:05 / 0:14` with a waveform whose played part is coloured; one sound at a time; leaving the chat, closing it or quitting stops it. As in faro, **no audio library is linked**: a player already on the system is started (`mpv`, `ffplay`, `pw-play`, `paplay`, `aplay`; a setting names another). That keeps the binary and the Nix package free of ALSA/PipeWire. Matrix voice messages carry their duration and waveform in the event, so, unlike faro, we need no ffmpeg for either. With `mpv` we can go further than faro: its control socket gives real position, pause and seek (`←`/`→`); other players get start/stop and an estimated position. Over SSH, play is refused with a hint to save the file. The downloaded file is a temporary one with mode 0600, removed afterwards. | Medium |
+| C | **`matrix-rat doctor`** | One screen (command and palette entry) saying what the app found: terminal, colour depth, picture protocol and why, keyboard protocol, clipboard tool, notification service, secret store, audio player, key bindings that clash or actions without a key, settings that have no effect. One key copies it as text, with nothing private in it. Bug reports become one paste; it would have shortened several of our own hunts. | Small to medium |
+| D | **Unread count in the window title** | `matrix-rat (3)`, without room names, restored on exit; a setting turns it off. | Small |
+| E | **A bad config value does not take the rest with it** | Each key is read on its own: a wrong value keeps its default and the status line names the key. To check first how far ours already goes. | Small |
+
+A is what the user noticed in faro. B is the audio the user asked for on 2026-11-15. C to E
+are cheap and stand alone.
+
+### Worth doing later
+
+- **A demo mode** (`matrix-rat demo`): a made-up account with scripted people whose messages
+  cover the hard cases (right-to-left text, wide characters, joined emoji, long names, every
+  message type). Gives README pictures without a real account, a way to try the app before
+  logging in, and a rendering test that cannot rot. Our fake data from the first milestone is
+  a start. Medium to large.
+- **A lock screen** (key or idle time): hides content, stops audio, holds back read receipts,
+  makes notifications generic. Medium.
+- **Popups over pictures**: faro cuts the covered part out of a picture instead of hiding the
+  whole picture while a popup is open. To check how ours behaves in kitty first.
+- **Transcribing voice messages** with a local `whisper` program, off by default. Small once B
+  exists; remote services are not wanted without a clear consent step.
+- **An update notice**, opt-in, asking GitHub at most twice a day, never installing; a build
+  switch so the Nix package leaves it out.
+- **Lints that enforce our rules**: forbid blocking calls on the UI thread and wildcard match
+  arms on our own enums through clippy's configuration; `cargo deny` for licences and known
+  vulnerabilities in CI; a weekly grouped dependency update.
+- **A numbered decisions file** in faro's manner, should §5 outgrow a table.
+- **Packaging**: AUR and a `.deb` wrapping the release archives (already on our list).
+
+### Looked at and not proposed
+
+- **A line-by-line mode** for screen readers and pipes: valuable, but it wants the state logic
+  free of the terminal, which is a large restructuring here.
+- **Splitting into several crates, a web demo, a website**: much work for what a one-person
+  project gains.
+- **Bubbles**, **more picture protocols** (decided against on 2026-11-15), **an encrypted
+  vault** (the SDK's store is already encrypted with a key from the secret store), **mosh
+  emoji handling** (no one has asked).
+
+## 7. Known limits and open questions
+
+- **Custom emoji as pictures** have not been seen in a real kitty terminal by anyone: how the
+  two-cell pictures look is unverified.
+- **A declined invitation** that a late sync answer brings back is shown again: it cannot be told
+  from a new invitation. Left as it is on the reviewer's advice.
+- **Signing another session out** on a homeserver that has handed its accounts to an
+  authentication service goes through that service's page; the app only links there.
+- **Key backup and recovery are not created here**, only used; setting them up needs another
+  client.
+- **Verification by another person in a direct chat** has not been tried on real hardware.
+- **The ARM64 binary** was built and reported its version on the build runner; nobody has run it.
+- **Running under WSL** is described in the README and untried.
+- **The test homeserver** (continuwuity) sends only the text of a thread's newest reply, so the
+  threads list shows no "who and when" there; and one test with two accounts waiting for a
+  member count failed once in 120 runs, during a network interruption, unexplained.
+- **Small review notes left open on purpose** are in the review files: a half emoji box before
+  the read marker when a row is cut, no retry of emoji pictures that failed to load, the
+  field limit of the "new room" form.

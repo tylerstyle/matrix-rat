@@ -548,8 +548,9 @@ cargo test write_screenshots -- --ignored   # regenerate the pictures above
 ```
 
 The UI thread owns all state and talks to a Matrix worker over two channels; keys, status
-line hints, menus and palette entries resolve to the same `Action`s. The design, the milestones and the
-log of every code review are in [docs/PLAN.md](docs/PLAN.md); the reviews themselves are in
+line hints, menus and palette entries resolve to the same `Action`s. Where the project stands, how it is
+built and what comes next are in [docs/PLAN.md](docs/PLAN.md); every code review is listed in
+[docs/REVIEW-LOG.md](docs/REVIEW-LOG.md), with the reviews themselves in
 [docs/reviews/](docs/reviews/).
 
 ## Licence and credits
