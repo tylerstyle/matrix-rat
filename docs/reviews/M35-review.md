@@ -80,3 +80,15 @@
    - `audio_caps().can_play` (`src/app/playback.rs:244`) omits `file.size <= MAX_FILE`, so context menus on >100 MB audio show `"Play audio"` alongside `"Play in system player"` (pressing `x` gives the size refusal toast).
    - `Matrix::get` (`src/matrix/media.rs:520-539`) decrypts up to `MAX_FILE` (`100 MB`) inline on the async worker thread while temporarily holding encrypted, decrypted, and SDK-cached buffers simultaneously.
    - `the_debug_output_of_the_app_holds_nothing_private` (`src/app.rs:9554-9735`) leaves `AudioState` idle and `commands_and_events_print_no_ids_and_no_error_text` (`src/matrix/mod.rs:2394`) doesn't cover `FetchAudio`/`CancelAudio`/`AudioFetched` (partially covered by `src/app/playback.rs:1258-1273`).
+
+---
+
+## Follow-up (`062f519`)
+
+- Checked commit `062f519` (`1034` unit tests reported green):
+  - **Finding 1 fixed:** `on_viewer_key` (`src/app/media.rs:102-107`) now calls `self.stop_audio()` before `self.suspend_requested = true`, covered by `suspending_from_the_picture_viewer_stops_it_too` (`src/app/playback.rs:871-886`).
+  - **Finding 2 fixed:** `ui::timeline::draw` (`src/ui/timeline.rs:1503-1525`) resets symbols to `" "` and strips `Modifier::UNDERLINED` across `rect.x..rect.x + left` before painting `over` (preserving row selection/hover colours and right-aligned read markers), and skips `&row.hits` with `*start < left` so hidden filename/play/link hits are unreachable while playing.
+  - **Finding 3 fixed:** `event_message` (`src/matrix/convert.rs:335-337`) now passes `meta.duration` (bounded to `<= 24 h` by `audio_meta`) into `attach_media`.
+  - **Finding 4:** Left as-is by decision (noted as negligible in normal runs; `Stop` and `Drop` signal `-self.group` prior to reaping).
+
+**M35 ok**
