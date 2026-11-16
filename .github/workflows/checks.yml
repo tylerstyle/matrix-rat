@@ -28,4 +28,5 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2.1.2
         with:
           command: check
-          arguments: --log-level warn
+          # The toolchain the package asks for (rust-version in Cargo.toml).
+          rust-version: "1.96.0"
