@@ -9,7 +9,7 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-16, with 0.8.0.
+Last brought up to date: 2026-11-16, with 0.9.0.
 
 ## 1. What it is for
 
@@ -39,6 +39,7 @@ Not goals: calls, widgets, creating or deactivating accounts, a Windows build.
 | 0.6.1 | 2026-11-15 | A code block typed on one line keeps its code; `/code`. |
 | 0.7.0 | 2026-11-15 | Space management, custom emoji as pictures and in reactions, `O` for the system's viewer, `Ctrl-B` for the room list, ready-made Linux binaries, running under WSL described. A room that was left stays gone; a muted room shows as muted at once. The rest of the debug output is free of private data. |
 | 0.8.0 | 2026-11-16 | `Esc` closes one layer at a time, down to "no chat open"; voice and audio messages played inside the app (a player on the system, pause and seek with mpv); `matrix-rat doctor`; unread count in the window title; a config with one bad value still starts. |
+| 0.9.0 | 2026-11-16 | A channel for agents: `matrix-rat serve` without the screen on a bot account, `rooms`/`send`/`read`/`listen` for scripts, and an MCP server bound to one room with which a coding agent asks a question and waits for the answer (only a verified sender counts unless told otherwise). A playing message shows as playing in its thread too, and a long file name goes on over its rows; the doctor keeps key names in one piece. Build checks: no blocking call without a stated reason, `cargo deny` in CI. |
 
 Each release is a tag, a GitHub release with notes, the Nix package in the NUR with a binary
 cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
@@ -47,7 +48,7 @@ cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
 ## 3. How it is built
 
 One binary crate, about 127,000 lines of Rust with its tests (945 unit tests and 43 tests against
-a real homeserver at 0.7.0; 1034 and 44 at 0.8.0).
+a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0).
 
 **Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.19.1, pinned exactly (every minor
 release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`; `ratatui-image` and `image` for
@@ -277,8 +278,9 @@ Still open:
 - A wait hands over twenty messages at most; with more, the older ones of the backlog are
   left to `read_messages` (as designed), except those owed, which come with the next wait.
 
-**Also in 0.9:** what the user's testing of 0.8 turns up (nothing reported yet). Done on the
-branch `leftovers-09`: the three open notes of the 0.8 reviews (a playing message inside a
+**Also in 0.9:** the user tried 0.8 (audio with and without a waveform, leaving a room stops
+it, `Esc`, the unread count, the doctor: all work; a config with a bad value is not tried
+yet) and nothing had to be fixed. Merged with M37: the three open notes of the 0.8 reviews (a playing message inside a
 thread view, empty continuation rows of a playing row with a long name, the doctor breaking
 `Alt-Enter` across lines), and the stricter build checks:
 
