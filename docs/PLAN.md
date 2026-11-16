@@ -137,7 +137,7 @@ Rust 1.96 or newer.
 
 ## 6. What comes next
 
-See §6a for the plan that came out of looking at faro. Besides that, the list of what could
+See §6a for the plan that came out of looking at faro (0.8, done) and §6b for 0.9. Besides that, the list of what could
 be done, by demand:
 
 - Playing audio and voice messages inside the app (asked for by the user).
@@ -204,6 +204,36 @@ are cheap and stand alone.
 - **Bubbles**, **more picture protocols** (decided against on 2026-11-15), **an encrypted
   vault** (the SDK's store is already encrypted with a key from the secret store), **mosh
   emoji handling** (no one has asked).
+
+## 6b. 0.9: a channel for agents (approved by the user on 2026-11-16)
+
+**Why.** The user wants agents working on their machines to ask them questions while they are
+away, through Matrix. Today that runs on an outside tool (`matrix-commander-rs`) with a bot
+account and polling. matrix-rat's Matrix side already runs without the screen, so it can
+offer this itself. The account used is a dummy that is only in the rooms it shares with the
+user, so handing an agent the whole instance is acceptable (the user's decision).
+
+**What is built.**
+
+| Piece | What it is |
+|---|---|
+| `matrix-rat serve` | The worker without the screen, on a profile that is already logged in (log in once with the normal app, `--profile bot`). Holds the profile lock, stays in sync, and listens on a private socket in the runtime directory (mode 0600, owner checked). Never accepts an invitation by itself. Ends cleanly on SIGTERM; made to run as a user service. |
+| `matrix-rat send` / `read` / `listen` | Talk to a running `serve` over the socket. `send --room R "text"`; `read --room R [--limit n] [--from @user]` prints JSON, one message a line; `listen --room R` stays connected and prints messages as they come. Without a `serve` running they say so (they do not open the store themselves: two processes on one store is what the lock forbids). |
+| `matrix-rat mcp --room R --name N` | An MCP server on stdin/stdout for one agent, bound to one room: tools to send (signed `[N]`), to read the latest messages, and to wait some minutes for a new one. It can reach no other room, whatever the agent asks. `--from @user` makes it hand over only that user's messages as answers; everything else in the room is marked as not from the user. |
+
+**Rules for it.**
+
+- The socket protocol is one JSON object a line, with bounded line length and a small fixed
+  set of requests; room names are resolved by `serve` against the rooms the account is in.
+- Text from Matrix that reaches an agent is data, never instructions: the tools' descriptions
+  say so, and each message carries who sent it and whether that is the configured user.
+- Nothing of it is logged beyond kinds and counts, as everywhere.
+- An idle agent cannot be woken by this; that limit is known and accepted for now.
+
+**Also in 0.9:** what the user's testing of 0.8 turns up; the three open notes of the 0.8
+reviews (a playing message inside a thread view, empty continuation rows of a playing row
+with a long name, the doctor breaking `Alt-Enter` across lines); stricter build checks (no
+blocking calls on the UI thread, `cargo deny` in CI).
 
 ## 7. Known limits and open questions
 
