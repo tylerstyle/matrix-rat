@@ -188,9 +188,9 @@ are cheap and stand alone.
   exists; remote services are not wanted without a clear consent step.
 - **An update notice**, opt-in, asking GitHub at most twice a day, never installing; a build
   switch so the Nix package leaves it out.
-- **Lints that enforce our rules**: forbid blocking calls on the UI thread and wildcard match
-  arms on our own enums through clippy's configuration; `cargo deny` for licences and known
-  vulnerabilities in CI; a weekly grouped dependency update.
+- **Lints that enforce our rules**, the rest: forbid wildcard match arms on our own enums
+  through clippy's configuration; a weekly grouped dependency update. (Blocking calls and
+  `cargo deny` are done, see §6b.)
 - **A numbered decisions file** in faro's manner, should §5 outgrow a table.
 - **Packaging**: AUR and a `.deb` wrapping the release archives (already on our list).
 
@@ -236,10 +236,16 @@ homeserver: a bot profile logged in with the normal app, `serve`, `rooms`, `send
 yet tried with a real MCP client. Seen once and not again in seven tries: a `read` right
 after the first `send` of a fresh `serve` listed the new message twice.
 
-**Also in 0.9:** what the user's testing of 0.8 turns up; the three open notes of the 0.8
-reviews (a playing message inside a thread view, empty continuation rows of a playing row
-with a long name, the doctor breaking `Alt-Enter` across lines); stricter build checks (no
-blocking calls on the UI thread, `cargo deny` in CI).
+**Also in 0.9:** what the user's testing of 0.8 turns up (nothing reported yet). Done on the
+branch `leftovers-09`: the three open notes of the 0.8 reviews (a playing message inside a
+thread view, empty continuation rows of a playing row with a long name, the doctor breaking
+`Alt-Enter` across lines), and the stricter build checks:
+
+- `clippy.toml` refuses calls that block their thread (`sleep`, waiting for a program or a
+  thread, `block_on`, blocking channel calls). The fifteen places that do so on purpose say
+  why with `#[expect(clippy::disallowed_methods, reason = "…")]`; tests are exempt.
+- `deny.toml` and `.github/workflows/checks.yml`: `cargo deny check` for every change and
+  once a week. Three advisories are ignored there, each with its reason (see §7).
 
 ## 7. Known limits and open questions
 
@@ -257,6 +263,13 @@ blocking calls on the UI thread, `cargo deny` in CI).
 - **The test homeserver** (continuwuity) sends only the text of a thread's newest reply, so the
   threads list shows no "who and when" there; and one test with two accounts waiting for a
   member count failed once in 120 runs, during a network interruption, unexplained.
+- **The SQLite built into the release archives** (through matrix-sdk 0.19.1) is older than
+  3.54.0 and has a known flaw (RUSTSEC-2026-0459): opening a database whose `-wal` file has
+  another page size can hand out stale memory. It takes someone who can write into the
+  profile's private folder, who could read the store there anyway. The fix comes with the
+  next matrix-sdk; the Nix package links the system's SQLite (3.54.0) and is not affected.
+  Two more advisories only say "unmaintained" (anymap2, bincode 1), both deep in
+  dependencies.
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.
