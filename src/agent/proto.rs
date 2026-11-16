@@ -42,6 +42,9 @@ pub const MAX_ROOM: usize = 512;
 pub const MAX_ROOMS: usize = 2000;
 /// The longest name (of a room or a sender) handed out, in characters.
 pub const MAX_NAME: usize = 256;
+/// The longest id (of a room, an event or a user) handed out, in bytes: what Matrix
+/// allows. A longer one is not cut, it is not handed out at all.
+pub const MAX_ID: usize = 255;
 /// The longest reason of a refusal, in characters.
 pub const MAX_REASON: usize = 300;
 
@@ -69,10 +72,23 @@ pub struct Msg {
     /// The body was longer than [`MAX_BODY`] and has been cut.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
-    /// A doubt about who really sent this, in an encrypted room: `unverified_device`,
-    /// `identity_changed`, `sender_mismatch`, `not_encrypted` or `unconfirmed`.
+    /// A doubt about who really sent this, in an encrypted room, as the app shows it
+    /// (the lenient judgement: a sender nobody verified is not doubted):
+    /// `unverified_device`, `identity_changed`, `sender_mismatch`, `not_encrypted` or
+    /// `unconfirmed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// The strict judgement: the message came encrypted, from a device that its
+    /// owner has cross-signed, of a user whose identity the account `serve` runs as
+    /// has verified, and nothing puts that in doubt. Without this field (an older
+    /// `serve`) a message is not verified.
+    #[serde(default)]
+    pub verified: bool,
+    /// Why it is not `verified`: `not_encrypted`, `unverified_identity`,
+    /// `unverified_device`, `unconfirmed`, `identity_changed`, `sender_mismatch`,
+    /// `undecryptable` or `redacted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untrusted: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -90,18 +106,73 @@ impl std::fmt::Debug for Msg {
             .field("own", &self.own)
             .field("truncated", &self.truncated)
             .field("warning", &self.warning.is_some())
+            .field("verified", &self.verified)
             .finish_non_exhaustive()
     }
 }
 
+/// How much it takes for a message to count as written by the user it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    /// Only what is [verified](Msg::verified): encrypted, from a cross-signed device
+    /// of a user whose identity the account has verified.
+    Verified,
+    /// Also what nobody verified, and what came in a room without encryption: only
+    /// what contradicts the sender (`identity_changed`, `sender_mismatch`,
+    /// `not_encrypted` in an encrypted room) is turned away. As good as the
+    /// homeserver's word.
+    AllowUnverified,
+}
+
+/// What a message is to someone who waits for a certain user's word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing<'a> {
+    /// Someone else's, or the account's own.
+    Other,
+    /// It counts as that user's.
+    Theirs,
+    /// It names that user as its sender and does not count: why not.
+    Doubted(&'a str),
+}
+
 impl Msg {
-    /// The doubts that say the sender may not be who the message names: such a
-    /// message is never taken as the configured user's.
-    pub fn sender_in_doubt(&self) -> bool {
-        matches!(
-            self.warning.as_deref(),
-            Some("identity_changed" | "sender_mismatch" | "not_encrypted")
-        )
+    /// Why this message does not count as written by the sender it names; `None` if
+    /// it does. A message that could not be read, and one that was deleted, never
+    /// counts: there is nothing in it that anyone said.
+    pub fn doubt(&self, trust: Trust) -> Option<&str> {
+        match self.kind.as_str() {
+            "undecryptable" => return Some("undecryptable"),
+            "redacted" => return Some("redacted"),
+            _ => {}
+        }
+        // What contradicts the sender is turned away whatever else is said.
+        let contradicted = self.warning.as_deref().filter(|warning| {
+            matches!(
+                *warning,
+                "identity_changed" | "sender_mismatch" | "not_encrypted"
+            )
+        });
+        match trust {
+            Trust::AllowUnverified => contradicted,
+            Trust::Verified if self.verified && self.warning.is_none() => None,
+            Trust::Verified => Some(
+                self.untrusted
+                    .as_deref()
+                    .or(self.warning.as_deref())
+                    .unwrap_or("unverified"),
+            ),
+        }
+    }
+
+    /// What this message is to someone who waits for the word of `user`.
+    pub fn standing(&self, user: &str, trust: Trust) -> Standing<'_> {
+        if self.own || self.sender != user {
+            return Standing::Other;
+        }
+        match self.doubt(trust) {
+            None => Standing::Theirs,
+            Some(why) => Standing::Doubted(why),
+        }
     }
 }
 
@@ -343,7 +414,19 @@ pub fn clean_outgoing(text: &str) -> String {
         .collect()
 }
 
-/// One line of text from outside, safe for a terminal and at most `max` characters.
+/// An id (of a room, an event or a user) as it may be handed out: exactly as it is.
+/// `None` for one that is empty, longer than [`MAX_ID`], or that holds what a
+/// terminal must not get: an id is compared and parsed by whoever receives it, so one
+/// that would have to be changed is not handed out at all.
+pub fn clean_id(id: &str) -> Option<String> {
+    let fine = !id.is_empty()
+        && id.len() <= MAX_ID
+        && !id.contains(|c: char| c.is_whitespace() || crate::text::unsafe_char(c));
+    fine.then(|| id.to_owned())
+}
+
+/// One line of text from outside, safe for a terminal and at most `max` characters;
+/// what is cut ends with `…`. For names and reasons, which are shown, never for ids.
 pub fn clean_line(text: &str, max: usize) -> String {
     let clean = crate::text::sanitize_line(text);
     match clean.char_indices().nth(max) {
@@ -448,7 +531,7 @@ pub fn parse_item(line: &str) -> Option<Item> {
 // ----- lines, bounded -------------------------------------------------------------------
 
 /// What [`LineReader::next`] found.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum Read {
     Line(String),
     /// The other side closed (what it had begun of a line is dropped).
@@ -462,6 +545,20 @@ pub enum Read {
     Idle,
     /// A line was begun and not finished in time.
     Stalled,
+}
+
+/// Hand-written: a line is a request or an answer, with rooms and texts in it.
+impl std::fmt::Debug for Read {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Line(line) => write!(f, "Line({} bytes)", line.len()),
+            Self::Eof => f.write_str("Eof"),
+            Self::TooLong => f.write_str("TooLong"),
+            Self::Invalid => f.write_str("Invalid"),
+            Self::Idle => f.write_str("Idle"),
+            Self::Stalled => f.write_str("Stalled"),
+        }
+    }
 }
 
 /// Reads lines of a bounded length from `reader`, keeping at most that length (and one
@@ -589,7 +686,172 @@ mod tests {
             own: false,
             truncated: false,
             warning: None,
+            verified: true,
+            untrusted: None,
         }
+    }
+
+    /// A message as the worker judges it: `warning` is what the app shows,
+    /// `untrusted` the strict judgement.
+    fn judged(kind: &str, warning: Option<&str>, untrusted: Option<&str>) -> Msg {
+        Msg {
+            kind: kind.into(),
+            warning: warning.map(str::to_owned),
+            verified: untrusted.is_none(),
+            untrusted: untrusted.map(str::to_owned),
+            ..message()
+        }
+    }
+
+    #[test]
+    fn a_message_counts_as_its_senders_only_when_nothing_is_in_doubt() {
+        use Trust::{AllowUnverified, Verified};
+        // (the message, strictly, allowing the unverified)
+        let cases = [
+            // Verified, nothing shown: counts either way.
+            (judged("text", None, None), None, None),
+            (judged("image", None, None), None, None),
+            // Nobody verified the sender: the app shows nothing, strictly it fails.
+            (
+                judged("text", None, Some("unverified_identity")),
+                Some("unverified_identity"),
+                None,
+            ),
+            // A room without encryption.
+            (
+                judged("text", None, Some("not_encrypted")),
+                Some("not_encrypted"),
+                None,
+            ),
+            // The lenient doubts that do not contradict the sender.
+            (
+                judged("text", Some("unverified_device"), Some("unverified_device")),
+                Some("unverified_device"),
+                None,
+            ),
+            (
+                judged("text", Some("unconfirmed"), Some("unconfirmed")),
+                Some("unconfirmed"),
+                None,
+            ),
+            // What contradicts the sender fails either way.
+            (
+                judged("text", Some("identity_changed"), Some("identity_changed")),
+                Some("identity_changed"),
+                Some("identity_changed"),
+            ),
+            (
+                judged("text", Some("sender_mismatch"), Some("sender_mismatch")),
+                Some("sender_mismatch"),
+                Some("sender_mismatch"),
+            ),
+            (
+                judged("text", Some("not_encrypted"), Some("not_encrypted")),
+                Some("not_encrypted"),
+                Some("not_encrypted"),
+            ),
+            // What says nothing never counts, whatever else is claimed about it.
+            (
+                judged("undecryptable", None, Some("undecryptable")),
+                Some("undecryptable"),
+                Some("undecryptable"),
+            ),
+            (
+                judged("undecryptable", None, None),
+                Some("undecryptable"),
+                Some("undecryptable"),
+            ),
+            (
+                judged("redacted", None, Some("redacted")),
+                Some("redacted"),
+                Some("redacted"),
+            ),
+            (
+                judged("redacted", None, None),
+                Some("redacted"),
+                Some("redacted"),
+            ),
+        ];
+        for (message, strictly, allowing) in &cases {
+            let what = (&message.kind, &message.warning, &message.untrusted);
+            assert_eq!(message.doubt(Verified), *strictly, "{what:?}");
+            assert_eq!(message.doubt(AllowUnverified), *allowing, "{what:?}");
+        }
+        // Said to be verified and shown with a warning: the warning wins.
+        let odd = Msg {
+            verified: true,
+            ..judged("text", Some("unconfirmed"), None)
+        };
+        assert_eq!(odd.doubt(Verified), Some("unconfirmed"));
+        // Not verified, and no reason given: still not verified.
+        let bare = Msg {
+            verified: false,
+            ..judged("text", None, None)
+        };
+        assert_eq!(bare.doubt(Verified), Some("unverified"));
+
+        // Whose word it is: the named sender's only, and never the account's own.
+        let ann = judged("text", None, None);
+        assert_eq!(ann.standing("@ann:example.org", Verified), Standing::Theirs);
+        assert_eq!(ann.standing("@eve:example.org", Verified), Standing::Other);
+        assert_eq!(ann.standing("@ann:example.org ", Verified), Standing::Other);
+        let own = Msg {
+            own: true,
+            ..judged("text", None, None)
+        };
+        assert_eq!(own.standing("@ann:example.org", Verified), Standing::Other);
+        assert_eq!(
+            own.standing("@ann:example.org", AllowUnverified),
+            Standing::Other
+        );
+        let unverified = judged("text", None, Some("unverified_identity"));
+        assert_eq!(
+            unverified.standing("@ann:example.org", Verified),
+            Standing::Doubted("unverified_identity")
+        );
+        assert_eq!(
+            unverified.standing("@ann:example.org", AllowUnverified),
+            Standing::Theirs
+        );
+        assert_eq!(
+            unverified.standing("@eve:example.org", Verified),
+            Standing::Other
+        );
+    }
+
+    #[test]
+    fn an_id_is_handed_out_as_it_is_or_not_at_all() {
+        for id in [
+            "$event:example.org",
+            "!room:example.org",
+            "@ann:example.org",
+            "$a",
+        ] {
+            assert_eq!(clean_id(id).as_deref(), Some(id));
+        }
+        let longest = format!("${}", "e".repeat(MAX_ID - 1));
+        assert_eq!(clean_id(&longest).as_deref(), Some(longest.as_str()));
+        // Too long is not cut (and gets no `…`), and what a terminal must not get is
+        // not taken out: such an id is no id.
+        let too_long = format!("${}", "e".repeat(MAX_ID));
+        for id in [
+            "",
+            too_long.as_str(),
+            "$with space",
+            "$line\nbreak",
+            "$esc\u{1b}[31m",
+            "$flip\u{202e}",
+            "$tab\there",
+        ] {
+            assert_eq!(clean_id(id), None, "{id:?}");
+        }
+        // A name is shown, so it is cut with a mark.
+        assert_eq!(
+            clean_line(&"n".repeat(MAX_NAME + 5), MAX_NAME)
+                .chars()
+                .count(),
+            MAX_NAME + 1
+        );
     }
 
     #[test]
@@ -677,25 +939,28 @@ mod tests {
         }
         // The fields that are only there when they say something.
         assert!(!line.contains("truncated") && !line.contains("warning"));
+        assert!(line.contains("\"verified\":true") && !line.contains("untrusted"));
         let doubted = Msg {
             truncated: true,
             warning: Some("sender_mismatch".into()),
+            verified: false,
+            untrusted: Some("sender_mismatch".into()),
             ..message()
         };
         let line = message_line(&doubted);
         match parse_item(&line) {
-            Some(Item::Message(got)) => {
-                assert_eq!(*got, doubted);
-                assert!(got.sender_in_doubt());
-            }
+            Some(Item::Message(got)) => assert_eq!(*got, doubted),
             _ => panic!("not a message: {line}"),
         }
-        assert!(!message().sender_in_doubt());
-        let unverified = Msg {
-            warning: Some("unverified_device".into()),
-            ..message()
-        };
-        assert!(!unverified.sender_in_doubt());
+        // A message of a `serve` that does not judge yet is not verified.
+        let old = r#"{"message":{"event_id":"$e","sender":"@a:b","sender_name":"a","timestamp_ms":1,"kind":"text","body":"x","edited":false,"own":false}}"#;
+        match parse_item(old) {
+            Some(Item::Message(got)) => {
+                assert!(!got.verified);
+                assert_eq!(got.doubt(Trust::Verified), Some("unverified"));
+            }
+            _ => panic!("not a message"),
+        }
 
         let room = RoomInfo {
             id: "!room:example.org".into(),
@@ -748,7 +1013,7 @@ mod tests {
     #[test]
     fn debug_output_names_no_room_no_text_and_no_reason() {
         let shown = format!(
-            "{:?} {:?} {:?} {:?} {:?}",
+            "{:?} {:?} {:?} {:?} {:?} {:?}",
             message(),
             RoomInfo {
                 id: "!room:example.org".into(),
@@ -764,6 +1029,7 @@ mod tests {
             Request::Listen {
                 room: "!room:example.org".into(),
             },
+            Read::Line(r#"{"op":"listen","room":"Secret Garden"}"#.into()),
         );
         for private in ["example.org", "Ann", "line one", "Garden", "launch", "$one"] {
             assert!(!shown.contains(private), "{private} in {shown}");

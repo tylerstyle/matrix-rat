@@ -25,7 +25,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
@@ -66,6 +66,8 @@ pub struct Limits {
     pub sync: Duration,
     /// How long the worker gets to stop.
     pub stop: Duration,
+    /// How long, on stopping, the connections get to write down that it is over.
+    pub grace: Duration,
     /// Messages held for a listener that is not reading; one more and it is dropped.
     pub backlog: usize,
     /// Connections served at once.
@@ -82,6 +84,7 @@ impl Default for Limits {
             ready: Duration::from_secs(20),
             sync: Duration::from_secs(30),
             stop: Duration::from_secs(5),
+            grace: Duration::from_secs(2),
             backlog: 64,
             connections: 32,
         }
@@ -198,7 +201,8 @@ struct Seen {
 
 impl Seen {
     /// Whether `message` is new, or says something else than when it was noted last
-    /// (edited, deleted, decrypted at last).
+    /// (edited, deleted, decrypted at last), or its sender is trusted differently
+    /// (verified meanwhile, or no longer).
     fn note(&mut self, message: &Msg) -> bool {
         let mark = mark(message);
         match self.marks.get_mut(&message.event_id) {
@@ -221,7 +225,7 @@ impl Seen {
     }
 }
 
-/// What a message says, as one number.
+/// What a message says, and how far its sender is trusted, as one number.
 fn mark(message: &Msg) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -231,6 +235,8 @@ fn mark(message: &Msg) -> u64 {
         message.edited,
         message.truncated,
         &message.warning,
+        message.verified,
+        &message.untrusted,
     )
         .hash(&mut hasher);
     hasher.finish()
@@ -308,6 +314,8 @@ pub struct Hub {
     matrix: MatrixHandle,
     events: UnboundedReceiver<MatrixEvent>,
     requests: mpsc::Receiver<HubRequest>,
+    /// Turns true (or closes) when `serve` is stopping.
+    closed: watch::Receiver<bool>,
     limits: Limits,
     logged_in: bool,
     /// The first sync of the session is through.
@@ -348,16 +356,19 @@ impl std::fmt::Debug for Hub {
 }
 
 impl Hub {
+    /// `closed`: turns true, or closes, when `serve` is stopping.
     pub fn new(
         matrix: MatrixHandle,
         events: UnboundedReceiver<MatrixEvent>,
         limits: Limits,
+        closed: watch::Receiver<bool>,
     ) -> (Self, HubHandle) {
         let (sender, requests) = mpsc::channel(MAX_WAITING);
         let hub = Self {
             matrix,
             events,
             requests,
+            closed: closed.clone(),
             limits,
             logged_in: false,
             caught_up: false,
@@ -373,6 +384,7 @@ impl Hub {
             HubHandle {
                 requests: sender,
                 limits,
+                closed,
             },
         )
     }
@@ -395,22 +407,28 @@ impl Hub {
         }
     }
 
-    /// Serves until the session is over or the worker is gone.
-    pub async fn run(&mut self) -> End {
+    /// Serves until the session is over or the worker is gone (and says which), or
+    /// until `serve` is stopping (`None`): then everyone who waits for an answer and
+    /// everyone who listens is told so first.
+    pub async fn run(&mut self) -> Option<End> {
         let mut tidy = tokio::time::interval(TIDY);
         tidy.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 event = self.events.recv() => match event {
-                    None => return End::WorkerGone,
+                    None => return Some(End::WorkerGone),
                     Some(event) => {
                         if let Some(end) = self.on_event(event) {
-                            return end;
+                            return Some(end);
                         }
                     }
                 },
                 Some(request) = self.requests.recv() => self.on_request(request),
                 _ = tidy.tick() => self.tidy(Instant::now()),
+                () = closing(&mut self.closed) => {
+                    self.session_over(&Refusal::stopping());
+                    return None;
+                }
             }
         }
     }
@@ -490,9 +508,15 @@ impl Hub {
             .into_iter()
             // An invitation is not a room of ours, and nothing here accepts one.
             .filter(|room| !matches!(room.category, RoomCategory::Invite | RoomCategory::Knock))
-            .map(|room| Known {
+            // A room whose id cannot be handed out as it is cannot be named by
+            // anyone: it is not listed and not reached. (An id is never cut.)
+            .filter_map(|room| {
+                let id = proto::clean_id(&room.id)?;
+                Some((id, room))
+            })
+            .map(|(id, room)| Known {
                 info: RoomInfo {
-                    id: proto::clean_line(&room.id, proto::MAX_NAME),
+                    id,
                     name: proto::clean_line(&room.name, proto::MAX_NAME),
                     encrypted: room.encrypted,
                     direct: room.direct,
@@ -538,11 +562,17 @@ impl Hub {
         match event {
             AgentEvent::Sent { request, result } => {
                 if let Some(reply) = self.sends.remove(&request) {
-                    let _ = reply.send(
-                        result
-                            .map(|event_id| proto::clean_line(&event_id, proto::MAX_NAME))
-                            .map_err(|reason| Refusal::failed(&reason)),
-                    );
+                    let sent = match result {
+                        Ok(event_id) => proto::clean_id(&event_id).ok_or_else(|| {
+                            Refusal::new(
+                                Code::Failed,
+                                "the message was sent, but the server named it with an id \
+                                 that cannot be handed out",
+                            )
+                        }),
+                        Err(reason) => Err(Refusal::failed(&reason)),
+                    };
+                    let _ = reply.send(sent);
                 }
             }
             AgentEvent::Read { request, result } => {
@@ -614,13 +644,11 @@ impl Hub {
                     .and_then(|room_id| Ok((room_id, self.slot()?)));
                 match checked {
                     Ok((room_id, request)) => {
-                        // The app's own Markdown, without its slash commands: a text
-                        // that starts with a slash is a text.
-                        let message = crate::format::message(&proto::clean_outgoing(&text));
+                        // Made into a message by the worker, off this task.
                         self.matrix.send(MatrixCmd::Agent(AgentCmd::Send {
                             request,
                             room_id,
-                            message,
+                            text: proto::clean_outgoing(&text),
                         }));
                         self.sends.insert(request, reply);
                     }
@@ -696,42 +724,32 @@ impl Hub {
         Ok(self.next_request)
     }
 
-    /// The id of the joined room that `room` names: an id, or the exact name, or the
-    /// main address. A name that several rooms have is refused, and the refusal says
+    /// The id of the joined room that `room` names. The id of a joined room always
+    /// means that room, whatever other rooms are called: nobody can take an id away
+    /// by naming a room after it. Otherwise it is the room whose exact name or main
+    /// address this is; if that fits several rooms (two of the same name, or one
+    /// named like the address of another), it is refused, and the refusal says
     /// nothing about them.
     fn resolve(&self, room: &str) -> Result<String, Refusal> {
         let wanted = room.trim();
-        let not_found = || {
-            Refusal::new(
+        let rooms = || self.rooms.iter().flatten();
+        if let Some(known) = rooms().find(|known| known.info.id == wanted) {
+            return Ok(known.info.id.clone());
+        }
+        let mut fitting = rooms()
+            .filter(|known| known.info.name == wanted || known.alias.as_deref() == Some(wanted));
+        match (fitting.next(), fitting.next()) {
+            (Some(known), None) => Ok(known.info.id.clone()),
+            (Some(_), Some(_)) => Err(Refusal::new(
+                Code::Ambiguous,
+                "ambiguous: several joined rooms have that name or address; use the \
+                 room's id",
+            )),
+            _ => Err(Refusal::new(
                 Code::NotFound,
                 "no joined room has that id, name or address",
-            )
-        };
-        let rooms = || self.rooms.iter().flatten();
-        if wanted.starts_with('!') {
-            return rooms()
-                .find(|known| known.info.id == wanted)
-                .map(|known| known.info.id.clone())
-                .ok_or_else(not_found);
+            )),
         }
-        let mut named = rooms().filter(|known| known.info.name == wanted);
-        match (named.next(), named.next()) {
-            (Some(known), None) => return Ok(known.info.id.clone()),
-            (Some(_), Some(_)) => {
-                return Err(Refusal::new(
-                    Code::Ambiguous,
-                    "ambiguous: several joined rooms have that name; use the room's id",
-                ));
-            }
-            _ => {}
-        }
-        if wanted.starts_with('#') {
-            let mut addressed = rooms().filter(|known| known.alias.as_deref() == Some(wanted));
-            if let (Some(known), None) = (addressed.next(), addressed.next()) {
-                return Ok(known.info.id.clone());
-            }
-        }
-        Err(not_found())
     }
 
     /// Refuses what has waited too long, forgets who has gone away, and stops
@@ -791,6 +809,8 @@ fn busy() -> Refusal {
 pub struct HubHandle {
     requests: mpsc::Sender<HubRequest>,
     limits: Limits,
+    /// Turns true (or closes) when `serve` is stopping.
+    closed: watch::Receiver<bool>,
 }
 
 impl HubHandle {
@@ -859,9 +879,15 @@ where
     W: AsyncWrite + Unpin,
 {
     let limits = hub.limits;
+    let mut closed = hub.closed.clone();
     let mut lines = LineReader::new(reader, proto::MAX_REQUEST_LINE);
     loop {
-        let line = match lines.next(Some(limits.idle), Some(limits.line)).await {
+        let read = tokio::select! {
+            read = lines.next(Some(limits.idle), Some(limits.line)) => read,
+            // Nothing is being asked: nothing to say, and no reason to stay.
+            () = closing(&mut closed) => return,
+        };
+        let line = match read {
             Ok(Read::Line(line)) => line,
             Ok(Read::Invalid) => {
                 let refusal = Refusal::bad("the line is not UTF-8");
@@ -903,15 +929,12 @@ where
                     }
                     going
                 }
-                Err(refusal) => say(&mut writer, &refusal.line(), &limits).await,
+                Err(refusal) => refuse(&mut writer, &refusal, &limits).await,
             },
-            Ok(Request::Send { room, text }) => {
-                let line = match hub.send(room, text).await {
-                    Ok(event_id) => proto::sent_line(&event_id),
-                    Err(refusal) => refusal.line(),
-                };
-                say(&mut writer, &line, &limits).await
-            }
+            Ok(Request::Send { room, text }) => match hub.send(room, text).await {
+                Ok(event_id) => say(&mut writer, &proto::sent_line(&event_id), &limits).await,
+                Err(refusal) => refuse(&mut writer, &refusal, &limits).await,
+            },
             Ok(Request::Read { room, limit }) => match hub.read(room, limit).await {
                 Ok((room_id, messages)) => {
                     let header = proto::read_line(&room_id, messages.len());
@@ -922,7 +945,7 @@ where
                     }
                     going
                 }
-                Err(refusal) => say(&mut writer, &refusal.line(), &limits).await,
+                Err(refusal) => refuse(&mut writer, &refusal, &limits).await,
             },
             Ok(Request::Listen { room }) => match hub.listen(room).await {
                 Ok(listening) => {
@@ -930,7 +953,7 @@ where
                     // A stream is the last thing a connection does.
                     false
                 }
-                Err(refusal) => say(&mut writer, &refusal.line(), &limits).await,
+                Err(refusal) => refuse(&mut writer, &refusal, &limits).await,
             },
         };
         if !going {
@@ -942,6 +965,17 @@ where
 /// Writes one line; `false` if the client is gone or does not read.
 async fn say<W: AsyncWrite + Unpin>(writer: &mut W, line: &str, limits: &Limits) -> bool {
     proto::write_line(writer, line, limits.write).await.is_ok()
+}
+
+/// Writes down what the hub refused; `false` if the client is gone, or if the refusal
+/// is that `serve` is stopping: then this was the connection's last word.
+async fn refuse<W: AsyncWrite + Unpin>(writer: &mut W, refusal: &Refusal, limits: &Limits) -> bool {
+    say(writer, &refusal.line(), limits).await && refusal.code != Code::Stopping
+}
+
+/// Waits until `serve` is stopping (or whoever would say so is gone).
+async fn closing(closed: &mut watch::Receiver<bool>) {
+    let _ = closed.wait_for(|closed| *closed).await;
 }
 
 /// Passes a room's news to a listener until it goes away (or says anything: while
@@ -987,12 +1021,19 @@ async fn stream<R, W>(
 // ----- the socket -----------------------------------------------------------------------
 
 /// Lets in this user's programs, [`Limits::connections`] at a time; one more is told
-/// that it is too many, anyone else is dropped without a word.
+/// that it is too many, anyone else is dropped without a word. When `serve` is
+/// stopping, nobody new is let in, and those who are in get [`Limits::grace`] to
+/// write down what they were told; what is left then is cut off.
 pub async fn accept(listener: UnixListener, hub: HubHandle) {
     let slots = Arc::new(Semaphore::new(hub.limits.connections));
+    let mut closed = hub.closed.clone();
     let mut connections = JoinSet::new();
     loop {
-        let stream = match listener.accept().await {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            () = closing(&mut closed) => break,
+        };
+        let stream = match accepted {
             Ok((stream, _)) => stream,
             Err(err) => {
                 tracing::warn!(why = %logsafe::Why::Io(err.kind()), "agent socket: could not accept");
@@ -1023,6 +1064,9 @@ pub async fn accept(listener: UnixListener, hub: HubHandle) {
             drop(slot);
         });
     }
+    drop(listener);
+    let told = async { while connections.join_next().await.is_some() {} };
+    let _ = tokio::time::timeout(hub.limits.grace, told).await;
 }
 
 /// Why `serve` did not start.
@@ -1038,12 +1082,27 @@ pub struct Served {
     #[cfg_attr(not(test), allow(dead_code))]
     handle: HubHandle,
     limits: Limits,
-    socket: SocketFile,
+    /// Says that `serve` is stopping, to the hub and to every connection.
+    closing: watch::Sender<bool>,
+    /// The socket's file; `None` once it has been removed.
+    socket: Option<SocketFile>,
     /// The hub at work; `None` once it has ended.
-    hub: Option<JoinHandle<End>>,
+    hub: Option<JoinHandle<Option<End>>>,
     /// Why it ended.
     end: Option<End>,
     accept: JoinHandle<()>,
+}
+
+/// Dropped without [`Served::stop`] (a start that was given up, a panic), nothing
+/// is left running behind a socket whose file is gone: the hub and the connections
+/// are cut off. (The worker ends when the last handle to it is gone.)
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.accept.abort();
+        if let Some(hub) = &self.hub {
+            hub.abort();
+        }
+    }
 }
 
 impl Served {
@@ -1067,7 +1126,8 @@ impl Served {
         socket: &Path,
         limits: Limits,
     ) -> Result<Self, StartError> {
-        let (mut hub, handle) = Hub::new(matrix.clone(), events, limits);
+        let (closing, closed) = watch::channel(false);
+        let (mut hub, handle) = Hub::new(matrix.clone(), events, limits, closed);
         if let Err(end) = hub.logged_in().await {
             stop_worker(&matrix, limits.stop).await;
             return Err(StartError::Session(end));
@@ -1082,7 +1142,8 @@ impl Served {
         Ok(Self {
             matrix,
             limits,
-            socket,
+            closing,
+            socket: Some(socket),
             accept: tokio::spawn(accept(listener, handle.clone())),
             hub: Some(tokio::spawn(async move { hub.run().await })),
             end: None,
@@ -1094,22 +1155,32 @@ impl Served {
     /// again; once it has ended, it says so every time.
     pub async fn ended(&mut self) -> End {
         if let Some(hub) = &mut self.hub {
-            let end = hub.await.unwrap_or(End::WorkerGone);
+            let end = hub.await.ok().flatten().unwrap_or(End::WorkerGone);
             self.hub = None;
             self.end = Some(end);
         }
         self.end.unwrap_or(End::WorkerGone)
     }
 
-    /// Closes the socket and its connections, removes the socket's file, and has the
-    /// worker stop the way the app does on quitting.
-    pub async fn stop(self) {
-        self.accept.abort();
-        let _ = self.accept.await;
-        drop(self.socket);
-        if let Some(hub) = self.hub {
+    /// Stops serving: the socket's file is removed and nobody new is let in; whoever
+    /// waits for an answer or listens is told that it is over, and the connections
+    /// get a moment ([`Limits::grace`]) to write that down before they are closed;
+    /// then the worker stops the way it does when the app quits.
+    pub async fn stop(mut self) {
+        let _ = self.closing.send(true);
+        drop(self.socket.take());
+        let grace = self.limits.grace;
+        if let Some(mut hub) = self.hub.take()
+            && tokio::time::timeout(grace, &mut hub).await.is_err()
+        {
             hub.abort();
             let _ = hub.await;
+        }
+        // The accept loop waits for the connections itself, for as long.
+        let wait = grace + Duration::from_secs(1);
+        if tokio::time::timeout(wait, &mut self.accept).await.is_err() {
+            self.accept.abort();
+            let _ = (&mut self.accept).await;
         }
         stop_worker(&self.matrix, self.limits.stop).await;
     }
@@ -1127,14 +1198,14 @@ async fn stop_worker(matrix: &MatrixHandle, limit: Duration) {
     let _ = tokio::time::timeout(limit, matrix.stopped()).await;
 }
 
-/// The signals that end `serve`, and the one that must not.
+/// The signals that end `serve`. (The signal of `matrix-rat --reload-theme`, which
+/// goes to every running instance of a profile and would end a program that does
+/// not handle it, is ignored from before the profile's lock is taken: see
+/// `watch::ignore_reload_signal` and `main`.)
 struct Signals {
     terminate: Signal,
     interrupt: Signal,
     hangup: Signal,
-    /// `matrix-rat --reload-theme` sends this to every running instance of a
-    /// profile, and unhandled it would end the program. There is no theme here.
-    reload: Signal,
 }
 
 impl Signals {
@@ -1143,19 +1214,15 @@ impl Signals {
             terminate: signal(SignalKind::terminate())?,
             interrupt: signal(SignalKind::interrupt())?,
             hangup: signal(SignalKind::hangup())?,
-            reload: signal(SignalKind::user_defined1())?,
         })
     }
 
     /// Waits for a signal to stop.
     async fn stop(&mut self) {
-        loop {
-            tokio::select! {
-                _ = self.terminate.recv() => return,
-                _ = self.interrupt.recv() => return,
-                _ = self.hangup.recv() => return,
-                _ = self.reload.recv() => {}
-            }
+        tokio::select! {
+            _ = self.terminate.recv() => {}
+            _ = self.interrupt.recv() => {}
+            _ = self.hangup.recv() => {}
         }
     }
 }

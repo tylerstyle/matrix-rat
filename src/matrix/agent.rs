@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures::{FutureExt, StreamExt, pin_mut};
-use matrix_sdk::ruma::events::room::message::MessageType;
+use matrix_sdk::deserialized_responses::{DeviceLinkProblem, VerificationLevel, VerificationState};
+use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
 use matrix_sdk::ruma::{RoomId, UserId};
 use matrix_sdk::{Client, Room, RoomState};
 use matrix_sdk_ui::eyeball_im::Vector;
@@ -33,12 +34,11 @@ use tokio::task::{JoinHandle, JoinSet};
 use super::MatrixEvent;
 use super::safety::IgnoredSet;
 use crate::agent::proto::{self, Msg};
-use crate::format::Outgoing;
 use crate::logsafe;
 use crate::model::Shield;
 
 /// The newest messages of a watched room that are told on every change.
-pub const WATCH_TAIL: usize = 50;
+pub const WATCH_TAIL: usize = 100;
 /// Rooms watched at once.
 pub const MAX_WATCHED: usize = 16;
 /// Sends and reads running at once.
@@ -65,7 +65,8 @@ pub enum AgentCmd {
     Send {
         request: u64,
         room_id: String,
-        message: Outgoing,
+        /// Sent with the composer's Markdown and none of its slash commands.
+        text: String,
     },
     /// The latest `limit` messages of a joined room, oldest first; answered with
     /// [`AgentEvent::Read`].
@@ -225,8 +226,8 @@ impl Agent {
             AgentCmd::Send {
                 request,
                 room_id,
-                message,
-            } => self.send(request, &room_id, message),
+                text,
+            } => self.send(request, &room_id, text),
             AgentCmd::Read {
                 request,
                 room_id,
@@ -265,7 +266,7 @@ impl Agent {
         self.room(room_id)
     }
 
-    fn send(&mut self, request: u64, room_id: &str, message: Outgoing) {
+    fn send(&mut self, request: u64, room_id: &str, text: String) {
         let room = match self.room_for_task(room_id) {
             Ok(room) => room,
             Err(err) => {
@@ -277,7 +278,7 @@ impl Agent {
         };
         let events = self.events.clone();
         self.tasks.spawn(async move {
-            let result = send_text(&room, &message).await;
+            let result = send_text(&room, &text).await;
             if let Err(err) = &result {
                 tracing::warn!(why = %logsafe::kind_any(err), "agent: could not send");
             }
@@ -367,10 +368,16 @@ async fn open(room: &Room) -> Result<Timeline> {
         .context("could not open the room's messages")
 }
 
-/// Sends `message` and waits for the server to accept it. Not through the send
-/// queue: the caller wants to know now, not to have it tried again later.
-async fn send_text(room: &Room, message: &Outgoing) -> Result<String> {
-    let content = super::rooms::content(message)?;
+/// `text` as the message it is sent as: with the app's own Markdown, and without its
+/// slash commands (a text that starts with a slash is a text).
+fn content_of(text: &str) -> Result<RoomMessageEventContent> {
+    super::rooms::content(&crate::format::message(text))
+}
+
+/// Sends `text` and waits for the server to accept it. Not through the send queue:
+/// the caller wants to know now, not to have it tried again later.
+async fn send_text(room: &Room, text: &str) -> Result<String> {
+    let content = content_of(text)?;
     let sent = tokio::time::timeout(SEND_TIMEOUT, room.send(content))
         .await
         .map_err(|_| anyhow!("timed out; the message may or may not have been sent"))?
@@ -482,19 +489,35 @@ async fn watch_room(
 /// The messages among `items` as they are handed out: what people (and programs)
 /// said, not who joined or what was set. A message of ours that the server has not
 /// confirmed has no id yet and is left out until it has one. Deleted and unreadable
-/// messages are told as such. Everything is cleaned for a terminal and bounded.
+/// messages are told as such. Everything is cleaned for a terminal and bounded; a
+/// message whose own id or whose sender's id cannot be handed out as it is, is left
+/// out (an id is never cut or changed).
 pub(super) fn messages(
     items: &Vector<Arc<TimelineItem>>,
     own: &UserId,
     ignored: &IgnoredSet,
 ) -> Vec<Msg> {
     let now = chrono::Local::now();
-    items
+    let mut left_out = 0usize;
+    let messages = items
         .iter()
         .filter_map(|item| {
             let event = item.as_event()?;
             let event_id = event.event_id()?;
             let kind = kind(event.content())?;
+            let (Some(event_id), Some(sender)) = (
+                proto::clean_id(event_id.as_str()),
+                proto::clean_id(event.sender().as_str()),
+            ) else {
+                left_out += 1;
+                return None;
+            };
+            let encryption = event.encryption_info();
+            let untrusted = strict_doubt(
+                kind,
+                encryption.map(|info| &info.verification_state),
+                encryption.is_some_and(|info| info.forwarder.is_some()),
+            );
             let message = super::convert::event_message(
                 item.unique_id().0.clone(),
                 event,
@@ -504,8 +527,8 @@ pub(super) fn messages(
             )?;
             let (body, truncated) = proto::bounded_body(message.body);
             Some(Msg {
-                event_id: proto::clean_line(event_id.as_str(), proto::MAX_NAME),
-                sender: proto::clean_line(event.sender().as_str(), proto::MAX_NAME),
+                event_id,
+                sender,
                 sender_name: proto::clean_line(&message.sender, proto::MAX_NAME),
                 timestamp_ms: message.sent_at.unwrap_or_default(),
                 kind: kind.to_owned(),
@@ -514,9 +537,55 @@ pub(super) fn messages(
                 own: message.own,
                 truncated,
                 warning: message.shield.map(|shield| warning(shield).to_owned()),
+                verified: untrusted.is_none(),
+                untrusted: untrusted.map(str::to_owned),
             })
         })
-        .collect()
+        .collect();
+    if left_out > 0 {
+        tracing::debug!(
+            left_out,
+            "agent: messages with an id that cannot be handed out"
+        );
+    }
+    messages
+}
+
+/// The strict judgement of who sent a message: why it cannot be taken as written by
+/// the user it names, `None` if it can. It can only if it came encrypted, from a
+/// device that its owner has cross-signed, of a user whose identity this account has
+/// verified, with a key that came from that device itself. This is stricter than the
+/// shield the app shows (`convert::shield`, which does not doubt a sender whom nobody
+/// verified): it is for those who act on a certain user's word.
+///
+/// `state`: what the SDK found out when it decrypted the event, `None` for an event
+/// that was not encrypted. `forwarded`: its key was passed on by someone else.
+fn strict_doubt(
+    kind: &str,
+    state: Option<&VerificationState>,
+    forwarded: bool,
+) -> Option<&'static str> {
+    match kind {
+        // Nothing in them that anyone said.
+        "undecryptable" => return Some("undecryptable"),
+        "redacted" => return Some("redacted"),
+        _ => {}
+    }
+    let Some(state) = state else {
+        // A room without encryption, or sent in the clear in one that has it.
+        return Some("not_encrypted");
+    };
+    match state {
+        VerificationState::Verified => forwarded.then_some("unconfirmed"),
+        VerificationState::Unverified(level) => Some(match level {
+            VerificationLevel::UnverifiedIdentity => "unverified_identity",
+            VerificationLevel::VerificationViolation => "identity_changed",
+            VerificationLevel::UnsignedDevice
+            | VerificationLevel::None(DeviceLinkProblem::MissingDevice) => "unverified_device",
+            VerificationLevel::None(DeviceLinkProblem::InsecureSource) => "unconfirmed",
+            VerificationLevel::MismatchedSender => "sender_mismatch",
+        }),
+    }
 }
 
 /// What kind of message this is; `None` for what is not a message.
@@ -589,7 +658,7 @@ mod tests {
             AgentCmd::Send {
                 request: 1,
                 room_id: "!room:example.org".into(),
-                message: crate::format::message("the launch codes"),
+                text: "the launch codes".into(),
             },
             AgentCmd::Read {
                 request: 2,
@@ -628,6 +697,8 @@ mod tests {
             own: false,
             truncated: false,
             warning: None,
+            verified: true,
+            untrusted: None,
         };
         let events = [
             AgentEvent::Sent {
@@ -699,27 +770,70 @@ mod tests {
                 "unconfirmed"
             ]
         );
-        // Exactly the ones that put the sender in doubt are the ones a client
-        // refuses to take as the configured user's.
-        let doubted: Vec<bool> = words
-            .iter()
-            .map(|word| {
-                Msg {
-                    event_id: String::new(),
-                    sender: String::new(),
-                    sender_name: String::new(),
-                    timestamp_ms: 0,
-                    kind: "text".into(),
-                    body: String::new(),
-                    edited: false,
-                    own: false,
-                    truncated: false,
-                    warning: Some((*word).to_owned()),
-                }
-                .sender_in_doubt()
-            })
-            .collect();
-        assert_eq!(doubted, [false, true, true, true, false]);
+    }
+
+    /// The strict judgement, branch by branch: only an encrypted message from a
+    /// verified user's cross-signed device, with a key from that device, passes.
+    #[test]
+    fn only_a_verified_sender_passes_the_strict_judgement() {
+        use VerificationLevel as Level;
+        let unverified = VerificationState::Unverified;
+        let verified = VerificationState::Verified;
+        assert_eq!(strict_doubt("text", Some(&verified), false), None);
+        for kind in ["notice", "emote", "image", "file", "poll", "other"] {
+            assert_eq!(strict_doubt(kind, Some(&verified), false), None, "{kind}");
+        }
+        // Not encrypted: a room without encryption, or sent in the clear.
+        assert_eq!(strict_doubt("text", None, false), Some("not_encrypted"));
+        // Every way of not being verified, the one the app does not show included.
+        for (level, why) in [
+            (Level::UnverifiedIdentity, "unverified_identity"),
+            (Level::VerificationViolation, "identity_changed"),
+            (Level::UnsignedDevice, "unverified_device"),
+            (
+                Level::None(DeviceLinkProblem::MissingDevice),
+                "unverified_device",
+            ),
+            (
+                Level::None(DeviceLinkProblem::InsecureSource),
+                "unconfirmed",
+            ),
+            (Level::MismatchedSender, "sender_mismatch"),
+        ] {
+            let state = unverified(level);
+            assert_eq!(strict_doubt("text", Some(&state), false), Some(why));
+            assert_eq!(strict_doubt("text", Some(&state), true), Some(why));
+        }
+        // A key that someone else passed on is not the sender's own word for it.
+        assert_eq!(
+            strict_doubt("text", Some(&verified), true),
+            Some("unconfirmed")
+        );
+        // What could not be read and what was deleted says nothing, whoever sent it.
+        for state in [None, Some(&verified)] {
+            assert_eq!(
+                strict_doubt("undecryptable", state, false),
+                Some("undecryptable")
+            );
+            assert_eq!(strict_doubt("redacted", state, false), Some("redacted"));
+        }
+    }
+
+    /// A text is sent with the app's Markdown, and a leading slash is text.
+    #[test]
+    fn a_text_is_sent_with_markdown_and_without_slash_commands() {
+        let sent = |text: &str| match content_of(text).expect("a message").msgtype {
+            MessageType::Text(text) => (text.body, text.formatted.map(|html| html.body)),
+            other => panic!("not a text: {other:?}"),
+        };
+        let (body, html) = sent("**done** with /etc/hosts");
+        assert_eq!(body, "**done** with /etc/hosts");
+        let html = html.expect("formatted");
+        assert!(html.contains("<strong>done</strong>"), "{html}");
+        // Not an emote, and not refused as an unknown command.
+        assert_eq!(sent("/me waves").0, "/me waves");
+        assert_eq!(sent("/unknown thing").0, "/unknown thing");
+        assert_eq!(sent("plain words"), ("plain words".to_owned(), None));
     }
 
     /// Only a room the account is in is sent to, read or watched: not one it was
@@ -760,7 +874,7 @@ mod tests {
             agent.handle(AgentCmd::Send {
                 request,
                 room_id: room.to_owned(),
-                message: crate::format::message("hello"),
+                text: "hello".into(),
             });
             match next(&mut events).await {
                 AgentEvent::Sent {
@@ -1097,6 +1211,9 @@ mod tests {
         assert_eq!(heard.body, question);
         assert_eq!(heard.sender, person_id.as_str());
         assert!(!heard.own && !heard.edited);
+        // The account never verified the person: not their word in the strict
+        // sense, and the message says why.
+        assert!(!heard.verified && heard.untrusted.is_some());
 
         // `read` has it too, by the room's id.
         let mut conn = Conn::open(&socket).await.expect("connect");

@@ -2437,7 +2437,7 @@ mod tests {
         let command = MatrixCmd::Agent(AgentCmd::Send {
             request: 4,
             room_id: "!room:example.org".into(),
-            message: crate::format::message("the secret plan for example.org"),
+            text: "the secret plan for example.org".into(),
         });
         assert_eq!(format!("{command:?}"), "Agent(Send(request 4))");
         assert_eq!(
@@ -2459,6 +2459,8 @@ mod tests {
             own: false,
             truncated: false,
             warning: None,
+            verified: true,
+            untrusted: None,
         };
         for (event, shown) in [
             (

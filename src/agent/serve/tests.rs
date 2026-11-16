@@ -13,7 +13,6 @@ use super::*;
 use crate::agent::client::{ClientError, Conn, Listener};
 use crate::agent::proto::Item;
 use crate::agent::testing::{ANN, BOT, Dir, EVE, Fake, ROOM, ROOM_NAME, message, own, quick, room};
-use crate::format::Outgoing;
 
 /// The refusal a request ended with.
 fn refusal<T>(result: Result<T, ClientError>) -> Refusal {
@@ -165,14 +164,33 @@ async fn send_finds_the_room_and_tells_what_became_of_the_message() {
     addressed.alias = Some("#lobby:example.org".into());
     let mut invite = room("!invite:example.org", "Party");
     invite.category = RoomCategory::Invite;
+    // A room whose address is what another room is called.
+    let mut hall = room("!hall:example.org", "Hall");
+    hall.alias = Some("#hall:example.org".into());
+    // Rooms whose ids cannot be handed out as they are: too long, or not clean.
+    let long_id = format!("!{}:example.org", "x".repeat(300));
     fake.tell(MatrixEvent::Rooms(vec![
         room(ROOM, ROOM_NAME),
         addressed,
         room("!twin1:example.org", "Twins"),
         room("!twin2:example.org", "Twins"),
         invite,
+        hall,
+        room("!nothall:example.org", "#hall:example.org"),
+        // Named after the id of another room, to be taken for it.
+        room("!copycat:example.org", ROOM),
+        room(&long_id, "Long"),
+        room("!bad\u{1b}[31m:example.org", "Unclean"),
     ]));
     let mut conn = Conn::open(&fake.socket).await.unwrap();
+    // Listed are the rooms that can be named: an id is never cut or cleaned.
+    let listed = conn.rooms().await.unwrap();
+    assert_eq!(listed.len(), 7);
+    assert!(
+        listed
+            .iter()
+            .all(|room| room.id.len() < 40 && !room.id.contains('…'))
+    );
 
     // By name, by id, by address; spaces around a name do not matter.
     for (asked, expected) in [
@@ -188,18 +206,11 @@ async fn send_finds_the_room_and_tells_what_became_of_the_message() {
                 AgentCmd::Send {
                     request,
                     room_id,
-                    message,
+                    text: sent,
                 } => {
                     assert_eq!(room_id, expected, "{asked}");
-                    // Markdown as in the app.
-                    match message {
-                        Outgoing::Text { plain, html, .. } => {
-                            assert_eq!(plain, text);
-                            let html = html.expect("formatted");
-                            assert!(html.contains("<strong>done</strong>"), "{html}");
-                        }
-                        other => panic!("not a text: {other:?}"),
-                    }
+                    // As it was given: the worker makes the message of it.
+                    assert_eq!(sent, text);
                     fake.tell(MatrixEvent::Agent(AgentEvent::Sent {
                         request,
                         result: Ok(format!("$sent-in-{expected}")),
@@ -211,8 +222,8 @@ async fn send_finds_the_room_and_tells_what_became_of_the_message() {
         assert_eq!(sent.unwrap(), format!("$sent-in-{expected}"));
     }
 
-    // A text that starts with a slash is a text, not one of the app's commands; and
-    // control characters do not travel.
+    // A text that starts with a slash stays what it is (the worker sends it as text,
+    // not as one of the app's commands); control characters do not travel.
     for (text, expected) in [
         ("/me waves", "/me waves"),
         ("/unknown thing", "/unknown thing"),
@@ -221,12 +232,11 @@ async fn send_finds_the_room_and_tells_what_became_of_the_message() {
         let (sent, ()) = tokio::join!(conn.send(ROOM, text), async {
             match fake.asked().await {
                 AgentCmd::Send {
-                    request, message, ..
+                    request,
+                    text: sent,
+                    ..
                 } => {
-                    match message {
-                        Outgoing::Text { plain, .. } => assert_eq!(plain, expected),
-                        other => panic!("not a text: {other:?}"),
-                    }
+                    assert_eq!(sent, expected);
                     fake.tell(MatrixEvent::Agent(AgentEvent::Sent {
                         request,
                         result: Ok("$e".into()),
@@ -248,6 +258,12 @@ async fn send_finds_the_room_and_tells_what_became_of_the_message() {
         ("!invite:example.org", Code::NotFound),
         ("agents", Code::NotFound),
         ("Twins", Code::Ambiguous),
+        // The address of one room and the name of another: not guessed.
+        ("#hall:example.org", Code::Ambiguous),
+        // A room whose id cannot be handed out cannot be reached, by name or by id.
+        ("Long", Code::NotFound),
+        (long_id.as_str(), Code::NotFound),
+        ("Unclean", Code::NotFound),
     ] {
         let refused = refusal(conn.send(asked, "hello").await);
         assert_eq!(refused.code, code, "{asked}");
@@ -276,6 +292,23 @@ async fn send_finds_the_room_and_tells_what_became_of_the_message() {
     let refused = refusal(sent);
     assert_eq!(refused.code, Code::Failed);
     assert_eq!(refused.message, "M_FORBIDDEN: not allowed here");
+    // An event id that cannot be handed out as it is, is not handed out changed.
+    for bad in ["$with\nbreak".to_owned(), format!("${}", "e".repeat(300))] {
+        let (sent, ()) = tokio::join!(conn.send(ROOM, "hello"), async {
+            match fake.asked().await {
+                AgentCmd::Send { request, .. } => {
+                    fake.tell(MatrixEvent::Agent(AgentEvent::Sent {
+                        request,
+                        result: Ok(bad.clone()),
+                    }));
+                }
+                other => panic!("not a send: {other:?}"),
+            }
+        });
+        let refused = refusal(sent);
+        assert_eq!(refused.code, Code::Failed);
+        assert!(refused.message.contains("was sent"), "{}", refused.message);
+    }
     fake.stop().await;
 }
 
@@ -741,10 +774,9 @@ async fn when_the_session_ends_everyone_is_told_and_stopping_removes_the_socket(
         });
     });
     assert_eq!(refusal(sent).code, Code::Stopping);
-    // The listener is told that this is the end.
+    // The listener is told that this is the end, in so many words.
     match next(&mut listener).await {
         Err(ClientError::Refused(refusal)) => assert_eq!(refusal.code, Code::Stopping),
-        Err(ClientError::Protocol(_)) => {}
         other => panic!("{other:?}"),
     }
     let mut served = fake.served.take().unwrap();
@@ -860,6 +892,91 @@ async fn a_watched_room_that_is_left_or_cannot_be_followed_ends_its_streams() {
     fake.stop().await;
 }
 
+/// Stopping (a signal) is told to everyone who is connected before the connections
+/// are closed: nobody is left with a connection that just ends.
+#[tokio::test]
+async fn stopping_tells_those_who_wait_and_those_who_listen() {
+    let mut fake = Fake::ready("told", quick()).await;
+    let mut listener = listening(&mut fake, Vec::new()).await;
+    let mut asking = Conn::open(&fake.socket).await.unwrap();
+    let mut idle = Conn::open(&fake.socket).await.unwrap();
+    idle.rooms().await.unwrap();
+    let socket = fake.socket.clone();
+    let began = std::time::Instant::now();
+    let (sent, ()) = tokio::join!(asking.send(ROOM, "hello"), async {
+        // The worker has the send and never answers it; then `serve` is stopped.
+        assert!(matches!(fake.asked().await, AgentCmd::Send { .. }));
+        fake.stop().await;
+    });
+    assert_eq!(refusal(sent).code, Code::Stopping);
+    match next(&mut listener).await {
+        Err(ClientError::Refused(refusal)) => assert_eq!(refusal.code, Code::Stopping),
+        other => panic!("{other:?}"),
+    }
+    // Nobody was waited for longer than it took to tell them.
+    assert!(
+        began.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        began.elapsed()
+    );
+    // A connection on which nothing was being asked is closed without a word.
+    assert!(idle.rooms().await.is_err());
+    assert!(!socket.exists());
+    assert!(matches!(
+        Conn::open(&socket).await,
+        Err(ClientError::NotRunning)
+    ));
+}
+
+/// A `Served` that is dropped without being stopped leaves nothing running behind a
+/// socket whose file is gone.
+#[tokio::test]
+async fn a_serve_that_is_dropped_leaves_nothing_running() {
+    let mut fake = Fake::ready("dropped", quick()).await;
+    let mut conn = Conn::open(&fake.socket).await.unwrap();
+    conn.rooms().await.unwrap();
+    let mut listener = listening(&mut fake, Vec::new()).await;
+    drop(fake.served.take());
+    assert!(!fake.socket.exists());
+    // The connections are cut off...
+    assert!(conn.rooms().await.is_err());
+    assert!(next(&mut listener).await.is_err());
+    // ...and the hub is gone: with it the last handle to the worker, which is how a
+    // worker learns that it has to end.
+    let gone = async {
+        while let Some(command) = fake.commands.recv().await {
+            assert!(
+                matches!(command, MatrixCmd::Agent(_)),
+                "{}",
+                command.describe()
+            );
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), gone)
+        .await
+        .expect("the hub lets go of the worker");
+}
+
+/// A message is told again when its sender is trusted differently: what a client
+/// did not take as the user's word it may take now, and the other way round.
+#[tokio::test]
+async fn a_message_whose_sender_becomes_verified_is_told_again() {
+    use crate::agent::testing::doubted;
+    let mut fake = Fake::ready("trust", quick()).await;
+    let unverified = doubted("$1", ANN, "yes", None, "unverified_identity");
+    let mut listener = listening(&mut fake, Vec::new()).await;
+    fake.watched(vec![unverified.clone()]);
+    assert_eq!(next(&mut listener).await.unwrap(), unverified);
+    let verified = message("$1", ANN, "yes");
+    fake.watched(vec![verified.clone()]);
+    let told = next(&mut listener).await.unwrap();
+    assert_eq!(told, verified);
+    assert!(told.verified && told.untrusted.is_none());
+    fake.watched(vec![unverified.clone()]);
+    assert_eq!(next(&mut listener).await.unwrap(), unverified);
+    fake.stop().await;
+}
+
 /// Whatever the worker tells that is meant for a screen, `serve` does nothing about
 /// it: above all it accepts no invitation and answers no verification.
 #[tokio::test]
@@ -924,7 +1041,8 @@ fn the_debug_output_of_the_hub_holds_nothing_private() {
     ];
     let (matrix, _commands) = MatrixHandle::for_test();
     let (_events, received) = unbounded_channel();
-    let (mut hub, _handle) = Hub::new(matrix, received, quick());
+    let (_closing, closed) = watch::channel(false);
+    let (mut hub, _handle) = Hub::new(matrix, received, quick(), closed);
     let mut held = Vec::new();
     // A request that waits for the rooms.
     let (reply, answer) = oneshot::channel();

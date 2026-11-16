@@ -52,6 +52,7 @@ pub fn quick() -> Limits {
         ready: Duration::from_secs(10),
         sync: Duration::from_secs(10),
         stop: Duration::from_millis(50),
+        grace: Duration::from_secs(2),
         backlog: 64,
         connections: 32,
     }
@@ -77,7 +78,8 @@ pub fn room(id: &str, name: &str) -> RoomSummary {
     }
 }
 
-/// A text message of someone else.
+/// A text message of someone else, verified as theirs (see [`doubted`] for one that
+/// is not).
 pub fn message(event_id: &str, sender: &str, body: &str) -> Msg {
     Msg {
         event_id: event_id.to_owned(),
@@ -95,6 +97,27 @@ pub fn message(event_id: &str, sender: &str, body: &str) -> Msg {
         own: false,
         truncated: false,
         warning: None,
+        verified: true,
+        untrusted: None,
+    }
+}
+
+/// A message that names `sender` and is not verified as theirs: `warning` is what
+/// the app would show about it (the lenient judgement), `why` the strict one.
+pub fn doubted(event_id: &str, sender: &str, body: &str, warning: Option<&str>, why: &str) -> Msg {
+    Msg {
+        warning: warning.map(str::to_owned),
+        verified: false,
+        untrusted: Some(why.to_owned()),
+        ..message(event_id, sender, body)
+    }
+}
+
+/// A message that could not be decrypted (yet).
+pub fn locked(event_id: &str, sender: &str) -> Msg {
+    Msg {
+        kind: "undecryptable".to_owned(),
+        ..doubted(event_id, sender, "Unable to decrypt", None, "undecryptable")
     }
 }
 
@@ -364,12 +387,10 @@ async fn play(
         let known = room_id == ROOM;
         match command {
             AgentCmd::Send {
-                request, message, ..
+                request,
+                text: plain,
+                ..
             } => {
-                let crate::format::Outgoing::Text { plain, .. } = message else {
-                    state.odd.push("a send that is not a text".to_owned());
-                    continue;
-                };
                 if !known {
                     tell(AgentEvent::Sent {
                         request,

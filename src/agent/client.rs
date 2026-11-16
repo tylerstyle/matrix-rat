@@ -13,7 +13,9 @@ use serde_json::{Map, Value};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-use super::proto::{self, Item, LineReader, Msg, Read, Refusal, Request, RoomInfo};
+use super::proto::{
+    self, Item, LineReader, Msg, Read, Refusal, Request, RoomInfo, Standing, Trust,
+};
 use super::socket;
 
 /// How long a client waits for the first line of an answer. `serve` answers or
@@ -292,9 +294,21 @@ impl Listener {
 
 // ----- the commands ---------------------------------------------------------------------
 
-/// What `--from` keeps: messages of that user, which are not the account's own.
-pub fn is_from(message: &Msg, from: Option<&str>) -> bool {
-    from.is_none_or(|from| !message.own && message.sender == from)
+/// `--from`, and how much it takes for a message to count as that user's.
+#[derive(Debug, Clone, Copy)]
+pub struct Sender<'a> {
+    pub user: &'a str,
+    pub trust: Trust,
+}
+
+/// What a message is to a command: printed without `--from`; with it, only what
+/// counts as that user's, while what names the user and does not count is told apart
+/// from what is someone else's.
+fn standing<'a>(message: &'a Msg, from: Option<Sender<'_>>) -> Standing<'a> {
+    match from {
+        None => Standing::Theirs,
+        Some(sender) => message.standing(sender.user, sender.trust),
+    }
 }
 
 /// Checks a `--room` argument; the complaint is for the user.
@@ -363,15 +377,18 @@ pub async fn send(
     print_line(out, &line)
 }
 
-/// `matrix-rat read`: prints the latest `limit` messages (with `from`: of that user,
-/// among the latest [`proto::READ_MAX`] of the room), oldest first, a line of JSON
-/// each.
+/// `matrix-rat read`: prints the latest `limit` messages, oldest first, a line of
+/// JSON each. With `from`: of what counts as that user's among the latest
+/// [`proto::READ_MAX`] of the room; if messages that name the user were left out
+/// because they do not count, `notes` (standard error) is told how many, without a
+/// word of what they say.
 pub async fn read(
     socket: &Path,
     room: &str,
     limit: usize,
-    from: Option<&str>,
+    from: Option<Sender<'_>>,
     out: &mut impl Write,
+    notes: &mut impl Write,
 ) -> Result<(), ClientError> {
     let asked = if from.is_some() {
         proto::READ_MAX
@@ -379,36 +396,58 @@ pub async fn read(
         limit
     };
     let (_, messages) = Conn::open(socket).await?.read(room, asked).await?;
-    let kept: Vec<&Msg> = messages
-        .iter()
-        .filter(|message| is_from(message, from))
-        .collect();
+    let mut kept: Vec<&Msg> = Vec::new();
+    let mut left_out = 0usize;
+    for message in &messages {
+        match standing(message, from) {
+            Standing::Theirs => kept.push(message),
+            Standing::Doubted(_) => left_out += 1,
+            Standing::Other => {}
+        }
+    }
     for message in &kept[kept.len().saturating_sub(limit)..] {
         print_message(out, message)?;
+    }
+    if left_out > 0 {
+        let _ = writeln!(
+            notes,
+            "matrix-rat: {left_out} of the messages that name this user as sender were left \
+             out: they could not be verified as theirs (read without --from to see them \
+             and why; --allow-unverified takes them)"
+        );
     }
     Ok(())
 }
 
-/// `matrix-rat listen`: prints every message that is new or has changed (with
-/// `from`: of that user), a line of JSON each, until the stream ends or nobody reads
-/// the output any more.
+/// `matrix-rat listen`: prints every message that is new or has changed, a line of
+/// JSON each, until the stream ends or nobody reads the output any more. With `from`:
+/// only what counts as that user's; a message that names the user and does not count
+/// is noted on `notes` (standard error) with the reason and nothing of what it says.
 pub async fn listen(
     socket: &Path,
     room: &str,
-    from: Option<&str>,
+    from: Option<Sender<'_>>,
     out: &mut impl Write,
+    notes: &mut impl Write,
 ) -> Result<(), ClientError> {
     let mut listener = Conn::open(socket).await?.listen(room).await?;
     loop {
         let message = listener.next().await?;
-        if is_from(&message, from) {
-            match print_message(out, &message) {
+        match standing(&message, from) {
+            Standing::Theirs => match print_message(out, &message) {
                 // `listen … | head -1`: done.
                 Err(ClientError::Io(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {
                     return Ok(());
                 }
                 other => other?,
+            },
+            Standing::Doubted(why) => {
+                let _ = writeln!(
+                    notes,
+                    "matrix-rat: a message that names this user as sender was left out: {why}"
+                );
             }
+            Standing::Other => {}
         }
     }
 }
@@ -441,20 +480,227 @@ mod tests {
             own,
             truncated: false,
             warning: None,
+            verified: true,
+            untrusted: None,
         }
     }
 
     #[test]
-    fn from_keeps_that_users_messages_and_never_the_accounts_own() {
+    fn from_keeps_what_counts_as_that_users_and_never_the_accounts_own() {
+        let strict = |user| {
+            Some(Sender {
+                user,
+                trust: Trust::Verified,
+            })
+        };
+        let lax = |user| {
+            Some(Sender {
+                user,
+                trust: Trust::AllowUnverified,
+            })
+        };
         let ann = message("@ann:example.org", false);
         let bob = message("@bob:example.org", false);
         let own = message("@bot:example.org", true);
-        assert!(is_from(&ann, None) && is_from(&bob, None) && is_from(&own, None));
-        assert!(is_from(&ann, Some("@ann:example.org")));
-        assert!(!is_from(&bob, Some("@ann:example.org")));
-        assert!(!is_from(&own, Some("@ann:example.org")));
+        // Without `--from` everything is printed.
+        for message in [&ann, &bob, &own] {
+            assert_eq!(standing(message, None), Standing::Theirs);
+        }
+        assert_eq!(standing(&ann, strict("@ann:example.org")), Standing::Theirs);
+        assert_eq!(standing(&bob, strict("@ann:example.org")), Standing::Other);
+        assert_eq!(standing(&own, strict("@ann:example.org")), Standing::Other);
         // Naming the account itself gives nothing rather than everything of its own.
-        assert!(!is_from(&own, Some("@bot:example.org")));
+        assert_eq!(standing(&own, strict("@bot:example.org")), Standing::Other);
+        assert_eq!(standing(&own, lax("@bot:example.org")), Standing::Other);
+        // Not verified: left out unless that is allowed.
+        let unverified = Msg {
+            verified: false,
+            untrusted: Some("unverified_identity".into()),
+            ..message("@ann:example.org", false)
+        };
+        assert_eq!(
+            standing(&unverified, strict("@ann:example.org")),
+            Standing::Doubted("unverified_identity")
+        );
+        assert_eq!(
+            standing(&unverified, lax("@ann:example.org")),
+            Standing::Theirs
+        );
+        // What contradicts the sender is left out either way.
+        let forged = Msg {
+            warning: Some("sender_mismatch".into()),
+            verified: false,
+            untrusted: Some("sender_mismatch".into()),
+            ..message("@ann:example.org", false)
+        };
+        for from in [strict("@ann:example.org"), lax("@ann:example.org")] {
+            assert_eq!(
+                standing(&forged, from),
+                Standing::Doubted("sender_mismatch")
+            );
+        }
+    }
+
+    /// `read --from` and `listen --from` against a `serve`: only what counts as the
+    /// user's reaches the output; what names the user and does not count is told on
+    /// the side, by number or reason, never by its text.
+    #[tokio::test]
+    async fn read_and_listen_with_from_print_only_what_counts_as_the_users() {
+        use crate::agent::testing::{ANN, EVE, ROOM, ROOM_NAME, World, message, own};
+        let doubted = |id: &str, kind: &str, warning: Option<&str>, why: &str| Msg {
+            kind: kind.into(),
+            warning: warning.map(str::to_owned),
+            verified: false,
+            untrusted: Some(why.into()),
+            ..message(id, ANN, "SECRET-TEXT of a message that does not count")
+        };
+        let history = vec![
+            message("$1", ANN, "one"),
+            message("$2", EVE, "I am Ann"),
+            own("$3", "[agent] hello"),
+            doubted("$4", "text", None, "unverified_identity"),
+            doubted("$5", "text", Some("unverified_device"), "unverified_device"),
+            doubted("$6", "text", Some("sender_mismatch"), "sender_mismatch"),
+            doubted("$7", "undecryptable", None, "undecryptable"),
+            doubted("$8", "redacted", None, "redacted"),
+            message("$9", ANN, "nine"),
+        ];
+        let world = World::start("cli-from", history).await;
+        let socket = world.socket();
+        let ids = |out: &[u8]| -> Vec<String> {
+            String::from_utf8(out.to_vec())
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let message: Msg = serde_json::from_str(line).expect("a message");
+                    message.event_id
+                })
+                .collect()
+        };
+        let from = |trust| Some(Sender { user: ANN, trust });
+
+        // Without `--from`: everything, with what is known about each.
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        read(&socket, ROOM_NAME, 100, None, &mut out, &mut notes)
+            .await
+            .unwrap();
+        assert_eq!(ids(&out).len(), 9);
+        assert!(notes.is_empty());
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("\"untrusted\":\"unverified_identity\""),
+            "{printed}"
+        );
+
+        // Strictly: only the verified ones of the user; five were left out, and
+        // nothing of what they say is told.
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        read(
+            &socket,
+            ROOM,
+            20,
+            from(Trust::Verified),
+            &mut out,
+            &mut notes,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(&out), ["$1", "$9"]);
+        let told = String::from_utf8(notes).unwrap();
+        assert!(told.starts_with("matrix-rat: 5 of the messages"), "{told}");
+        assert!(told.contains("--allow-unverified"), "{told}");
+        assert!(!told.contains("SECRET-TEXT"), "{told}");
+        // The limit counts what is printed.
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        read(
+            &socket,
+            ROOM,
+            1,
+            from(Trust::Verified),
+            &mut out,
+            &mut notes,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(&out), ["$9"]);
+
+        // Allowing the unverified: also what nobody verified, but never what
+        // contradicts the sender, could not be read or was deleted.
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        read(
+            &socket,
+            ROOM,
+            20,
+            from(Trust::AllowUnverified),
+            &mut out,
+            &mut notes,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(&out), ["$1", "$4", "$5", "$9"]);
+        let told = String::from_utf8(notes).unwrap();
+        assert!(told.starts_with("matrix-rat: 3 of the messages"), "{told}");
+
+        // Listening: the same judgement, message by message.
+        let listening = tokio::spawn({
+            let socket = socket.clone();
+            async move {
+                let (mut out, mut notes) = (HeadOf(Vec::new(), 2), Vec::new());
+                let ended =
+                    listen(&socket, ROOM, from(Trust::Verified), &mut out, &mut notes).await;
+                (ended, out.0, notes)
+            }
+        });
+        // Watched: whatever is posted from here on is news to the listener.
+        world.until_watched(true).await;
+        world.post(message("$a", EVE, "not her"));
+        world.post(doubted("$b", "undecryptable", None, "undecryptable"));
+        world.post(doubted("$c", "text", None, "unverified_identity"));
+        world.post(message("$d", ANN, "yes"));
+        // Decrypted at last, into something that counts.
+        world.change("$b", |message| {
+            *message = crate::agent::testing::message("$b", ANN, "readable now");
+        });
+        // One more than the output takes: the command ends.
+        world.post(message("$e", ANN, "more"));
+        let (ended, out, notes) = tokio::time::timeout(Duration::from_secs(10), listening)
+            .await
+            .expect("listen ends when nobody reads its output any more")
+            .unwrap();
+        assert!(ended.is_ok());
+        assert_eq!(ids(&out), ["$d", "$b"]);
+        let told = String::from_utf8(notes).unwrap();
+        assert_eq!(
+            told.lines().collect::<Vec<_>>(),
+            [
+                "matrix-rat: a message that names this user as sender was left out: undecryptable",
+                "matrix-rat: a message that names this user as sender was left out: unverified_identity",
+            ]
+        );
+        assert!(world.odd().is_empty());
+        world.stop().await;
+    }
+
+    /// An output that takes a number of lines and then is closed, like `| head -n`.
+    struct HeadOf(Vec<u8>, usize);
+
+    impl Write for HeadOf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.1 == 0 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.1 -= bytes
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count()
+                .min(self.1);
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -534,15 +780,16 @@ mod tests {
             send(&socket, "Agents", "hello", &mut out).await,
             Err(ClientError::NotRunning)
         ));
+        let mut notes = Vec::new();
         assert!(matches!(
-            read(&socket, "Agents", 5, None, &mut out).await,
+            read(&socket, "Agents", 5, None, &mut out, &mut notes).await,
             Err(ClientError::NotRunning)
         ));
         assert!(matches!(
-            listen(&socket, "Agents", None, &mut out).await,
+            listen(&socket, "Agents", None, &mut out, &mut notes).await,
             Err(ClientError::NotRunning)
         ));
-        assert!(out.is_empty());
+        assert!(out.is_empty() && notes.is_empty());
         assert!(!dir.path().join("run").exists(), "a client makes no folder");
         // A socket that a killed `serve` left behind: nobody answers there.
         let stale = dir.path().join("stale.sock");
