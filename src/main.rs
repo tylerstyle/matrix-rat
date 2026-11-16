@@ -59,7 +59,7 @@ struct Args {
 
     /// Profile to use; each profile has its own account, message store and log. The
     /// configuration and themes are shared between profiles.
-    #[arg(long, default_value = "default")]
+    #[arg(long, global = true, default_value = "default")]
     profile: String,
 
     /// Run on built-in demo data without connecting to Matrix.
