@@ -53,6 +53,7 @@ impl App {
             unbound: crate::doctor::unbound(&self.keymap),
             ignored_settings: self.found.ignored_settings.clone(),
             config_broken: self.found.config_broken,
+            audio: self.audio_found(),
             ..Facts::from_environment()
         }
     }

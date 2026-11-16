@@ -95,6 +95,8 @@ pub struct Facts {
     pub xclip: bool,
     /// `xdg-open`, which opens links, files and pictures in other programs.
     pub opener: bool,
+    /// What would play a voice message in the app.
+    pub audio: Audio,
     /// `VISUAL` or `EDITOR` names an editor (never what it names).
     pub editor_set: bool,
     pub secret_store: SecretStoreMode,
@@ -110,6 +112,36 @@ pub struct Facts {
     pub ignored_settings: Vec<String>,
     /// The config file is not valid TOML at all.
     pub config_broken: bool,
+}
+
+/// What the `audio_player` setting comes to here. Never the command itself: it is the
+/// user's own and can name a folder of theirs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audio {
+    /// One of the players the app knows, found by itself or named in the setting.
+    Known(crate::audio::Kind),
+    /// A command of the user's own that is there to be run.
+    Own,
+    /// Looked for the players it knows and found none.
+    NoneFound,
+    /// The setting names a command that is not there or cannot be read as one.
+    OwnMissing,
+}
+
+impl Audio {
+    /// From the setting, with this process's `PATH`.
+    pub fn found(setting: &str) -> Self {
+        Self::from_choice(&crate::audio::choose_here(setting))
+    }
+
+    pub fn from_choice(choice: &Result<crate::audio::Player, crate::audio::NoPlayer>) -> Self {
+        match choice {
+            Ok(player) if player.kind() == crate::audio::Kind::Other => Audio::Own,
+            Ok(player) => Audio::Known(player.kind()),
+            Err(crate::audio::NoPlayer::NoneFound) => Audio::NoneFound,
+            Err(_) => Audio::OwnMissing,
+        }
+    }
 }
 
 /// Is a program of this name in one of the folders of `path` (the `PATH` variable)?
@@ -438,6 +470,39 @@ fn desktop(facts: &Facts) -> Section {
             "xdg-open was not found (the package xdg-utils)",
         )
     });
+    lines.push(match facts.audio {
+        _ if facts.ssh => with(
+            "Playing voice messages",
+            "not offered",
+            Level::Note,
+            "over SSH the sound would play on the far machine; the file can be saved",
+        ),
+        Audio::Known(crate::audio::Kind::Mpv) => fine("Playing voice messages", "mpv"),
+        Audio::Known(kind) => with(
+            "Playing voice messages",
+            kind.program(),
+            Level::Note,
+            "plays and stops; pause and seek need mpv",
+        ),
+        Audio::Own => with(
+            "Playing voice messages",
+            "a command of your own",
+            Level::Note,
+            "plays and stops; pause and seek need mpv",
+        ),
+        Audio::NoneFound => with(
+            "Playing voice messages",
+            "not possible",
+            Level::Missing,
+            "none of mpv, ffplay, pw-play, paplay, aplay was found",
+        ),
+        Audio::OwnMissing => with(
+            "Playing voice messages",
+            "not possible",
+            Level::Missing,
+            "the command named by audio_player was not found",
+        ),
+    });
     lines.push(if facts.editor_set {
         fine("Writing in an editor", "VISUAL or EDITOR names one")
     } else {
@@ -627,6 +692,7 @@ fn command_line_facts(
         unbound: unbound(&keymap),
         ignored_settings: config.ignored.clone(),
         config_broken,
+        audio: Audio::found(&config.audio_player),
         ..Facts::from_environment()
     }
 }
@@ -661,6 +727,7 @@ impl Facts {
             wl_paste: on_path("wl-paste", path.as_deref()),
             xclip: on_path("xclip", path.as_deref()),
             opener: on_path("xdg-open", path.as_deref()),
+            audio: Audio::NoneFound,
             editor_set: crate::editor::command_from_env().is_ok(),
             secret_store: SecretStoreMode::File,
             own_theme: false,
@@ -702,6 +769,7 @@ pub(crate) fn sample() -> Facts {
         wl_paste: true,
         xclip: false,
         opener: true,
+        audio: Audio::Known(crate::audio::Kind::Mpv),
         editor_set: true,
         secret_store: SecretStoreMode::File,
         own_theme: false,
@@ -716,6 +784,43 @@ pub(crate) fn sample() -> Facts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_audio_line_says_what_plays_and_never_the_users_command() {
+        let line = |facts: &Facts| {
+            Report::new(facts)
+                .sections
+                .iter()
+                .flat_map(|section| section.lines.clone())
+                .find(|line| line.label == "Playing voice messages")
+                .unwrap()
+        };
+        let mut facts = sample();
+        assert_eq!(line(&facts).value, "mpv");
+        assert_eq!(line(&facts).level, Level::Fine);
+        facts.audio = Audio::Known(crate::audio::Kind::Aplay);
+        assert_eq!(line(&facts).value, "aplay");
+        assert!(line(&facts).hint.unwrap().contains("need mpv"));
+        facts.audio = Audio::Own;
+        assert_eq!(line(&facts).value, "a command of your own");
+        facts.audio = Audio::NoneFound;
+        assert_eq!(line(&facts).level, Level::Missing);
+        facts.audio = Audio::OwnMissing;
+        assert!(line(&facts).hint.unwrap().contains("audio_player"));
+        // Over SSH nothing plays, whatever is installed.
+        facts.audio = Audio::Known(crate::audio::Kind::Mpv);
+        facts.ssh = true;
+        assert_eq!(line(&facts).value, "not offered");
+        // The choice is told apart without the command being kept.
+        assert_eq!(
+            Audio::from_choice(&crate::audio::choose("no-such-player-x", None, None)),
+            Audio::OwnMissing
+        );
+        assert_eq!(
+            Audio::from_choice(&crate::audio::choose("auto", None, None)),
+            Audio::NoneFound
+        );
+    }
 
     fn kitty_desktop() -> Facts {
         sample()

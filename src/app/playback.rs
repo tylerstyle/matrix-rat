@@ -221,6 +221,11 @@ impl App {
     }
 
     /// What `x` and `Space` would do now, for the palette, the menu and the hints.
+    /// For the doctor: what the setting comes to, without the command itself.
+    pub(super) fn audio_found(&self) -> crate::doctor::Audio {
+        crate::doctor::Audio::from_choice(&self.audio.player)
+    }
+
     pub fn audio_caps(&self) -> AudioCaps {
         let room_id = self.room_id();
         let selected = self
