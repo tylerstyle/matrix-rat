@@ -90,8 +90,9 @@ pub fn extension(mime: Option<&str>) -> &'static str {
 }
 
 /// Makes `dir` if it is not there, owner-only, and checks that it is a folder of this
-/// user's (not a link to one elsewhere).
-fn private_dir(dir: &Path) -> io::Result<()> {
+/// user's (not a link to one elsewhere). A folder that is not is refused with an error
+/// of the kind `Other`. (The agent socket's folder is checked with this too.)
+pub fn private_dir(dir: &Path) -> io::Result<()> {
     match fs::symlink_metadata(dir) {
         Ok(meta) => {
             // SAFETY: a plain system call without arguments.

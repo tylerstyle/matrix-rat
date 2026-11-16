@@ -101,6 +101,12 @@ impl Paths {
             .join(format!("{}-notify-icons", self.profile))
     }
 
+    /// The socket of `matrix-rat serve`, which `send`, `read`, `listen` and `mcp`
+    /// talk to.
+    pub fn agent_socket(&self) -> PathBuf {
+        self.runtime_dir.join(format!("{}.sock", self.profile))
+    }
+
     /// The copies of voice and audio messages while they play, and mpv's control
     /// sockets: per profile, so that one instance's sweep at start never takes another
     /// one's sound away.
@@ -160,6 +166,9 @@ mod tests {
         assert_ne!(a.notify_icons_dir(), b.notify_icons_dir());
         assert_ne!(a.audio_dir(), b.audio_dir());
         assert!(a.audio_dir().starts_with(&a.runtime_dir));
+        assert_ne!(a.agent_socket(), b.agent_socket());
+        assert_eq!(a.agent_socket().parent(), Some(a.runtime_dir.as_path()));
+        assert!(a.agent_socket().to_string_lossy().ends_with("/a.sock"));
         assert_eq!(a.config_dir, b.config_dir);
     }
 }

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub use play::{Control, End, PlayerEvent, PlayerUpdate, Reported, Request, run};
-pub use temp::{TempAudio, remove_leftovers, socket_path};
+pub use temp::{TempAudio, private_dir, remove_leftovers, socket_path};
 
 /// The largest file played here: the size at which saving asks first. A larger one is
 /// saved (`s`) and played elsewhere.
