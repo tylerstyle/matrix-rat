@@ -880,7 +880,7 @@ impl App {
         }
 
         let mut any_changed = false;
-        let open_active = self.active;
+        let open_active = self.open_index();
         let has_thread = self.threads.open.is_some();
 
         for (idx, room) in self.rooms.iter_mut().enumerate() {
@@ -897,13 +897,15 @@ impl App {
                     room_changed = true;
                 }
             }
-            if room_changed && idx == open_active {
+            if room_changed && Some(idx) == open_active {
                 any_changed = true;
             }
         }
 
         if has_thread
-            && let Some(active_id) = self.rooms.get(open_active).map(|r| r.id.as_str())
+            && let Some(active_id) = open_active
+                .and_then(|open| self.rooms.get(open))
+                .map(|r| r.id.as_str())
             && let Some(eff) = profile.display_or_localpart(Some(active_id), uid.as_deref())
             && let Some(view) = &mut self.threads.open
         {

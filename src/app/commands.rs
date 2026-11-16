@@ -296,7 +296,7 @@ impl App {
             RoomCommand::Join => self.join_command(typed),
             RoomCommand::Leave => {
                 self.open_room_or_say()?;
-                self.open_info(Some(self.active), Some(InfoRow::Leave));
+                self.open_info(self.open_index(), Some(InfoRow::Leave));
                 // Typing the command was the first step; the question is the second.
                 if let Some(Modal::RoomInfo(info)) = &mut self.modal {
                     info.confirm = Some(Confirm::Leave);
@@ -429,7 +429,7 @@ impl App {
             }
             .into());
         }
-        let power = &self.rooms[self.active].power;
+        let power = &self.room().ok_or("No room is open")?.power;
         let label = person.label();
         let (allowed, popup): (bool, fn(String, String, String) -> ReasonConfirmPopup) =
             match typed.command {
@@ -466,7 +466,7 @@ impl App {
         if self.matrix.is_none() {
             return Err(NO_ACCOUNT.into());
         }
-        let power = &self.rooms[self.active].power;
+        let power = &self.room().ok_or("No room is open")?.power;
         let row = match typed.command {
             RoomCommand::Topic if !power.can_set_topic => {
                 return Err("You are not allowed to change the topic here".into());

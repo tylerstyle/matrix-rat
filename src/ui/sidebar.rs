@@ -114,6 +114,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     let rows = app.sidebar_rows();
     let cursor_room = app.cursor_room();
+    // With no chat open, no row is the open one.
+    let open_room = app.open_index();
 
     // Keep the keyboard cursor on screen (both of a room's lines, if it has two).
     let height = list.height as usize;
@@ -177,7 +179,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             SideRow::Room(index) => {
                 let room = &app.rooms[*index];
-                let active = *index == app.active;
+                let active = Some(*index) == open_room;
                 let base = if active {
                     Role::RoomActive
                 } else if room.bold || room.marked_unread {
@@ -276,7 +278,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     *index,
                     focused && Some(*index) == cursor_room,
                 );
-                let marker = if *index == app.active {
+                let marker = if Some(*index) == open_room {
                     Span::styled("▌", theme.style(Role::BorderFocused))
                 } else {
                     Span::raw(" ")
@@ -307,7 +309,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                             format!("{}: {line}", m.sender)
                         }
                     });
-                let text = if *index == app.active {
+                let text = if Some(*index) == open_room {
                     loaded.as_deref().or(room.preview.as_deref())
                 } else {
                     room.preview.as_deref().or(loaded.as_deref())
@@ -363,7 +365,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
 /// The background that marks the open room, the keyboard cursor or the pointer.
 fn highlight(frame: &mut Frame, app: &App, rect: Rect, index: usize, cursor: bool) {
     let theme = &app.theme;
-    if index == app.active {
+    if Some(index) == app.open_index() {
         frame
             .buffer_mut()
             .set_style(rect, theme.style(Role::RoomActive));

@@ -1100,7 +1100,12 @@ impl std::fmt::Debug for Anchor {
 /// Draws the timeline into `area`. `popup`: where the completion popup goes over it
 /// later in this frame.
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
-    let Some(room) = app.rooms.get(app.active) else {
+    // (A borrow of the list of rooms alone: the rest of the app is written to below.)
+    let room = match app.open_index() {
+        Some(open) => app.rooms.get(open),
+        None => None,
+    };
+    let Some(room) = room else {
         let block = super::pane_block(app, Pane::Timeline, "No room");
         let inner = block.inner(area);
         frame.render_widget(block, area);

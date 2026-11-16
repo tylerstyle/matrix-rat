@@ -13,6 +13,7 @@ mod keybinds;
 mod keywords;
 mod menu;
 mod modal;
+mod nochat;
 mod palette;
 mod people;
 mod poll;
@@ -60,7 +61,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let narrow = one_pane(app, area.width);
     let (sidebar_area, chat_area) = if narrow {
-        if app.focus == Pane::Sidebar {
+        // With no chat open the room list is the one pane there is.
+        if app.focus == Pane::Sidebar || app.chat_closed() {
             (Some(main), None)
         } else {
             (None, Some(main))
@@ -83,7 +85,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             app.hits.add(handle, HitId::Splitter);
         }
     }
-    if let Some(area) = chat_area {
+    if let Some(area) = chat_area
+        && app.chat_closed()
+    {
+        nochat::draw(frame, app, area);
+    } else if let Some(area) = chat_area {
         let composer_height = composer::height(app, area.width);
         let [timeline_area, composer_area] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(composer_height)])
@@ -424,6 +430,75 @@ mod tests {
         insta::assert_snapshot!("narrow_chat", render(&mut app, 50, 20));
         app.perform(Action::Focus(Pane::Sidebar));
         insta::assert_snapshot!("narrow_rooms", render(&mut app, 50, 20));
+    }
+
+    /// The demo with no chat open, as after Esc in the composer.
+    fn closed_app() -> App {
+        let mut app = App::demo();
+        render(&mut app, 100, 30);
+        app.perform(Action::Back);
+        assert!(app.chat_closed());
+        app
+    }
+
+    #[test]
+    fn no_chat_open() {
+        let mut app = closed_app();
+        insta::assert_snapshot!("no_chat_open", render(&mut app, 100, 30));
+    }
+
+    #[test]
+    fn no_chat_open_at_80x24() {
+        let mut app = closed_app();
+        insta::assert_snapshot!("no_chat_open_80x24", render(&mut app, 80, 24));
+    }
+
+    #[test]
+    fn no_chat_open_in_a_narrow_window() {
+        // One pane at a time: the room list is the one there is.
+        let mut app = closed_app();
+        insta::assert_snapshot!("no_chat_open_narrow", render(&mut app, 50, 20));
+    }
+
+    #[test]
+    fn no_chat_open_in_a_low_or_tiny_window() {
+        let mut app = closed_app();
+        // Too low for the name: the keys alone, as many as fit.
+        let low = render(&mut app, 100, 6);
+        assert!(low.contains("open the selected room"), "{low}");
+        assert!(!low.contains("all keys"), "{low}");
+        // Nothing breaks in a window too small for anything.
+        for (width, height) in [(61, 3), (60, 2), (64, 4), (20, 5), (1, 1)] {
+            render(&mut app, width, height);
+        }
+    }
+
+    #[test]
+    fn no_chat_open_names_the_keys_as_they_are_bound() {
+        let mut app = closed_app();
+        let screen = render(&mut app, 100, 30);
+        for line in [
+            " Enter  open the selected room",
+            "Ctrl-K  find a room",
+            "Ctrl-P  command palette",
+            "    F1  all keys",
+        ] {
+            assert!(screen.contains(line), "{line:?} not in:\n{screen}");
+        }
+        // Other keys, and none at all for the help: its line is not shown.
+        let config = crate::config::Config::parse(
+            "[keys.global]\npalette = \"f9\"\nhelp = \"none\"\n\
+             [keys.sidebar]\nsidebar_open = \"o\"\nhelp = \"none\"\n",
+        )
+        .unwrap();
+        app.keymap = crate::keymap::Keymap::from_config(&config).0;
+        let screen = render(&mut app, 100, 30);
+        assert!(
+            screen.contains("     o  open the selected room"),
+            "{screen}"
+        );
+        assert!(screen.contains("    F9  command palette"), "{screen}");
+        assert!(!screen.contains("all keys"), "{screen}");
     }
 
     #[test]

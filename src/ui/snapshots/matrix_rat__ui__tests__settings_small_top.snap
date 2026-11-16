@@ -13,15 +13,15 @@ expression: top
 "│ C  caro│   Link previews         ◂ off ▸                            │ded?   ┃│"
 "│ Rooms  │ Behaviour                                                  │       ┃│"
 "│ D  desi│   Mouse                 ● on                               │       ┃│"
-"│ N  nixo│   Typing notices        ● on                               │still …┃│"
-"│ O  off-│   Read receipts         ● on                               │       ┃│"
+"│ N  nixo│   Esc closes the chat   ● on                               │still …┃│"
+"│ O  off-│   Typing notices        ● on                               │       ┃│"
+"│        │   Read receipts         ● on                               │       ┃│"
 "│        │   Read markers          ● on                               │       ┃│"
 "│        │   Notifications         ○ off                              │       ┃│"
 "│        │   Do not disturb        ○ off                              │       ┃│"
 "│        │   Notification keywords Enter to view                      │       ┃│"
-"│        │   Download folder       ~/Downloads                        │       ┃│"
-"│        │ Help                                                       │ 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
-"│        │   Key bindings          default                          ▼ │────────╯"
+"│        │   Download folder       ~/Downloads                        │ 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
+"│        │ Help                                                     ▼ │────────╯"
 "│        │ F3 cycles this, or the active dark/light slot when paired; │────────╮"
 "│        │ themes/ files reload live.                                 │  📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
 "╰────────╰───────────────── ↑↓ select · ←→ change · Enter · Esc close ╯────────╯"
