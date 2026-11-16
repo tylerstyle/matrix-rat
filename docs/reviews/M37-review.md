@@ -59,7 +59,7 @@ M37 ok
 
 ## Follow-up: the listener fault found with a real MCP client
 
-Not by `matrix-agy` (out of credits; the user said to go on without it). Four rounds by
+Not by `matrix-agy`, which was not available. Four rounds by
 independent reviewers started by `matrix-claude`, each given the code and the questions, not
 the author's conclusions. Recorded here by `matrix-claude`.
 

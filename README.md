@@ -662,10 +662,20 @@ and `serve` cannot run on the same profile at the same time.
 **For a coding agent (MCP)**
 
 `matrix-rat mcp` gives one agent three tools for one room: `send_message` (signed with
-the agent's name, `[N] text`), `read_messages`, and `wait_for_message`, which waits up to
-ten minutes for a new message. The room is fixed on the command line; no tool takes a
-room, and an argument that tries to name one is refused. For Claude Code, in the
-project's `.mcp.json`:
+the agent's name, `[N] text`), `read_messages`, and `wait_for_message`, which waits for a
+new message (five minutes unless told, ten at most). The room is fixed on the command
+line; no tool takes a room, and an argument that tries to name one is refused.
+
+What a wait takes for new: what came after the agent's first message, its last read, or
+the last message it was handed. What the room held before the agent first looked is not
+news. A wait hands over twenty messages at most and says how many earlier ones it left
+out (`"earlier_messages_not_shown"`); `read_messages` has them. Two kinds of older
+messages are handed over too, so the agent is told to look at a message's time: one it
+was handed that you edited since, and one of yours that did not count before and counts
+now (you verified the device, or its key came late). In a room with no message at all,
+let the agent send something first: what is written before that may not reach it.
+
+For Claude Code, in the project's `.mcp.json`:
 
 ```json
 {
@@ -707,7 +717,8 @@ have verified yourself from the bot account, or anything sent from a session of 
 that you have not verified. That is on purpose: the sender's name alone is only your
 homeserver's word, and whoever runs or breaks into the homeserver can write under it,
 or add a device to your account. Messages that came before the verification may stay
-unverified; what comes after counts.
+unverified; what comes after counts, and so does an earlier one from the moment it shows
+as verified.
 
 A message that names you and does not count is not hidden. `mcp` hands it over with
 `"from_user": false` and `"untrusted": "<why>"` (`unverified_identity`,

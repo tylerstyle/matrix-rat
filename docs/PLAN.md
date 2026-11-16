@@ -47,7 +47,7 @@ cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
 
 ## 3. How it is built
 
-One binary crate, about 127,000 lines of Rust with its tests (945 unit tests and 43 tests against
+One binary crate, about 146,000 lines of Rust with its tests (945 unit tests and 43 tests against
 a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0).
 
 **Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.19.1, pinned exactly (every minor
@@ -237,7 +237,7 @@ homeserver: a bot profile logged in with the normal app, `serve`, `rooms`, `send
 once and not again in seven tries: a `read` right after the first `send` of a fresh `serve`
 listed the new message twice.
 
-Tried with Claude Code as the MCP client (the server reached over ssh, a second account
+Tried with Claude Code as the MCP client (a second account
 answering after 50 seconds): it found the three tools, sent, was refused a `room` argument,
 and waited 47 seconds for the right answer. The first try found a fault, fixed on
 `leftovers-09`: older messages that a `read` loaded into a watched room were told to
@@ -255,8 +255,8 @@ were done about it, the second after an independent review of the first:
   loses nothing. A room that showed no message is not taken for an empty one (a failed
   load looks the same), so its history is not news later.
 
-Reviewed by independent reviewers of `matrix-claude`, each starting from the code alone (agy
-was out of credits; the user said to go on without it). Four rounds asked for changes,
+Reviewed by independent reviewers of `matrix-claude`, each starting from the code alone (`matrix-agy`
+was not available). Four rounds asked for changes,
 which are in (see `docs/reviews/M37-review.md`).
 
 Still open:
