@@ -9,7 +9,6 @@ mod composer;
 mod config;
 mod details;
 mod devices;
-#[allow(dead_code)]
 mod doctor;
 mod editor;
 mod emoji;
@@ -50,11 +49,14 @@ mod watch;
 use std::fmt;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Profile to use; each profile has its own account, message store and log. The
     /// configuration and themes are shared between profiles.
     #[arg(long, default_value = "default")]
@@ -80,10 +82,21 @@ struct Args {
     target: Option<String>,
 }
 
+// A word in the place of the LINK: a Matrix link or address is never one of these
+// (they start with `https:`, `matrix:`, `#`, `!` or `@`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+enum Command {
+    /// Print what matrix-rat finds here (terminal, pictures, clipboard, notifications,
+    /// keys, config) and exit. Nothing private is in it: paste it into a bug report.
+    /// Takes no lock and logs nobody in, so it also runs beside a running matrix-rat.
+    Doctor,
+}
+
 /// Redacts the target link/address from Debug output.
 impl fmt::Debug for Args {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Args")
+            .field("command", &self.command)
             .field("profile", &self.profile)
             .field("demo", &self.demo)
             .field("reload_theme", &self.reload_theme)
@@ -108,6 +121,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let paths = paths::Paths::new(&args.profile)?;
+    if args.command == Some(Command::Doctor) {
+        // Before anything is made or locked: it only reads the config and asks the
+        // terminal.
+        print!("{}", doctor::command_line(&paths.config_file()));
+        return Ok(());
+    }
     if args.reload_theme {
         // Works without the profile lock: the running instances hold it.
         watch::signal_running_instances(&paths);
@@ -131,4 +150,43 @@ fn main() -> Result<()> {
         tracing::error!(why = %logsafe::kind_any(err), "exited with error");
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn parse(words: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("matrix-rat").chain(words.iter().copied()))
+            .unwrap_or_else(|err| panic!("{words:?}: {err}"))
+    }
+
+    #[test]
+    fn doctor_is_a_word_of_its_own_and_links_still_open() {
+        Args::command().debug_assert();
+        let args = parse(&["doctor"]);
+        assert_eq!(args.command, Some(Command::Doctor));
+        assert_eq!(args.target, None);
+        let args = parse(&["--profile", "work", "doctor"]);
+        assert_eq!(args.command, Some(Command::Doctor));
+        assert_eq!(args.profile, "work");
+        for link in [
+            "#rust:matrix.org",
+            "!room:example.org",
+            "@bob:example.org",
+            "https://matrix.to/#/#rust:matrix.org",
+            "matrix:r/rust:matrix.org",
+        ] {
+            let args = parse(&[link]);
+            assert_eq!(args.command, None, "{link}");
+            assert_eq!(args.target.as_deref(), Some(link));
+        }
+        let args = parse(&["--demo"]);
+        assert_eq!((args.command, args.demo), (None, true));
+        // The link stays out of debug output; the command is no secret.
+        let shown = format!("{:?}", parse(&["@bob:example.org"]));
+        assert!(!shown.contains("bob"), "{shown}");
+        assert!(format!("{:?}", parse(&["doctor"])).contains("Doctor"));
+    }
 }

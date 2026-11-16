@@ -7,6 +7,11 @@
 //! `alternate_screen` may follow so that a terminal that prints a query instead of
 //! answering it does so where it does no harm; callers run their queries, then call
 //! `activate`.
+//!
+//! The window title: with the `window_title` setting on, the title that was there is
+//! saved on the terminal's title stack when the app takes the terminal and put back
+//! whenever it hands it back (on exit, around Ctrl-Z and the editor, and from the
+//! panic hook). With the setting off the title is never touched, not even saved.
 
 use std::io::{self, Stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +23,7 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
     supports_keyboard_enhancement,
 };
 use crossterm::{execute, queue};
@@ -30,7 +35,20 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 static RAW: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+/// The keyboard protocol's flags were pushed (and so are to be popped): only by
+/// `activate` and `resume`, never by the queries before them.
+static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 static MOUSE: AtomicBool = AtomicBool::new(true);
+/// The `window_title` setting.
+static TITLE: AtomicBool = AtomicBool::new(false);
+/// The title that was there is on the terminal's title stack, to be put back.
+static TITLE_PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// Saves the window and icon titles on the terminal's title stack (xterm's
+/// `CSI 22 ; 0 t`); terminals without one ignore it.
+const PUSH_TITLE: &str = "\x1b[22;0t";
+/// Puts the saved titles back (`CSI 23 ; 0 t`).
+const POP_TITLE: &str = "\x1b[23;0t";
 
 /// Restores the terminal when dropped. Also restored by the panic hook.
 #[derive(Debug)]
@@ -40,15 +58,24 @@ pub struct TerminalGuard {
 
 impl TerminalGuard {
     /// Step 1: raw mode only. Run stdin-reading terminal queries after this.
-    pub fn enter(mouse: bool) -> Result<Self> {
+    /// `title`: the `window_title` setting (see the module's documentation).
+    pub fn enter(mouse: bool, title: bool) -> Result<Self> {
         install_panic_hook();
         MOUSE.store(mouse, Ordering::SeqCst);
+        TITLE.store(title, Ordering::SeqCst);
         enable_raw_mode()?;
         RAW.store(true, Ordering::SeqCst);
         // Queried here because it also reads a reply from stdin.
         let enhanced = supports_keyboard_enhancement().unwrap_or(false);
         KEYBOARD_ENHANCED.store(enhanced, Ordering::SeqCst);
         Ok(Self { _private: () })
+    }
+
+    /// Whether the terminal speaks the kitty keyboard protocol, as it answered in
+    /// [`TerminalGuard::enter`]: the app keeps this rather than asking again (once the
+    /// event stream exists, nothing else may read the terminal's input).
+    pub fn keyboard_enhanced(&self) -> bool {
+        KEYBOARD_ENHANCED.load(Ordering::SeqCst)
     }
 
     /// Optional step between the two: only the alternate screen, nothing that makes
@@ -83,11 +110,14 @@ fn write_activation() -> Result<()> {
     if MOUSE.load(Ordering::SeqCst) {
         queue!(out, EnableMouseCapture)?;
     }
-    if KEYBOARD_ENHANCED.load(Ordering::SeqCst) {
+    if KEYBOARD_ENHANCED.load(Ordering::SeqCst) && !KEYBOARD_PUSHED.swap(true, Ordering::SeqCst) {
         queue!(
             out,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
+    }
+    if TITLE.load(Ordering::SeqCst) && !TITLE_PUSHED.swap(true, Ordering::SeqCst) {
+        write!(out, "{PUSH_TITLE}")?;
     }
     out.flush()?;
     Ok(())
@@ -106,6 +136,49 @@ pub fn set_mouse(on: bool) -> Result<()> {
     }
     out.flush()?;
     Ok(())
+}
+
+/// Turns the `window_title` setting on or off while running: on, the title that is
+/// there is saved first; off, it is put back and not touched again.
+pub fn set_window_title(on: bool) -> Result<()> {
+    if TITLE.swap(on, Ordering::SeqCst) == on || !ACTIVE.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let mut out = io::stdout();
+    if on {
+        if !TITLE_PUSHED.swap(true, Ordering::SeqCst) {
+            write!(out, "{PUSH_TITLE}")?;
+        }
+    } else if TITLE_PUSHED.swap(false, Ordering::SeqCst) {
+        write!(out, "{POP_TITLE}")?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Sets the window title, where the `window_title` setting allows it and the title
+/// that was there has been saved; else nothing is written.
+pub fn write_window_title(title: &str) -> Result<()> {
+    if !TITLE.load(Ordering::SeqCst) || !TITLE_PUSHED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    execute!(io::stdout(), SetTitle(title))?;
+    Ok(())
+}
+
+/// For `matrix-rat doctor`: asks the terminal what the app asks it at start, with the
+/// same code and time limits: the keyboard protocol in raw mode, then the pictures on
+/// the alternate screen (where a terminal that prints a question instead of answering
+/// does no harm). The terminal is handed back as it was, also if a question fails.
+/// Returns whether the keyboard protocol is there, and how pictures would be shown.
+pub fn ask_for_doctor(images: crate::config::ImageMode) -> Result<(bool, crate::images::Graphics)> {
+    // No mouse and no title: nothing is activated, only asked.
+    let guard = TerminalGuard::enter(false, false)?;
+    guard.alternate_screen()?;
+    let (graphics, _) = crate::images::Graphics::detect_with_term(images, false);
+    let keyboard = guard.keyboard_enhanced();
+    drop(guard);
+    Ok((keyboard, graphics))
 }
 
 /// Puts text on the system clipboard through the terminal (OSC 52), which also works
@@ -182,7 +255,9 @@ impl Drop for TerminalGuard {
 pub fn restore() {
     let mut out = io::stdout();
     if ACTIVE.swap(false, Ordering::SeqCst) {
-        if KEYBOARD_ENHANCED.load(Ordering::SeqCst) {
+        // Only what was pushed is popped: one pop more would take an entry of the
+        // shell's (or of whatever runs us).
+        if KEYBOARD_PUSHED.swap(false, Ordering::SeqCst) {
             let _ = execute!(out, PopKeyboardEnhancementFlags);
         }
         let _ = execute!(
@@ -193,6 +268,10 @@ pub fn restore() {
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );
+    }
+    if TITLE_PUSHED.swap(false, Ordering::SeqCst) {
+        let _ = write!(out, "{POP_TITLE}");
+        let _ = out.flush();
     }
     if RAW.swap(false, Ordering::SeqCst) {
         let _ = disable_raw_mode();
@@ -231,7 +310,15 @@ fn place(file: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, place};
+    use super::{POP_TITLE, PUSH_TITLE, base64, place};
+
+    #[test]
+    fn the_title_is_saved_and_put_back_on_the_terminals_title_stack() {
+        // xterm's window manipulation: 22 saves, 23 restores; 0 is both the window
+        // and the icon title, which the title we set (OSC 0) changes together.
+        assert_eq!(PUSH_TITLE, "\x1b[22;0t");
+        assert_eq!(POP_TITLE, "\x1b[23;0t");
+    }
 
     #[test]
     fn a_panics_place_leaves_out_the_home_directory() {

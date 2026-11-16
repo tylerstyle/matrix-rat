@@ -5,6 +5,7 @@ mod complete;
 mod composer;
 mod details;
 mod devices;
+mod doctor;
 mod global_search;
 mod help;
 pub mod hit;

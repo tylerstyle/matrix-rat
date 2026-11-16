@@ -55,6 +55,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Details(details) => super::details::draw(frame, app, area, details),
         Modal::Threads(list) => super::threads::draw(frame, app, area, list),
         Modal::Keywords(popup) => super::keywords::draw(frame, app, area, popup),
+        Modal::Doctor(popup) => super::doctor::draw(frame, app, area, popup),
     }
     app.modal = Some(modal);
 }
@@ -296,6 +297,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
             | Setting::TypingNotices
             | Setting::ReadReceipts
             | Setting::DoNotDisturb
+            | Setting::WindowTitle
             | Setting::ReadMarkers
             | Setting::RoomPreviews
             | Setting::Notifications => {
@@ -344,7 +346,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
                 };
                 spans.push(Span::styled(truncate(&value, room), theme.style(role)));
             }
-            Setting::Sessions | Setting::Keywords => spans.push(Span::styled(
+            Setting::Sessions | Setting::Keywords | Setting::Doctor => spans.push(Span::styled(
                 truncate(&value, room),
                 theme.style(Role::Muted),
             )),

@@ -32,6 +32,9 @@ pub struct Config {
     pub read_receipts: bool,
     /// No notifications for now (the "Do not disturb" switch).
     pub do_not_disturb: bool,
+    /// The terminal's window title shows the unread count (`matrix-rat (3)`), and the
+    /// title from before is put back on exit. Off: the title is not touched at all.
+    pub window_title: bool,
     /// Show under messages who has read up to there.
     pub read_markers: bool,
     /// Notifications for new messages: "auto", "desktop", "terminal" or "off".
@@ -83,6 +86,7 @@ impl std::fmt::Debug for Config {
             .field("typing_notices", &self.typing_notices)
             .field("read_receipts", &self.read_receipts)
             .field("do_not_disturb", &self.do_not_disturb)
+            .field("window_title", &self.window_title)
             .field("read_markers", &self.read_markers)
             .field("notifications", &self.notifications)
             .field("notification_icon", &self.notification_icon)
@@ -207,6 +211,7 @@ impl Default for Config {
             typing_notices: true,
             read_receipts: true,
             do_not_disturb: false,
+            window_title: true,
             read_markers: true,
             notifications: crate::notify::NotifyMode::Auto,
             notification_icon: crate::notify::AppIcon::Color,
@@ -736,6 +741,10 @@ mod tests {
         let config: Config = toml::from_str("esc_closes_chat = false").unwrap();
         assert!(!config.esc_closes_chat);
         assert!(config.read_receipts);
+        assert!(config.window_title);
+        let config: Config = toml::from_str("window_title = false").unwrap();
+        assert!(!config.window_title);
+        assert!(config.esc_closes_chat);
         assert_eq!(config.images, ImageMode::Auto);
     }
 

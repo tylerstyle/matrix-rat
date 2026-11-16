@@ -6,6 +6,7 @@ mod commands;
 mod complete;
 mod details;
 mod devices;
+mod doctor;
 mod drafts;
 mod emotes;
 mod external_editor;
@@ -27,6 +28,7 @@ pub mod search;
 mod spaces;
 mod thread;
 mod thread_list;
+mod title;
 mod unread;
 mod verify;
 
@@ -254,6 +256,14 @@ pub struct App {
     pub read_receipts: bool,
     /// No notifications for now, whatever the mode says.
     pub do_not_disturb: bool,
+    /// The `window_title` setting: the unread count in the terminal's title (see
+    /// `title`); the event loop applies changes to the terminal.
+    pub window_title: bool,
+    /// The title as last written; `None` before the first and after the terminal was
+    /// handed back.
+    title_written: Option<String>,
+    /// What the app learned about where it runs, for the doctor's report.
+    found: doctor::Found,
     /// Show who has read up to where (the `read_markers` setting).
     pub read_markers: bool,
     /// Whether clicks go to the app; the event loop applies changes to the terminal.
@@ -419,6 +429,9 @@ impl std::fmt::Debug for App {
             .field("window_focused", &self.window_focused)
             .field("edit_stash", &self.edit_stash.is_some())
             .field("pending_copy", &self.pending_copy.is_some())
+            .field("window_title", &self.window_title)
+            .field("title_written", &self.title_written)
+            .field("found", &self.found)
             .field("notify_mode", &self.notify_mode)
             .field("pending_notices", &self.pending_notices.len())
             .field("link_previews", &self.link_previews)
@@ -520,9 +533,13 @@ impl App {
         app.typing_notices = config.typing_notices;
         app.read_receipts = config.read_receipts;
         app.do_not_disturb = config.do_not_disturb;
+        app.window_title = config.window_title;
         app.read_markers = config.read_markers;
         app.esc_closes_chat = config.esc_closes_chat;
         app.mouse = config.mouse;
+        app.found.image_mode = config.images;
+        app.found.secret_store = config.secret_store;
+        app.found.ignored_settings = config.ignored.clone();
         app.download_dir = config.download_dir.clone();
         app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
@@ -549,6 +566,7 @@ impl App {
         }
         let (keymap, warnings) = Keymap::from_config(config);
         app.keymap = keymap;
+        app.found.key_problems = warnings.len();
         for warning in &warnings {
             tracing::warn!(%warning, "invalid key binding in config");
         }
@@ -607,6 +625,9 @@ impl App {
             typing_notices: true,
             read_receipts: true,
             do_not_disturb: false,
+            window_title: true,
+            title_written: None,
+            found: Default::default(),
             read_markers: true,
             mouse: true,
             pending_copy: None,
@@ -792,9 +813,23 @@ impl App {
     pub fn reload_theme(&mut self) {
         self.dirty = true;
         self.theme_names = Theme::available(&self.themes_dir);
-        if let Some(file) = &self.config_file
-            && let Ok(config) = Config::load(file)
-        {
+        let loaded = self.config_file.as_deref().map(Config::load);
+        // What the doctor says about the file follows it; the settings themselves
+        // (but the theme) are read at start only.
+        match &loaded {
+            Some(Ok(config)) => {
+                self.found.config_broken = false;
+                self.found.ignored_settings = config.ignored.clone();
+                let problems = Keymap::from_config(config).1.len();
+                if problems != self.found.key_problems {
+                    tracing::info!(problems, "key bindings in the config read again");
+                    self.found.key_problems = problems;
+                }
+            }
+            Some(Err(_)) => self.found.config_broken = true,
+            None => {}
+        }
+        if let Some(Ok(config)) = loaded {
             let (cfg_dark, cfg_light) = config.paired_themes();
             if config.theme != self.config_theme
                 || cfg_dark != self.config_theme_dark
@@ -1026,11 +1061,12 @@ impl App {
             Setting::ReadMarkers => switch(self.read_markers),
             Setting::Notifications => switch(self.notify_mode != crate::notify::NotifyMode::Off),
             Setting::DoNotDisturb => switch(self.do_not_disturb),
+            Setting::WindowTitle => switch(self.window_title),
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Profile => self.own_profile_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
-            Setting::Sessions | Setting::Keywords => "Enter to view".to_owned(),
+            Setting::Sessions | Setting::Keywords | Setting::Doctor => "Enter to view".to_owned(),
             Setting::KeyBackup => {
                 crate::devices::backup_setting_text(self.verify.security).to_owned()
             }
@@ -1108,6 +1144,13 @@ impl App {
                     "Notifications are back on"
                 });
             }
+            Setting::WindowTitle => {
+                self.window_title = !self.window_title;
+                self.save_setting("window_title", self.window_title);
+                // Off, the event loop puts the old title back; on again, ours is
+                // written at once.
+                self.title_written = None;
+            }
             Setting::ReadMarkers => {
                 self.read_markers = !self.read_markers;
                 self.save_setting("read_markers", self.read_markers);
@@ -1145,6 +1188,15 @@ impl App {
             Setting::Keys => {
                 if delta == 0 {
                     self.open_keybinds_editor();
+                }
+            }
+            Setting::Doctor => {
+                if delta == 0 {
+                    // In the settings' place; any other popup stays.
+                    if matches!(self.modal, Some(Modal::Settings(_))) {
+                        self.modal = None;
+                    }
+                    self.open_doctor();
                 }
             }
             Setting::Profile => {
@@ -2985,6 +3037,7 @@ impl App {
             },
             Action::UserInfo => self.open_user_info_from_selection(),
             Action::MessageDetails => self.open_message_details(),
+            Action::Doctor => self.open_doctor(),
             Action::CreatePoll => self.open_poll_create(""),
             Action::OpenStickers => {
                 self.open_stickers("");
@@ -3095,7 +3148,8 @@ impl App {
                 | Modal::PollForm(_)
                 | Modal::PollVote(_)
                 | Modal::Stickers(_)
-                | Modal::Threads(_),
+                | Modal::Threads(_)
+                | Modal::Doctor(_),
             ) => {
                 self.modal = None;
             }
@@ -3288,6 +3342,7 @@ impl App {
             Some(Modal::Details(_)) => self.on_details_key(code, mods),
             Some(Modal::Threads(_)) => self.on_threads_key(code, mods),
             Some(Modal::Keywords(_)) => self.on_keywords_key(code, mods),
+            Some(Modal::Doctor(_)) => self.on_doctor_key(code, mods),
             None => {}
         }
     }
@@ -3814,9 +3869,13 @@ impl App {
             }
             Event::FocusGained => {
                 self.window_focused = true;
+                self.found.focus_reports = true;
                 self.dirty = true;
             }
-            Event::FocusLost => self.window_focused = false,
+            Event::FocusLost => {
+                self.window_focused = false;
+                self.found.focus_reports = true;
+            }
             _ => {}
         }
     }
@@ -4059,7 +4118,7 @@ impl App {
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
-            Some(Modal::Pinned(_) | Modal::Details(_)) => return,
+            Some(Modal::Pinned(_) | Modal::Details(_) | Modal::Doctor(_)) => return,
             Some(Modal::UserInfo(_)) => return self.on_user_info_paste(first_line),
             Some(Modal::OwnProfile(_)) => return self.on_own_profile_paste(&text, first_line),
             None => {}
@@ -4124,6 +4183,7 @@ impl App {
                                     | Modal::Stickers(_)
                                     | Modal::Details(_)
                                     | Modal::Threads(_)
+                                    | Modal::Doctor(_)
                             )
                         ) || matches!(
                             &self.modal,
@@ -4327,6 +4387,7 @@ impl App {
                     Some(HitId::StickerRow(index)) => self.send_sticker_at(index),
                     Some(HitId::DetailsFlip) => self.flip_details(),
                     Some(HitId::DetailsCopy) => self.copy_details(),
+                    Some(HitId::DoctorCopy) => self.copy_doctor(),
                     Some(HitId::ThreadRow(index)) => self.activate_thread_row(index),
                     Some(HitId::ThreadsMore) => self.click_threads_more(),
                     Some(HitId::ThreadsMine) => self.toggle_threads_mine(),
@@ -4370,6 +4431,7 @@ impl App {
                             | Modal::Details(_)
                             | Modal::Threads(_)
                             | Modal::Keywords(_)
+                            | Modal::Doctor(_)
                     )
                 ) =>
             {
@@ -4399,6 +4461,7 @@ impl App {
                     Some(Modal::Details(_)) => self.scroll_details(delta),
                     Some(Modal::Threads(_)) => self.scroll_threads(delta),
                     Some(Modal::Keywords(_)) => self.scroll_keywords(delta),
+                    Some(Modal::Doctor(_)) => self.scroll_doctor(delta),
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.
                     Some(Modal::Settings(menu)) if menu.editing.is_none() => {
@@ -4794,7 +4857,7 @@ fn open_in_browser(url: &str) {
 
 pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<String>) -> Result<()> {
     let (portal_scheme, mut scheme_watch) = crate::portal::SchemeWatch::start().await;
-    let guard = TerminalGuard::enter(config.mouse)?;
+    let guard = TerminalGuard::enter(config.mouse, config.window_title)?;
     // Terminal queries (image protocol, background colour) go here: on the alternate
     // screen, where a terminal that prints a question instead of answering does no
     // harm, but before mouse and focus reports are on and before the event stream.
@@ -4816,6 +4879,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         (Some(handle), Some(events))
     };
     let mut app = App::new_in_scheme(config, paths.themes_dir(), matrix.clone(), initial_scheme);
+    // As the terminal answered before the event stream existed: never asked again.
+    app.found.keyboard_enhanced = Some(guard.keyboard_enhanced());
     // The demo is for looking around: what is changed there is not written into the
     // real configuration.
     if !demo {
@@ -4849,6 +4914,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             // never resumed; they are sent again when drawn.
             app.flush_images(true);
             terminal::suspend(&mut terminal)?;
+            // The shell's title was put back meanwhile.
+            app.window_title_lost();
             app.dirty = true;
         }
         if let Some(request) = app.take_editor_request() {
@@ -4872,8 +4939,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             ));
             terminal::absorb_reader_wake();
             let resumed = terminal::resume(&mut terminal);
-            // The screen was cleared: pictures are sent again when drawn.
+            // The screen was cleared: pictures are sent again when drawn. The title
+            // from before was put back for the editor: ours is written again too.
             app.images.forget_encoded();
+            app.window_title_lost();
             app.finish_editor(outcome);
             resumed?;
         }
@@ -4895,6 +4964,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             });
         }
         terminal::set_mouse(app.mouse)?;
+        terminal::set_window_title(app.window_title)?;
         if std::mem::take(&mut app.repaint) {
             // As after a resize: pictures are sent again with the fresh screen.
             app.images.forget_encoded();
@@ -4920,6 +4990,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             terminal.draw(|frame| ui::draw(frame, &mut app))?;
             app.after_draw();
             app.flush_images(false);
+            // Only when the count changed, and never with the setting off.
+            if let Some(title) = app.take_window_title() {
+                terminal::write_window_title(&title)?;
+            }
         }
         tokio::select! {
             event = events.next() => match event {
@@ -7486,7 +7560,12 @@ mod tests {
         assert!(saved.mouse && !saved.read_receipts);
         assert!(std::fs::read_to_string(&file).unwrap().contains("# mine"));
 
-        // Logging out asks twice; the demo has no account, so it only says so.
+        // Logging out asks twice; the demo has no account, so it only says so. The
+        // last rows are below the edge of a window this low: the menu scrolls to them.
+        while !matches!(&app.modal, Some(Modal::Settings(menu)) if menu.current() == Setting::Logout)
+        {
+            app.on_event(key(KeyCode::Up));
+        }
         redraw(&mut app, &mut terminal);
         let (col, row) = find(&terminal, "Log out");
         app.on_event(click(col, row));
@@ -7494,8 +7573,9 @@ mod tests {
         assert!(app.toast.is_some());
 
         // "Key bindings" opens the key-bindings editor; the backdrop closes popups.
-        // (Up from "Log out": ignored users, key backup, sessions, encryption, profile, keys.)
-        for _ in 0..6 {
+        // (Up from "Log out": ignored users, key backup, sessions, encryption, profile,
+        // what the app found, keys.)
+        for _ in 0..7 {
             app.on_event(key(KeyCode::Up));
         }
         app.on_event(key(KeyCode::Enter));
@@ -9480,6 +9560,10 @@ mod tests {
         app.ignored_users.insert("@troll:example.org".into());
         app.timeline.marked_read = Some("$needle:example.org".into());
         app.sidebar.filter.set("garden filter");
+        // The window title as written, and what the doctor keeps.
+        assert!(app.take_window_title().is_some());
+        app.found.key_problems = 2;
+        app.found.ignored_settings = vec!["mouse".into()];
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         // Lays out the messages: the row cache and the link previews fill.
         redraw(&mut app, &mut terminal);
@@ -9514,6 +9598,7 @@ mod tests {
             (Action::NewRoom, false),
             (Action::React, true),
             (Action::ForwardMessage, true),
+            (Action::Doctor, false),
         ] {
             app.modal = None;
             app.focus = Pane::Timeline;
@@ -9565,9 +9650,14 @@ mod tests {
             "Emoji(",
             "Settings(",
             "Login(",
+            "Doctor(",
         ] {
             assert!(all.contains(popup), "{popup} never open in {all}");
         }
+        // What the doctor and the window title keep is no more than counts, switches
+        // and our own setting names.
+        assert!(all.contains("title_written: Some(\"matrix-rat"), "{all}");
+        assert!(all.contains("found: Found {"), "{all}");
         for text in &shown {
             for private in PRIVATE {
                 assert!(!text.contains(private), "{private} in {text}");
