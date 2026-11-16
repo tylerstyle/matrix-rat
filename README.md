@@ -311,7 +311,9 @@ lines, ready to paste into a terminal or a file. (`c` copies the whole message i
 
 Everything is optional. The settings menu (`F2`) covers the common choices and writes
 them into `~/.config/matrix-rat/config.toml`, keeping your comments; a few settings
-exist only in that file (marked below).
+exist only in that file (marked below). A setting whose value is not understood keeps
+its default and is named when the app starts; the rest of the file still counts. Only a
+file that is not valid TOML at all stops the start.
 
 ### Themes
 

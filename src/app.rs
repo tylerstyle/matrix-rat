@@ -533,16 +533,22 @@ impl App {
         app.config_theme_light = light;
         let initial = app.desired_theme();
         app.set_theme(&initial);
+        // Our own setting names, nothing of the user's: fit for the log and the screen.
+        let ignored = config.ignored_notice();
+        if ignored.is_some() {
+            tracing::warn!(settings = ?config.ignored, "values in the config not understood");
+        }
         let (keymap, warnings) = Keymap::from_config(config);
         app.keymap = keymap;
         for warning in &warnings {
             tracing::warn!(%warning, "invalid key binding in config");
         }
-        if !warnings.is_empty() {
-            app.show_toast(format!(
-                "Key bindings: {} problem(s), see the log",
-                warnings.len()
-            ));
+        // One line for both: there is room for one notice only.
+        let keys = (!warnings.is_empty())
+            .then(|| format!("Key bindings: {} problem(s), see the log", warnings.len()));
+        let notices: Vec<String> = ignored.into_iter().chain(keys).collect();
+        if !notices.is_empty() {
+            app.show_toast(notices.join(" · "));
         }
         app
     }

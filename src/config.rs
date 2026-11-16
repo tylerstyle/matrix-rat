@@ -59,6 +59,10 @@ pub struct Config {
     /// Order-preserving raw `[keys]` data parsed via `toml_edit` in `Config::parse`.
     #[serde(skip)]
     pub raw_keys: Option<RawKeyConfig>,
+    /// Settings of the file whose value was not understood. They keep their defaults;
+    /// the rest of the file counts. Names only: they are our own setting names.
+    #[serde(skip)]
+    pub ignored: Vec<String>,
 }
 
 /// Hand-written: the download folder is a path, the click command can hold one, and
@@ -90,6 +94,7 @@ impl std::fmt::Debug for Config {
             .field("secret_store", &self.secret_store)
             .field("preset", &self.preset.is_some())
             .field("keys", &self.keys.is_some())
+            .field("ignored", &self.ignored)
             .finish_non_exhaustive()
     }
 }
@@ -210,12 +215,14 @@ impl Default for Config {
             preset: None,
             keys: None,
             raw_keys: None,
+            ignored: Vec::new(),
         }
     }
 }
 
 impl Config {
-    /// A missing file gives the defaults; a broken file is an error the user should see.
+    /// A missing file gives the defaults; a file that is not TOML at all is an error the
+    /// user should see. One setting with a value we do not understand is not: see `parse`.
     pub fn load(path: &Path) -> Result<Config> {
         if !path.exists() {
             return Ok(Config::default());
@@ -226,11 +233,53 @@ impl Config {
     }
 
     /// Parses TOML text into `Config`, keeping declaration order inside `[keys]`.
+    ///
+    /// A setting whose value is not understood (`mouse = "yes"`, `images = "sixel"`) does
+    /// not take the rest of the file with it: it keeps its default and its name is
+    /// listed in `ignored`, for the app to say so.
     pub fn parse(source: &str) -> Result<Config> {
-        let mut config: Config = toml::from_str(source)?;
+        let mut table: toml::Table = toml::from_str(source)?;
+        let mut ignored = Vec::new();
+        if toml::Value::Table(table.clone())
+            .try_into::<Config>()
+            .is_err()
+        {
+            // Each setting on its own tells which ones are at fault.
+            let names: Vec<String> = table.keys().cloned().collect();
+            for name in names {
+                let Some(value) = table.get(&name) else {
+                    continue;
+                };
+                let mut alone = toml::Table::new();
+                alone.insert(name.clone(), value.clone());
+                if toml::Value::Table(alone).try_into::<Config>().is_err() {
+                    table.remove(&name);
+                    ignored.push(name);
+                }
+            }
+        }
+        let mut config: Config = toml::Value::Table(table).try_into()?;
         let document: toml_edit::DocumentMut = source.parse()?;
         config.raw_keys = Some(extract_raw_keys(&document));
+        config.ignored = ignored;
         Ok(config)
+    }
+
+    /// What to tell the user about `ignored`, if anything.
+    pub fn ignored_notice(&self) -> Option<String> {
+        match self.ignored.as_slice() {
+            [] => None,
+            [one] => Some(format!(
+                "Config: the value of `{one}` is not understood; its default is used"
+            )),
+            many => Some(format!(
+                "Config: the values of {} are not understood; their defaults are used",
+                many.iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
     }
 
     /// Returns order-preserved raw key configuration, falling back to `serde`-decoded values
@@ -608,6 +657,47 @@ pub fn save_key_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_bad_value_does_not_take_the_rest_of_the_file_with_it() {
+        let config = Config::parse(
+            "mouse = \"yes\"\n\
+             read_markers = false\n\
+             images = \"sixel\"\n\
+             sidebar_width = 31\n\
+             [keys]\n\
+             quit = \"ctrl-x\"\n",
+        )
+        .unwrap();
+        // The two that are wrong keep their defaults and are named, by the alphabet.
+        assert_eq!(config.ignored, ["images", "mouse"]);
+        assert_eq!(config.mouse, Config::default().mouse);
+        assert_eq!(config.images, ImageMode::Auto);
+        // Everything else counts, the key bindings too.
+        assert!(!config.read_markers);
+        assert_eq!(config.sidebar_width, 31);
+        assert!(
+            config
+                .raw_keys
+                .is_some_and(|raw| !raw.root_entries.is_empty())
+        );
+        let notice = Config::parse("mouse = 3")
+            .unwrap()
+            .ignored_notice()
+            .unwrap();
+        assert!(
+            notice.contains("`mouse`") && !notice.contains('3'),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn a_good_file_ignores_nothing_and_a_file_that_is_not_toml_is_still_an_error() {
+        let config = Config::parse("mouse = false\nnot_a_setting = 1\n").unwrap();
+        assert!(config.ignored.is_empty() && config.ignored_notice().is_none());
+        assert!(!config.mouse);
+        assert!(Config::parse("mouse = = false").is_err());
+    }
 
     #[test]
     fn debug_output_names_no_folder_no_command_and_no_theme() {
