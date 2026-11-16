@@ -54,3 +54,28 @@
 - **Assessment:** Sound CI hygiene. Runs on `push` to `main`, `pull_request`, weekly `schedule` (`cron: "17 5 * * 1"`), and `workflow_dispatch`, with `permissions: contents: read`. Both `actions/checkout@11d5960a326750d5838078e36cf38b85af677262` (`persist-credentials: false`, matching `release-binaries.yml:33`) and `EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9` (`# v2.1.2`) are pinned by full 40-character commit SHA. *(Verified full-SHA pinning in the workflow file; `# v2.1.2` tag -> SHA mapping was not checked directly against git remote.)*
 
 M37 ok
+
+---
+
+## Follow-up: the listener fault found with a real MCP client
+
+Not by `matrix-agy` (out of credits; the user said to go on without it). Four rounds by
+independent reviewers started by `matrix-claude`, each given the code and the questions, not
+the author's conclusions. Recorded here by `matrix-claude`.
+
+**The fault.** With Claude Code as the MCP client, `wait_for_message` came back at once with
+an old message: a `read` had loaded older messages into the watched room's newest hundred,
+and `serve` told them to listeners as new.
+
+| Round | Commit | Verdict | What it found |
+|---|---|---|---|
+| M37b | `fa8ed34` (`Seen::sift`, first page loaded by the watcher) | changes requested | An answer missed in a sync gap could now be lost for good; an empty baseline still told history; old messages told again for a change (trust, late key, deletion) ended a wait. |
+| M37c | `71bfb2f` (the MCP server's ledger: known, handed, passed over) | changes requested | A failed first read was taken for an empty room, making all history news; a read that did not show a gap answer buried it; a cancelled wait lost one that could not be read yet; a deleted answer was counted for ever; the watcher skipped the settle wait at the room's start. No way found for another member to fake an answer. |
+| M37d | `0196cdc` (owed messages, no empty-room anchor) | changes requested | All of the above confirmed fixed. New: a read during a wait left the anchor behind the answer, which was handed over twice; two rare cases with an anchor that is gone from the room; the empty-room price not listed as open. |
+| M37e | `0264ec0` (anchor compared by place, the lost-anchor rules) | changes requested | All four confirmed fixed for a wait. The same two rare cases were open for `read_messages`, which owed old history when the anchor was not among what it read. One narrow race left as the lesser evil (an anchor moved by a concurrent read to a message the wait has not heard of). |
+
+The last finding is fixed in the commit that adds this section, in the way the reviewer
+proposed (the read uses the wait's guard), with a test. What stays open is listed in
+`docs/PLAN.md` §6b.
+
+M37 follow-up: closed by `matrix-claude` after M37e's finding was fixed.

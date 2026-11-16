@@ -647,6 +647,13 @@ impl Server {
             .collect()
     }
 
+    /// Whether any look at the room has shown a message yet.
+    fn ever_looked(&self) -> bool {
+        self.ledger
+            .lock()
+            .is_ok_and(|ledger| !ledger.known.kept.is_empty())
+    }
+
     /// Which of `messages` a look at the room has shown before.
     fn known(&self, messages: &[Msg]) -> Vec<bool> {
         match self.ledger.lock() {
@@ -839,7 +846,9 @@ impl Server {
             .await
             .map_err(|err| self.told(err))?;
         self.pin(&room_id);
+        let ever_looked = self.ever_looked();
         let was_known = self.known(&messages);
+        let none_known = !was_known.iter().any(|known| *known);
         let turned_up = self.look(&messages);
         let shown_from = messages.len().saturating_sub(limit);
         // Where the room had been seen up to, among what was read.
@@ -855,7 +864,11 @@ impl Server {
             let unseen = match (&seen, seen_at) {
                 (None, _) => false,
                 (Some(_), Some(seen_at)) => at > seen_at || turned_up[at],
-                (Some(_), None) => !was_known[at],
+                // The point is not among what was read (see `wait_for_message`):
+                // so much came since that none of it is known, or the point is
+                // gone and only what stands after a known message came since. And
+                // if no look has ever shown anything, this is what the room held.
+                (Some(_), None) => ever_looked && !was_known[at] && (turned_up[at] || none_known),
             };
             match self.weigh(message) {
                 Ok(()) if unseen => self.owe(message),
@@ -924,10 +937,7 @@ impl Server {
         };
         let seen = self.seen();
         // Which of what was read is known already, and which turned up among it.
-        let ever_looked = self
-            .ledger
-            .lock()
-            .is_ok_and(|ledger| !ledger.known.kept.is_empty());
+        let ever_looked = self.ever_looked();
         let was_known = self.known(&latest);
         let none_known = !was_known.iter().any(|known| *known);
         let turned_up = self.look(&latest);

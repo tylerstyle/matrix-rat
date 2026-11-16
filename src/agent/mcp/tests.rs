@@ -1123,6 +1123,26 @@ async fn a_room_that_showed_nothing_does_not_make_its_history_news() {
         .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
         .await;
     assert_eq!(ids(&woken), ["$answer"]);
+    session.end().await;
+    world.stop().await;
+
+    // Nor when the history shows to a read first, the question not yet among it,
+    // and the read does not show all of it.
+    let world = World::start("mcp-unloaded-read", Vec::new()).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session
+        .ok("send_message", json!({ "text": "merge or wait?" }))
+        .await;
+    world.change("$sent-1", |question| {
+        *question = message("$history-2", ANN, "do it");
+    });
+    world.insert_before("$history-2", message("$history-1", ANN, "go ahead"));
+    let read = session.ok("read_messages", json!({ "limit": 1 })).await;
+    assert_eq!(ids(&read), ["$history-2"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
 
     // The same when the first thing done is to wait, or to read. (The price: in a
     // room that really is empty, what is written between such a first call and the

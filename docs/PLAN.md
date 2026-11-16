@@ -255,8 +255,8 @@ were done about it, the second after an independent review of the first:
   load looks the same), so its history is not news later.
 
 Reviewed by independent reviewers of `matrix-claude`, each starting from the code alone (agy
-was out of credits; the user said to go on without it). Three rounds asked for changes,
-which are in.
+was out of credits; the user said to go on without it). Four rounds asked for changes,
+which are in (see `docs/reviews/M37-review.md`).
 
 Still open:
 
@@ -312,6 +312,10 @@ thread view, empty continuation rows of a playing row with a long name, the doct
   and is not affected there.
   Two more advisories only say "unmaintained" (anymap2, bincode 1), both deep in
   dependencies.
+- **The test homeserver's own fault**: continuwuity now and then answers a sync with an
+  error ("pdu should have a shortstatehash"), in bursts, and a server-backed test that waits
+  for something then times out (seen in the threads, people and media tests, on `main` as
+  on a branch). A second run is the remedy; a fresh database for it may be worth trying.
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.
