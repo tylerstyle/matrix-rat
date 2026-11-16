@@ -68,3 +68,13 @@
 ### 8. `esc_closes_chat` setting & docs (`src/config.rs`, `src/modal.rs`, `src/palette.rs`, `README.md`)
 - `Config.esc_closes_chat` defaults to `true`, is redacted/safe in `Debug`, appears in `Setting::ALL` (`23` items), `SettingsMenu`, and `collect_settings` (with aliases `"escape"`, `"close chat"`, `"no chat open"`, `"setting"`), and persists via `save_setting("esc_closes_chat", ...)`.
 - Known open points match intent: `vim` preset overrides `Esc` in `Composer` to `Focus(Pane::Timeline)` (so `Esc` never closes the chat unless `back` is given another key under `[keys.composer]`), and there is no separate `CloseChat` action. `README.md` (`170`, `180`, `378`, `392`) matches the implemented behaviour cleanly.
+
+---
+
+## Follow-up (`550f298`)
+
+- Checked commit `550f298` (`967` unit tests reported green):
+  - **Finding 1 fixed:** `open_pinned_of(&mut self, room_id: &str)` (`src/app/moderation.rs:295-327`) handles any room by ID (`Action::OpenPinned` delegates via `self.room_id()`; `InfoRow::Pinned` at `src/app/rooms.rs:1564` passes `&room_id`), covered by `the_room_info_shows_the_pinned_messages_of_its_own_room_with_no_chat_open` (`src/app/rooms.rs:4430-4447`).
+  - **Finding 2 fixed:** `Setting::EscClosesChat` (`src/app.rs:1075-1080`) now calls `self.show_room(self.active)` so toggling the setting off while closed leaves a non-matching space filter and moves the cursor onto the reopened room.
+
+**M33 ok**
