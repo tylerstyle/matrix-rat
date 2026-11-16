@@ -100,6 +100,20 @@ fn watch(watcher: &mut RecommendedWatcher, dir: &Path) -> Result<()> {
         .with_context(|| format!("could not watch {}", dir.display()))
 }
 
+/// Has the reload signal ignored from here on, until something listens for it (as
+/// [`ThemeWatch::start`] does). To be called before the profile's lock is taken:
+/// from that moment `matrix-rat --reload-theme` takes this process for a running
+/// instance and signals it, and a signal that nothing handles ends the program. The
+/// app listens only once its screen is set up, and `matrix-rat serve` never does (it
+/// has no theme).
+pub fn ignore_reload_signal() {
+    // SAFETY: sets how one signal is handled, with the constant for "ignore"; no
+    // handler of ours is involved.
+    unsafe {
+        libc::signal(libc::SIGUSR1, libc::SIG_IGN);
+    }
+}
+
 /// `matrix-rat --reload-theme`: asks every running instance to reload its theme.
 /// Returns how many were told.
 ///
@@ -162,6 +176,43 @@ fn is_this_program(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What becomes of a child process that sends itself the reload signal: its exit
+    /// code, or the signal that ended it.
+    fn child_after_the_reload_signal(ignored: bool) -> (Option<i32>, Option<i32>) {
+        // SAFETY: the child calls only what may be called after `fork` in a program
+        // with threads (`signal`, `raise`, `_exit`), and the parent waits for it.
+        unsafe {
+            let child = libc::fork();
+            assert!(child >= 0, "fork");
+            if child == 0 {
+                if ignored {
+                    ignore_reload_signal();
+                } else {
+                    libc::signal(libc::SIGUSR1, libc::SIG_DFL);
+                }
+                libc::raise(libc::SIGUSR1);
+                libc::_exit(0);
+            }
+            let mut status = 0;
+            assert_eq!(libc::waitpid(child, &mut status, 0), child);
+            (
+                libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)),
+                libc::WIFSIGNALED(status).then(|| libc::WTERMSIG(status)),
+            )
+        }
+    }
+
+    /// Why the signal is ignored before the profile's lock is taken: unhandled, it
+    /// ends the program that `--reload-theme` found by that lock.
+    #[test]
+    fn the_reload_signal_ends_a_program_unless_it_is_ignored() {
+        assert_eq!(
+            child_after_the_reload_signal(false),
+            (None, Some(libc::SIGUSR1))
+        );
+        assert_eq!(child_after_the_reload_signal(true), (Some(0), None));
+    }
 
     #[tokio::test]
     async fn file_changes_and_renames_are_noticed() {

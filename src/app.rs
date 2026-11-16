@@ -3659,6 +3659,8 @@ impl App {
             }
             MatrixEvent::Devices(event) => self.on_devices_event(event),
             MatrixEvent::Keywords(event) => self.on_keywords_event(event),
+            // Answers for `matrix-rat serve`; the app never asks for them.
+            MatrixEvent::Agent(_) => {}
             MatrixEvent::DecryptionRetried {
                 event_id, result, ..
             } => self.on_decryption_retried(&event_id, result),

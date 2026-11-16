@@ -155,7 +155,7 @@ pub fn day_label(when: &DateTime<Local>, now: &DateTime<Local>) -> String {
 }
 
 /// `None` for events that are not worth a line in a chat view.
-fn event_message(
+pub(super) fn event_message(
     id: String,
     event: &EventTimelineItem,
     own: &UserId,

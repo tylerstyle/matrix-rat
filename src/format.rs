@@ -191,6 +191,13 @@ pub fn parse_with_mentions(
     }
 }
 
+/// A text as a message, with the Markdown of the composer and none of its slash
+/// commands: for texts that no person typed here (the agent channel), where a leading
+/// slash is the start of a path, not of a command.
+pub fn message(text: &str) -> Outgoing {
+    markdown_message(text.trim(), &[], false)
+}
+
 fn shift_marks(raw: &str, sub: &str, extra_left: usize, marks: &[MentionMark]) -> Vec<MentionMark> {
     if marks.is_empty() || sub.is_empty() {
         return Vec::new();

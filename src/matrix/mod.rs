@@ -1,6 +1,7 @@
 //! The Matrix side of the app. Everything that talks to the SDK lives in this module and
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
+mod agent;
 mod convert;
 mod devices;
 mod directory;
@@ -26,6 +27,7 @@ mod threads;
 mod upload;
 mod verify;
 
+pub use agent::{AgentCmd, AgentEvent, MAX_WATCHED as AGENT_MAX_WATCHED};
 pub use devices::{
     BackupUpload, DevicesCmd, DevicesEvent, ServerBackup, Session, SessionList, SessionTrust,
     SignOutOutcome,
@@ -433,6 +435,9 @@ pub enum MatrixCmd {
         mine: bool,
         generation: u64,
     },
+    /// What `matrix-rat serve` asks for: send a text, read a room, watch a room.
+    /// Never sent by the app.
+    Agent(AgentCmd),
 }
 
 /// Never prints the password or the recovery key, nor a message, a path or an id of a
@@ -629,6 +634,8 @@ impl MatrixCmd {
                     Some(format!("mine: {mine}")),
                 ],
             ),
+            // The inner command prints no room and no text.
+            Self::Agent(command) => ("Agent", vec![Some(command.shown(ids))]),
         };
         crate::logsafe::shape(name, parts)
     }
@@ -1032,6 +1039,8 @@ pub enum MatrixEvent {
         room_id: String,
         generation: u64,
     },
+    /// An answer to a [`MatrixCmd::Agent`], or news of a room that is watched.
+    Agent(AgentEvent),
 }
 
 /// Hand-written so that no message text, no error text (it can name rooms, people
@@ -1278,6 +1287,8 @@ impl MatrixEvent {
             ),
             Self::Threads(page) => ("Threads", vec![Some(format!("{page:?}"))]),
             Self::ThreadsFailed { generation: g, .. } => ("ThreadsFailed", vec![generation(g)]),
+            // The inner event prints no room, no message and no reason.
+            Self::Agent(event) => ("Agent", vec![Some(event.shown(full))]),
         };
         crate::logsafe::shape(name, parts)
     }
@@ -1299,6 +1310,12 @@ impl MatrixHandle {
     pub fn send(&self, command: MatrixCmd) {
         // A closed channel means the worker is gone, which only happens at shutdown.
         let _ = self.commands.send(command);
+    }
+
+    /// Waits until the worker has ended: it takes no more commands, and has let go
+    /// of the store. For a program that ends when the worker does.
+    pub async fn stopped(&self) {
+        self.commands.closed().await;
     }
 }
 
@@ -1799,6 +1816,12 @@ impl Worker {
             relist.clone(),
         );
         let mut devices = devices::Devices::new(client.clone(), self.events.clone());
+        let mut agent = agent::Agent::new(
+            client.clone(),
+            self.events.clone(),
+            ignored.clone(),
+            left.clone(),
+        );
         let mut emote_mgr = emotes::EmoteManager::new(client.clone(), self.events.clone());
         let emote_handlers = emote_mgr.register_handlers(client);
         let power_events = self.events.clone();
@@ -2021,6 +2044,7 @@ impl Worker {
                     Some(MatrixCmd::Manage(command)) => manager.handle(command),
                     Some(MatrixCmd::Devices(command)) => devices.handle(command),
                     Some(MatrixCmd::Keywords(command)) => keywords.handle(command),
+                    Some(MatrixCmd::Agent(command)) => agent.handle(command),
                     Some(MatrixCmd::SearchMessages { generation, query }) => {
                         searcher.start(generation, query);
                     }
@@ -2087,6 +2111,7 @@ impl Worker {
         manager.stop();
         devices.stop();
         keywords.stop();
+        agent.stop();
         emote_mgr.stop();
         searcher.stop();
         user_searcher.stop();
@@ -2408,6 +2433,82 @@ mod tests {
             room_id: "!room:example.org".into(),
         });
         assert_eq!(format!("{command:?}"), "Manage(Leave)");
+        // What `serve` asks for and is told: no room, no text, no event, no reason.
+        let command = MatrixCmd::Agent(AgentCmd::Send {
+            request: 4,
+            room_id: "!room:example.org".into(),
+            text: "the secret plan for example.org".into(),
+        });
+        assert_eq!(format!("{command:?}"), "Agent(Send(request 4))");
+        assert_eq!(
+            command.describe(),
+            "Agent(Send(request 4, !room:example.org))"
+        );
+        let command = MatrixCmd::Agent(AgentCmd::Watch {
+            room_id: "!room:example.org".into(),
+        });
+        assert_eq!(format!("{command:?}"), "Agent(Watch)");
+        let told = crate::agent::proto::Msg {
+            event_id: "$event:example.org".into(),
+            sender: "@alice:example.org".into(),
+            sender_name: "Alice of example.org".into(),
+            timestamp_ms: 1,
+            kind: "text".into(),
+            body: "the secret plan for example.org".into(),
+            edited: false,
+            own: false,
+            truncated: false,
+            warning: None,
+            verified: true,
+            untrusted: None,
+        };
+        for (event, shown) in [
+            (
+                AgentEvent::Sent {
+                    request: 4,
+                    result: Ok("$event:example.org".into()),
+                },
+                "Agent(Sent(request 4, ok: true))",
+            ),
+            (
+                AgentEvent::Sent {
+                    request: 4,
+                    result: Err("#secret:example.org refused it".into()),
+                },
+                "Agent(Sent(request 4, ok: false))",
+            ),
+            (
+                AgentEvent::Read {
+                    request: 5,
+                    result: Ok(vec![told.clone()]),
+                },
+                "Agent(Read(request 5, 1 messages))",
+            ),
+            (
+                AgentEvent::Watched {
+                    room_id: "!room:example.org".into(),
+                    messages: vec![told.clone(), told],
+                },
+                "Agent(Watched(2 messages))",
+            ),
+            (
+                AgentEvent::WatchEnded {
+                    room_id: "!room:example.org".into(),
+                    reason: "not in #secret:example.org".into(),
+                },
+                "Agent(WatchEnded)",
+            ),
+        ] {
+            assert_eq!(format!("{:?}", MatrixEvent::Agent(event)), shown);
+        }
+        let event = MatrixEvent::Agent(AgentEvent::WatchEnded {
+            room_id: "!room:example.org".into(),
+            reason: "gone".into(),
+        });
+        assert_eq!(
+            event.describe(),
+            "Agent(WatchEnded(!room:example.org, gone))"
+        );
         let event = MatrixEvent::Timeline {
             room_id: "!room:example.org".into(),
             generation: 3,

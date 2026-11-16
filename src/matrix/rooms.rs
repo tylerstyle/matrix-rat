@@ -1261,6 +1261,7 @@ impl Timelines {
             | MatrixCmd::SearchUsers { .. }
             | MatrixCmd::Devices(_)
             | MatrixCmd::Keywords(_)
+            | MatrixCmd::Agent(_)
             | MatrixCmd::CancelUserSearch
             | MatrixCmd::SearchDirectory { .. }
             | MatrixCmd::DirectoryNextPage { .. }
@@ -1609,7 +1610,7 @@ async fn load_room_members(room: Room, room_id: String) -> Option<MatrixEvent> {
     })
 }
 
-fn content(message: &Outgoing) -> Result<RoomMessageEventContent> {
+pub(super) fn content(message: &Outgoing) -> Result<RoomMessageEventContent> {
     Ok(match message {
         Outgoing::Text {
             plain,

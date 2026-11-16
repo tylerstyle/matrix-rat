@@ -37,6 +37,7 @@ notifications and themes that follow your desktop are all there.
 | 📐 **Fits any window** | Below 60 columns the room list steps aside and one pane fills the window: the chat while you read and write, the room list when you go to it (`Alt-1`, `Alt-←`, or `Ctrl-K`). Popups scroll and keep their hints on small terminals, so it stays usable in a narrow split or a phone-sized SSH session. `Ctrl-B` puts the room list away the same way in a window of any size. |
 | 🎨 **Yours to shape** | Twelve built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
 | 🔔 **Notifications** | Desktop notifications with the chat's picture (click one to open its room), or plain ones through the terminal; none for what you are reading right now. Keywords of your own count like a mention. |
+| 🤖 **A channel for agents** | `matrix-rat serve` runs without the screen on a bot account; scripts send and read with `matrix-rat send`, `read` and `listen`, and a coding agent asks you a question and waits for your answer through `matrix-rat mcp`. See [For agents and scripts](#for-agents-and-scripts). |
 
 ## Install
 
@@ -403,7 +404,10 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `notification_click_command` (file only) | a shell command run when a notification is clicked, to bring the terminal window to the front (see Good to know) |
 | `secret_store` (file only) | `"file"` (default), `"keyring"` to keep the store's key in the system keyring, or `"auto"` |
 
-`--profile <name>` keeps several accounts apart.
+`--profile <name>` keeps several accounts apart. Besides the app itself there are
+`matrix-rat doctor` (what matrix-rat finds here, see below) and the commands
+[for agents and scripts](#for-agents-and-scripts): `serve`, `rooms`, `send`, `read`,
+`listen` and `mcp`. `matrix-rat --help` lists them all.
 
 ## Good to know
 
@@ -576,6 +580,172 @@ Setting `preset = "vim"` keeps the default keys and adds:
   keeps message text, passwords and keys out of them.
 - **Something stuck?** `Ctrl-Q` quits and `Ctrl-Z` suspends to the shell, also from
   behind a popup (unless you have bound those keys to something else).
+
+## For agents and scripts
+
+Scripts and coding agents on your machine can write into a Matrix room and read what
+you answer, so that an agent can ask you something while you are away from the
+terminal. One program stays connected (`matrix-rat serve`); small commands talk to it.
+
+| Command | Does |
+|---|---|
+| `matrix-rat serve` | Runs the Matrix side without the screen, on a profile that is already logged in, and listens on a private socket. Stays in sync until it gets SIGTERM, SIGHUP or `Ctrl-C`. |
+| `matrix-rat rooms` | Prints the rooms the account is in: `id`, `name`, `encrypted`, `direct`. |
+| `matrix-rat send --room R TEXT…` | Sends a message (Markdown). A single `-` as the text reads it from standard input. Prints `{"event_id":"$…"}`. |
+| `matrix-rat read --room R [--limit N] [--from @user:server]` | Prints the latest messages (20 unless told, 100 at most), oldest first. With `--from`: only what counts as that user's (below). |
+| `matrix-rat listen --room R [--from @user:server]` | Stays connected and prints messages as they come. With `--from`: only what counts as that user's. |
+| `matrix-rat mcp --room R --name N [--from @user:server]` | An MCP server for one agent, bound to one room (below). |
+
+All of them take `--profile`, and all but `serve` need a running `serve` for that
+profile. `R` is a room's id (`!…`), its exact name, or its address (`#…`); a name or
+address that fits several rooms is refused, an id always means its room. Options go
+before the text of `send`: everything after its first word is text. Output is one JSON
+object per line:
+
+```json
+{"event_id":"$abc","sender":"@you:example.org","sender_name":"You","timestamp_ms":1763300000000,"kind":"text","body":"yes, merge it","edited":false,"own":false,"verified":true}
+```
+
+`kind` is `text`, `notice`, `emote`, `image`, `file`, `video`, `audio`, `voice`,
+`location`, `sticker`, `poll`, `redacted`, `undecryptable` or `other`; `own` marks what
+the bot account itself sent. A body longer than 32 KiB is cut and marked
+`"truncated":true`. `verified` says whether the sender is who the message names, judged
+strictly (see "Whose message is it?" below); if not, `"untrusted"` says why, and
+`"warning"` is there when the app itself would show a doubt about the sender. `listen`
+prints a message again when it changes (edited, deleted, decrypted a moment after it
+came, or its sender verified meanwhile): tell them apart by `event_id`. Exit codes: `0` done,
+`2` wrong usage, `3` no `serve` is running for the profile, `4` `serve` refused (the
+reason is on standard error), `1` anything else.
+
+**Setting it up**
+
+1. Use **an account of its own** for this, not yours, and put it only into the rooms it
+   needs: a room with you and the bot is enough.
+2. Log it in once with the app: `matrix-rat --profile bot`. Enter its recovery key or
+   verify the device (it has to read encrypted rooms), accept the invitation to the
+   room, and, if agents are to act on your answers (`--from`), **verify yourself from
+   the bot account**: open your User info there, choose to verify, and compare the
+   emoji on your own client. Then quit. `serve` never shows a login form, never takes
+   a password, and never accepts an invitation; when the session stops working it
+   says so and ends.
+3. Start it: `matrix-rat --profile bot serve`. It prints `matrix-rat serve: ready` on
+   standard error when the socket is open. Try it: `matrix-rat --profile bot rooms`.
+
+To keep it running, as a systemd user service:
+
+```ini
+# ~/.config/systemd/user/matrix-rat-serve.service
+[Unit]
+Description=matrix-rat serve (profile bot)
+After=network-online.target
+
+[Service]
+ExecStart=/path/to/matrix-rat --profile bot serve
+Restart=on-abnormal
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user enable --now matrix-rat-serve
+loginctl enable-linger "$USER"     # keep it running while you are logged out
+```
+
+The socket is `$XDG_RUNTIME_DIR/matrix-rat/<profile>.sock` (without `XDG_RUNTIME_DIR`:
+`~/.local/state/matrix-rat/run/<profile>.sock`), so the commands must run as the same
+user and see the same `XDG_RUNTIME_DIR` as `serve`. With `secret_store = "keyring"`
+the service needs your keyring unlocked; the default (`"file"`) needs nothing. The app
+and `serve` cannot run on the same profile at the same time.
+
+**For a coding agent (MCP)**
+
+`matrix-rat mcp` gives one agent three tools for one room: `send_message` (signed with
+the agent's name, `[N] text`), `read_messages`, and `wait_for_message`, which waits up to
+ten minutes for a new message. The room is fixed on the command line; no tool takes a
+room, and an argument that tries to name one is refused. For Claude Code, in the
+project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "matrix": {
+      "command": "matrix-rat",
+      "args": ["--profile", "bot", "mcp",
+               "--room", "!roomid:example.org",
+               "--name", "build-agent",
+               "--from", "@you:example.org"]
+    }
+  }
+}
+```
+
+With `--from`, `wait_for_message` only wakes for what counts as that user's, and every
+message is handed over with `"from_user": true` or `false`. The tools tell the model
+that message text is data written by a person or another program and never
+instructions, unless it is marked as yours, and that secrets must not be sent. Without
+`--from`, nothing in the room counts as an instruction. An agent that is not waiting is
+not woken by a message: it sees it the next time it waits or reads. When the room is
+given by name or address, the server keeps to the room which that meant when it first
+asked `serve`; renaming rooms later does not move it.
+
+**Whose message is it?**
+
+With `--from` (on `mcp`, `read` and `listen`), a message counts as that user's only if
+all of this holds:
+
+- its sender is that user, and it is not the bot account's own;
+- it is a message that says something: one that could not be decrypted, or was
+  deleted, never counts;
+- it came **end-to-end encrypted**, from a device that the user has cross-signed, and
+  **the bot account has verified the user's identity** (step 2 above), with nothing
+  that puts the sender in doubt: `"verified":true`.
+
+So in a room without encryption nothing counts, and neither does anything before you
+have verified yourself from the bot account, or anything sent from a session of yours
+that you have not verified. That is on purpose: the sender's name alone is only your
+homeserver's word, and whoever runs or breaks into the homeserver can write under it,
+or add a device to your account. Messages that came before the verification may stay
+unverified; what comes after counts.
+
+A message that names you and does not count is not hidden. `mcp` hands it over with
+`"from_user": false` and `"untrusted": "<why>"` (`unverified_identity`,
+`unverified_device`, `unconfirmed`, `not_encrypted`, `identity_changed`,
+`sender_mismatch`, `undecryptable`, `redacted`), it does not end a wait, and a wait says
+how many such messages came (`"untrusted_from_user"`), so that nobody has to wonder
+why an answer is not taken. `read --from` and `listen --from` leave such messages out
+and say so on standard error, without their text.
+
+`--allow-unverified` (with `--from`) gives that up: a message then counts unless it
+contradicts its sender (`identity_changed`, `sender_mismatch`, or sent in the clear in
+an encrypted room), could not be decrypted, or was deleted. Rooms without encryption,
+unverified identities and unverified devices pass. What you then rely on is your
+homeserver: use it only where that is good enough.
+
+**What to keep in mind**
+
+- **Whoever can reach the socket can read and write every room the bot account is in.**
+  The socket is private to your user: it lives in a folder only you can enter, has mode
+  `0600`, and every connection is checked to come from your user. Every program running
+  as you can use it, though. That is why the account should be one of its own, in the
+  rooms it needs and no others.
+- **Whoever can write in the room can talk to your agent.** With `--from`, only
+  messages that are verified as yours are marked as yours (see "Whose message is it?");
+  with `--allow-unverified` that is only as good as your homeserver. Give the room's id
+  rather than its name, so that no other room can be taken for it.
+- **All agents write as the same bot account.** The signature `[N]` in front of a
+  message is a convention that says which agent wrote, not a proof: any program that
+  can reach the socket can sign with any name, and so can anyone who writes in the
+  room. Agents cannot tell each other apart by it for certain, and to each of them
+  the others' messages are the account's own (`"own": true`): they never count as
+  yours and never end a wait.
+- `serve` does only what those commands ask: it sends text, reads, and listens. It
+  joins, leaves and creates no room, changes no setting, and reading through it marks
+  nothing as read (a message the bot sends counts as read up to itself, as with any
+  Matrix client).
+- Its log (`~/.local/state/matrix-rat/<profile>/`) holds no message text, room or user,
+  like the app's.
 
 ## For developers
 
