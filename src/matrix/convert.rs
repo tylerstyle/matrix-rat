@@ -332,12 +332,9 @@ fn event_message(
                             } else {
                                 (MediaKind::Audio, "🔊")
                             };
-                            let duration = c
-                                .info
-                                .as_ref()
-                                .and_then(|info| info.duration)
-                                .or_else(|| c.audio.as_ref().map(|audio| audio.duration));
                             let meta = audio_meta(c);
+                            // The bounded length: a sender's absurd one is not shown.
+                            let duration = meta.duration;
                             let waveform = waveform_bars(&meta.waveform);
                             let size = c.info.as_ref().and_then(|info| info.size);
                             let summary = attach_media(

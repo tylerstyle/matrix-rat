@@ -99,7 +99,12 @@ impl App {
         if let Some(action) = self.keymap.lookup_popup_global(code, mods) {
             match action {
                 crate::action::Action::Quit => self.should_quit = true,
-                crate::action::Action::Suspend => self.suspend_requested = true,
+                crate::action::Action::Suspend => {
+                    // As everywhere: the player is its own process group and would
+                    // play on while the app is stopped.
+                    self.stop_audio();
+                    self.suspend_requested = true;
+                }
                 _ => {}
             }
             return;

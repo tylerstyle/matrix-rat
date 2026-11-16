@@ -869,6 +869,23 @@ mod tests {
     }
 
     #[test]
+    fn suspending_from_the_picture_viewer_stops_it_too() {
+        let dir = Dir::new("viewer");
+        let (mut app, _commands) = app_with(vec![voice("v1", true)], &dir);
+        select(&mut app, 0);
+        app.perform(Action::PlayAudio);
+        let id = app.audio.next_id;
+        let mut request = fetched(&mut app, id, &dir);
+        // The viewer handles its keys itself.
+        app.on_viewer_key(
+            crossterm::event::KeyCode::Char('z'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        assert!(app.suspend_requested);
+        assert_eq!(request.control.try_recv(), Ok(Control::Stop));
+    }
+
+    #[test]
     fn pause_and_seek_on_the_message_that_plays_with_mpv() {
         let dir = Dir::new("pause");
         let (mut app, _commands) = app_with(vec![voice("v1", true), text("t", "hi")], &dir);

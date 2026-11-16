@@ -1500,6 +1500,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
         match &sounding {
             Some(line) => {
                 frame.render_widget(&row.line, rect);
+                // What the row said is gone from under the sound, with its underlines
+                // (a link in a file name); the row's colours stay.
+                let buffer = frame.buffer_mut();
+                for x in rect.x..rect.x + left {
+                    if let Some(cell) = buffer.cell_mut((x, rect.y)) {
+                        cell.set_symbol(" ");
+                        cell.modifier.remove(Modifier::UNDERLINED);
+                    }
+                }
                 // Over all of what the row said, and no further than its marker.
                 let pad = usize::from(left).saturating_sub(line.width());
                 let mut over = line.clone();
@@ -1509,6 +1518,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
             None => frame.render_widget(&row.line, rect),
         }
         for (start, end, id) in &row.hits {
+            // Under a sound only the marker's part of the row is still what was laid
+            // out: a click elsewhere must not reach what is no longer shown.
+            if sounding.is_some() && *start < left {
+                continue;
+            }
             let start = (*start).min(rect.width);
             let end = (*end).min(rect.width);
             app.hits
