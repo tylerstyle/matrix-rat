@@ -1073,7 +1073,9 @@ impl App {
                 // comes opens as at the start).
                 if !self.esc_closes_chat && self.chat_closed {
                     if self.active < self.rooms.len() {
-                        self.open_room(self.active);
+                        // `show_room`: the list follows, out of a space the room is
+                        // not in.
+                        self.show_room(self.active);
                     } else {
                         self.chat_closed = false;
                     }
