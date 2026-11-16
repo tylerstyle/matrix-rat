@@ -167,6 +167,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
+| `Esc` | one step back at a time: closes the help or a popup, clears the room list's filter, goes back to the composer, gives up a reply or an edit, leaves a thread. In the composer with nothing left to cancel it closes the chat: no room is open (nothing in it counts as read, and its messages notify you like any other room's), your draft waits there, and the room list has the focus; `Enter` or a click opens a room again. Set `esc_closes_chat = false` (or switch off "Esc closes the chat" in the settings) to have `Esc` stop at the composer |
 | `Alt-U` | jump to the first unread message (the "new" line) |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
 | `Ctrl-N` | join a room, browse public rooms, start a chat (search people by name or ID), create a room or a space (`info` or `Enter` for User info) |
@@ -176,7 +177,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
 | `Alt-I` | attach the picture in the clipboard (a screenshot, a picture copied in the browser); needs `wl-clipboard` on Wayland or `xclip` on X11 |
 | `Alt-V` | write the message in your editor (`$VISUAL`, else `$EDITOR`); what you save comes back into the composer, unsent |
-| `Ctrl-B` | hide the room list, or show it again (while hidden, going to it with `Alt-1` or `Ctrl-K` shows it in place of the chat) |
+| `Ctrl-B` | hide the room list, or show it again (while hidden, going to it with `Alt-1` or `Ctrl-K` shows it in place of the chat, and so does closing the chat with `Esc`) |
 | `F2` / `F3` | settings / next theme |
 | `Ctrl-Q` | quit |
 
@@ -374,7 +375,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 
 - **Room list (`sidebar`)**: `j`/`k` move cursor, `g`/`G` top/bottom, `l` focus messages, `i` focus composer, `/` find in room.
 - **Messages (`timeline`)**: `j`/`k` select newer/older message, `g`/`G` oldest/newest, `h` focus room list, `l`/`i` focus composer (so `message_details` has no key there unless you give it one), `/` find in room.
-- **Composer (`composer`)**: `Esc` returns focus to messages (plain letters and symbols always type).
+- **Composer (`composer`)**: `Esc` goes to the messages (plain letters and symbols always type), and `Esc` in the messages goes back to the composer. So `Esc` does not close the chat with this preset; to have that, give `back` a key of its own under `[keys.composer]`, e.g. `back = "alt-q"`.
 
 </details>
 
@@ -388,6 +389,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `notification_icon` | the program's icon in desktop notifications: `"color"` (default), `"outline"` (a line drawing in one colour) or `"generic"` (the desktop's own new-message icon). matrix-rat's icons are used when they are installed (the Nix package does that, see [`assets/`](assets/README.md)), else the desktop's own |
 | `sidebar_hidden` | `true`: the room list is put away (`Ctrl-B` changes it) |
 | `sidebar_width` | width of the room list (or drag the divider) |
+| `esc_closes_chat` | `true` (default): `Esc` in the composer, with no reply, edit or thread left to step back from, closes the chat and goes to the room list. `false`: `Esc` stops at the composer |
 | `read_receipts`, `read_markers`, `typing_notices` | what others see of you, and what you see of them |
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
 | `download_dir` | where `s` saves attachments |
