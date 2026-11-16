@@ -312,7 +312,9 @@ lines, ready to paste into a terminal or a file. (`c` copies the whole message i
 
 Everything is optional. The settings menu (`F2`) covers the common choices and writes
 them into `~/.config/matrix-rat/config.toml`, keeping your comments; a few settings
-exist only in that file (marked below).
+exist only in that file (marked below). A setting whose value is not understood keeps
+its default and is named when the app starts; the rest of the file still counts. Only a
+file that is not valid TOML at all stops the start.
 
 ### Themes
 
@@ -364,7 +366,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
@@ -386,6 +388,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `room_previews` | latest message under each room, larger room pictures |
 | `link_previews` | `"off"` (default), `"unencrypted"` or `"all"`: a preview (title and two lines) under messages with a link, for the first link. **Your homeserver fetches the link**, see Good to know |
 | `do_not_disturb` | `true`: no notifications for now. The switch "Do not disturb" in the settings and the command palette (type `dnd`) changes it; the status line says when it is on |
+| `window_title` | `true` (default): the terminal's title is `matrix-rat (3)` while 3 messages wait, `matrix-rat` when none do: the numbers on the room list's badges added up (messages, not rooms; muted rooms, invitations and join requests do not count; do not disturb changes nothing), never a room's name. The title from before is put back when matrix-rat ends, and around `Ctrl-Z` and the editor, in terminals that keep a stack of titles (xterm, kitty, foot, Alacritty and others; elsewhere the shell usually sets its own again). `false` (or "Unread count in title" in the settings): the title is left alone |
 | `notification_icon` | the program's icon in desktop notifications: `"color"` (default), `"outline"` (a line drawing in one colour) or `"generic"` (the desktop's own new-message icon). matrix-rat's icons are used when they are installed (the Nix package does that, see [`assets/`](assets/README.md)), else the desktop's own |
 | `sidebar_hidden` | `true`: the room list is put away (`Ctrl-B` changes it) |
 | `sidebar_width` | width of the room list (or drag the divider) |
@@ -533,6 +536,19 @@ Setting `preset = "vim"` keeps the default keys and adds:
   that reads the keyboard keep their own copies for a while, so do the Matrix
   libraries while a request is on its way, and the system may write memory to swap or
   into a crash dump.
+- **Something not working?** (no pictures, `Shift-Enter` sends, no notifications,
+  pasting a picture fails, a key does nothing): "What the app found here" in the command
+  palette (`Ctrl-P`, type `doctor`) or in the settings (`F2`) shows what matrix-rat
+  found: the terminal and its colours, keyboard and mouse, how pictures are shown and
+  why, the notification service, the clipboard tool, `xdg-open` and the editor, where
+  the store's key is kept, and key bindings or settings in the config that were not
+  understood or took a key away. Lines marked `!` need seeing to, `~` are limits worth
+  knowing. `c` (or "Copy as text") copies it for a bug report. Nothing private is in
+  it: no account, server, room, path or file name. The same report comes from
+  `matrix-rat doctor` in a shell, which needs no login and also runs beside a running
+  matrix-rat: it only reads the config, and asks the terminal what the app asks it at
+  start (in a terminal only; piped elsewhere, those lines say "not asked"). The popup
+  does not open over another one, such as the login form: use the command there.
 - **Logs** are in `~/.local/state/matrix-rat/<profile>/`. At the default level the app
   keeps message text, passwords and keys out of them.
 - **Something stuck?** `Ctrl-Q` quits and `Ctrl-Z` suspends to the shell, also from

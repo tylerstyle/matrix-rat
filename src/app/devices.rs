@@ -2127,6 +2127,8 @@ mod tests {
         app.on_event(key(KeyCode::Esc));
         let row_style = |app: &mut App, terminal: &mut Terminal<TestBackend>, value: &str| {
             app.on_event(key(KeyCode::F(2)));
+            // From the first row up to the last: the menu scrolls down to it.
+            app.on_event(key(KeyCode::Up));
             let text = screen(app, terminal);
             let (col, row) = find(&text, value);
             let style = terminal.backend().buffer()[(col, row)].style();

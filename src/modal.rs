@@ -574,10 +574,14 @@ pub enum Setting {
     Sessions,
     /// Key backup and recovery, and message keys to and from a file.
     KeyBackup,
+    /// The unread count in the terminal's window title (`window_title`).
+    WindowTitle,
+    /// What the app found where it runs (`Action::Doctor`).
+    Doctor,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 23] = [
+    pub const ALL: [Setting; 25] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -592,9 +596,11 @@ impl Setting {
         Setting::ReadMarkers,
         Setting::Notifications,
         Setting::DoNotDisturb,
+        Setting::WindowTitle,
         Setting::Keywords,
         Setting::DownloadDir,
         Setting::Keys,
+        Setting::Doctor,
         Setting::Profile,
         Setting::Encryption,
         Setting::Sessions,
@@ -639,6 +645,8 @@ impl Setting {
             Setting::KeyBackup => "Key backup",
             Setting::IgnoredUsers => "Ignored users",
             Setting::Logout => "Log out",
+            Setting::WindowTitle => "Unread count in title",
+            Setting::Doctor => "What the app found",
         }
     }
 
@@ -694,6 +702,12 @@ impl Setting {
             }
             Setting::Logout => {
                 "Ends this session. Encrypted history needs your recovery key again."
+            }
+            Setting::WindowTitle => {
+                "The terminal's title shows how many messages wait: matrix-rat (3). Off: the title is left alone."
+            }
+            Setting::Doctor => {
+                "Terminal, pictures, clipboard, notifications, keys and config as the app found them, to copy into a bug report."
             }
         }
     }
@@ -1913,6 +1927,8 @@ pub enum Modal {
     Threads(ThreadsPopup),
     /// The account's notification keywords.
     Keywords(crate::keywords::KeywordsPopup),
+    /// What the app found where it runs, for a bug report.
+    Doctor(crate::doctor::Popup),
 }
 
 /// Hand-written, so that a new kind of popup is added here by hand: each one holds
@@ -1947,6 +1963,7 @@ impl std::fmt::Debug for Modal {
             Self::Details(popup) => ("Details", popup),
             Self::Threads(popup) => ("Threads", popup),
             Self::Keywords(popup) => ("Keywords", popup),
+            Self::Doctor(popup) => ("Doctor", popup),
         };
         f.debug_tuple(name).field(popup).finish()
     }
