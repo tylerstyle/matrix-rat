@@ -151,7 +151,7 @@ be done, by demand:
 - Other languages; exporting a chat; a gallery of a room's files.
 - Reading the shortcode a received custom-emoji reaction carries (the SDK does not expose it).
 
-## 6a. Ideas from faro (proposed 0.8, awaiting the user's choice)
+## 6a. Ideas from faro (0.8: A to E approved by the user on 2026-11-16)
 
 [faro](https://github.com/harababurel/faro) is a terminal Signal client on the same libraries
 (ratatui, ratatui-image, crossterm, tokio). Its design documents and source were read on
@@ -179,11 +179,6 @@ are cheap and stand alone.
 
 ### Worth doing later
 
-- **A demo mode** (`matrix-rat demo`): a made-up account with scripted people whose messages
-  cover the hard cases (right-to-left text, wide characters, joined emoji, long names, every
-  message type). Gives README pictures without a real account, a way to try the app before
-  logging in, and a rendering test that cannot rot. Our fake data from the first milestone is
-  a start. Medium to large.
 - **A lock screen** (key or idle time): hides content, stops audio, holds back read receipts,
   makes notifications generic. Medium.
 - **Popups over pictures**: faro cuts the covered part out of a picture instead of hiding the
@@ -200,6 +195,7 @@ are cheap and stand alone.
 
 ### Looked at and not proposed
 
+- **A demo mode** with scripted people: the user does not want it (2026-11-16).
 - **A line-by-line mode** for screen readers and pipes: valuable, but it wants the state logic
   free of the terminal, which is a large restructuring here.
 - **Splitting into several crates, a web demo, a website**: much work for what a one-person
