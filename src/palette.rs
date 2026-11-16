@@ -316,6 +316,8 @@ pub struct PaletteContext {
     pub in_knock: bool,
     pub thread_open: bool,
     pub has_room: bool,
+    /// The user closed the chat: what is about the open chat is not on offer.
+    pub chat_closed: bool,
     pub has_messages: bool,
     /// Whether "edit your last message" has something to edit right now.
     pub can_edit_last: bool,
@@ -326,6 +328,7 @@ pub struct PaletteContext {
     pub user_id: Option<String>,
     pub own_display_name: Option<String>,
     pub mouse: bool,
+    pub esc_closes_chat: bool,
     pub typing_notices: bool,
     pub read_receipts: bool,
     pub do_not_disturb: bool,
@@ -369,11 +372,13 @@ impl std::fmt::Debug for PaletteContext {
             .field("in_knock", &self.in_knock)
             .field("thread_open", &self.thread_open)
             .field("has_room", &self.has_room)
+            .field("chat_closed", &self.chat_closed)
             .field("has_messages", &self.has_messages)
             .field("can_edit_last", &self.can_edit_last)
             .field("open_unread", &self.open_unread)
             .field("connected", &self.connected)
             .field("mouse", &self.mouse)
+            .field("esc_closes_chat", &self.esc_closes_chat)
             .field("typing_notices", &self.typing_notices)
             .field("read_receipts", &self.read_receipts)
             .field("do_not_disturb", &self.do_not_disturb)
@@ -972,6 +977,10 @@ fn include_keymap_action(action: Action) -> ActionInclusion {
 fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
     let sel = ctx.selection;
     let in_pending = ctx.in_invite || ctx.in_knock;
+    // With no chat open, nothing about the open chat would be performed.
+    if ctx.chat_closed && action.needs_open_chat() {
+        return false;
+    }
     match action {
         Action::Reply => sel.has_selection,
         Action::Edit => sel.can_edit,
@@ -1385,6 +1394,13 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::EscClosesChat)),
+            title: Setting::EscClosesChat.label(),
+            hint: Some(switch(ctx.esc_closes_chat)),
+            aliases: &["escape", "close chat", "no chat open", "setting"],
+            enabled: true,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::TypingNotices)),
             title: Setting::TypingNotices.label(),
             hint: Some(switch(ctx.typing_notices)),
@@ -1680,6 +1696,7 @@ mod tests {
             in_knock: false,
             thread_open: false,
             has_room: true,
+            chat_closed: false,
             has_messages: true,
             can_edit_last: true,
             open_unread: Some(false),
@@ -1687,6 +1704,7 @@ mod tests {
             user_id: None,
             own_display_name: None,
             mouse: true,
+            esc_closes_chat: true,
             typing_notices: true,
             read_receipts: true,
             do_not_disturb: false,

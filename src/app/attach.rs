@@ -432,7 +432,9 @@ impl App {
         }
 
         if self.matrix.is_some() {
-            self.clear_marked_unread(self.active);
+            if let Some(open) = self.open_index() {
+                self.clear_marked_unread(open);
+            }
             self.attach.sends += 1;
             self.send_matrix(MatrixCmd::SendFiles {
                 send: self.attach.sends,

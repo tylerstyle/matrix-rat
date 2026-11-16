@@ -167,3 +167,108 @@ pub enum Action {
     /// Open the sticker picker for the active room or thread.
     OpenStickers,
 }
+
+impl Action {
+    /// Whether the action is about the open chat: its messages, its composer, or the
+    /// room as the one that is open. With no chat open (see `App::close_chat`) there
+    /// is nothing for it to act on, so it is not performed and the command palette
+    /// does not offer it. Actions about the room under the room list's cursor, and
+    /// everything that opens a room, are not among them.
+    ///
+    /// Every action is named, so that a new one has to be placed.
+    pub fn needs_open_chat(self) -> bool {
+        match self {
+            // Going to the messages or the composer, and moving in the messages.
+            Action::FocusNext
+            | Action::FocusPrev
+            | Action::Focus(Pane::Timeline | Pane::Composer)
+            | Action::FocusDir(Dir::Right | Dir::Up | Dir::Down)
+            | Action::PageUp
+            | Action::PageDown
+            | Action::JumpToNewest
+            | Action::JumpToOldest
+            | Action::JumpToUnread
+            | Action::SelectOlder
+            | Action::SelectNewer
+            // The selected message.
+            | Action::Reply
+            | Action::Edit
+            | Action::React
+            | Action::Delete
+            | Action::Copy
+            | Action::CopyCode
+            | Action::Open
+            | Action::OpenExternal
+            | Action::JumpToReply
+            | Action::Save
+            | Action::OpenThread
+            | Action::CloseThread
+            | Action::PinMessage
+            | Action::ForwardMessage
+            | Action::RetryDecryption
+            | Action::UserInfo
+            | Action::MessageDetails
+            // The composer.
+            | Action::Send
+            | Action::Newline
+            | Action::CancelCompose
+            | Action::EditLast
+            | Action::ComposeInEditor
+            | Action::OpenEmoji
+            | Action::Attach
+            | Action::PastePicture
+            | Action::CreatePoll
+            | Action::OpenStickers
+            // The room as the open one.
+            | Action::AcceptInvite
+            | Action::DeclineInvite
+            | Action::WithdrawKnock
+            | Action::Search
+            | Action::ToggleUnread
+            | Action::OpenPinned => true,
+
+            Action::Quit
+            | Action::Suspend
+            | Action::Focus(Pane::Sidebar)
+            | Action::FocusDir(Dir::Left)
+            | Action::FocusRoomFilter
+            | Action::ToggleHelp
+            | Action::CycleTheme
+            | Action::ToggleSidebar
+            | Action::Back
+            | Action::SidebarUp
+            | Action::SidebarDown
+            | Action::SidebarOpen
+            | Action::SidebarTop
+            | Action::SidebarBottom
+            | Action::LoginSubmit
+            | Action::LoginBrowser
+            | Action::RecoverySubmit
+            | Action::CloseModal
+            | Action::OpenSettings
+            | Action::StartVerification
+            | Action::RoomPrev
+            | Action::RoomNext
+            | Action::SearchEverywhere
+            | Action::SpaceNext
+            | Action::SpacePrev
+            | Action::SpaceInfo
+            | Action::FilterUnread
+            | Action::FilterPeople
+            | Action::Verify(_)
+            | Action::OpenPalette
+            | Action::OpenRoom(_)
+            | Action::SelectTheme(_)
+            | Action::Setting(_)
+            | Action::NewRoom
+            | Action::RoomInfo
+            | Action::LeaveRoom
+            | Action::InviteUser
+            | Action::Manage(_)
+            | Action::ContextMenu
+            | Action::MarkAllRead
+            | Action::OpenThreads
+            | Action::Devices(_) => false,
+        }
+    }
+}

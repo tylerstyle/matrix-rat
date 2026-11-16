@@ -139,7 +139,7 @@ impl App {
     /// its threads is shown in their place.
     pub(super) fn room_messages_of(&self, index: usize) -> &[Message] {
         match &self.threads.open {
-            Some(view) if index == self.active => &view.room_messages,
+            Some(view) if Some(index) == self.open_index() => &view.room_messages,
             _ => self
                 .rooms
                 .get(index)
@@ -184,7 +184,7 @@ impl App {
             (_, true) => return self.show_toast("That message has not been sent yet"),
             (_, false) => None,
         };
-        let Some(room_id) = self.room_id() else {
+        let (Some(open), Some(room_id)) = (self.open_index(), self.room_id()) else {
             return;
         };
         let root_message = message.clone();
@@ -213,7 +213,7 @@ impl App {
         let mut shown = vec![first];
         shown.extend(replies.unwrap_or_default());
 
-        let room = &mut self.rooms[self.active];
+        let room = &mut self.rooms[open];
         self.repaint = true;
         self.threads.open = Some(ThreadView {
             root: root.clone(),
@@ -245,7 +245,7 @@ impl App {
     /// Opens `ThreadView` for `root` in the active room without sending `OpenThread`
     /// (the worker has already opened a timeline for this thread via `OpenEvent`).
     pub(super) fn enter_thread_from_jump(&mut self, root: String) {
-        let Some(room_id) = self.room_id() else {
+        let (Some(open), Some(room_id)) = (self.open_index(), self.room_id()) else {
             return;
         };
         if self.thread_open() {
@@ -263,13 +263,13 @@ impl App {
         self.composer.set_text(&draft);
         self.restore_thread_marks(&room_id, &root);
 
-        let existing_root = self.rooms[self.active]
+        let existing_root = self.rooms[open]
             .messages
             .iter()
             .position(|m| matches!(&m.item, Some(ItemRef::Event(id)) if id == &root));
         let (has_root_message, root_index, root_message, shown) = match existing_root {
             Some(idx) => {
-                let root_msg = self.rooms[self.active].messages[idx].clone();
+                let root_msg = self.rooms[open].messages[idx].clone();
                 let mut first = root_msg.clone();
                 first.id = ROOT_ID.to_owned();
                 first.read_by = Default::default();
@@ -278,7 +278,7 @@ impl App {
             None => (false, 0, Message::default(), Vec::new()),
         };
 
-        let room = &mut self.rooms[self.active];
+        let room = &mut self.rooms[open];
         self.repaint = true;
         self.threads.open = Some(ThreadView {
             root: Some(root.clone()),
@@ -333,7 +333,7 @@ impl App {
         }
 
         let mut deleted = None;
-        if let Some(room) = self.rooms.get_mut(self.active) {
+        if let Some(room) = self.open_index().and_then(|open| self.rooms.get_mut(open)) {
             let shown = std::mem::replace(&mut room.messages, view.room_messages);
             match &view.root {
                 // What was read is no longer new; the next update has the real state.
@@ -406,8 +406,9 @@ impl App {
                     return;
                 };
                 // The open room's draft is put aside while one of its threads is shown.
+                let open = self.open_index();
                 let draft = match &mut self.threads.open {
-                    Some(view) if index == self.active => &mut view.room_draft,
+                    Some(view) if Some(index) == open => &mut view.room_draft,
                     _ => &mut self.rooms[index].draft,
                 };
                 if draft.is_empty() {

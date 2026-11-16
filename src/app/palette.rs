@@ -16,6 +16,7 @@ impl App {
         if self.theme_names.is_empty() {
             // keep callers safe even without open_palette refresh
         }
+        let open = self.open_index();
         let rooms = crate::model::RoomKind::SECTIONS
             .iter()
             .flat_map(|kind| {
@@ -27,7 +28,7 @@ impl App {
                         id: r.id.clone(),
                         name: r.name.clone(),
                         unread: r.unread,
-                        active: i == self.active,
+                        active: Some(i) == open,
                     })
             })
             .collect();
@@ -77,6 +78,7 @@ impl App {
             in_knock,
             thread_open,
             has_room: self.room().is_some(),
+            chat_closed: self.chat_closed,
             has_messages: !self.messages().is_empty(),
             can_edit_last: self.last_editable().is_some(),
             open_unread: self
@@ -87,6 +89,7 @@ impl App {
             user_id: self.user_id.clone(),
             own_display_name: self.own_profile_hint(),
             mouse: self.mouse,
+            esc_closes_chat: self.esc_closes_chat,
             typing_notices: self.typing_notices,
             read_receipts: self.read_receipts,
             do_not_disturb: self.do_not_disturb,
@@ -267,6 +270,7 @@ impl App {
     pub(super) fn perform_setting(&mut self, setting: Setting) {
         match setting {
             Setting::Mouse
+            | Setting::EscClosesChat
             | Setting::TypingNotices
             | Setting::ReadReceipts
             | Setting::DoNotDisturb

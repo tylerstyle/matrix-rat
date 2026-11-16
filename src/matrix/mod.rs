@@ -107,6 +107,9 @@ pub enum MatrixCmd {
         room_id: String,
         generation: u64,
     },
+    /// Stop delivering the timeline that was asked for last (see
+    /// [`MatrixCmd::OpenRoom`]): the UI shows no room any more.
+    CloseRoom,
     /// Open a room (or thread) focused around a specific event id via `/context` when
     /// it is not already in a live timeline. Answered with [`MatrixEvent::Timeline`] for
     /// `generation`, or [`MatrixEvent::JumpFailed`] if unavailable.
@@ -453,6 +456,7 @@ impl MatrixCmd {
             Self::CancelLogin => ("CancelLogin", vec![]),
             Self::Recover { .. } => ("Recover", vec![]),
             Self::OpenRoom { room_id, .. } => ("OpenRoom", vec![id(room_id)]),
+            Self::CloseRoom => ("CloseRoom", vec![]),
             Self::OpenEvent {
                 room_id,
                 generation,

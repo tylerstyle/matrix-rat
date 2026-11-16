@@ -1505,6 +1505,26 @@ impl Keymap {
             .map(|b| b.label.as_ref())
     }
 
+    /// The keys that perform `action` while `context` has the focus, in the order
+    /// they are listed: those bound everywhere, unless the context uses the key for
+    /// something else, then those bound in the context itself.
+    pub fn labels_from(&self, context: Context, action: Action) -> Vec<&str> {
+        let everywhere = self
+            .bindings
+            .iter()
+            .filter(|b| b.context == Context::Global && context != Context::Global)
+            .filter(|b| {
+                self.lookup_in(context, b.code, b.mods)
+                    .is_none_or(|taken| taken == action)
+            });
+        let there = self.bindings.iter().filter(|b| b.context == context);
+        everywhere
+            .chain(there)
+            .filter(|b| b.action == action)
+            .map(|b| b.label.as_ref())
+            .collect()
+    }
+
     /// The key that gives up a reply or an edit from the composer, to name it there:
     /// the one bound to `CancelCompose`; else the `Back` key, unless the composer has
     /// another use for it (the vim preset's Esc goes to the messages); else Ctrl-C,
@@ -1928,6 +1948,63 @@ mod tests {
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn labels_from_names_the_keys_that_work_where_the_focus_is() {
+        let keymap = Keymap::default();
+        // Those bound everywhere first, then the context's own.
+        assert_eq!(
+            keymap.labels_from(Context::Sidebar, Action::ToggleHelp),
+            ["F1", "?"]
+        );
+        assert_eq!(
+            keymap.labels_from(Context::Sidebar, Action::FocusRoomFilter),
+            ["Alt-R", "Ctrl-K"]
+        );
+        assert_eq!(
+            keymap.labels_from(Context::Sidebar, Action::SidebarOpen),
+            ["Enter"]
+        );
+        assert_eq!(
+            keymap.labels_from(Context::Global, Action::ToggleHelp),
+            ["F1"]
+        );
+        // Bound in another context only: not from here.
+        assert!(
+            keymap
+                .labels_from(Context::Sidebar, Action::Send)
+                .is_empty()
+        );
+        // A key that the context uses for something else does not count.
+        let cfg = Config::parse("[keys.sidebar]\nsidebar_open = \"f1\"\n").unwrap();
+        let (keymap, _) = Keymap::from_config(&cfg);
+        assert_eq!(
+            keymap.labels_from(Context::Sidebar, Action::ToggleHelp),
+            ["?"]
+        );
+        assert_eq!(
+            keymap.labels_from(Context::Sidebar, Action::SidebarOpen),
+            ["F1"]
+        );
+        // The vim preset's Esc in the composer goes to the messages: from there
+        // Esc is not a key for stepping back.
+        let cfg = Config::parse("preset = \"vim\"\n").unwrap();
+        let (keymap, _) = Keymap::from_config(&cfg);
+        assert!(
+            keymap
+                .labels_from(Context::Composer, Action::Back)
+                .is_empty()
+        );
+        assert_eq!(keymap.labels_from(Context::Sidebar, Action::Back), ["Esc"]);
+        // It can be given a key of its own there (as the README says).
+        let cfg = Config::parse("preset = \"vim\"\n[keys.composer]\nback = \"alt-q\"\n").unwrap();
+        let (keymap, warnings) = Keymap::from_config(&cfg);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            keymap.labels_from(Context::Composer, Action::Back),
+            ["Alt-Q"]
+        );
     }
 
     #[test]

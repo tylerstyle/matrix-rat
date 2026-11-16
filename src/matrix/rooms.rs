@@ -669,6 +669,9 @@ impl Timelines {
                     Err(err) => self.fail("Could not open the room", err),
                 }
             }
+            // No room is shown any more: nothing is forwarded, loaded or looked up
+            // for one. The timelines stay cached for the next time they are opened.
+            MatrixCmd::CloseRoom => self.close(),
             MatrixCmd::OpenEvent {
                 room_id,
                 event_id,
@@ -2301,6 +2304,47 @@ mod tests {
             Ok(MatrixEvent::ActionFailed(text)) => assert!(text.contains("not in this room")),
             other => panic!("expected opening to fail, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn closing_the_room_stops_its_timeline() {
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::left::{LeftRooms, testing::Server};
+        use matrix_sdk::ruma::room_id;
+
+        let room = room_id!("!open:localhost");
+        let client = Server {
+            joined: vec![room.as_str()],
+            ..Server::default()
+        }
+        .client()
+        .await;
+        let left = LeftRooms::default();
+        let (mut timelines, _events) = timelines_of(client, &left);
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room.to_string(),
+                generation: 1,
+            })
+            .await;
+        let forwarder = timelines.forwarder.as_ref().map(|task| task.abort_handle());
+        let forwarder = forwarder.expect("the open room's timeline is forwarded");
+        // The UI shows no room any more.
+        timelines.handle(MatrixCmd::CloseRoom).await;
+        assert!(timelines.forwarder.is_none());
+        assert!(timelines.paginator.is_none() && timelines.detached.is_none());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !forwarder.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the forwarder ends");
+        // The room's timeline stays cached for the next time it is opened.
+        assert_eq!(timelines.cache.len(), 1);
+        // Nothing to hide, nothing shown: the command names no room.
+        assert_eq!(format!("{:?}", MatrixCmd::CloseRoom), "CloseRoom");
+        assert_eq!(MatrixCmd::CloseRoom.describe(), "CloseRoom");
     }
 
     #[tokio::test]

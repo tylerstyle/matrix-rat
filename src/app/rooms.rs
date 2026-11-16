@@ -76,7 +76,7 @@ impl App {
         if self.focus == Pane::Sidebar {
             self.cursor_room()
         } else {
-            (self.active < self.rooms.len()).then_some(self.active)
+            self.open_index()
         }
     }
 
@@ -1366,8 +1366,7 @@ impl App {
             Click::LowPriority => self.toggle_room_tag(true),
             // The name above the messages is the open room's, wherever the focus is.
             Click::OpenInfo => {
-                let open = (self.active < self.rooms.len()).then_some(self.active);
-                self.open_info(open, None);
+                self.open_info(self.open_index(), None);
             }
             Click::SettingChoice(idx) => self.on_setting_choice(idx),
             Click::SettingSlot(slot) => self.on_setting_slot(slot),
@@ -2443,7 +2442,7 @@ impl App {
             return;
         };
         self.manage.pending_open = None;
-        if index != self.active || self.thread_open() {
+        if Some(index) != self.open_index() || self.thread_open() {
             self.open_room(index);
         }
         if let Some(at) = self.visible_rooms().iter().position(|i| *i == index) {
