@@ -3,7 +3,7 @@ source: src/app/doctor.rs
 expression: "screen(&mut app, &mut terminal)"
 ---
 "╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────╮"
-"│╭ What the app found · 1–18 of 36 ───────────────────────────────────────────╮│"
+"│╭ What the app found · 1–18 of 37 ───────────────────────────────────────────╮│"
 "││ Terminal                                                                   ││"
 "││   matrix-rat                 1.2.3                                         ││"
 "││   TERM                       xterm-kitty                                   ││"

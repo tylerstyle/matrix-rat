@@ -182,6 +182,7 @@ mod tests {
                 size: Some(size),
                 kind: crate::model::MediaKind::File,
                 source: Box::new(MediaSource::Plain(OwnedMxcUri::from(key))),
+                audio: None,
             }),
             ..Message::default()
         }

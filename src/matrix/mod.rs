@@ -270,6 +270,17 @@ pub enum MatrixCmd {
         /// Open it with the desktop's program for it afterwards.
         open: bool,
     },
+    /// Download a voice or audio message into a private file in `dir`, to be played,
+    /// in place of one that is still on its way; answered with
+    /// [`MatrixEvent::AudioFetched`].
+    FetchAudio {
+        /// The app's number for the sound.
+        id: u64,
+        file: crate::model::Attachment,
+        dir: std::path::PathBuf,
+    },
+    /// Give up the download of [`MatrixCmd::FetchAudio`]; it is not answered.
+    CancelAudio,
     /// Ask the homeserver what a web address is about; answered with
     /// [`MatrixEvent::LinkPreview`]. Only sent when the user turned link previews on.
     LinkPreview {
@@ -525,6 +536,9 @@ impl MatrixCmd {
             Self::LinkPreview { .. } => ("LinkPreview", vec![]),
             Self::Verification(command) => ("Verification", vec![Some(format!("{command:?}"))]),
             Self::SaveFile { open, .. } => ("SaveFile", vec![Some(format!("open: {open}"))]),
+            // The source of an encrypted file carries its key; the folder is a path.
+            Self::FetchAudio { id, .. } => ("FetchAudio", vec![Some(format!("sound {id}"))]),
+            Self::CancelAudio => ("CancelAudio", vec![]),
             Self::OpenThread { room_id, root, .. } => ("OpenThread", vec![id(room_id), id(root)]),
             Self::InThread { root, command } => {
                 ("InThread", vec![id(root), Some(command.shown(ids))])
@@ -867,6 +881,12 @@ pub enum MatrixEvent {
         open: bool,
         result: Result<std::path::PathBuf, String>,
     },
+    /// Outcome of [`MatrixCmd::FetchAudio`]: the private copy to play (removed when
+    /// dropped), or a short reason for the user.
+    AudioFetched {
+        id: u64,
+        result: Result<crate::audio::TempAudio, String>,
+    },
     /// Outcome of [`MatrixCmd::LinkPreview`]: what the server said about the address
     /// (`None`: nothing, for whatever reason).
     LinkPreview {
@@ -1130,6 +1150,10 @@ impl MatrixEvent {
             Self::SuppressedNotice { room_id } => ("SuppressedNotice", vec![id(room_id)]),
             Self::NoticeClicked { room_id } => ("NoticeClicked", vec![id(room_id)]),
             Self::FileSaved { result, .. } => ("FileSaved", vec![ok(result.is_ok())]),
+            Self::AudioFetched { id, result } => (
+                "AudioFetched",
+                vec![Some(format!("sound {id}")), ok(result.is_ok())],
+            ),
             Self::UploadLimit(bytes) => ("UploadLimit", vec![Some(bytes.to_string())]),
             // The reason names a file.
             Self::FilesNotSent { .. } => ("FilesNotSent", vec![]),

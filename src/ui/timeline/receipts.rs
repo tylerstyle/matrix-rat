@@ -56,6 +56,10 @@ pub(super) fn add(mut rows: Vec<Row>, room: &Room, max_width: usize, theme: &The
             let pad = max_width - text - marker_width;
             row.line.spans.push(Span::raw(" ".repeat(pad)));
             row.line.spans.extend(spans);
+            // A voice or audio message that plays keeps it (see `draw`).
+            if let Some(part) = &mut row.audio {
+                part.marker = marker_width as u16;
+            }
         } else if row.image.is_none() && max_width >= CUT_MIN {
             // "… ✓" over the end of the text. (Nothing can be written over a
             // picture; who read that is in the menu.)
@@ -71,6 +75,11 @@ pub(super) fn add(mut rows: Vec<Row>, room: &Room, max_width: usize, theme: &The
             row.line
                 .spans
                 .push(Span::styled(format!("…{} ✓", " ".repeat(pad)), muted));
+            // Of that, a voice or audio message that plays keeps the tick: what was cut
+            // is not shown meanwhile.
+            if let Some(part) = &mut row.audio {
+                part.marker = 2;
+            }
         }
     }
     rows

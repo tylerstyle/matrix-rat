@@ -306,7 +306,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
                 let dot = if on { "● " } else { "○ " };
                 spans.push(Span::styled(format!("{dot}{value}"), theme.style(role)));
             }
-            Setting::DownloadDir => match (&mut menu.editing, selected) {
+            Setting::DownloadDir | Setting::AudioPlayer => match (&mut menu.editing, selected) {
                 (Some(typed), true) => {
                     let view = typed.view(room.saturating_sub(1), false);
                     frame.set_cursor_position(Position::new(

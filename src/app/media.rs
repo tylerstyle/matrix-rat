@@ -82,7 +82,13 @@ impl App {
         if self.selectable(index) {
             self.timeline.selected = Some(index);
         }
-        if self.messages().get(index).is_some_and(|m| m.file.is_some()) {
+        let sound = self.messages().get(index).is_some_and(|m| m.is_sound());
+        let audio = self.audio_caps();
+        if sound && self.timeline.selected == Some(index) && (audio.can_play || audio.selected) {
+            // Played (or stopped) in here, as `x` does; where it cannot be (over SSH,
+            // without a player), the system's player as before.
+            self.perform(crate::action::Action::PlayAudio);
+        } else if self.messages().get(index).is_some_and(|m| m.file.is_some()) {
             self.save_attachment(true);
         } else {
             self.open_image(index);
@@ -93,7 +99,12 @@ impl App {
         if let Some(action) = self.keymap.lookup_popup_global(code, mods) {
             match action {
                 crate::action::Action::Quit => self.should_quit = true,
-                crate::action::Action::Suspend => self.suspend_requested = true,
+                crate::action::Action::Suspend => {
+                    // As everywhere: the player is its own process group and would
+                    // play on while the app is stopped.
+                    self.stop_audio();
+                    self.suspend_requested = true;
+                }
                 _ => {}
             }
             return;

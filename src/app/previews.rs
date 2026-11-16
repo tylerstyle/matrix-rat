@@ -220,6 +220,7 @@ mod tests {
             source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
                 "mxc://example.org/f".into(),
             )),
+            audio: None,
         });
         let (mut app, mut terminal, mut commands) = app_with(
             vec![

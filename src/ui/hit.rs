@@ -20,6 +20,8 @@ pub enum Button {
 pub enum InputTarget {
     Login(usize),
     Recovery,
+    /// The text setting being typed in the settings: the download folder, or the audio
+    /// player.
     DownloadDir,
     EmojiQuery,
     PaletteQuery,

@@ -166,6 +166,13 @@ pub enum Action {
     CreatePoll,
     /// Open the sticker picker for the active room or thread.
     OpenStickers,
+    /// Play the selected voice or audio message in here, or stop it (also: stop what
+    /// plays, with no such message selected).
+    PlayAudio,
+    /// Pause or resume what plays (mpv only).
+    PauseAudio,
+    /// Jump back (`Left`) or forward (`Right`) in what plays (mpv only).
+    SeekAudio(Dir),
     /// Show what the app found where it runs (terminal, pictures, the desktop's
     /// helpers, keys, config), to be copied into a bug report.
     Doctor,
@@ -222,6 +229,10 @@ impl Action {
             | Action::PastePicture
             | Action::CreatePoll
             | Action::OpenStickers
+            // What plays belongs to the open room.
+            | Action::PlayAudio
+            | Action::PauseAudio
+            | Action::SeekAudio(_)
             // The room as the open one.
             | Action::AcceptInvite
             | Action::DeclineInvite

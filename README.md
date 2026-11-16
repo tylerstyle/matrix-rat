@@ -164,7 +164,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `x` play or stop a voice or audio message (with mpv: `Space` pause, `←` `→` 5 seconds back or on), `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Esc` | one step back at a time: closes the help or a popup, clears the room list's filter, goes back to the composer, gives up a reply or an edit, leaves a thread. In the composer with nothing left to cancel it closes the chat: no room is open (nothing in it counts as read, and its messages notify you like any other room's), your draft waits there, and the room list has the focus; `Enter` or a click opens a room again. Set `esc_closes_chat = false` (or switch off "Esc closes the chat" in the settings) to have `Esc` stop at the composer |
@@ -368,7 +368,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`.
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**
@@ -396,6 +396,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `read_receipts`, `read_markers`, `typing_notices` | what others see of you, and what you see of them |
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
 | `download_dir` | where `s` saves attachments |
+| `audio_player` | what plays voice and audio messages in the app (`x`): `"auto"` (default) takes the first of `mpv`, `ffplay`, `pw-play`, `paplay` and `aplay` found on `PATH`; or a command line of your own, such as `"mpv --volume=70"`, to which the file is added at the end (split into words like `$EDITOR`, no shell). It must play the file and end when the sound does. Also **Audio player** in the settings, which says what was found. See Good to know |
 | `mouse` | turn off to use the terminal's own text selection |
 | `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
 | `notification_preview` (file only) | `false` hides message text, names and pictures in notifications |
@@ -497,10 +498,32 @@ Setting `preset = "vim"` keeps the default keys and adds:
   your vote. Your own poll can be ended from the message menu, and edited (`e`) as long as
   nobody voted. Votes of people you ignore are not counted.
 - **Voice messages, audio, video and places**: a voice message shows its length and
-  waveform, audio and video their length and size; `o` (or a click on the `▶`) downloads
-  one and plays it in your system's player, `s` only saves it. A video shows its preview
-  picture where the sender gave one. A shared place shows its description and opens in
-  your map program with `o`.
+  waveform, audio and video their length and size. `x` on a voice or audio message (or
+  a click on its `▶`, or "Play audio" in its menu) plays it **in the app**: its first
+  line becomes `■ 0:05 / 0:12`, and the played part of its waveform takes the accent
+  colour (a message without a waveform gets a plain bar). `x` again, or a click on the
+  `■`, stops it; while it downloads it shows `loading`, and `x` or `Esc` gives that up.
+  One sound plays at a time: starting another stops the first. It goes on while you
+  scroll, select other messages or open popups, and in a thread of its room; it stops
+  when you open another room, close the chat, leave the room, log out, press `Ctrl-Z` or
+  quit (`x` with no voice or audio message selected, or "Stop audio" in `Ctrl-P`, stops
+  it from anywhere in the room).
+  No sound library is built in: a player you have is started, see `audio_player`. With
+  **mpv**, the position is mpv's own, and on the message that plays `Space` pauses and
+  resumes and `←` `→` jump 5 seconds back or on (through mpv's control socket). Other
+  players show a position counted from their start, without pause or seek. The file is
+  downloaded (and decrypted) into a temporary file readable by you only, in
+  `$XDG_RUNTIME_DIR/matrix-rat/<profile>-audio/` (else under your state folder), under
+  a random name (never the
+  sender's file name), and removed when the sound ends or is stopped; what a killed
+  run left there is removed at the next start. Files over 100 MB are not played here
+  (`s` saves them). The player is stopped and waited for when the app ends, also when
+  the app is killed (the system kills the player with it). **Over SSH** this is not
+  offered: the sound would play on the machine matrix-rat runs on, so `s` saves the file
+  instead. `o` still downloads a voice message, video or audio and plays it in your
+  system's player, `s` only saves it. A video shows its preview picture where the sender
+  gave one. A shared place shows its description and opens in your map program with
+  `o`.
 - **Custom emoji and stickers** come from image packs: your own, the open room's, and
   those of other rooms you switched on for everywhere (packs are made in another client,
   such as Cinny or FluffyChat). They are loaded the first time something needs them

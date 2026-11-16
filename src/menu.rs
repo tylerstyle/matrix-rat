@@ -404,6 +404,8 @@ pub struct MessageFacts {
     pub can_pin: bool,
     /// Whether the current user can ban the message's sender.
     pub can_ban_sender: bool,
+    /// Whether the message plays in here, or plays now (see `AudioCaps`).
+    pub audio: crate::palette::AudioCaps,
 }
 
 /// The entries for a message. Empty for lines that are not messages.
@@ -486,9 +488,23 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
             .links
             .is_empty()
     };
+    // Voice and audio play in here where they can; the system's player stays the other
+    // way to them.
+    let in_app = !deleted && (facts.audio.can_play || facts.audio.selected);
+    if in_app {
+        let label = if facts.audio.selected {
+            "Stop audio"
+        } else {
+            "Play audio"
+        };
+        items.push(Item::action(keys, label, Timeline, Action::PlayAudio));
+    }
     if !deleted {
         let open = if let Some(file) = &message.file {
             let label = match file.kind {
+                crate::model::MediaKind::Audio | crate::model::MediaKind::Voice if in_app => {
+                    "Play in system player"
+                }
                 crate::model::MediaKind::Audio | crate::model::MediaKind::Voice => "Play audio",
                 crate::model::MediaKind::Video => "Play video",
                 crate::model::MediaKind::File | crate::model::MediaKind::Picture => "Open file",
@@ -826,6 +842,7 @@ mod tests {
         can_redact_other: false,
         can_pin: false,
         can_ban_sender: false,
+        audio: crate::palette::AudioCaps::NONE,
     };
 
     #[test]
@@ -913,6 +930,7 @@ mod tests {
             source: Box::new(MediaSource::Plain(
                 mxc_uri!("mxc://example.org/f").to_owned(),
             )),
+            audio: None,
         }
     }
 

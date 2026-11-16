@@ -19,7 +19,8 @@ ratatui = "0.30.2"
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 # Runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+# `process`, `net` and `io-util`: the audio player and mpv's control socket (src/audio).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "process", "net", "io-util"] }
 futures = "0.3"
 
 # Support

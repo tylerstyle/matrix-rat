@@ -38,6 +38,20 @@ pub struct Row {
     image: Option<ImageRow>,
     /// Cells of the row that custom emoji pictures are painted over.
     emotes: Vec<EmoteSpot>,
+    /// What of a voice or audio message the row shows, which looks different while
+    /// the message loads or plays (see `ui::audio`).
+    audio: Option<AudioPart>,
+}
+
+/// A row of a voice or audio message that changes while it loads or plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioPart {
+    /// Of its first line (`▶ 🎤 note.ogg · 0:12 · 2 kB`), else of its waveform's.
+    head: bool,
+    /// The first row of that line (a long one takes more).
+    first: bool,
+    /// Columns at the row's end that a read marker takes (see `receipts`): it stays.
+    marker: u16,
 }
 
 /// Hand-written: the line is what the message says, and who sent it.
@@ -50,6 +64,7 @@ impl std::fmt::Debug for Row {
             .field("hits", &self.hits)
             .field("image", &self.image)
             .field("emotes", &self.emotes.len())
+            .field("audio", &self.audio)
             .finish_non_exhaustive()
     }
 }
@@ -91,6 +106,7 @@ impl Row {
             hits: Vec::new(),
             image: None,
             emotes: Vec::new(),
+            audio: None,
         }
     }
 }
@@ -141,6 +157,41 @@ fn marker(message: &Message, repeated_shield: bool) -> Option<(String, Role)> {
                 .chain(edited.then_some("(edited)"))
                 .collect();
             (!parts.is_empty()).then(|| (parts.join(" "), role))
+        }
+    }
+}
+
+/// What a row of the sound's message shows while it loads or plays, in `width`
+/// columns; `None` where the row stays as it is. A first line or a waveform that took
+/// more than one row says all in its first; the others are left empty.
+fn sound_row(
+    part: AudioPart,
+    view: crate::app::AudioView,
+    message: &Message,
+    width: usize,
+    theme: &Theme,
+    images: &mut ImageStore,
+) -> Option<Line<'static>> {
+    let file = message.file.as_ref()?;
+    let waveform = file
+        .audio
+        .as_ref()
+        .map_or(&[][..], |meta| meta.waveform.as_slice());
+    match (part.head, part.first) {
+        (true, true) => {
+            let spinner = if view == crate::app::AudioView::Loading {
+                images.spinner()
+            } else {
+                ""
+            };
+            Some(super::audio::head(
+                view, file, INDENT, width, spinner, theme,
+            ))
+        }
+        (true, false) => Some(Line::default()),
+        (false, true) => super::audio::wave(view, waveform, INDENT, width, theme),
+        (false, false) => {
+            super::audio::wave(view, waveform, INDENT, width, theme).map(|_| Line::default())
         }
     }
 }
@@ -206,6 +257,27 @@ fn preview_url<'r>(message: &Message, rich: &'r Rich, view: &PreviewView) -> Opt
     crate::previews::eligible(url).then_some(url.as_str())
 }
 
+/// For a voice or audio message that can be played here: whether the second line of its
+/// text is its waveform (as `matrix::convert` writes it). `None` for any other message.
+fn sound_rows(message: &Message, rich: &Rich) -> Option<bool> {
+    if !message.is_sound() {
+        return None;
+    }
+    let waveform = message
+        .file
+        .as_ref()?
+        .audio
+        .as_ref()
+        .map_or(&[][..], |meta| meta.waveform.as_slice());
+    let second = rich.lines.get(1).map(|line| {
+        line.segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>()
+    });
+    Some(!waveform.is_empty() && second.is_some_and(|text| text == crate::audio::bars(waveform)))
+}
+
 /// The rows under a message for its link's preview: the title in bold, and up to two
 /// lines of description. Plain text only: it is from whoever wrote the page.
 fn preview_rows(preview: &Preview, msg: usize, body_width: usize, theme: &Theme) -> Vec<Row> {
@@ -222,6 +294,7 @@ fn preview_rows(preview: &Preview, msg: usize, body_width: usize, theme: &Theme)
         hits: Vec::new(),
         image: None,
         emotes: Vec::new(),
+        audio: None,
     };
     let title = Style {
         fg: theme.style(Role::Text).fg,
@@ -397,6 +470,7 @@ pub fn build_layout(
                     hits,
                     image: None,
                     emotes: Vec::new(),
+                    audio: None,
                 });
             }
 
@@ -436,6 +510,7 @@ pub fn build_layout(
                                         rows: *count,
                                     }),
                                     emotes: Vec::new(),
+                                    audio: None,
                                 });
                             }
                         }
@@ -454,6 +529,7 @@ pub fn build_layout(
                                 hits: vec![(start, end, HitId::Image(i))],
                                 image: None,
                                 emotes: Vec::new(),
+                                audio: None,
                             });
                         }
                         Slot::Failed(_) | Slot::Off => {}
@@ -534,6 +610,10 @@ pub fn build_layout(
                     Vec::new()
                 };
                 let last = wrapped.len().saturating_sub(1);
+                // A voice or audio message: its first line and its waveform change
+                // while it loads or plays (they are drawn over, see `draw`).
+                let sound = sound_rows(message, &rich);
+                let mut wave_seen = false;
                 let play_style = Style {
                     fg: theme.style(Role::Link).fg,
                     ..Style::new()
@@ -547,6 +627,19 @@ pub fn build_layout(
                         .filter(|b| in_block != Some(*b))
                         .filter(|b| rich.code_blocks.get(*b).is_some_and(|c| !c.text.is_empty()));
                     in_block = row.block;
+                    let audio = sound.and_then(|waveform| match row.line {
+                        0 => Some(AudioPart {
+                            head: true,
+                            first: n == 0,
+                            marker: 0,
+                        }),
+                        1 if waveform => Some(AudioPart {
+                            head: false,
+                            first: !std::mem::replace(&mut wave_seen, true),
+                            marker: 0,
+                        }),
+                        _ => None,
+                    });
                     let mut spans = vec![Span::raw(INDENT)];
                     let mut segment_hits = Vec::new();
                     let mut spots = Vec::new();
@@ -632,6 +725,7 @@ pub fn build_layout(
                         hits,
                         image: None,
                         emotes: spots,
+                        audio,
                     });
                     rows.extend(own_row);
                 }
@@ -690,6 +784,7 @@ pub fn build_layout(
                         hits: std::mem::take(&mut hits),
                         image: None,
                         emotes: std::mem::take(&mut spots),
+                        audio: None,
                     });
                     col = INDENT.len();
                 }
@@ -720,6 +815,7 @@ pub fn build_layout(
                     hits,
                     image: None,
                     emotes: spots,
+                    audio: None,
                 });
             }
             if let Some(thread) = &message.thread {
@@ -781,6 +877,7 @@ fn thread_row(thread: &ThreadSummary, msg: usize, body_width: usize, theme: &The
         hits: vec![(start, start + used as u16, HitId::Thread(msg))],
         image: None,
         emotes: Vec::new(),
+        audio: None,
     }
 }
 
@@ -961,6 +1058,7 @@ fn push_poll_rows(
             hits,
             image: None,
             emotes: Vec::new(),
+            audio: None,
         });
     }
 
@@ -1316,6 +1414,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
         }
     };
     let rows = &cache.rows;
+    // The sound that loads or plays, where it is in this room: rows of its message look
+    // different meanwhile, without being laid out again.
+    let sound = app.audio_in(room);
     let height = content.height as usize;
     let max_scroll = rows.len().saturating_sub(height);
 
@@ -1384,12 +1485,60 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
             }
             app.hits.add(rect, HitId::Message(msg));
         }
-        frame.render_widget(&row.line, rect);
+        // A read marker at the end of the row stays where it is, and its gap with it.
+        let kept = row.audio.map_or(0, |part| part.marker).min(rect.width);
+        let left = rect.width - kept;
+        let room_left = usize::from(left).saturating_sub(if kept > 0 { 2 } else { 0 });
+        let sounding = row
+            .audio
+            .zip(sound)
+            .filter(|(_, (at, _))| *at == row.source)
+            .and_then(|(part, (at, view))| {
+                let message = room.messages.get(at)?;
+                sound_row(part, view, message, room_left, theme, &mut app.images)
+            });
+        match &sounding {
+            Some(line) => {
+                frame.render_widget(&row.line, rect);
+                // What the row said is gone from under the sound, with its underlines
+                // (a link in a file name); the row's colours stay.
+                let buffer = frame.buffer_mut();
+                for x in rect.x..rect.x + left {
+                    if let Some(cell) = buffer.cell_mut((x, rect.y)) {
+                        cell.set_symbol(" ");
+                        cell.modifier.remove(Modifier::UNDERLINED);
+                    }
+                }
+                // Over all of what the row said, and no further than its marker.
+                let pad = usize::from(left).saturating_sub(line.width());
+                let mut over = line.clone();
+                over.spans.push(Span::raw(" ".repeat(pad)));
+                frame.render_widget(&over, Rect::new(rect.x, rect.y, left, 1));
+            }
+            None => frame.render_widget(&row.line, rect),
+        }
         for (start, end, id) in &row.hits {
+            // Under a sound only the marker's part of the row is still what was laid
+            // out: a click elsewhere must not reach what is no longer shown.
+            if sounding.is_some() && *start < left {
+                continue;
+            }
             let start = (*start).min(rect.width);
             let end = (*end).min(rect.width);
             app.hits
                 .add(Rect::new(rect.x + start, rect.y, end - start, 1), *id);
+        }
+        // All of the row that took the first line's place stops the sound.
+        if let (Some(part), Some(line)) = (row.audio, &sounding)
+            && part.head
+            && part.first
+        {
+            let start = (INDENT.len() as u16).min(rect.width);
+            let end = (line.width() as u16).clamp(start, rect.width);
+            app.hits.add(
+                Rect::new(rect.x + start, rect.y, end - start, 1),
+                HitId::PlayMedia(row.source),
+            );
         }
     }
 
@@ -1932,6 +2081,7 @@ mod tests {
             source: Box::new(MediaSource::Plain(
                 mxc_uri!("mxc://example.org/v").to_owned(),
             )),
+            audio: None,
         });
 
         let mut video = room.messages[0].clone();
@@ -1945,6 +2095,7 @@ mod tests {
             source: Box::new(MediaSource::Plain(
                 mxc_uri!("mxc://example.org/vid").to_owned(),
             )),
+            audio: None,
         });
         let thumb_key = "mxc://example.org/vthumb";
         video.image = Some(crate::images::testing::remote_image(

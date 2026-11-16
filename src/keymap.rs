@@ -128,7 +128,8 @@ macro_rules! action_table {
                 | Action::Devices(_)
                 | Action::OpenRoom(_)
                 | Action::SelectTheme(_)
-                | Action::Setting(_) => None,
+                | Action::Setting(_)
+                | Action::SeekAudio(Dir::Up | Dir::Down) => None,
             }
         }
     };
@@ -209,6 +210,10 @@ action_table! {
     Action::RetryDecryption => ("retry_decryption", Context::Timeline, "Try decrypting again"),
     Action::JumpToNewest => ("jump_to_newest", Context::Timeline, "Jump to newest"),
     Action::JumpToOldest => ("jump_to_oldest", Context::Timeline, "Jump to oldest"),
+    Action::PlayAudio => ("play_audio", Context::Timeline, "Play or stop voice and audio"),
+    Action::PauseAudio => ("pause_audio", Context::Timeline, "Pause or resume audio (mpv)"),
+    Action::SeekAudio(Dir::Left) => ("audio_back", Context::Timeline, "Audio back 5 s (mpv)"),
+    Action::SeekAudio(Dir::Right) => ("audio_forward", Context::Timeline, "Audio forward 5 s (mpv)"),
     Action::Send => ("send", Context::Composer, "Send"),
     Action::Newline => ("newline", Context::Composer, "Line break"),
     Action::CancelCompose => ("cancel_compose", Context::Composer, "Cancel reply or edit"),
@@ -704,6 +709,38 @@ pub const DEFAULT: &[Binding] = &[
         Action::JumpToNewest,
         "End",
         "Jump to newest",
+    ),
+    bind(
+        Timeline,
+        Char('x'),
+        NONE,
+        Action::PlayAudio,
+        "x",
+        "Play or stop voice and audio",
+    ),
+    bind(
+        Timeline,
+        Char(' '),
+        NONE,
+        Action::PauseAudio,
+        "Space",
+        "Pause or resume audio (mpv)",
+    ),
+    bind(
+        Timeline,
+        KeyCode::Left,
+        NONE,
+        Action::SeekAudio(Dir::Left),
+        "←",
+        "Audio back 5 s (mpv)",
+    ),
+    bind(
+        Timeline,
+        KeyCode::Right,
+        NONE,
+        Action::SeekAudio(Dir::Right),
+        "→",
+        "Audio forward 5 s (mpv)",
     ),
     bind(
         Timeline,

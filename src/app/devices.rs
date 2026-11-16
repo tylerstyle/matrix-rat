@@ -1576,6 +1576,9 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected();
         drain(&mut commands);
         app.on_event(key(KeyCode::F(2)));
+        // The row is below the edge of a window this low: up from the first row
+        // wraps to the last ones and the menu scrolls to them.
+        app.on_event(key(KeyCode::Up));
         let text = screen(&mut app, &mut terminal);
         let (col, row) = find(&text, "Key backup");
         app.on_event(click(col, row));
