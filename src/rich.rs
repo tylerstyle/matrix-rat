@@ -910,6 +910,8 @@ pub struct WrappedRow {
     pub segments: Vec<Segment>,
     /// The code block this row belongs to, if any.
     pub block: Option<usize>,
+    /// Which of the text's lines it is a row of.
+    pub line: usize,
 }
 
 /// Hand-written: the prefix is the message's (its pieces show their text in tests
@@ -920,6 +922,7 @@ impl std::fmt::Debug for WrappedRow {
             .field("prefix_bytes", &self.prefix.len())
             .field("segments", &self.segments)
             .field("block", &self.block)
+            .field("line", &self.line)
             .finish()
     }
 }
@@ -928,12 +931,13 @@ impl std::fmt::Debug for WrappedRow {
 pub fn wrap(rich: &Rich, max: usize) -> Vec<WrappedRow> {
     let max = max.max(1);
     let mut rows = Vec::new();
-    for line in &rich.lines {
+    for (index, line) in rich.lines.iter().enumerate() {
         let room = max.saturating_sub(width(&line.prefix)).max(1);
         let mut row = WrappedRow {
             prefix: line.prefix.clone(),
             segments: Vec::new(),
             block: line.block,
+            line: index,
         };
         let mut used = 0;
         let next_row = |row: &mut WrappedRow, rows: &mut Vec<WrappedRow>, used: &mut usize| {
@@ -943,6 +947,7 @@ pub fn wrap(rich: &Rich, max: usize) -> Vec<WrappedRow> {
                     prefix: line.hanging.clone(),
                     segments: Vec::new(),
                     block: line.block,
+                    line: index,
                 },
             );
             // A space that fitted before the wrap point is not shown at the row's end

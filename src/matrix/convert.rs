@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Local, TimeZone};
 use matrix_sdk::ruma::events::room::message::{
-    LocationMessageEventContent, MessageType, UnstableAmplitude,
+    AudioMessageEventContent, LocationMessageEventContent, MessageType,
 };
 use matrix_sdk::ruma::events::room::{ImageInfo as RumaImageInfo, MediaSource};
 use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedUserId, UInt, UserId};
@@ -17,8 +17,8 @@ use matrix_sdk_ui::timeline::{
 };
 
 use crate::model::{
-    Attachment, ImageInfo, ImageSource, ItemRef, MediaKind, MediaRef, Message, MsgKind, Reaction,
-    SendState, Shield, UtdWhy,
+    Attachment, AudioMeta, ImageInfo, ImageSource, ItemRef, MediaKind, MediaRef, Message, MsgKind,
+    Reaction, SendState, Shield, UtdWhy,
 };
 use crate::text::{sanitize, sanitize_line};
 
@@ -337,12 +337,10 @@ fn event_message(
                                 .as_ref()
                                 .and_then(|info| info.duration)
                                 .or_else(|| c.audio.as_ref().map(|audio| audio.duration));
-                            let waveform = c
-                                .audio
-                                .as_ref()
-                                .and_then(|audio| waveform_bars(&audio.waveform));
+                            let meta = audio_meta(c);
+                            let waveform = waveform_bars(&meta.waveform);
                             let size = c.info.as_ref().and_then(|info| info.size);
-                            attach_media(
+                            let summary = attach_media(
                                 &mut message,
                                 kind,
                                 icon,
@@ -352,7 +350,11 @@ fn event_message(
                                 size,
                                 duration,
                                 waveform.as_deref(),
-                            )
+                            );
+                            if let Some(file) = &mut message.file {
+                                file.audio = Some(std::sync::Arc::new(meta));
+                            }
+                            summary
                         }
                         MessageType::Location(c) => format_location(c),
                         other => other.body().to_owned(),
@@ -484,47 +486,43 @@ fn parse_dimensions(width: Option<UInt>, height: Option<UInt>) -> Option<(u32, u
 }
 
 fn format_duration(duration: std::time::Duration) -> String {
-    let secs = duration.as_secs() + u64::from(duration.subsec_millis() >= 500);
-    let hours = secs / 3600;
-    let mins = (secs % 3600) / 60;
-    let rem = secs % 60;
-    if hours > 0 {
-        format!("{hours}:{mins:02}:{rem:02}")
-    } else {
-        format!("{mins}:{rem:02}")
-    }
+    crate::audio::length(duration)
 }
 
-fn waveform_bars(amplitudes: &[UnstableAmplitude]) -> Option<String> {
-    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    const MAX_BARS: usize = 24;
-    if amplitudes.is_empty() {
-        return None;
+/// The line of bars under a voice message; `None` without a waveform.
+fn waveform_bars(waveform: &[u16]) -> Option<String> {
+    (!waveform.is_empty()).then(|| crate::audio::bars(waveform))
+}
+
+/// What a voice or audio message says about its sound, bounded: a believable length,
+/// a short waveform, and its type (only ever used to pick a file ending).
+fn audio_meta(content: &AudioMessageEventContent) -> AudioMeta {
+    let stated = content
+        .info
+        .as_ref()
+        .and_then(|info| info.duration)
+        .or_else(|| content.audio.as_ref().map(|audio| audio.duration));
+    // As many as the event holds, which is bounded by the size of an event.
+    let amplitudes: Vec<u64> = content
+        .audio
+        .as_ref()
+        .map(|audio| {
+            audio
+                .waveform
+                .iter()
+                .map(|sample| u64::from(sample.get()))
+                .collect()
+        })
+        .unwrap_or_default();
+    AudioMeta {
+        duration: stated.and_then(crate::audio::bounded_duration),
+        waveform: crate::audio::bounded_waveform(&amplitudes),
+        mime: content
+            .info
+            .as_ref()
+            .and_then(|info| info.mimetype.as_deref())
+            .map(|mime| sanitize_line(mime).chars().take(100).collect()),
     }
-    let to_bar = |raw: u64| -> char {
-        let idx = ((raw.min(1024) * 7) / 1024) as usize;
-        BARS[idx]
-    };
-    let bars: String = if amplitudes.len() <= MAX_BARS {
-        amplitudes
-            .iter()
-            .map(|sample| to_bar(u64::from(sample.get())))
-            .collect()
-    } else {
-        (0..MAX_BARS)
-            .map(|bucket| {
-                let start = bucket * amplitudes.len() / MAX_BARS;
-                let end = ((bucket + 1) * amplitudes.len() / MAX_BARS).max(start + 1);
-                let peak = amplitudes[start..end]
-                    .iter()
-                    .map(|sample| u64::from(sample.get()))
-                    .max()
-                    .unwrap_or(0);
-                to_bar(peak)
-            })
-            .collect()
-    };
-    Some(bars)
 }
 
 pub(super) fn location_label(c: &LocationMessageEventContent) -> String {
@@ -620,6 +618,7 @@ fn attach_media(
         size,
         kind,
         source: Box::new(source.clone()),
+        audio: None,
     });
     text
 }
@@ -917,7 +916,7 @@ mod tests {
         use matrix_sdk::ruma::events::location::LocationContent;
         use matrix_sdk::ruma::events::room::ThumbnailInfo;
         use matrix_sdk::ruma::events::room::message::{
-            AudioInfo, AudioMessageEventContent, LocationMessageEventContent,
+            AudioInfo, AudioMessageEventContent, LocationMessageEventContent, UnstableAmplitude,
             UnstableAudioDetailsContentBlock, UnstableVoiceContentBlock, VideoInfo,
             VideoMessageEventContent,
         };
@@ -938,10 +937,8 @@ mod tests {
             .into_iter()
             .map(UnstableAmplitude::new)
             .collect();
-        assert_eq!(waveform_bars(&short).as_deref(), Some("▁▄█"));
-        let long: Vec<UnstableAmplitude> = (0u16..48)
-            .map(|n| UnstableAmplitude::new((n * 21) % 1024))
-            .collect();
+        assert_eq!(waveform_bars(&[0, 512, 1024]).as_deref(), Some("▁▄█"));
+        let long: Vec<u16> = (0u16..48).map(|n| (n * 21) % 1024).collect();
         assert_eq!(waveform_bars(&long).unwrap().chars().count(), 24);
 
         let mut voice_msg = Message::default();
@@ -971,13 +968,32 @@ mod tests {
                 .as_ref()
                 .and_then(|i| i.duration)
                 .or_else(|| voice_content.audio.as_ref().map(|a| a.duration)),
-            voice_content
-                .audio
-                .as_ref()
-                .and_then(|a| waveform_bars(&a.waveform))
-                .as_deref(),
+            waveform_bars(&audio_meta(&voice_content).waveform).as_deref(),
         );
         assert_eq!(body, "🎤 voice.ogg · 0:12 · 2.0 kB\n▁▄█");
+        // What is kept for drawing how far it has played.
+        let mut info = AudioInfo::new();
+        info.mimetype = Some("audio/ogg\u{1b}[31m".to_owned());
+        voice_content.info = Some(Box::new(info));
+        assert_eq!(
+            audio_meta(&voice_content),
+            AudioMeta {
+                duration: Some(std::time::Duration::from_secs(12)),
+                waveform: vec![0, 512, 1024],
+                mime: Some("audio/ogg[31m".to_owned()),
+            }
+        );
+        // A sender's word is bounded: no endless length, no endless waveform.
+        voice_content.audio = Some(UnstableAudioDetailsContentBlock::new(
+            std::time::Duration::from_secs(10_000_000),
+            (0..5000u16)
+                .map(|n| UnstableAmplitude::new(n % 2000))
+                .collect(),
+        ));
+        let bounded = audio_meta(&voice_content);
+        assert_eq!(bounded.duration, None);
+        assert_eq!(bounded.waveform.len(), crate::audio::MAX_WAVEFORM);
+        assert!(bounded.waveform.iter().all(|value| *value <= 1024));
         assert!(voice_msg.is_playable());
         assert_eq!(voice_msg.file.as_ref().unwrap().kind, MediaKind::Voice);
 

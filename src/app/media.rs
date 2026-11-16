@@ -82,7 +82,13 @@ impl App {
         if self.selectable(index) {
             self.timeline.selected = Some(index);
         }
-        if self.messages().get(index).is_some_and(|m| m.file.is_some()) {
+        let sound = self.messages().get(index).is_some_and(|m| m.is_sound());
+        let audio = self.audio_caps();
+        if sound && self.timeline.selected == Some(index) && (audio.can_play || audio.selected) {
+            // Played (or stopped) in here, as `x` does; where it cannot be (over SSH,
+            // without a player), the system's player as before.
+            self.perform(crate::action::Action::PlayAudio);
+        } else if self.messages().get(index).is_some_and(|m| m.file.is_some()) {
             self.save_attachment(true);
         } else {
             self.open_image(index);

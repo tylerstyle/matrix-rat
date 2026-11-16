@@ -161,6 +161,32 @@ pub struct MessageCaps {
     pub undecryptable: bool,
 }
 
+/// What `x` and `Space` would do: voice and audio played in the app.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioCaps {
+    /// Something plays (or loads): `x` stops it, unless another such message is selected.
+    pub active: bool,
+    /// The selected message can be played here.
+    pub can_play: bool,
+    /// The selected message is what plays.
+    pub selected: bool,
+    /// What plays can be paused (mpv), and whether it is.
+    pub can_pause: bool,
+    pub paused: bool,
+}
+
+impl AudioCaps {
+    /// Nothing to play, nothing playing.
+    #[cfg(test)]
+    pub const NONE: Self = Self {
+        active: false,
+        can_play: false,
+        selected: false,
+        can_pause: false,
+        paused: false,
+    };
+}
+
 /// Source message details when the palette is acting as a "Forward to room" picker.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ForwardTarget {
@@ -337,6 +363,9 @@ pub struct PaletteContext {
     pub link_previews: crate::config::LinkPreviews,
     pub notifications: bool,
     pub download_dir: String,
+    /// What the settings show for the audio player.
+    pub audio_player: String,
+    pub audio: AudioCaps,
     pub verify_status: &'static str,
     pub backup_status: &'static str,
     pub ignored_users: usize,
@@ -386,6 +415,7 @@ impl std::fmt::Debug for PaletteContext {
             .field("room_previews", &self.room_previews)
             .field("link_previews", &self.link_previews)
             .field("notifications", &self.notifications)
+            .field("audio", &self.audio)
             .field("verify_status", &self.verify_status)
             .field("backup_status", &self.backup_status)
             .field("ignored_users", &self.ignored_users)
@@ -969,7 +999,8 @@ fn include_keymap_action(action: Action) -> ActionInclusion {
         | Action::RoomPrev
         | Action::RoomNext
         | Action::Send
-        | Action::Newline => ActionInclusion::Skip,
+        | Action::Newline
+        | Action::SeekAudio(_) => ActionInclusion::Skip,
         _ => ActionInclusion::Include,
     }
 }
@@ -1000,6 +1031,8 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Copy => sel.can_copy,
         Action::CopyCode => sel.can_copy_code,
         Action::Save | Action::OpenExternal => sel.can_save,
+        Action::PlayAudio => ctx.audio.can_play || ctx.audio.active,
+        Action::PauseAudio => ctx.audio.can_pause,
         Action::Open => sel.can_open,
         Action::OpenThread => sel.can_open_thread,
         Action::JumpToReply => sel.can_jump_to_reply,
@@ -1063,6 +1096,25 @@ fn action_meta<'a>(
             ],
         ),
         Action::Open => (Cow::Borrowed(description), &["view picture"]),
+        // Stopping where something plays and `x` would stop it.
+        Action::PlayAudio => (
+            Cow::Borrowed(
+                if ctx.audio.active && (ctx.audio.selected || !ctx.audio.can_play) {
+                    "Stop audio"
+                } else {
+                    "Play voice or audio message"
+                },
+            ),
+            &["sound", "voice message", "listen", "stop audio"],
+        ),
+        Action::PauseAudio => (
+            Cow::Borrowed(if ctx.audio.paused {
+                "Resume audio"
+            } else {
+                "Pause audio"
+            }),
+            &["sound", "voice message"],
+        ),
         Action::OpenThread => (Cow::Borrowed(description), &["thread", "replies"]),
         Action::JumpToReply => (Cow::Borrowed(description), &["parent", "original", "reply"]),
         Action::Attach => (
@@ -1117,6 +1169,8 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::Save
                 | Action::Open
                 | Action::OpenExternal
+                | Action::PlayAudio
+                | Action::PauseAudio
                 | Action::OpenThread
                 | Action::JumpToReply
                 | Action::PinMessage
@@ -1475,6 +1529,13 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::AudioPlayer)),
+            title: Setting::AudioPlayer.label(),
+            hint: Some(ctx.audio_player.clone()),
+            aliases: &["voice messages", "sound", "mpv", "setting"],
+            enabled: true,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::Keys)),
             title: Setting::Keys.label(),
             hint: Some(ctx.keymap.preset_summary()),
@@ -1713,6 +1774,8 @@ mod tests {
             link_previews: crate::config::LinkPreviews::Off,
             notifications: true,
             download_dir: "~/Downloads".to_owned(),
+            audio_player: "auto: mpv".to_owned(),
+            audio: AudioCaps::default(),
             verify_status: "unknown",
             backup_status: "unknown",
             ignored_users: 0,

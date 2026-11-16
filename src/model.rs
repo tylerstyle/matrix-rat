@@ -516,13 +516,42 @@ pub struct Attachment {
     pub size: Option<u64>,
     pub kind: MediaKind,
     pub source: Box<matrix_sdk::ruma::events::room::MediaSource>,
+    /// For voice and audio: what the sender said about the sound, to draw how far it
+    /// has played.
+    pub audio: Option<std::sync::Arc<AudioMeta>>,
 }
 
 /// Hand-written: an encrypted source carries the key of the file, and the name can
 /// say what the file is about.
 impl std::fmt::Debug for Attachment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Attachment({:?}, size: {:?})", self.kind, self.size)
+        write!(
+            f,
+            "Attachment({:?}, size: {:?}, audio: {:?})",
+            self.kind, self.size, self.audio
+        )
+    }
+}
+
+/// What a voice or audio message says about its sound. From the sender, so bounded
+/// (see `crate::audio`): the length is believable, the waveform short.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct AudioMeta {
+    pub duration: Option<std::time::Duration>,
+    /// Loudness along the sound, from 0 to 1024; at most a few hundred values.
+    pub waveform: Vec<u16>,
+    /// The stated type (`audio/ogg`), only to give the played copy a file ending.
+    pub mime: Option<String>,
+}
+
+/// Hand-written: only the shape (the type is the sender's text).
+impl fmt::Debug for AudioMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AudioMeta")
+            .field("duration", &self.duration)
+            .field("waveform", &self.waveform.len())
+            .field("mime", &self.mime.is_some())
+            .finish()
     }
 }
 
@@ -593,6 +622,7 @@ impl ImageInfo {
                 size: self.size,
                 kind: MediaKind::Picture,
                 source: Box::new(media.full.clone()),
+                audio: None,
             }),
         }
     }
@@ -651,6 +681,17 @@ impl Message {
                 MediaKind::Audio | MediaKind::Voice | MediaKind::Video
             )
         })
+    }
+
+    /// Whether this is a voice or audio message that can be played in the app: one
+    /// that was sent (and so is on the server) and not deleted.
+    pub fn is_sound(&self) -> bool {
+        self.state == SendState::Sent
+            && self.kind != MsgKind::Redacted
+            && self
+                .file
+                .as_ref()
+                .is_some_and(|file| matches!(file.kind, MediaKind::Audio | MediaKind::Voice))
     }
 
     /// What saving this message would write to disk, if anything.

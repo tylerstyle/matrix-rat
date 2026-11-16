@@ -1,0 +1,34 @@
+---
+source: src/app/playback.rs
+expression: shown
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 #Alpha ────────────────────────────────────────────────────────────────╮"
+"│ Filter rooms…        ││                                                                          │"
+"│ ○ Unread  ○ People   ││                                                                          │"
+"│ Rooms                ││                                                                          │"
+"│▌A  Alpha             ││                                                                          │"
+"│ B  Beta              ││                                                                          │"
+"│                      ││                                                                          │"
+"│                      ││                                                                          │"
+"│                      ││                                                                          │"
+"│                      ││                                                                          │"
+"│                      ││                                                                          │"
+"│                      ││                                                                          │"
+"│                      ││                                                                          │"
+"│                      ││                                                                          │"
+"│                      ││───────────────────────────────── Today ───────────────────────────────── │"
+"│                      ││● bob  10:01                                                              │"
+"│                      ││  listen to this                                                          │"
+"│                      ││                                                                          │"
+"│                      ││● alice  10:00                                                            │"
+"│                      ││  ■ 0:05 / 0:12 · 🎤 waves.ogg                                            │" Hidden by multi-width symbols: [(44, " ")]
+"│                      ││  ▁▃▅▇█▅▄▂▄▆▇▅▃▂▃▅▇▄▂▁▃▅▆▃                                                │"
+"│                      ││  ▶ 🎤 plain.ogg · 0:12 · 2.0 kB                                          │" Hidden by multi-width symbols: [(30, " ")]
+"│                      ││                                                                          │"
+"│                      ││● bob  10:01                                                              │"
+"│                      ││  and this one has no waveform                                            │"
+"│                      │╰──────────────────────────────────────────────────────────────────────────╯"
+"│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
+"│                      ││ Click here or press Alt-3 to write                                 📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
+" ● synced  x stop  Space pause  ←→ seek  Enter reply  t thread    F1 help  F2 settings  F3 rat-dark "

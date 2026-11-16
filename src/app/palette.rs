@@ -98,6 +98,8 @@ impl App {
             link_previews: self.link_previews,
             notifications: self.notify_mode != crate::notify::NotifyMode::Off,
             download_dir: crate::files::display(&self.download_dir()),
+            audio_player: self.audio.setting_text(),
+            audio: self.audio_caps(),
             verify_status: crate::verify::setting_text(self.verify.security),
             backup_status: crate::devices::backup_setting_text(self.verify.security),
             ignored_users: self.ignored_users.len(),
@@ -285,9 +287,14 @@ impl App {
                     self.setting_value(setting)
                 ));
             }
-            Setting::DownloadDir => {
-                let mut menu = SettingsMenu::select(Setting::DownloadDir, self.has_theme_pair());
-                menu.editing = Some(LineEdit::from(self.download_dir.as_str()));
+            Setting::DownloadDir | Setting::AudioPlayer => {
+                let mut menu = SettingsMenu::select(setting, self.has_theme_pair());
+                let text = if setting == Setting::AudioPlayer {
+                    self.audio.setting.as_str()
+                } else {
+                    self.download_dir.as_str()
+                };
+                menu.editing = Some(LineEdit::from(text));
                 self.open_modal(Modal::Settings(menu));
             }
             Setting::Keys => self.change_setting(Setting::Keys, 0),
@@ -601,6 +608,7 @@ mod tests {
             source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
                 matrix_sdk::ruma::OwnedMxcUri::from(key_url),
             )),
+            audio: None,
         });
         assert!(app.can_save());
         app.on_event(ctrl_p());

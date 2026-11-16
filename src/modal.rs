@@ -556,6 +556,8 @@ pub enum Setting {
     /// Words that make a message notify like a mention (push rules on the server).
     Keywords,
     DownloadDir,
+    /// What plays voice and audio messages (text, like the download folder).
+    AudioPlayer,
     Keys,
     Encryption,
     Profile,
@@ -577,7 +579,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 23] = [
+    pub const ALL: [Setting; 24] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -594,6 +596,7 @@ impl Setting {
         Setting::DoNotDisturb,
         Setting::Keywords,
         Setting::DownloadDir,
+        Setting::AudioPlayer,
         Setting::Keys,
         Setting::Profile,
         Setting::Encryption,
@@ -632,6 +635,7 @@ impl Setting {
             Setting::DoNotDisturb => "Do not disturb",
             Setting::Keywords => "Notification keywords",
             Setting::DownloadDir => "Download folder",
+            Setting::AudioPlayer => "Audio player",
             Setting::Keys => "Key bindings",
             Setting::Profile => "Profile",
             Setting::Encryption => "Encryption",
@@ -676,6 +680,9 @@ impl Setting {
             Setting::DownloadDir => {
                 "Where s saves files and pictures. Enter to change; empty for the default."
             }
+            Setting::AudioPlayer => {
+                "What x plays voice and audio with: auto, or a command (the file is added). Enter to change."
+            }
             Setting::Keys => {
                 "Edit key bindings or switch presets (F1 still opens the key overview)."
             }
@@ -705,7 +712,7 @@ pub struct SettingsMenu {
     pub selected: usize,
     /// Log out was chosen once; choosing it again does it.
     pub confirm_logout: bool,
-    /// The download folder while it is being typed.
+    /// The download folder or the audio player while it is being typed.
     pub editing: Option<LineEdit>,
     /// Whether `ThemeDark` and `ThemeLight` slot rows are shown.
     pub show_theme_pair: bool,

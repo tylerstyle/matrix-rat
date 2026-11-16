@@ -22,6 +22,7 @@ use tokio::task::JoinSet;
 use url::Url;
 
 use super::MatrixEvent;
+use crate::audio::{self, TempAudio};
 use crate::files;
 use crate::images::{
     self, AVATAR_PIXELS, Decoded, EMOTE_PIXELS, FULL_PIXELS, MAX_DOWNLOAD, THUMBNAIL_PIXELS,
@@ -35,6 +36,8 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 const AVATAR_TIMEOUT: Duration = Duration::from_secs(20);
 /// Saving is asked for by the user and may be a large file.
 const SAVE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// A sound to play is waited for; a large one may take a while.
+const AUDIO_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// Below this size the file itself is fetched instead of a thumbnail: it is needed for
 /// the viewer anyway and saves the server the scaling.
 const SMALL_FILE: u64 = 256 * 1024;
@@ -59,6 +62,9 @@ pub struct Media {
     save_slot: Arc<Semaphore>,
     /// The running picture fetches. They end with the session: dropping this stops them.
     fetches: Mutex<JoinSet<()>>,
+    /// The download of the sound to play, if one is on its way: one at a time, given
+    /// up when another is asked for, when the app cancels it, and with the session.
+    audio: Mutex<JoinSet<()>>,
 }
 
 impl Media {
@@ -72,6 +78,7 @@ impl Media {
             emote_slots: Arc::new(Semaphore::new(2)),
             save_slot: Arc::new(Semaphore::new(1)),
             fetches: Mutex::default(),
+            audio: Mutex::default(),
         }
     }
 
@@ -218,6 +225,58 @@ impl Media {
             });
         });
     }
+}
+
+impl Media {
+    /// Downloads a voice or audio message (decrypting it if needed, at most
+    /// [`audio::MAX_FILE`] bytes) into a private file in `dir`, in place of one that is
+    /// still on its way. The outcome arrives as [`MatrixEvent::AudioFetched`]; a
+    /// download given up is not answered (its file, if it got that far, is removed).
+    pub fn fetch_audio(&self, id: u64, file: Attachment, dir: PathBuf) {
+        let client = self.client.clone();
+        let events = self.events.clone();
+        let mut audio = self.audio.lock().expect("not poisoned");
+        audio.abort_all();
+        while audio.try_join_next().is_some() {}
+        audio.spawn(async move {
+            let result =
+                match tokio::time::timeout(AUDIO_TIMEOUT, load_audio(&client, &file, dir)).await {
+                    Ok(result) => result,
+                    Err(_) => Err("the download took too long".to_owned()),
+                };
+            let _ = events.send(MatrixEvent::AudioFetched { id, result });
+        });
+    }
+
+    /// Gives up the download of the sound to play, if one is on its way.
+    pub fn cancel_audio(&self) {
+        self.audio.lock().expect("not poisoned").abort_all();
+    }
+}
+
+/// The file of a voice or audio message, in a private file of its own in `dir`.
+async fn load_audio(client: &Client, file: &Attachment, dir: PathBuf) -> Result<TempAudio, String> {
+    // Saves a request when the sender is honest about a large file.
+    if let Some(size) = file.size.filter(|size| *size > audio::MAX_FILE) {
+        return Err(format!("too large to play here ({})", human_size(size)));
+    }
+    let bytes = get(client, &file.source, None, audio::MAX_FILE)
+        .await
+        .map_err(|refused| match refused {
+            Refused::TooLarge(_) => format!(
+                "too large to play here (over {})",
+                human_size(audio::MAX_FILE)
+            ),
+            Refused::Failed => "the download failed".to_owned(),
+        })?;
+    let mime = file.audio.as_ref().and_then(|meta| meta.mime.clone());
+    tokio::task::spawn_blocking(move || TempAudio::create(&dir, mime.as_deref(), &bytes))
+        .await
+        .map_err(|_| "it could not be put into a file".to_owned())?
+        .map_err(|err| {
+            tracing::debug!(why = %crate::logsafe::kind(&err), "could not write a sound to play");
+            "it could not be put into a file".to_owned()
+        })
 }
 
 async fn load(
@@ -730,6 +789,118 @@ mod tests {
         assert_eq!(kept(&endless).await, None);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sound_is_fetched_into_a_private_file_one_at_a_time() {
+        use matrix_sdk::ruma::events::room::EncryptedFile;
+        use matrix_sdk_base::crypto::AttachmentEncryptor;
+        use std::os::unix::fs::PermissionsExt;
+
+        let plain: Vec<u8> = (0..3000u32).map(|n| (n % 7) as u8).collect();
+        let mut input = std::io::Cursor::new(plain.clone());
+        let mut encryptor = AttachmentEncryptor::new(&mut input);
+        let mut secret = Vec::new();
+        encryptor.read_to_end(&mut secret).unwrap();
+        let keys = encryptor.finish();
+        let client = serve_with(Arc::default(), secret).await;
+        let attachment = |name: &str, size: Option<u64>| {
+            let source = if name.ends_with("secret") {
+                let uri = <&MxcUri>::from(name).to_owned();
+                let file =
+                    EncryptedFile::new(uri, keys.encryption_info.clone(), keys.hashes.clone());
+                MediaSource::Encrypted(Box::new(file))
+            } else {
+                MediaSource::Plain(<&MxcUri>::from(name).to_owned())
+            };
+            Attachment {
+                key: name.to_owned(),
+                name: "../../.bashrc".to_owned(),
+                size,
+                kind: crate::model::MediaKind::Voice,
+                source: Box::new(source),
+                audio: Some(Arc::new(crate::model::AudioMeta {
+                    mime: Some("audio/ogg".to_owned()),
+                    ..Default::default()
+                })),
+            }
+        };
+        let root = std::env::temp_dir().join(format!("matrix-rat-sound-{}", std::process::id()));
+        let dir = root.join("default-audio");
+
+        // Decrypted, in a file of its own: owner-only, named at random, never after
+        // the sender's name, and gone when dropped.
+        let sound = load_audio(
+            &client,
+            &attachment("mxc://example.org/secret", None),
+            dir.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(sound.path()).unwrap(), plain);
+        let mode = std::fs::metadata(sound.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(sound.path().parent(), Some(dir.as_path()));
+        let name = sound
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("play-") && name.ends_with(".ogg"),
+            "{name}"
+        );
+        let path = sound.path().to_owned();
+        drop(sound);
+        assert!(!path.exists());
+        // Too large, by the sender's word (nothing is asked) or by what arrives.
+        let large = attachment("mxc://example.org/declared", Some(audio::MAX_FILE + 1));
+        let refused = load_audio(&client, &large, dir.clone()).await.unwrap_err();
+        assert!(refused.starts_with("too large to play here"), "{refused}");
+        let missing = attachment("mxc://example.org/x", None);
+        let failed = load_audio(&client, &missing, dir.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(failed, "the download failed");
+
+        // Through the worker's way in: one at a time. A download that is replaced, or
+        // given up, is not answered.
+        let (events, mut answers) = tokio::sync::mpsc::unbounded_channel();
+        let media = Media::new(client.clone(), events);
+        media.fetch_audio(
+            1,
+            attachment("mxc://example.org/endless", None),
+            dir.clone(),
+        );
+        media.fetch_audio(2, attachment("mxc://example.org/secret", None), dir.clone());
+        let answer = tokio::time::timeout(Duration::from_secs(10), answers.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match answer {
+            MatrixEvent::AudioFetched {
+                id: 2,
+                result: Ok(sound),
+            } => drop(sound),
+            other => panic!("{}", other.describe()),
+        }
+        media.fetch_audio(
+            3,
+            attachment("mxc://example.org/endless", None),
+            dir.clone(),
+        );
+        media.cancel_audio();
+        let late = tokio::time::timeout(Duration::from_millis(500), answers.recv()).await;
+        assert!(late.is_err(), "a download given up is not answered");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().next().is_none(),
+            "nothing is left"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn media_addresses() {
         use matrix_sdk::ruma::mxc_uri;
@@ -903,6 +1074,141 @@ mod tests {
         // The saved file is the upload, byte for byte, under its own name.
         assert_eq!(saved, downloads.join(&name));
         assert_eq!(std::fs::read(&saved).unwrap(), uploaded);
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Sends an audio file into an unencrypted room of the test user, then checks that
+    /// the worker presents it as audio with its type kept, and fetches it into a private
+    /// file of its own to be played. Setup as for the other end-to-end tests.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn uploaded_audio_is_fetched_into_a_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let username = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+
+        let sender = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .unwrap();
+        sender
+            .matrix_auth()
+            .login_username(&username, &password)
+            .initial_device_display_name("matrix-rat audio test")
+            .send()
+            .await
+            .unwrap();
+        sender.sync_once(SyncSettings::default()).await.unwrap();
+        let room = sender
+            .joined_rooms()
+            .into_iter()
+            .find(|room| !room.encryption_state().is_encrypted())
+            .expect("the test user has joined an unencrypted room");
+        // Not a real sound: nothing plays it here, only its bytes are compared.
+        let name = format!("../rat-{}.ogg", std::process::id());
+        let sound: Vec<u8> = b"OggS"
+            .iter()
+            .copied()
+            .chain((0..20_000u32).map(|n| (n % 251) as u8))
+            .collect();
+        let ogg: mime::Mime = "audio/ogg".parse().unwrap();
+        room.send_attachment(&name, &ogg, sound.clone(), AttachmentConfig::new())
+            .await
+            .unwrap();
+        let room_id = room.room_id().to_string();
+
+        let root = std::env::temp_dir().join(format!("matrix-rat-audio-{}", std::process::id()));
+        let dir = root.join("run").join("it-audio");
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password: password.into(),
+        });
+        let wait = async {
+            let mut opened = false;
+            let mut requested = false;
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err)
+                    | MatrixEvent::Error(err)
+                    | MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) if !opened => {
+                        if rooms.iter().any(|room| room.id == room_id) {
+                            opened = true;
+                            handle.send(MatrixCmd::OpenRoom {
+                                room_id: room_id.clone(),
+                                generation: 1,
+                            });
+                        }
+                    }
+                    MatrixEvent::Timeline { messages, .. } if !requested => {
+                        let found = messages
+                            .iter()
+                            .filter_map(|m| m.file.as_ref())
+                            .find(|file| {
+                                file.name.ends_with(&name[3..])
+                                    && file.kind == crate::model::MediaKind::Audio
+                            });
+                        if let Some(file) = found {
+                            requested = true;
+                            let meta = file.audio.as_ref().expect("audio is described");
+                            assert_eq!(meta.mime.as_deref(), Some("audio/ogg"));
+                            // The first is given up for the second (unless it was done
+                            // before the second was asked for); the second is answered.
+                            for id in [1, 2] {
+                                handle.send(MatrixCmd::FetchAudio {
+                                    id,
+                                    file: file.clone(),
+                                    dir: dir.clone(),
+                                });
+                            }
+                        }
+                    }
+                    MatrixEvent::AudioFetched { id: 2, result } => {
+                        return result.expect("the sound could not be fetched");
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let fetched = tokio::time::timeout(Duration::from_secs(60), wait)
+            .await
+            .expect("timed out waiting for the sound");
+        assert_eq!(std::fs::read(fetched.path()).unwrap(), sound);
+        let mode = std::fs::metadata(fetched.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(fetched.path().parent(), Some(dir.as_path()));
+        let file_name = fetched
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            file_name.starts_with("play-") && file_name.ends_with(".ogg"),
+            "{file_name}"
+        );
+        let path = fetched.path().to_owned();
+        drop(fetched);
+        assert!(!path.exists());
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);

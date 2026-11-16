@@ -161,6 +161,7 @@ impl App {
             can_redact_other,
             can_pin,
             can_ban_sender,
+            audio: self.audio_caps(),
         };
         let items = menu::message_items(message, facts, &self.keymap);
         self.show_menu(Target::Message(target), "", items, at);

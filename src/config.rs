@@ -51,6 +51,9 @@ pub struct Config {
     pub link_previews: LinkPreviews,
     /// Where saved attachments go. Empty: the desktop's download folder.
     pub download_dir: String,
+    /// What plays voice and audio messages: "auto" (the first of mpv, ffplay, pw-play,
+    /// paplay and aplay on `PATH`), or a command line to which the file is added.
+    pub audio_player: String,
     /// How pictures are shown: "auto", "halfblocks" or "off".
     pub images: ImageMode,
     /// Where the local store passphrase is kept: "auto", "keyring" or "file".
@@ -90,6 +93,10 @@ impl std::fmt::Debug for Config {
             .field("room_previews", &self.room_previews)
             .field("link_previews", &self.link_previews)
             .field("download_dir", &!self.download_dir.is_empty())
+            .field(
+                "audio_player_auto",
+                &crate::audio::is_auto(&self.audio_player),
+            )
             .field("images", &self.images)
             .field("secret_store", &self.secret_store)
             .field("preset", &self.preset.is_some())
@@ -210,6 +217,7 @@ impl Default for Config {
             room_previews: true,
             link_previews: LinkPreviews::Off,
             download_dir: String::new(),
+            audio_player: "auto".to_owned(),
             images: ImageMode::Auto,
             secret_store: crate::matrix::SecretStoreMode::File,
             preset: None,
@@ -621,11 +629,12 @@ mod tests {
              theme_dark = \"alice-dark\"\n\
              theme_light = \"alice-light\"\n\
              download_dir = \"/home/alice/secret-downloads\"\n\
-             notification_click_command = \"raise-window --title alice\"\n",
+             notification_click_command = \"raise-window --title alice\"\n\
+             audio_player = \"/home/alice/bin/play-quietly\"\n",
         )
         .unwrap();
         let shown = format!("{config:?}");
-        for private in ["alice", "/home", "raise-window"] {
+        for private in ["alice", "/home", "raise-window", "play-quietly"] {
             assert!(!shown.contains(private), "{private} in {shown}");
         }
         // Whether they are set still shows.
@@ -636,6 +645,7 @@ mod tests {
     fn partial_config_keeps_defaults() {
         let config: Config = toml::from_str("theme = \"terminal\"").unwrap();
         assert_eq!(config.theme, "terminal");
+        assert_eq!(config.audio_player, "auto");
         assert_eq!(config.sidebar_width, 24);
         assert!(config.mouse);
         assert!(config.read_receipts);

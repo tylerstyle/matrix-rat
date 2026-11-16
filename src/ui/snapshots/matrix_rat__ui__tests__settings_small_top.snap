@@ -21,7 +21,7 @@ expression: top
 "│        │   Do not disturb        ○ off                              │       ┃│"
 "│        │   Notification keywords Enter to view                      │       ┃│"
 "│        │   Download folder       ~/Downloads                        │ 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
-"│        │ Help                                                     ▼ │────────╯"
+"│        │   Audio player          auto: none found                 ▼ │────────╯"
 "│        │ F3 cycles this, or the active dark/light slot when paired; │────────╮"
 "│        │ themes/ files reload live.                                 │  📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
 "╰────────╰───────────────── ↑↓ select · ←→ change · Enter · Esc close ╯────────╯"

@@ -1,6 +1,7 @@
 //! Drawing. Each frame also rebuilds the hit map used for mouse handling.
 
 mod attach;
+mod audio;
 mod complete;
 mod composer;
 mod details;

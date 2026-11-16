@@ -19,6 +19,7 @@ mod moderation;
 mod palette;
 mod paste_picture;
 mod people;
+mod playback;
 mod poll;
 mod previews;
 mod rooms;
@@ -29,6 +30,8 @@ mod thread;
 mod thread_list;
 mod unread;
 mod verify;
+
+pub use playback::AudioView;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -393,6 +396,8 @@ pub struct App {
     pub keywords: crate::keywords::KeywordsState,
     /// Custom emoji and stickers from image packs.
     pub emotes: emotes::EmoteState,
+    /// Voice and audio played in here: the player, and the sound there is.
+    audio: playback::AudioState,
 }
 
 /// Hand-written: the app holds everything private there is (messages, drafts, ids,
@@ -449,6 +454,7 @@ impl std::fmt::Debug for App {
             .field("devices", &self.devices)
             .field("keywords", &self.keywords)
             .field("emotes", &self.emotes)
+            .field("audio", &self.audio)
             .finish_non_exhaustive()
     }
 }
@@ -492,6 +498,8 @@ impl App {
         let mut app = Self::new_in_scheme(config, themes_dir, matrix, ColorScheme::Dark);
         // Tests may well run inside a desktop that would obey: no window is raised.
         app.notification_click_command = None;
+        // Nor do they depend on the players the machine has, or on running over SSH.
+        app.audio = playback::AudioState::default();
         app
     }
 
@@ -524,6 +532,7 @@ impl App {
         app.esc_closes_chat = config.esc_closes_chat;
         app.mouse = config.mouse;
         app.download_dir = config.download_dir.clone();
+        app.audio = playback::AudioState::new(&config.audio_player);
         app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
         app.link_previews = config.link_previews;
@@ -681,6 +690,7 @@ impl App {
             devices: Default::default(),
             keywords: Default::default(),
             emotes: Default::default(),
+            audio: Default::default(),
         }
     }
 
@@ -1021,6 +1031,7 @@ impl App {
             Setting::Notifications => switch(self.notify_mode != crate::notify::NotifyMode::Off),
             Setting::DoNotDisturb => switch(self.do_not_disturb),
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
+            Setting::AudioPlayer => self.audio.setting_text(),
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Profile => self.own_profile_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
@@ -1134,6 +1145,13 @@ impl App {
                     && let Some(Modal::Settings(menu)) = &mut self.modal
                 {
                     menu.editing = Some(LineEdit::from(self.download_dir.as_str()));
+                }
+            }
+            Setting::AudioPlayer => {
+                if delta == 0
+                    && let Some(Modal::Settings(menu)) = &mut self.modal
+                {
+                    menu.editing = Some(LineEdit::from(self.audio.setting.as_str()));
                 }
             }
             Setting::Keys => {
@@ -1376,6 +1394,8 @@ impl App {
 
     /// Nothing of a previous session may linger behind the login form.
     pub(crate) fn reset_session(&mut self) {
+        // The sound belongs to a room of the session.
+        self.stop_audio();
         self.rooms.clear();
         self.active = 0;
         // The next session starts as every one does: its first room opens by itself.
@@ -1530,6 +1550,8 @@ impl App {
     /// for another room or for none: the typing notice is taken back, the unsent text
     /// goes to the store and waits with the room, an edit is given up.
     fn leave_open_room(&mut self) {
+        // What plays belongs to the room.
+        self.stop_audio();
         if self.typing_sent.take().is_some()
             && let Some(room_id) = self.room_id()
         {
@@ -2619,7 +2641,11 @@ impl App {
         }
         match action {
             Action::Quit => self.should_quit = true,
-            Action::Suspend => self.suspend_requested = true,
+            Action::Suspend => {
+                // Nothing could stop it while the app is away.
+                self.stop_audio();
+                self.suspend_requested = true;
+            }
             Action::FocusNext => self.set_focus(match self.focus {
                 Pane::Sidebar => Pane::Timeline,
                 Pane::Timeline => Pane::Composer,
@@ -2935,6 +2961,16 @@ impl App {
                     self.show_toast("Nothing to save in this message");
                 }
             }
+            Action::PlayAudio => self.play_audio(),
+            Action::PauseAudio => self.control_audio(crate::audio::Control::TogglePause),
+            Action::SeekAudio(dir) => {
+                let seconds = match dir {
+                    Dir::Left => -crate::audio::SEEK_SECONDS,
+                    Dir::Right => crate::audio::SEEK_SECONDS,
+                    Dir::Up | Dir::Down => return,
+                };
+                self.control_audio(crate::audio::Control::Seek(seconds));
+            }
             Action::StartVerification => self.start_verification(),
             Action::Verify(button) => self.verify_button(button),
             Action::OpenThread => {
@@ -3241,7 +3277,11 @@ impl App {
                 KeyCode::Esc => menu.editing = None,
                 KeyCode::Enter => {
                     let text = menu.editing.take().unwrap_or_default();
-                    self.set_download_dir(&text);
+                    if menu.current() == Setting::AudioPlayer {
+                        self.set_audio_player(&text);
+                    } else {
+                        self.set_download_dir(&text);
+                    }
                 }
                 _ => {
                     if let Some(text) = &mut menu.editing {
@@ -3478,6 +3518,7 @@ impl App {
             }
             MatrixEvent::NoticeClicked { room_id } => self.on_notice_click(&room_id),
             MatrixEvent::FileSaved { key, open, result } => self.on_file_saved(key, open, result),
+            MatrixEvent::AudioFetched { id, result } => self.on_audio_fetched(id, result),
             MatrixEvent::Security(security) => self.on_security(security),
             MatrixEvent::Verification(update) => self.on_verification(update),
             MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
@@ -3753,6 +3794,9 @@ impl App {
     fn back(&mut self) {
         if self.help_open {
             self.help_open = false;
+        } else if self.audio_loading() {
+            // A sound's download is given up first: it is what is under way.
+            self.stop_audio();
         } else if self.focus == Pane::Sidebar
             && (!self.sidebar.filter.is_empty()
                 || self.sidebar.unread_only
@@ -4679,6 +4723,7 @@ impl App {
         if self.images.tick() {
             self.dirty = true;
         }
+        self.audio_tick();
     }
 }
 
@@ -4816,6 +4861,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         app.config_file = Some(paths.config_file());
     }
     app.startup_target = target;
+    // Copies of sounds and mpv's sockets; what an earlier run left there goes now.
+    app.set_audio_dir(paths.audio_dir());
     if demo {
         app.add_demo_space();
         app.maybe_open_startup_target();
@@ -4835,10 +4882,17 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let (notice_clicks, mut clicked) = tokio::sync::mpsc::unbounded_channel::<String>();
     // Pictures read from the clipboard come back here.
     let (pasted, mut pasted_back) = tokio::sync::mpsc::unbounded_channel();
+    // What the audio players say comes back here; their tasks end with them.
+    let (player_news, mut player_back) = tokio::sync::mpsc::unbounded_channel();
+    let mut players = tokio::task::JoinSet::new();
 
     while !app.should_quit {
         if app.suspend_requested {
             app.suspend_requested = false;
+            // What played was told to stop: it is gone before the app is stopped, which
+            // it would not see to otherwise (a player is not stopped with the terminal).
+            let stopped = async { while players.join_next().await.is_some() {} };
+            let _ = tokio::time::timeout(Duration::from_secs(1), stopped).await;
             // The terminal frees its copies of the pictures now, in case we are
             // never resumed; they are sent again when drawn.
             app.flush_images(true);
@@ -4888,6 +4942,12 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 let _ = back.send(crate::clipboard::Done { id, result });
             });
         }
+        if let Some(request) = app.take_audio_start() {
+            // A task on the async threads, which live as long as the app: the player is
+            // started from there (see `audio::play`).
+            players.spawn(crate::audio::run(request, player_news.clone()));
+        }
+        while players.try_join_next().is_some() {}
         terminal::set_mouse(app.mouse)?;
         if std::mem::take(&mut app.repaint) {
             // As after a resize: pictures are sent again with the fresh screen.
@@ -4929,6 +4989,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             } => app.on_matrix(event),
             Some(room_id) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked { room_id }),
             Some(done) = pasted_back.recv() => app.finish_paste(done),
+            Some(update) = player_back.recv() => app.on_audio(update),
             _ = theme_watch.changed() => app.reload_theme(),
             scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),
@@ -4942,6 +5003,13 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         }
     }
     app.flush_images(true);
+    // What plays stops with the app, and its file goes; a player that does not end in
+    // time is killed as its task is dropped.
+    app.stop_audio();
+    let stopped = async { while players.join_next().await.is_some() {} };
+    let _ = tokio::time::timeout(Duration::from_secs(2), stopped).await;
+    drop(players);
+    crate::audio::remove_leftovers(&paths.audio_dir());
     // Let the worker stop syncing cleanly, but never hang on the way out.
     if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
         // The worker takes commands in order: the draft is written before it stops.
@@ -5138,6 +5206,7 @@ mod tests {
             source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
                 "mxc://example.org/a".into(),
             )),
+            audio: None,
         });
         app.rooms[0].messages[4].kind = MsgKind::Redacted;
         app.perform(Action::EditLast);
@@ -7480,7 +7549,12 @@ mod tests {
         assert!(saved.mouse && !saved.read_receipts);
         assert!(std::fs::read_to_string(&file).unwrap().contains("# mine"));
 
-        // Logging out asks twice; the demo has no account, so it only says so.
+        // Logging out asks twice; the demo has no account, so it only says so. (The
+        // list scrolls to it: the last row is below the fold here.)
+        while !matches!(&app.modal, Some(Modal::Settings(menu)) if menu.current() == Setting::Logout)
+        {
+            app.on_event(key(KeyCode::Down));
+        }
         redraw(&mut app, &mut terminal);
         let (col, row) = find(&terminal, "Log out");
         app.on_event(click(col, row));

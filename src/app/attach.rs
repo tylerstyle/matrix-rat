@@ -1194,6 +1194,7 @@ mod tests {
             source: Box::new(matrix_sdk::ruma::events::room::MediaSource::Plain(
                 matrix_sdk::ruma::OwnedMxcUri::from("mxc://example.org/report"),
             )),
+            audio: None,
         });
         app.rooms[0].messages.push(file);
         app.timeline.selected = Some(3);

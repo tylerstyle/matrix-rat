@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
 use super::hit::{Button, HitId};
-use crate::action::{Action, Pane};
+use crate::action::{Action, Dir, Pane};
 use crate::app::App;
 use crate::keymap::Context;
 use crate::matrix::SyncStatus;
@@ -149,6 +149,27 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 push_action(&mut hints, Context::Timeline, A::Back, "back");
             }
             Pane::Timeline => {
+                // Voice and audio played in here: `x`, and with mpv `Space` and the
+                // arrows on the message that plays.
+                let audio = app.audio_caps();
+                if audio.selected {
+                    push_action(&mut hints, Context::Timeline, A::PlayAudio, "stop");
+                    if audio.can_pause {
+                        let pause = if audio.paused { "resume" } else { "pause" };
+                        push_action(&mut hints, Context::Timeline, A::PauseAudio, pause);
+                        let back = hint_key(Context::Timeline, A::SeekAudio(Dir::Left));
+                        let forward = hint_key(Context::Timeline, A::SeekAudio(Dir::Right));
+                        if let Some(keys) = match (back, forward) {
+                            (Some(back), Some(forward)) => Some(format!("{back}{forward}")),
+                            (one, other) => one.or(other),
+                        } {
+                            hints.push((keys, "seek", None));
+                        }
+                    }
+                } else if audio.can_play {
+                    push_action(&mut hints, Context::Timeline, A::PlayAudio, "play");
+                }
+                let in_app = audio.selected || audio.can_play;
                 // What opening the selected message does, if anything.
                 let open = app
                     .timeline
@@ -157,7 +178,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     .and_then(|message| {
                         if message.poll.as_ref().is_some_and(|poll| !poll.ended) {
                             Some("vote")
-                        } else if message.is_playable() {
+                        } else if message.is_playable() && !(in_app && message.is_sound()) {
+                            // Voice and audio: `x` above, where it plays them.
                             Some("play")
                         } else if message.image.is_some() {
                             Some("view")
