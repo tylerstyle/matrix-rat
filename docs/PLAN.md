@@ -232,9 +232,18 @@ user, so handing an agent the whole instance is acceptable (the user's decision)
 
 **State (2026-11-16):** built, reviewed (M36) and merged. Tried by hand against the test
 homeserver: a bot profile logged in with the normal app, `serve`, `rooms`, `send`, `read`,
-`listen` and the MCP server over a pipe all work, and `serve` ends cleanly on SIGTERM. Not
-yet tried with a real MCP client. Seen once and not again in seven tries: a `read` right
-after the first `send` of a fresh `serve` listed the new message twice.
+`listen` and the MCP server over a pipe all work, and `serve` ends cleanly on SIGTERM. Seen
+once and not again in seven tries: a `read` right after the first `send` of a fresh `serve`
+listed the new message twice.
+
+Tried with Claude Code as the MCP client (the server reached over ssh, a second account
+answering after 50 seconds): it found the three tools, sent, was refused a `room` argument,
+and waited 47 seconds for the right answer. The first try found a fault, fixed on
+`leftovers-09`: older messages that a `read` loaded into a watched room were told to
+listeners as new, so `wait_for_message` came back at once with an old message. `serve` now
+takes a message it did not know for news only if it stands after the newest one it knew.
+Still open: a real answer that arrived during a gap in the sync and is loaded later counts
+as history for `listen`; `wait_for_message` finds it anyway, through its own reading.
 
 **Also in 0.9:** what the user's testing of 0.8 turns up (nothing reported yet). Done on the
 branch `leftovers-09`: the three open notes of the 0.8 reviews (a playing message inside a
@@ -267,7 +276,8 @@ thread view, empty continuation rows of a playing row with a long name, the doct
   3.54.0 and has a known flaw (RUSTSEC-2026-0459): opening a database whose `-wal` file has
   another page size can hand out stale memory. It takes someone who can write into the
   profile's private folder, who could read the store there anyway. The fix comes with the
-  next matrix-sdk; the Nix package links the system's SQLite (3.54.0) and is not affected.
+  next matrix-sdk; the Nix package links the system's SQLite (3.54.0 in nixos-unstable today)
+  and is not affected there.
   Two more advisories only say "unmaintained" (anymap2, bincode 1), both deep in
   dependencies.
 - **Small review notes left open on purpose** are in the review files: a half emoji box before

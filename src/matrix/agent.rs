@@ -457,6 +457,22 @@ async fn watch_room(
     let own = room.own_user_id().to_owned();
     let (mut items, changes) = timeline.subscribe().await;
     pin_mut!(changes);
+    // A room whose messages are not loaded yet looks empty, and what is loaded later
+    // would all look new: one page is loaded first, so that what is told first is
+    // what the room holds.
+    if messages(&items, &own, &ignored.borrow()).is_empty()
+        && !items.iter().any(|item| item.is_timeline_start())
+    {
+        let loaded = tokio::time::timeout(PAGE_TIMEOUT, timeline.paginate_backwards(PAGE)).await;
+        if !matches!(loaded, Ok(Ok(_))) {
+            tracing::debug!("agent: could not load a watched room's latest messages");
+        }
+        if let Ok(Some(diffs)) = tokio::time::timeout(SETTLE, changes.next()).await {
+            for diff in diffs {
+                diff.apply(&mut items);
+            }
+        }
+    }
     loop {
         let mut newest = messages(&items, &own, &ignored.borrow());
         let skip = newest.len().saturating_sub(WATCH_TAIL);

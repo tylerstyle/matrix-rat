@@ -225,6 +225,29 @@ impl Seen {
     }
 }
 
+impl Seen {
+    /// Notes all of `messages` (a room's newest, oldest first) and returns what of
+    /// them is news: what is new at the room's end, and what changed. A message that
+    /// was not known but stands before one that was is not news: it is history that
+    /// was loaded meanwhile (a `read` that asked for more than was there), older than
+    /// what has been told already.
+    fn sift(&mut self, messages: Vec<Msg>) -> Vec<Msg> {
+        let newest_known = messages
+            .iter()
+            .rposition(|message| self.marks.contains_key(&message.event_id));
+        messages
+            .into_iter()
+            .enumerate()
+            .filter(|(at, message)| {
+                let known = self.marks.contains_key(&message.event_id);
+                let differs = self.note(message);
+                differs && (known || newest_known.is_none_or(|newest| *at > newest))
+            })
+            .map(|(_, message)| message)
+            .collect()
+    }
+}
+
 /// What a message says, and how far its sender is trusted, as one number.
 fn mark(message: &Msg) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -591,10 +614,7 @@ impl Hub {
                     return;
                 };
                 watch.told = true;
-                let news: Vec<Msg> = messages
-                    .into_iter()
-                    .filter(|message| watch.seen.note(message))
-                    .collect();
+                let news = watch.seen.sift(messages);
                 if !watch.baseline {
                     // What was there before anyone listened is not news.
                     if caught_up {

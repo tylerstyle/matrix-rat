@@ -437,6 +437,29 @@ async fn listen_tells_what_is_new_or_changed_and_nothing_that_was_there_before()
     assert_eq!(next(&mut listener).await.unwrap().event_id, "$after");
     assert_eq!(next(&mut second).await.unwrap().event_id, "$after");
 
+    // Older messages are loaded meanwhile (a `read` asked for more than was there):
+    // they stand before what is known, and are history, not news. What comes after
+    // them at the room's end is told as ever.
+    let mut longer = vec![
+        message("$ancient", EVE, "long ago"),
+        message("$older", ANN, "an earlier answer"),
+    ];
+    longer.extend(all.clone());
+    fake.watched(longer.clone());
+    longer.push(message("$latest", ANN, "the answer"));
+    fake.watched(longer.clone());
+    assert_eq!(next(&mut listener).await.unwrap().event_id, "$latest");
+    assert_eq!(next(&mut second).await.unwrap().event_id, "$latest");
+    // One of them changes later (decrypted at last, edited): that is told.
+    longer[1] = Msg {
+        body: "an earlier answer, corrected".into(),
+        edited: true,
+        ..longer[1].clone()
+    };
+    fake.watched(longer.clone());
+    assert_eq!(next(&mut listener).await.unwrap().event_id, "$older");
+    assert_eq!(next(&mut second).await.unwrap().event_id, "$older");
+
     // When the last listener has gone, the room is no longer watched.
     drop(listener);
     tokio::time::sleep(Duration::from_millis(1500)).await;
