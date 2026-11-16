@@ -736,6 +736,14 @@ impl Hub {
         if let Some(known) = rooms().find(|known| known.info.id == wanted) {
             return Ok(known.info.id.clone());
         }
+        // What looks like an id is only ever an id: a room named after the id of a
+        // room that was left must not stand in for it.
+        if wanted.starts_with('!') {
+            return Err(Refusal::new(
+                Code::NotFound,
+                "no joined room has that id, name or address",
+            ));
+        }
         let mut fitting = rooms()
             .filter(|known| known.info.name == wanted || known.alias.as_deref() == Some(wanted));
         match (fitting.next(), fitting.next()) {
