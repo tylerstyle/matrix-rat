@@ -1,4 +1,7 @@
 #![recursion_limit = "256"]
+// A test may wait for what it tests; everywhere else `clippy.toml` refuses calls that
+// block their thread unless the place says why it may.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 //! matrix-rat — a mouse-friendly Matrix client for the terminal.
 
 mod action;
@@ -197,6 +200,10 @@ impl fmt::Debug for Args {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the entry point: the main thread is the runtime's"
+)]
 fn main() -> Result<()> {
     let args = Args::parse();
     if let Some(generator) = &args.print_template {
@@ -262,6 +269,10 @@ fn main() -> Result<()> {
 /// Runs `send`, `read`, `listen` or `mcp` against the profile's `serve` and returns
 /// the exit code. What is wrong is said on standard error, where it is the user's (or
 /// the agent's) to read; nothing is logged.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a command-line client: its one thread runs the request to its end"
+)]
 fn client_command(command: Command, paths: &paths::Paths) -> u8 {
     use agent::client::{self, exit};
     let socket = paths.agent_socket();

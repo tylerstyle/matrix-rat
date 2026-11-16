@@ -82,9 +82,27 @@ struct Sound {
     id: u64,
     room_id: String,
     message_id: String,
+    /// The message's event, where it has one. A thread shows its first message under
+    /// another id than the room does: the event says it is the same message.
+    event: Option<String>,
     /// The file's address: with the message's id, which message this is.
     key: String,
     phase: Phase,
+}
+
+impl Sound {
+    /// Whether `message` is the one this sound belongs to.
+    fn belongs_to(&self, message: &Message) -> bool {
+        let same = self.message_id == message.id
+            || self
+                .event
+                .as_deref()
+                .is_some_and(|event| message.event_id() == Some(event));
+        same && message
+            .file
+            .as_ref()
+            .is_some_and(|file| file.key == self.key)
+    }
 }
 
 impl fmt::Debug for Sound {
@@ -157,14 +175,9 @@ impl AudioState {
 
     /// Whether `message` of the room `room_id` is the sound.
     fn is(&self, room_id: &str, message: &Message) -> bool {
-        self.current.as_ref().is_some_and(|sound| {
-            sound.room_id == room_id
-                && sound.message_id == message.id
-                && message
-                    .file
-                    .as_ref()
-                    .is_some_and(|file| file.key == sound.key)
-        })
+        self.current
+            .as_ref()
+            .is_some_and(|sound| sound.room_id == room_id && sound.belongs_to(message))
     }
 
     fn playing(&self) -> Option<&Playing> {
@@ -255,13 +268,10 @@ impl App {
             .current
             .as_ref()
             .filter(|sound| sound.room_id == room.id)?;
-        let at = room.messages.iter().rposition(|message| {
-            message.id == sound.message_id
-                && message
-                    .file
-                    .as_ref()
-                    .is_some_and(|file| file.key == sound.key)
-        })?;
+        let at = room
+            .messages
+            .iter()
+            .rposition(|message| sound.belongs_to(message))?;
         let meta = room.messages[at].file.as_ref()?.audio.as_deref();
         Some((at, sound.view(meta)))
     }
@@ -287,6 +297,7 @@ impl App {
     }
 
     fn start_audio(&mut self, room_id: String, message: Message) {
+        let event = message.event_id().map(str::to_owned);
         let Some(file) = message.file else {
             return;
         };
@@ -329,6 +340,7 @@ impl App {
         self.audio.current = Some(Sound {
             id,
             room_id,
+            event,
             message_id: message.id,
             key: file.key.clone(),
             phase: Phase::Loading,
@@ -705,6 +717,41 @@ mod tests {
         update(&mut app, 1, PlayerEvent::Ended(End::Stopped));
         assert!(app.toast.is_none());
         assert!(asked(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn a_thread_shows_its_first_message_playing() {
+        let dir = Dir::new("thread-root");
+        let (mut app, mut commands) = app_with(vec![text("t", "hi"), voice("v1", true)], &dir);
+        select(&mut app, 1);
+        app.on_event(key(KeyCode::Char('x')));
+        fetched(&mut app, 1, &dir);
+        // The thread shows the message as its first, under another id.
+        app.open_thread(1);
+        assert!(app.thread_open());
+        let room = app.rooms[0].clone();
+        assert_ne!(room.messages[0].id, "v1");
+        assert!(matches!(
+            app.audio_in(&room),
+            Some((0, AudioView::Playing { .. }))
+        ));
+        // `x` on it stops it instead of starting it again.
+        select(&mut app, 0);
+        assert!(app.audio_caps().selected);
+        app.on_event(key(KeyCode::Char('x')));
+        assert!(!app.audio_caps().active);
+        assert_eq!(asked(&mut commands), ["FetchAudio(sound 1)"]);
+
+        // The other way round: started in the thread, shown in the room.
+        app.on_event(key(KeyCode::Char('x')));
+        fetched(&mut app, 2, &dir);
+        app.close_thread();
+        assert!(!app.thread_open());
+        let room = app.rooms[0].clone();
+        assert!(matches!(
+            app.audio_in(&room),
+            Some((1, AudioView::Playing { .. }))
+        ));
     }
 
     #[test]

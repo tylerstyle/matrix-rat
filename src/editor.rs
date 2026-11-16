@@ -206,6 +206,10 @@ impl Drop for TempFile {
 }
 
 /// Runs the editor on the file and waits. True if it ended successfully.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the editor has the terminal until it ends; called inside spawn_blocking"
+)]
 pub fn run_command(argv: &[String], file: &Path) -> io::Result<bool> {
     let (program, args) = argv
         .split_first()

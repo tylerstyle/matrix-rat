@@ -1,0 +1,19 @@
+# The interface thread must never wait: every call that blocks its thread is refused
+# unless the place says, with `#[expect(clippy::disallowed_methods, reason = "…")]`,
+# why it may (a thread of its own, a bounded wait, the program's entry point).
+# Tests are exempt (see the top of src/main.rs).
+disallowed-methods = [
+    { path = "std::thread::sleep", reason = "blocks its thread; on the interface thread nothing may wait" },
+    { path = "std::process::Command::status", reason = "waits for the program to end" },
+    { path = "std::process::Command::output", reason = "waits for the program to end" },
+    { path = "std::process::Child::wait", reason = "waits for the program to end" },
+    { path = "std::process::Child::wait_with_output", reason = "waits for the program to end" },
+    { path = "std::thread::JoinHandle::join", reason = "waits for the thread to end" },
+    { path = "std::sync::mpsc::Receiver::recv", reason = "waits without a limit" },
+    { path = "tokio::runtime::Runtime::block_on", reason = "blocks its thread on a future" },
+    { path = "tokio::runtime::Handle::block_on", reason = "blocks its thread on a future" },
+    { path = "futures_executor::local_pool::block_on", reason = "blocks its thread on a future" },
+    { path = "tokio::sync::mpsc::Receiver::blocking_recv", reason = "waits without a limit" },
+    { path = "tokio::sync::mpsc::UnboundedReceiver::blocking_recv", reason = "waits without a limit" },
+    { path = "tokio::sync::mpsc::Sender::blocking_send", reason = "waits without a limit" },
+]

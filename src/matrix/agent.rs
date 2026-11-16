@@ -39,6 +39,10 @@ use crate::model::Shield;
 
 /// The newest messages of a watched room that are told on every change.
 pub const WATCH_TAIL: usize = 100;
+/// How far a watch goes back for a first message of a room that shows none, and for
+/// how long (well within the time a `listen` waits to be let in).
+const WATCH_LOAD_PAGES: usize = 3;
+const WATCH_LOAD_BUDGET: Duration = Duration::from_secs(10);
 /// Rooms watched at once.
 pub const MAX_WATCHED: usize = 16;
 /// Sends and reads running at once.
@@ -457,6 +461,46 @@ async fn watch_room(
     let own = room.own_user_id().to_owned();
     let (mut items, changes) = timeline.subscribe().await;
     pin_mut!(changes);
+    // A room whose messages are not loaded yet looks empty, and what is loaded later
+    // would all look new: older ones are loaded first until a message is there (a
+    // page may hold none: who joined, what was set), within a few pages and a short
+    // time, so that what is told first is what the room holds.
+    let give_up = tokio::time::Instant::now() + WATCH_LOAD_BUDGET;
+    for _ in 0..WATCH_LOAD_PAGES {
+        while let Some(Some(diffs)) = changes.next().now_or_never() {
+            for diff in diffs {
+                diff.apply(&mut items);
+            }
+        }
+        if !messages(&items, &own, &ignored.borrow()).is_empty()
+            || items.iter().any(|item| item.is_timeline_start())
+        {
+            break;
+        }
+        let done = match tokio::time::timeout_at(give_up, timeline.paginate_backwards(PAGE)).await {
+            Ok(Ok(reached_start)) => reached_start,
+            Ok(Err(err)) => {
+                tracing::debug!(why = %logsafe::kind(&err), "agent: could not load a watched room's latest messages");
+                break;
+            }
+            Err(_) => break,
+        };
+        // What was loaded reaches the timeline a moment later, also when it was
+        // all the room has.
+        if let Ok(Some(diffs)) = tokio::time::timeout(SETTLE, changes.next()).await {
+            for diff in diffs {
+                diff.apply(&mut items);
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    while let Some(Some(diffs)) = changes.next().now_or_never() {
+        for diff in diffs {
+            diff.apply(&mut items);
+        }
+    }
     loop {
         let mut newest = messages(&items, &own, &ignored.borrow());
         let skip = newest.len().saturating_sub(WATCH_TAIL);

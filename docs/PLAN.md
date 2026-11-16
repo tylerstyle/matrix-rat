@@ -188,9 +188,9 @@ are cheap and stand alone.
   exists; remote services are not wanted without a clear consent step.
 - **An update notice**, opt-in, asking GitHub at most twice a day, never installing; a build
   switch so the Nix package leaves it out.
-- **Lints that enforce our rules**: forbid blocking calls on the UI thread and wildcard match
-  arms on our own enums through clippy's configuration; `cargo deny` for licences and known
-  vulnerabilities in CI; a weekly grouped dependency update.
+- **Lints that enforce our rules**, the rest: forbid wildcard match arms on our own enums
+  through clippy's configuration; a weekly grouped dependency update. (Blocking calls and
+  `cargo deny` are done, see §6b.)
 - **A numbered decisions file** in faro's manner, should §5 outgrow a table.
 - **Packaging**: AUR and a `.deb` wrapping the release archives (already on our list).
 
@@ -232,14 +232,61 @@ user, so handing an agent the whole instance is acceptable (the user's decision)
 
 **State (2026-11-16):** built, reviewed (M36) and merged. Tried by hand against the test
 homeserver: a bot profile logged in with the normal app, `serve`, `rooms`, `send`, `read`,
-`listen` and the MCP server over a pipe all work, and `serve` ends cleanly on SIGTERM. Not
-yet tried with a real MCP client. Seen once and not again in seven tries: a `read` right
-after the first `send` of a fresh `serve` listed the new message twice.
+`listen` and the MCP server over a pipe all work, and `serve` ends cleanly on SIGTERM. Seen
+once and not again in seven tries: a `read` right after the first `send` of a fresh `serve`
+listed the new message twice.
 
-**Also in 0.9:** what the user's testing of 0.8 turns up; the three open notes of the 0.8
-reviews (a playing message inside a thread view, empty continuation rows of a playing row
-with a long name, the doctor breaking `Alt-Enter` across lines); stricter build checks (no
-blocking calls on the UI thread, `cargo deny` in CI).
+Tried with Claude Code as the MCP client (the server reached over ssh, a second account
+answering after 50 seconds): it found the three tools, sent, was refused a `room` argument,
+and waited 47 seconds for the right answer. The first try found a fault, fixed on
+`leftovers-09`: older messages that a `read` loaded into a watched room were told to
+listeners as new, so `wait_for_message` came back at once with an old message. Two things
+were done about it, the second after an independent review of the first:
+
+- `serve` takes a message it did not know for news only if it stands after the newest one
+  it knew, and a watch loads older messages first until the room shows one.
+- The MCP server no longer goes by a message's place alone. It remembers what each look at
+  the room showed, what it handed to the agent and what the agent is still owed. Before the
+  point the agent has seen, a message is news only if it was not there at the time (an
+  answer missed in a gap of the sync and loaded later), if it was handed over and was edited
+  since, or if it named the user without counting as theirs and counts now. What is owed
+  stays owed until it is handed over: a read that does not show it or a cancelled wait
+  loses nothing. A room that showed no message is not taken for an empty one (a failed
+  load looks the same), so its history is not news later.
+
+Reviewed by independent reviewers of `matrix-claude`, each starting from the code alone (agy
+was out of credits; the user said to go on without it). Four rounds asked for changes,
+which are in (see `docs/reviews/M37-review.md`).
+
+Still open:
+
+- `listen` on the command line does not tell an answer that arrived during a gap in the
+  sync and is loaded later, and in a room that shows no message within three pages when a
+  watch begins it can tell loaded history as new once. The MCP tools do neither.
+- A `wait_for_message` that is already waiting does not see an answer loaded from a gap;
+  the next wait hands it over (a read in between that does not show it keeps it owed), if
+  the answer is among the room's newest hundred.
+- In a room that holds no message at all, what is written between an agent's first wait or
+  read and its next call is not handed over, unless the agent sent something first. The MCP
+  server cannot tell an empty room from one whose messages could not be loaded, and taking
+  the second for the first made old history news. `serve` would have to say whether a read
+  reached the room's start.
+- When the user verifies a device, or a key comes late, messages that were shown as
+  untrusted or unreadable before are handed over as theirs, however old; the tool's
+  description tells the agent to look at the time.
+- A wait hands over twenty messages at most; with more, the older ones of the backlog are
+  left to `read_messages` (as designed), except those owed, which come with the next wait.
+
+**Also in 0.9:** what the user's testing of 0.8 turns up (nothing reported yet). Done on the
+branch `leftovers-09`: the three open notes of the 0.8 reviews (a playing message inside a
+thread view, empty continuation rows of a playing row with a long name, the doctor breaking
+`Alt-Enter` across lines), and the stricter build checks:
+
+- `clippy.toml` refuses calls that block their thread (`sleep`, waiting for a program or a
+  thread, `block_on`, blocking channel calls). The fifteen places that do so on purpose say
+  why with `#[expect(clippy::disallowed_methods, reason = "…")]`; tests are exempt.
+- `deny.toml` and `.github/workflows/checks.yml`: `cargo deny check` for every change and
+  once a week. Three advisories are ignored there, each with its reason (see §7).
 
 ## 7. Known limits and open questions
 
@@ -257,6 +304,18 @@ blocking calls on the UI thread, `cargo deny` in CI).
 - **The test homeserver** (continuwuity) sends only the text of a thread's newest reply, so the
   threads list shows no "who and when" there; and one test with two accounts waiting for a
   member count failed once in 120 runs, during a network interruption, unexplained.
+- **The SQLite built into the release archives** (through matrix-sdk 0.19.1) is older than
+  3.54.0 and has a known flaw (RUSTSEC-2026-0459): opening a database whose `-wal` file has
+  another page size can hand out stale memory. It takes someone who can write into the
+  profile's private folder, who could read the store there anyway. The fix comes with the
+  next matrix-sdk; the Nix package links the system's SQLite (3.54.0 in nixos-unstable today)
+  and is not affected there.
+  Two more advisories only say "unmaintained" (anymap2, bincode 1), both deep in
+  dependencies.
+- **The test homeserver's own fault**: continuwuity now and then answers a sync with an
+  error ("pdu should have a shortstatehash"), in bursts, and a server-backed test that waits
+  for something then times out (seen in the threads, people and media tests, on `main` as
+  on a branch). A second run is the remedy; a fresh database for it may be worth trying.
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.

@@ -1031,6 +1031,260 @@ async fn a_message_decrypted_late_does_not_take_the_room_back() {
     }
 }
 
+/// Where a message stands is not all: old messages that `serve` tells again are not
+/// news, an answer that turns up later among what was seen is, and so is an answer
+/// that was handed over and says something else now.
+#[tokio::test]
+async fn only_what_the_agent_has_not_seen_as_it_is_now_is_news() {
+    let old = doubted("$old", ANN, "yes, do it", None, "unverified");
+    let world = World::start("mcp-ledger", vec![message("$first", EVE, "hi"), old]).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session
+        .ok("send_message", json!({ "text": "merge or wait?" }))
+        .await;
+
+    // An old word of the user's is told again by `serve` (she was verified
+    // meanwhile), and older messages are loaded: neither answers the question.
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.change("$old", |changed| {
+        *changed = message("$old", ANN, "yes, do it");
+    });
+    world.insert_before("$first", message("$ancient", ANN, "go ahead"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // What she says now does.
+    world.post(message("$later", ANN, "did you get my answer?"));
+    let (_, woken) = session.result(id).await;
+    assert_eq!(ids(&woken), ["$later"]);
+
+    // Her answer was missed in a gap of the sync and is loaded only now: it stands
+    // before what was handed over, and was not there when the room was looked at.
+    world.insert_before("$later", message("$answer", ANN, "wait"));
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$answer"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+
+    // She corrects the answer the agent has: told again, while it waits or before.
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.change("$answer", |changed| {
+        changed.body = "merge after all".into();
+        changed.edited = true;
+    });
+    let (_, woken) = session.result(id).await;
+    assert_eq!(ids(&woken), ["$answer"]);
+    assert_eq!(woken["messages"][0]["body"], "merge after all");
+    world.change("$answer", |changed| changed.body = "no: wait".into());
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$answer"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+
+    // What the agent was shown as not hers is news once it is hers, wherever it
+    // stands by then.
+    world.post(doubted("$doubt", ANN, "tag it", None, "unverified"));
+    world.post(own("$own", "[builder] noted"));
+    let read = session.ok("read_messages", json!({ "limit": 2 })).await;
+    assert_eq!(read["messages"][0]["from_user"], false);
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.change("$doubt", |changed| {
+        *changed = message("$doubt", ANN, "tag it");
+    });
+    let (_, woken) = session.result(id).await;
+    assert_eq!(ids(&woken), ["$doubt"]);
+    assert_eq!(woken["messages"][0]["from_user"], true);
+    session.end().await;
+    world.stop().await;
+}
+
+/// A room whose messages could not be loaded looks empty. It is not taken for an
+/// empty room: what it held all along is not news when it shows later.
+#[tokio::test]
+async fn a_room_that_showed_nothing_does_not_make_its_history_news() {
+    let world = World::start("mcp-unloaded", Vec::new()).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session
+        .ok("send_message", json!({ "text": "merge or wait?" }))
+        .await;
+    world.insert_before("$sent-1", message("$history", ANN, "go ahead"));
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+    world.post(message("$answer", ANN, "wait"));
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$answer"]);
+    session.end().await;
+    world.stop().await;
+
+    // Nor when the history shows to a read first, the question not yet among it,
+    // and the read does not show all of it.
+    let world = World::start("mcp-unloaded-read", Vec::new()).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session
+        .ok("send_message", json!({ "text": "merge or wait?" }))
+        .await;
+    world.change("$sent-1", |question| {
+        *question = message("$history-2", ANN, "do it");
+    });
+    world.insert_before("$history-2", message("$history-1", ANN, "go ahead"));
+    let read = session.ok("read_messages", json!({ "limit": 1 })).await;
+    assert_eq!(ids(&read), ["$history-2"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+
+    // The same when the first thing done is to wait, or to read. (The price: in a
+    // room that really is empty, what is written between such a first call and the
+    // next one is not news either. Whether a room is empty or not loaded cannot be
+    // told from here.)
+    for first in ["wait_for_message", "read_messages"] {
+        let world = World::start("mcp-unloaded-first", Vec::new()).await;
+        let mut session = Session::start(world.socket(), Some(ANN));
+        let arguments = match first {
+            "read_messages" => json!({}),
+            _ => json!({ "timeout_seconds": 1 }),
+        };
+        session.ok(first, arguments).await;
+        world.post(message("$history", ANN, "go ahead"));
+        session
+            .ok("send_message", json!({ "text": "merge or wait?" }))
+            .await;
+        let nothing = session
+            .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+            .await;
+        assert_eq!(nothing["status"], "nothing new", "{first}");
+        session.end().await;
+        world.stop().await;
+    }
+    session.end().await;
+    world.stop().await;
+}
+
+/// A read while a wait is on moves the point the room has been seen up to; the wait
+/// moves it on from there, so that its answer is not handed over a second time.
+#[tokio::test]
+async fn an_answer_is_handed_over_once_also_when_a_read_came_in_between() {
+    let world = World::start("mcp-overlap", vec![message("$first", EVE, "hi")]).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session
+        .ok("send_message", json!({ "text": "merge or wait?" }))
+        .await;
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    let read = session.begin("read_messages", json!({ "limit": 1 })).await;
+    let (_, shown) = session.result(read).await;
+    assert_eq!(ids(&shown), ["$sent-1"]);
+    world.post(message("$answer", ANN, "merge"));
+    let (_, woken) = session.result(id).await;
+    assert_eq!(ids(&woken), ["$answer"]);
+    session
+        .ok("send_message", json!({ "text": "and tag it?" }))
+        .await;
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+
+    // What a read does not show of what came since is owed, not lost.
+    world.post(message("$one", ANN, "yes"));
+    world.post(message("$two", ANN, "today"));
+    let read = session.ok("read_messages", json!({ "limit": 1 })).await;
+    assert_eq!(ids(&read), ["$two"]);
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$one"]);
+    session.end().await;
+    world.stop().await;
+}
+
+/// An answer the agent is owed stays owed until it is handed over: a read that does
+/// not show it, a wait that is cancelled, and a key that comes late lose nothing.
+#[tokio::test]
+async fn what_the_agent_is_owed_is_not_lost_on_the_way() {
+    let world = World::start("mcp-owed", vec![message("$first", EVE, "hi")]).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session
+        .ok("send_message", json!({ "text": "merge or wait?" }))
+        .await;
+    world.post(message("$later", ANN, "did you get my answer?"));
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$later"]);
+
+    // The answer missed in a gap is loaded by a read that does not show it.
+    world.insert_before("$later", message("$answer", ANN, "wait"));
+    let read = session.ok("read_messages", json!({ "limit": 1 })).await;
+    assert_eq!(ids(&read), ["$later"]);
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$answer"]);
+
+    // Another one cannot be read yet when it is loaded; the wait that saw it is
+    // cancelled, and the key comes while nobody waits.
+    world.insert_before("$later", locked("$sealed", ANN));
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    session
+        .say(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": id }
+        }))
+        .await;
+    world.until_watched(false).await;
+    world.change("$sealed", |changed| {
+        *changed = message("$sealed", ANN, "and tag it");
+    });
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$sealed"]);
+
+    // What a read does not show and is not the user's word yet is owed as well.
+    world.post(doubted("$doubt", ANN, "ship it", None, "unverified"));
+    world.post(own("$own", "[builder] noted"));
+    let read = session.ok("read_messages", json!({ "limit": 1 })).await;
+    assert_eq!(ids(&read), ["$own"]);
+    world.change("$doubt", |changed| {
+        *changed = message("$doubt", ANN, "ship it");
+    });
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$doubt"]);
+
+    // A deleted answer the agent has is said once (a count, no text), not for ever.
+    world.change("$doubt", |changed| {
+        *changed = Msg {
+            kind: "redacted".into(),
+            ..doubted("$doubt", ANN, "", None, "redacted")
+        };
+    });
+    let once = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(once["status"], "nothing new");
+    assert_eq!(once["untrusted_from_user"], 1);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+    session.end().await;
+    world.stop().await;
+}
+
 /// In a room without encryption nothing can be verified: with a user set up,
 /// nothing counts as hers unless the server was told to take what is not verified.
 #[tokio::test]

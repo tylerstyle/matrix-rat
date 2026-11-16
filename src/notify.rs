@@ -465,6 +465,10 @@ fn desktop() -> &'static futures::channel::mpsc::UnboundedSender<DesktopJob> {
             use futures::StreamExt;
             use futures::future::Either;
             let mut clickable = Clickable::new(None);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the notification thread is this loop"
+            )]
             futures::executor::block_on(async {
                 loop {
                     // Whichever comes first: something to show, or news from the

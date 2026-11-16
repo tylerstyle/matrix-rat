@@ -121,6 +121,10 @@ pub fn ignore_reload_signal() {
 /// program, and SIGUSR1 would end it. A running instance keeps its pid file locked, so
 /// only files that are locked right now are trusted, and the process is checked to be
 /// this program before it is signalled.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "run from the command line before any interface exists; kill ends at once"
+)]
 pub fn signal_running_instances(paths: &Paths) -> usize {
     let Ok(entries) = std::fs::read_dir(&paths.runtime_dir) else {
         return 0;

@@ -4,6 +4,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets -- -D warnings  # clippy.toml: no blocking calls without a reason
 cargo test  # the server-backed tests are extra: cargo test -- --ignored --test-threads=1
 cargo build  # keep target/debug/matrix-rat current for manual runs

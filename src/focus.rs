@@ -43,6 +43,10 @@ pub fn raise_window(command: &str) {
 /// Runs a program to its end or until `PATIENCE` runs out, and returns what it wrote
 /// (if `capture`; else nothing) if it succeeded. Nothing of ours is passed to it on
 /// standard input.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "runs on the raise-window thread, and no longer than PATIENCE"
+)]
 fn run(mut command: Command, capture: bool) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut child = command

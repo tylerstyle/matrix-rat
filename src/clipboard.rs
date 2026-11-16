@@ -299,6 +299,10 @@ impl fmt::Debug for TempPicture {
 /// Runs `argv` (no shell) until it ends, it has written more than `max` bytes or
 /// `deadline` has passed, whichever is first; in the last two cases it is killed.
 /// Nothing is passed to it, and what it says about errors goes nowhere.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tool was killed the line before, so reaping it does not wait; and this runs inside spawn_blocking"
+)]
 pub fn run_tool(argv: &[&str], max: u64, deadline: Instant) -> Ran {
     let Some((program, args)) = argv.split_first() else {
         return Ran::Failed;
@@ -323,6 +327,10 @@ pub fn run_tool(argv: &[&str], max: u64, deadline: Instant) -> Ran {
 }
 
 /// Reads what the tool writes and waits for its end, within the limits.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "short naps up to the caller's deadline, never longer"
+)]
 fn collect(child: &mut Child, max: u64, deadline: Instant) -> Ran {
     let Some(mut out) = child.stdout.take() else {
         return Ran::Failed;
