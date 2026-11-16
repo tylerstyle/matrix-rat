@@ -9,7 +9,7 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-16, after 0.7.0.
+Last brought up to date: 2026-11-16, with 0.8.0.
 
 ## 1. What it is for
 
@@ -38,6 +38,7 @@ Not goals: calls, widgets, creating or deactivating accounts, a Windows build.
 | 0.6.0 | 2026-11-15 | Room commands (`/join`, `/kick`, `/topic`, …), message details with the event source, a list of a room's threads, notification keywords, do not disturb, pasting a picture from the clipboard, `NO_COLOR`, a high-contrast theme. Logs no longer hold raw error text. |
 | 0.6.1 | 2026-11-15 | A code block typed on one line keeps its code; `/code`. |
 | 0.7.0 | 2026-11-15 | Space management, custom emoji as pictures and in reactions, `O` for the system's viewer, `Ctrl-B` for the room list, ready-made Linux binaries, running under WSL described. A room that was left stays gone; a muted room shows as muted at once. The rest of the debug output is free of private data. |
+| 0.8.0 | 2026-11-16 | `Esc` closes one layer at a time, down to "no chat open"; voice and audio messages played inside the app (a player on the system, pause and seek with mpv); `matrix-rat doctor`; unread count in the window title; a config with one bad value still starts. |
 
 Each release is a tag, a GitHub release with notes, the Nix package in the NUR with a binary
 cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
@@ -46,7 +47,7 @@ cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
 ## 3. How it is built
 
 One binary crate, about 127,000 lines of Rust with its tests (945 unit tests and 43 tests against
-a real homeserver at 0.7.0).
+a real homeserver at 0.7.0; 1034 and 44 at 0.8.0).
 
 **Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.19.1, pinned exactly (every minor
 release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`; `ratatui-image` and `image` for
