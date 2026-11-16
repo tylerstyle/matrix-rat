@@ -9,6 +9,8 @@ mod composer;
 mod config;
 mod details;
 mod devices;
+#[allow(dead_code)]
+mod doctor;
 mod editor;
 mod emoji;
 mod files;

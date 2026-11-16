@@ -189,12 +189,12 @@ impl Graphics {
 
 /// WezTerm and Konsole answer the kitty graphics check but do not place pictures
 /// through Unicode placeholders correctly.
-fn placeholders_broken() -> bool {
+pub(crate) fn placeholders_broken() -> bool {
     let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
     set("WEZTERM_EXECUTABLE") || set("KONSOLE_VERSION")
 }
 
-fn in_multiplexer() -> bool {
+pub(crate) fn in_multiplexer() -> bool {
     let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
     let term = std::env::var("TERM").unwrap_or_default();
     set("TMUX")
