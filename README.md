@@ -616,7 +616,9 @@ prints a message again when it changes (edited, deleted, decrypted a moment afte
 came, or its sender verified meanwhile): tell them apart by `event_id`. Exit codes: `0` done,
 `2` wrong usage, `3` no `serve` is running for the profile, `4` `serve` refused (the
 reason is on standard error), `1` anything else. `serve` itself ends with `78` when the
-profile needs a login, and with `1` when it failed for another reason.
+profile has no session it can use (it needs a login, or the session could not be read:
+with `secret_store = "keyring"` also while the keyring is locked), and with `1` when it
+failed for another reason.
 
 **Setting it up**
 
@@ -642,8 +644,8 @@ After=network-online.target
 
 [Service]
 ExecStart=/path/to/matrix-rat --profile bot serve
-# Start again after a failure, but not when the profile needs a login (exit code 78):
-# only you can mend that.
+# Start again after a failure, but not when the profile has no session that can be
+# used (exit code 78): that needs you.
 Restart=on-failure
 RestartPreventExitStatus=78
 RestartSec=30

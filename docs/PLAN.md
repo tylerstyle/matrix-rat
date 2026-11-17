@@ -265,9 +265,13 @@ Still open:
   sync and is loaded later, and in a room that shows no message within three pages when a
   watch begins it can tell loaded history as new once. The MCP tools do neither.
 - (Mended after 0.9.0, branch `fixes-091`.) A `wait_for_message` that is already waiting
-  now reads the room again once a minute and hands over an answer loaded into a gap, if
-  it is among the room's newest hundred. A wait that names `after_event_id` takes
-  nothing from before that point, as before.
+  now looks at the room anew once a minute (a long wait is a row of short ones, each by
+  the rules of a new call) and hands over an answer loaded into a gap, if it is among
+  the room's newest hundred. With `after_event_id`, what is loaded after that point ends
+  the wait; what is loaded before it is owed and handed over by a later wait that names
+  no point. Left as it is: the progress notices pause for the moment of each new look,
+  and a look that loads history into a room that showed nothing before can make `serve`
+  tell it to listeners as new (the case of the first point above).
 - In a room that holds no message at all, what is written between an agent's first wait or
   read and its next call is not handed over, unless the agent sent something first. The MCP
   server cannot tell an empty room from one whose messages could not be loaded, and taking

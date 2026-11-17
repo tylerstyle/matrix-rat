@@ -1686,7 +1686,8 @@ async fn a_running_wait_finds_what_is_loaded_into_a_gap() {
         .await;
     assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
 
-    // A wait that says itself from where takes nothing from before that point.
+    // A wait that says itself from where takes nothing from before that point, and
+    // what is loaded after it ends the wait.
     let id = begin_wait(
         &mut session,
         &world,
@@ -1701,9 +1702,69 @@ async fn a_running_wait_finds_what_is_loaded_into_a_gap() {
             .is_none(),
         "woken by what stands before the point the call named"
     );
-    world.post(message("$last", ANN, "done"));
+    world.post(own("$own-2", "[builder] on it"));
+    world.insert_before("$own-2", message("$gap-3", ANN, "and tag it"));
     let (failed, woken) = session.result(id).await;
     assert!(!failed);
-    assert_eq!(ids(&woken), ["$last"]);
+    assert_eq!(ids(&woken), ["$gap-3"]);
+    // What stood before that point is not lost: a wait that names none hands it over.
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$gap-2"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+    session.end().await;
+}
+
+/// The answer is loaded behind the point the room has been seen up to (the agent's
+/// own question, someone else's message came after it): it is handed over once.
+#[tokio::test]
+async fn an_answer_loaded_behind_the_question_is_handed_over_once() {
+    let world = World::start("mcp-relook-2", vec![message("$first", EVE, "hi")]).await;
+    let mut session =
+        Session::start_relooking(world.socket(), Some(ANN), Duration::from_millis(150));
+    session
+        .ok("send_message", json!({ "text": "merge or wait?" }))
+        .await;
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.post(message("$eve", EVE, "good question"));
+    world.insert_before("$eve", message("$answer", ANN, "wait"));
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$answer"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+
+    // One that cannot be read when it is loaded, behind what was handed over: when
+    // its key comes it ends the wait, and the room is not taken back by it.
+    world.post(message("$later", ANN, "are you there?"));
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$later"]);
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.insert_before("$later", locked("$sealed", ANN));
+    assert!(
+        session
+            .hear_within(Duration::from_millis(600))
+            .await
+            .is_none(),
+        "woken by a message nobody could read"
+    );
+    world.change("$sealed", |changed| {
+        *changed = message("$sealed", ANN, "and tag it");
+    });
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$sealed"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
     session.end().await;
 }
