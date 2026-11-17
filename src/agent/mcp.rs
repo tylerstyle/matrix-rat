@@ -44,6 +44,10 @@ const WAIT_DEFAULT: u64 = 300;
 const WAIT_MAX: u64 = 600;
 /// The most messages a wait hands over at once: of a longer backlog, the newest.
 const WAIT_MESSAGES: usize = 20;
+/// How long a later part of a wait may take over the wait's end to look at the room.
+const PART_SETUP: Duration = Duration::from_secs(2);
+/// How long a wait pauses when a later part of it could not begin.
+const PART_RETRY: Duration = Duration::from_secs(5);
 
 // JSON-RPC's error codes.
 const PARSE_ERROR: i64 = -32700;
@@ -936,9 +940,23 @@ impl Server {
         let mut first = true;
         loop {
             let part = (Instant::now() + self.relook).min(deadline);
-            let (part_found, part_doubted) = self
-                .wait_part(after, first, part, deadline, seconds, progress)
-                .await?;
+            let looked = self.wait_part(after, first, part, deadline, seconds, progress);
+            let (part_found, part_doubted) = if first {
+                looked.await?
+            } else {
+                // A later part that cannot begin (the connection to Matrix is
+                // being started again, `serve` is busy) does not end a wait that
+                // went well so far: it is tried again. And it is given no more
+                // time than the wait has.
+                match tokio::time::timeout_at(deadline + PART_SETUP, looked).await {
+                    Ok(Ok(part)) => part,
+                    Ok(Err(_)) => {
+                        tokio::time::sleep_until((Instant::now() + PART_RETRY).min(deadline)).await;
+                        (Vec::new(), Vec::new())
+                    }
+                    Err(_) => (Vec::new(), Vec::new()),
+                }
+            };
             first = false;
             found = part_found;
             for (id, _) in part_doubted {
@@ -950,6 +968,9 @@ impl Server {
                 break;
             }
         }
+        // What an earlier part could not take and a later one hands over is not
+        // counted as left out.
+        doubted.retain(|id| !found.iter().any(|message| message.event_id == *id));
 
         let mut answer = if found.is_empty() {
             json!({ "status": "nothing new", "messages": [] })
@@ -1034,6 +1055,14 @@ impl Server {
         // messages took the place of theirs): then only what stands after a known
         // message and is not known is news.
         let lost = seen.is_some() && seen_at.is_none() && after.is_none();
+        // A room that has shown nothing yet is listened to in one piece: a new look
+        // would take what came meanwhile for what the room held before, and there
+        // is nothing known to tell a loaded message by anyway.
+        let part = if seen.is_none() && latest.is_empty() {
+            deadline
+        } else {
+            part
+        };
         if seen.is_none()
             && let Some(newest) = latest.last()
         {

@@ -269,8 +269,10 @@ Still open:
   the rules of a new call) and hands over an answer loaded into a gap, if it is among
   the room's newest hundred. With `after_event_id`, what is loaded after that point ends
   the wait; what is loaded before it is owed and handed over by a later wait that names
-  no point. Left as it is: the progress notices pause for the moment of each new look,
-  and a look that loads history into a room that showed nothing before can make `serve`
+  no point. A room that has shown no message is listened to in one piece, as
+  before. A later part that cannot begin (the connection is being started again) is
+  tried again and does not end the wait. Left as it is: the progress notices start
+  their beat anew with each look, so about one a minute is left out; and a look that loads history into a room that showed nothing before can make `serve`
   tell it to listeners as new (the case of the first point above).
 - In a room that holds no message at all, what is written between an agent's first wait or
   read and its next call is not handed over, unless the agent sent something first. The MCP

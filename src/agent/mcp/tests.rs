@@ -1768,3 +1768,26 @@ async fn an_answer_loaded_behind_the_question_is_handed_over_once() {
     assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
     session.end().await;
 }
+
+/// A room that has shown nothing is not looked at anew during a wait: what comes
+/// in between would be taken for what the room held before.
+#[tokio::test]
+async fn a_wait_in_a_room_that_showed_nothing_is_one_piece() {
+    let world = World::start("mcp-relook-3", Vec::new()).await;
+    let mut session =
+        Session::start_relooking(world.socket(), Some(ANN), Duration::from_millis(150));
+    let reads = world.reads();
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    assert!(
+        session
+            .hear_within(Duration::from_millis(600))
+            .await
+            .is_none()
+    );
+    assert_eq!(world.reads(), reads + 1, "the room was read again");
+    world.post(message("$answer", ANN, "wait"));
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$answer"]);
+    session.end().await;
+}
