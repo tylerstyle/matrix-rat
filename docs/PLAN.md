@@ -154,6 +154,24 @@ be done, by demand:
 - Other languages; exporting a chat; a gallery of a room's files.
 - Reading the shortcode a received custom-emoji reaction carries (the SDK does not expose it).
 
+### Before 1.0.0 (asked for by the user on 2026-11-17)
+
+Not features: three passes over what is there, each ending in a report the user reads.
+
+- **A deep look at memory and CPU use.** Measured, not guessed: memory at rest and over a
+  day with a real account (many rooms, large timelines, pictures), CPU at rest, while
+  syncing and while scrolling, for the app and for `serve`; what grows without bound; where
+  the time of a frame goes. Then the fixes the numbers call for.
+- **Another round of optimisation over the whole codebase**: what is computed more often
+  than needed, copied where it could be borrowed, held longer than needed; also build time
+  and binary size (the branch `release-profile` has an earlier try).
+- **A second opinion from a tool from outside**: the codebase checked again by something
+  that is not one of the agents that wrote and reviewed it. Which tool is open (candidates:
+  `cargo audit`/`cargo deny` are in use already; `cargo geiger` for unsafe code in the tree,
+  `cargo udeps`/`cargo machete` for unused dependencies, `miri` or sanitizers for the tests
+  that can run under them, a fuzzer for the parsers, another vendor's review model); the
+  user decides.
+
 ## 6a. Ideas from faro (0.8: A to E approved by the user on 2026-11-16)
 
 [faro](https://github.com/harababurel/faro) is a terminal Signal client on the same libraries
