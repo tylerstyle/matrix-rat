@@ -315,6 +315,9 @@ thread view, empty continuation rows of a playing row with a long name, the doct
 - **The test homeserver** (continuwuity) sends only the text of a thread's newest reply, so the
   threads list shows no "who and when" there; and one test with two accounts waiting for a
   member count failed once in 120 runs, during a network interruption, unexplained.
+- `chrono` was declared unmaintained on 2026-11-17 (RUSTSEC-2026-0543; no known flaw). The
+  SDK uses it too, so it stays in the tree until the SDK moves; `cargo deny` is told so. Our
+  own use (a message's local time, fourteen places) can move to `jiff` or `time` then.
 - **The SQLite built into the release archives** (through matrix-sdk 0.19.1) is older than
   3.54.0 and has a known flaw (RUSTSEC-2026-0459): opening a database whose `-wal` file has
   another page size can hand out stale memory. It takes someone who can write into the

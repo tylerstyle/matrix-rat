@@ -19,6 +19,10 @@ ignore = [
     # Unmaintained, not vulnerable, and not ours to replace.
     { id = "RUSTSEC-2026-0319", reason = "anymap2, used by matrix-sdk" },
     { id = "RUSTSEC-2025-0141", reason = "bincode 1, used by syntect; declared complete by its authors" },
+    # Declared unmaintained on 2026-11-17. matrix-sdk-ui and oauth2 (through matrix-sdk) use it
+    # too, so it stays in the tree whatever we do; our own use (local time of a message) can
+    # move to `jiff` or `time` once the SDK has moved.
+    { id = "RUSTSEC-2026-0543", reason = "chrono, used by matrix-sdk-ui, oauth2 and us; no known flaw" },
 ]
 
 [licenses]
