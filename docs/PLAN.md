@@ -271,7 +271,8 @@ Still open:
   the wait; what is loaded before it is owed and handed over by a later wait that names
   no point. A room that has shown no message is listened to in one piece, as
   before. A later part that cannot begin (the connection is being started again) is
-  tried again and does not end the wait. Left as it is: the progress notices start
+  tried again and does not end the wait (if `serve` stays away, the wait ends with
+  "nothing new" and the next call says what is wrong). Left as it is: the progress notices start
   their beat anew with each look, so about one a minute is left out; and a look that loads history into a room that showed nothing before can make `serve`
   tell it to listeners as new (the case of the first point above).
 - In a room that holds no message at all, what is written between an agent's first wait or
