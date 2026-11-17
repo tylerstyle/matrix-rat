@@ -204,7 +204,7 @@ impl fmt::Debug for Args {
     clippy::disallowed_methods,
     reason = "the entry point: the main thread is the runtime's"
 )]
-fn main() -> Result<()> {
+fn main() -> Result<std::process::ExitCode> {
     let args = Args::parse();
     if let Some(generator) = &args.print_template {
         let Some((_, template)) = theme::TEMPLATES.iter().find(|(name, _)| name == generator)
@@ -216,7 +216,7 @@ fn main() -> Result<()> {
             );
         };
         print!("{template}");
-        return Ok(());
+        return Ok(std::process::ExitCode::SUCCESS);
     }
     let paths = paths::Paths::new(&args.profile)?;
     let serve = match args.command {
@@ -224,7 +224,7 @@ fn main() -> Result<()> {
             // Before anything is made or locked: it only reads the config and asks the
             // terminal.
             print!("{}", doctor::command_line(&paths.config_file()));
-            return Ok(());
+            return Ok(std::process::ExitCode::SUCCESS);
         }
         Some(Command::Serve) => true,
         // The clients of a running `serve`: they make no folder, take no lock, open
@@ -235,7 +235,7 @@ fn main() -> Result<()> {
     if args.reload_theme {
         // Works without the profile lock: the running instances hold it.
         watch::signal_running_instances(&paths);
-        return Ok(());
+        return Ok(std::process::ExitCode::SUCCESS);
     }
     paths.create_dirs()?;
     let config = config::Config::load(&paths.config_file())?;
@@ -262,8 +262,13 @@ fn main() -> Result<()> {
     };
     if let Err(err) = &result {
         tracing::error!(why = %logsafe::kind_any(err), "exited with error");
+        // A missing login has an exit code of its own: a restart does not mend it.
+        if err.is::<agent::serve::NeedLogin>() {
+            eprintln!("Error: {err}");
+            return Ok(agent::serve::EXIT_NEED_LOGIN.into());
+        }
     }
-    result
+    result.map(|()| std::process::ExitCode::SUCCESS)
 }
 
 /// Runs `send`, `read`, `listen` or `mcp` against the profile's `serve` and returns

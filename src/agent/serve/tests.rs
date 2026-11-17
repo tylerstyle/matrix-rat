@@ -1139,3 +1139,13 @@ fn the_debug_output_of_the_hub_holds_nothing_private() {
     assert_eq!(listener.room_id, "!hidden-room:example.org");
     drop(answer);
 }
+
+#[test]
+fn only_a_missing_login_ends_as_one() {
+    let need = End::NeedLogin.into_error("bot");
+    assert!(need.is::<NeedLogin>());
+    assert_eq!(need.to_string(), End::NeedLogin.message("bot"));
+    let gone = End::WorkerGone.into_error("bot");
+    assert!(!gone.is::<NeedLogin>());
+    assert_eq!(gone.to_string(), End::WorkerGone.message("bot"));
+}

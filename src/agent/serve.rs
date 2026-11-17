@@ -181,6 +181,35 @@ impl End {
     }
 }
 
+/// The exit code of `serve` when the profile has no session that can be used: what is
+/// missing is a login, which only a person can do. `EX_CONFIG` of `sysexits.h`. A
+/// service can tell it from a failure worth a restart (`RestartPreventExitStatus=78`).
+pub const EXIT_NEED_LOGIN: u8 = 78;
+
+/// `serve` ended, or did not start, because the profile needs a login. The text is
+/// [`End::message`].
+#[derive(Debug)]
+pub struct NeedLogin(String);
+
+impl std::fmt::Display for NeedLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NeedLogin {}
+
+impl End {
+    /// The error `serve` ends with.
+    fn into_error(self, profile: &str) -> anyhow::Error {
+        let message = self.message(profile);
+        match self {
+            Self::NeedLogin => anyhow::Error::new(NeedLogin(message)),
+            Self::WorkerGone => anyhow::anyhow!("{message}"),
+        }
+    }
+}
+
 /// A joined room as the hub knows it.
 struct Known {
     info: RoomInfo,
@@ -1274,7 +1303,7 @@ pub async fn run(paths: &Paths, secret_store: SecretStoreMode) -> anyhow::Result
         Ok(served) => served,
         Err(StartError::Session(end)) => {
             tracing::error!(why = ?end, "serve: not started");
-            anyhow::bail!("{}", end.message(&paths.profile));
+            return Err(end.into_error(&paths.profile));
         }
         Err(StartError::Socket(err)) => {
             tracing::error!("serve: the socket could not be opened");
@@ -1293,7 +1322,7 @@ pub async fn run(paths: &Paths, secret_store: SecretStoreMode) -> anyhow::Result
     served.stop().await;
     tracing::info!(why = ?end, "serve: stopped");
     match end {
-        Some(end) => anyhow::bail!("{}", end.message(&paths.profile)),
+        Some(end) => Err(end.into_error(&paths.profile)),
         None => Ok(()),
     }
 }

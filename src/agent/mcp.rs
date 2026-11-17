@@ -44,6 +44,10 @@ const WAIT_DEFAULT: u64 = 300;
 const WAIT_MAX: u64 = 600;
 /// The most messages a wait hands over at once: of a longer backlog, the newest.
 const WAIT_MESSAGES: usize = 20;
+/// How long a later part of a wait may take over the wait's end to look at the room.
+const PART_SETUP: Duration = Duration::from_secs(2);
+/// How long a wait pauses when a later part of it could not begin.
+const PART_RETRY: Duration = Duration::from_secs(5);
 
 // JSON-RPC's error codes.
 const PARSE_ERROR: i64 = -32700;
@@ -214,6 +218,10 @@ pub struct Server {
     grace: Duration,
     /// How often a waiting call tells the client that it is still waiting.
     progress: Duration,
+    /// How long a waiting call listens before it looks at the room anew, for what
+    /// `serve` does not tell a listener: an answer missed in a gap of the sync that
+    /// was loaded since.
+    relook: Duration,
 }
 
 /// What a line from the client leads to.
@@ -240,7 +248,14 @@ impl Server {
             ledger: Mutex::new(Ledger::new()),
             grace: Duration::from_secs(10),
             progress: Duration::from_secs(15),
+            relook: Duration::from_secs(60),
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_relook(mut self, relook: Duration) -> Self {
+        self.relook = relook;
+        self
     }
 
     #[cfg(test)]
@@ -675,6 +690,13 @@ impl Server {
             || (ledger.owed.has(&message.event_id) && self.weigh(message).is_ok())
     }
 
+    /// Whether the agent has `message` saying what it says now.
+    fn has_as_it_is(&self, message: &Msg) -> bool {
+        self.ledger
+            .lock()
+            .is_ok_and(|ledger| ledger.handed.has(&message.event_id) && !ledger.changed(message))
+    }
+
     /// The agent is owed this message: it is news until it is handed over.
     fn owe(&self, message: &Msg) {
         if let Ok(mut ledger) = self.ledger.lock()
@@ -872,7 +894,9 @@ impl Server {
             };
             match self.weigh(message) {
                 Ok(()) if unseen => self.owe(message),
-                Err(Some(_)) => self.doubt(message),
+                // (Not what the room held before the agent looked at it for the
+                // first time: a wait takes that for seen, too.)
+                Err(Some(_)) if unseen => self.doubt(message),
                 _ => {}
             }
         }
@@ -907,6 +931,81 @@ impl Server {
         };
         let deadline = Instant::now() + Duration::from_secs(seconds);
 
+        // A long wait is a row of short ones, each of which looks at the room anew:
+        // `serve` tells a listener what comes at the room's end and what changes,
+        // not what is loaded later into a gap of the sync. A new look finds it, by
+        // the same rules as the next call would.
+        let mut found: Vec<Msg>;
+        let mut doubted: Vec<String> = Vec::new();
+        let mut first = true;
+        loop {
+            let part = (Instant::now() + self.relook).min(deadline);
+            let looked = self.wait_part(after, first, part, deadline, seconds, progress);
+            let (part_found, part_doubted) = if first {
+                looked.await?
+            } else {
+                // A later part that cannot begin (the connection to Matrix is
+                // being started again, `serve` is busy) does not end a wait that
+                // went well so far: it is tried again. And it is given no more
+                // time than the wait has.
+                match tokio::time::timeout_at(deadline + PART_SETUP, looked).await {
+                    Ok(Ok(part)) => part,
+                    Ok(Err(_)) => {
+                        tokio::time::sleep_until((Instant::now() + PART_RETRY).min(deadline)).await;
+                        (Vec::new(), Vec::new())
+                    }
+                    Err(_) => (Vec::new(), Vec::new()),
+                }
+            };
+            first = false;
+            found = part_found;
+            for (id, _) in part_doubted {
+                if !doubted.contains(&id) {
+                    doubted.push(id);
+                }
+            }
+            if !found.is_empty() || Instant::now() >= deadline {
+                break;
+            }
+        }
+        // What an earlier part could not take and a later one hands over is not
+        // counted as left out.
+        doubted.retain(|id| !found.iter().any(|message| message.event_id == *id));
+
+        let mut answer = if found.is_empty() {
+            json!({ "status": "nothing new", "messages": [] })
+        } else {
+            // A long backlog is not poured out at once: `read_messages` has the rest.
+            let earlier = found.len().saturating_sub(WAIT_MESSAGES);
+            found.drain(..earlier);
+            self.hand(&found);
+            let mut woken = json!({ "status": "new", "messages": self.all_shown(&found) });
+            if earlier > 0 {
+                woken["earlier_messages_not_shown"] = earlier.into();
+            }
+            woken
+        };
+        // So that nobody wonders why an answer is not taken: a count, no text.
+        if !doubted.is_empty() {
+            answer["untrusted_from_user"] = doubted.len().into();
+        }
+        Ok(answer)
+    }
+
+    /// One part of a wait: looks at the room and listens until `part` is over, or
+    /// longer (until `deadline` at most) while something found waits for a key.
+    /// Returns what ends the wait, in the room's order, and what names the
+    /// configured user as its sender without counting as theirs (by id, with the
+    /// reason). `first` is false for the later parts of one call.
+    async fn wait_part(
+        &self,
+        after: Option<&String>,
+        first: bool,
+        part: Instant,
+        deadline: Instant,
+        seconds: u64,
+        progress: &Progress,
+    ) -> Result<(Vec<Msg>, Vec<(String, String)>), String> {
         // Listening comes first, so that nothing is missed between looking at what
         // is there and waiting for more.
         let mut listener = Conn::open(&self.config.socket)
@@ -935,6 +1034,9 @@ impl Server {
                     Some(latest.len() + behind)
                 })
         };
+        // So much came during the wait that the point the call named is no longer
+        // among what is read: from here on it is as if none was named.
+        let after = after.filter(|after| first || place(after, &heard).is_some());
         let seen = self.seen();
         // Which of what was read is known already, and which turned up among it.
         let ever_looked = self.ever_looked();
@@ -953,6 +1055,14 @@ impl Server {
         // messages took the place of theirs): then only what stands after a known
         // message and is not known is news.
         let lost = seen.is_some() && seen_at.is_none() && after.is_none();
+        // A room that has shown nothing yet is listened to in one piece: a new look
+        // would take what came meanwhile for what the room held before, and there
+        // is nothing known to tell a loaded message by anyway.
+        let part = if seen.is_none() && latest.is_empty() {
+            deadline
+        } else {
+            part
+        };
         if seen.is_none()
             && let Some(newest) = latest.last()
         {
@@ -998,20 +1108,30 @@ impl Server {
         };
         for (at, message) in latest.iter().enumerate() {
             // From where the room has been seen.
-            let fresh = at >= start && (!lost || (!was_known[at] && (turned_up[at] || none_known)));
+            // (Not what the agent has as it is, should the point not have moved
+            // on with it; a call that names its own point is given all after it.)
+            let fresh = at >= start
+                && (!lost || (!was_known[at] && (turned_up[at] || none_known)))
+                && (after.is_some() || !self.has_as_it_is(message));
             if fresh {
                 sort_in(message.clone(), &mut found, &mut doubted);
                 continue;
             }
+            // Before that: what was not there when the room was looked at (an
+            // answer missed in a gap of the sync, loaded now) is owed from here on,
+            // until it is handed over. Also when the call says itself from where:
+            // a later call that does not hands it over.
+            if seen.is_some()
+                && at < start
+                && turned_up[at]
+                && !matches!(self.weigh(message), Err(None))
+            {
+                self.owe(message);
+            }
+            // And what is owed or changed is news, unless the call says itself
+            // from where.
             if after.is_some() || seen.is_none() {
                 continue;
-            }
-            // Before that, unless the call says itself from where: what was not
-            // there when the room was looked at (an answer missed in a gap of the
-            // sync, loaded now) is owed from here on, until it is handed over; and
-            // what is owed or changed is news.
-            if at < start && turned_up[at] && !matches!(self.weigh(message), Err(None)) {
-                self.owe(message);
             }
             if self.reopened(message) {
                 sort_in(message.clone(), &mut found, &mut doubted);
@@ -1032,12 +1152,17 @@ impl Server {
                     break;
                 }
             }
-            let until = settle.map_or(deadline, |settle| settle.min(deadline));
+            let until = settle.map_or(part, |settle| settle.min(deadline));
             tokio::select! {
                 next = listener.next() => {
                     let message = next.map_err(|err| self.told(err))?;
                     let at = place(&message.event_id, &heard);
-                    if at.is_none() {
+                    // Without a place, and owed or handed over before: not at the
+                    // room's end, but from further back than what was read. It is
+                    // told because it changed, and it must not take the room back.
+                    // (Not: known. Another call may have looked a moment ago.)
+                    let old = at.is_none() && self.reopened(&message);
+                    if at.is_none() && !old {
                         heard.push(message.event_id.clone());
                     }
                     self.look(std::slice::from_ref(&message));
@@ -1081,24 +1206,7 @@ impl Server {
             self.set_seen(Anchor::After(id.clone()));
         }
 
-        let mut answer = if found.is_empty() {
-            json!({ "status": "nothing new", "messages": [] })
-        } else {
-            // A long backlog is not poured out at once: `read_messages` has the rest.
-            let earlier = found.len().saturating_sub(WAIT_MESSAGES);
-            found.drain(..earlier);
-            self.hand(&found);
-            let mut woken = json!({ "status": "new", "messages": self.all_shown(&found) });
-            if earlier > 0 {
-                woken["earlier_messages_not_shown"] = earlier.into();
-            }
-            woken
-        };
-        // So that nobody wonders why an answer is not taken: a count, no text.
-        if !doubted.is_empty() {
-            answer["untrusted_from_user"] = doubted.len().into();
-        }
-        Ok(answer)
+        Ok((found, doubted))
     }
 }
 

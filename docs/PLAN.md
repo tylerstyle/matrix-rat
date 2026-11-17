@@ -264,9 +264,17 @@ Still open:
 - `listen` on the command line does not tell an answer that arrived during a gap in the
   sync and is loaded later, and in a room that shows no message within three pages when a
   watch begins it can tell loaded history as new once. The MCP tools do neither.
-- A `wait_for_message` that is already waiting does not see an answer loaded from a gap;
-  the next wait hands it over (a read in between that does not show it keeps it owed), if
-  the answer is among the room's newest hundred.
+- (Mended after 0.9.0, branch `fixes-091`.) A `wait_for_message` that is already waiting
+  now looks at the room anew once a minute (a long wait is a row of short ones, each by
+  the rules of a new call) and hands over an answer loaded into a gap, if it is among
+  the room's newest hundred. With `after_event_id`, what is loaded after that point ends
+  the wait; what is loaded before it is owed and handed over by a later wait that names
+  no point. A room that has shown no message is listened to in one piece, as
+  before. A later part that cannot begin (the connection is being started again) is
+  tried again and does not end the wait (if `serve` stays away, the wait ends with
+  "nothing new" and the next call says what is wrong). Left as it is: the progress notices start
+  their beat anew with each look, so about one a minute is left out; and a look that loads history into a room that showed nothing before can make `serve`
+  tell it to listeners as new (the case of the first point above).
 - In a room that holds no message at all, what is written between an agent's first wait or
   read and its next call is not handed over, unless the agent sent something first. The MCP
   server cannot tell an empty room from one whose messages could not be loaded, and taking
