@@ -29,6 +29,21 @@ impl Session {
     }
 
     fn start_trusting(socket: std::path::PathBuf, from: Option<&str>, trust: Trust) -> Self {
+        Self::start_with(socket, from, trust, None)
+    }
+
+    /// A server whose waits read the room again that often (else: once a minute,
+    /// which no test waits for).
+    fn start_relooking(socket: std::path::PathBuf, from: Option<&str>, relook: Duration) -> Self {
+        Self::start_with(socket, from, Trust::Verified, Some(relook))
+    }
+
+    fn start_with(
+        socket: std::path::PathBuf,
+        from: Option<&str>,
+        trust: Trust,
+        relook: Option<Duration>,
+    ) -> Self {
         let config = Config {
             socket,
             profile: "bot".into(),
@@ -37,9 +52,12 @@ impl Session {
             from: from.map(str::to_owned),
             trust,
         };
-        let server = Arc::new(
-            Server::new(config).with_waits(Duration::from_millis(1500), Duration::from_millis(50)),
-        );
+        let mut server =
+            Server::new(config).with_waits(Duration::from_millis(1500), Duration::from_millis(50));
+        if let Some(relook) = relook {
+            server = server.with_relook(relook);
+        }
+        let server = Arc::new(server);
         let (input, server_input) = tokio::io::duplex(64 * 1024);
         let (server_output, output) = tokio::io::duplex(64 * 1024);
         Self {
@@ -1615,4 +1633,77 @@ fn an_agents_name_is_short_and_cannot_end_its_own_signature() {
     ] {
         assert!(check_name(bad).is_err(), "{bad:?}");
     }
+}
+
+/// `serve` does not tell a listener what is loaded into a gap of the sync. A wait
+/// that is running reads the room again from time to time and finds it.
+#[tokio::test]
+async fn a_running_wait_finds_what_is_loaded_into_a_gap() {
+    let world = World::start("mcp-relook", vec![message("$first", EVE, "hi")]).await;
+    let mut session =
+        Session::start_relooking(world.socket(), Some(ANN), Duration::from_millis(150));
+    session
+        .ok("send_message", json!({ "text": "merge or wait?" }))
+        .await;
+    world.post(message("$later", ANN, "did you get my answer?"));
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 600 }))
+        .await;
+    assert_eq!(ids(&woken), ["$later"]);
+
+    // The answer is loaded while a wait is running: no listener is told.
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.insert_before("$later", message("$answer", ANN, "wait"));
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$answer"]);
+
+    // It is handed over once, and where the room has been seen has not moved back:
+    // what came after it is not news again.
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+
+    // History that is loaded (it stands before all that is known) is not news, and
+    // neither is what others say; a new message still wakes the wait once.
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.insert_before("$first", message("$ancient", ANN, "go ahead"));
+    world.insert_before("$later", message("$eve-gap", EVE, "me too"));
+    assert!(
+        session
+            .hear_within(Duration::from_millis(600))
+            .await
+            .is_none(),
+        "woken by history or by someone else"
+    );
+    world.post(message("$new", ANN, "now merge"));
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$new"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+
+    // A wait that says itself from where takes nothing from before that point.
+    let id = begin_wait(
+        &mut session,
+        &world,
+        json!({ "timeout_seconds": 600, "after_event_id": "$new" }),
+    )
+    .await;
+    world.insert_before("$new", message("$gap-2", ANN, "one more thing"));
+    assert!(
+        session
+            .hear_within(Duration::from_millis(600))
+            .await
+            .is_none(),
+        "woken by what stands before the point the call named"
+    );
+    world.post(message("$last", ANN, "done"));
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$last"]);
+    session.end().await;
 }

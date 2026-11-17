@@ -214,6 +214,9 @@ pub struct Server {
     grace: Duration,
     /// How often a waiting call tells the client that it is still waiting.
     progress: Duration,
+    /// How often a waiting call reads the room again, for what `serve` does not
+    /// tell a listener: an answer missed in a gap of the sync that was loaded since.
+    relook: Duration,
 }
 
 /// What a line from the client leads to.
@@ -240,7 +243,14 @@ impl Server {
             ledger: Mutex::new(Ledger::new()),
             grace: Duration::from_secs(10),
             progress: Duration::from_secs(15),
+            relook: Duration::from_secs(60),
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_relook(mut self, relook: Duration) -> Self {
+        self.relook = relook;
+        self
     }
 
     #[cfg(test)]
@@ -1020,6 +1030,8 @@ impl Server {
         // Once something is found while something else cannot be read yet: until
         // when its key may still come.
         let mut settle: Option<Instant> = None;
+        let mut relook = tokio::time::interval_at(Instant::now() + self.relook, self.relook);
+        relook.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             if !found.is_empty() {
                 let unread = found.iter().any(|message| message.kind == "undecryptable")
@@ -1055,6 +1067,48 @@ impl Server {
                 }
                 () = tokio::time::sleep_until(until) => break,
                 () = progress.tick(seconds) => {}
+                _ = relook.tick() => {
+                    // `serve` tells a listener what comes at the room's end and what
+                    // changes, not what is loaded later into a gap of the sync: for
+                    // that the room is read again. A read that fails or takes until
+                    // the wait is over is left out; the next one, or the next call,
+                    // sees the same.
+                    let read = async {
+                        Conn::open(&self.config.socket)
+                            .await?
+                            .read(listener.room_id(), proto::READ_MAX)
+                            .await
+                    };
+                    let Ok(Ok((_, again))) = tokio::time::timeout_at(until, read).await else {
+                        continue;
+                    };
+                    let turned_up = self.look(&again);
+                    // Up to where what was read now is in its place already.
+                    let placed = again
+                        .iter()
+                        .rposition(|message| place(&message.event_id, &heard).is_some());
+                    for (at, message) in again.into_iter().enumerate() {
+                        if !turned_up[at] {
+                            // Known: what changes in it, the listener is told.
+                            continue;
+                        }
+                        if placed.is_none_or(|placed| at > placed) {
+                            // At the room's end: the listener tells it too, a moment
+                            // later or earlier. Its place is behind all there is.
+                            heard.push(message.event_id.clone());
+                            sort_in(message, &mut found, &mut doubted);
+                        } else if after.is_none() {
+                            // Among what is in its place: loaded into a gap. As at
+                            // the start of a wait, it is owed until handed over.
+                            if !matches!(self.weigh(&message), Err(None)) {
+                                self.owe(&message);
+                            }
+                            if self.reopened(&message) {
+                                sort_in(message, &mut found, &mut doubted);
+                            }
+                        }
+                    }
+                }
             }
         }
 
