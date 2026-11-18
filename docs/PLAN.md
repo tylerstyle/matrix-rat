@@ -153,6 +153,12 @@ be done, by demand:
 - More Linux packaging (AUR, a `.deb`): small now that release archives exist.
 - Other languages; exporting a chat; a gallery of a room's files.
 - Reading the shortcode a received custom-emoji reaction carries (the SDK does not expose it).
+- A plugin system (asked for by the user on 2026-11-18), not designed yet. The user's ideas:
+  speech to text for audio messages, sticker packs, an image generator, a locally running
+  bot (for example a daily summary of a room). First thoughts: plugins as separate programs;
+  `serve` with `send`/`read`/`listen` already carries bots; missing are actions on a message
+  and commands in the composer; a plugin is allowed per room and gets only what the user
+  hands it. Sticker packs rather built in than as a plugin.
 
 ### Before 1.0.0 (asked for by the user on 2026-11-17)
 
