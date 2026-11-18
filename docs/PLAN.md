@@ -159,6 +159,12 @@ be done, by demand:
   `serve` with `send`/`read`/`listen` already carries bots; missing are actions on a message
   and commands in the composer; a plugin is allowed per room and gets only what the user
   hands it. Sticker packs rather built in than as a plugin.
+- A rooms bar for the single chat view (asked for by the user on 2026-11-18): with the room
+  list hidden, a one-line bar above the chat labelled "Rooms"; a click closes the chat and
+  shows the room list; rooms with new notifications appear in it as icons with their count.
+  Meant as a first part of a layout for small touch screens (Linux phones; later perhaps
+  Android or iOS). Open: what an icon is without pictures, and what happens when more rooms
+  are active than fit.
 
 ### Before 1.0.0 (asked for by the user on 2026-11-17)
 
