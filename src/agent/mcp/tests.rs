@@ -1679,7 +1679,7 @@ fn a_name_from_the_environment_passes_the_same_check_as_one_from_the_command_lin
         "nul\0",
         "esc\u{1b}[31m",
         "flip\u{202e}",
-        "sep\u{2028}",
+        "line\u{2028}separator",
         too_long.as_str(),
     ] {
         // What one refuses the other refuses, and the message names the variable
@@ -1689,6 +1689,12 @@ fn a_name_from_the_environment_passes_the_same_check_as_one_from_the_command_lin
         assert!(told.starts_with(NAME_ENV), "{told}");
         assert!(bad.trim().is_empty() || !told.contains(bad), "{told}");
     }
+    // What stands around a name is cut off like blanks around `--name`, a line break
+    // at its end included: what is left is the name.
+    assert_eq!(
+        agent_name(None, Some(OsStr::new(" builder\u{2028}\n"))).unwrap(),
+        "builder"
+    );
     // Bytes that are no text are no name.
     let told = agent_name(None, Some(OsStr::from_bytes(b"build\xffer"))).unwrap_err();
     assert!(told.starts_with(NAME_ENV), "{told}");
