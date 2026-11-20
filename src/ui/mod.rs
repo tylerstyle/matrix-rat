@@ -20,6 +20,7 @@ mod palette;
 mod people;
 mod poll;
 mod roominfo;
+mod saved;
 mod search;
 mod sidebar;
 mod status;

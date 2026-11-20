@@ -406,6 +406,8 @@ pub struct MessageFacts {
     pub can_ban_sender: bool,
     /// Whether the message plays in here, or plays now (see `AudioCaps`).
     pub audio: crate::palette::AudioCaps,
+    /// The message can be saved for later (it has an address of its own).
+    pub can_keep: bool,
 }
 
 /// The entries for a message. Empty for lines that are not messages.
@@ -566,6 +568,15 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
     if facts.can_pin && sent && addressable && (message.pinned || (!deleted && !undecryptable)) {
         let label = if message.pinned { "Unpin" } else { "Pin" };
         items.push(Item::action(keys, label, Timeline, Action::PinMessage));
+    }
+    if facts.can_keep {
+        let label = if message.saved {
+            "Remove from saved"
+        } else {
+            "Save for later"
+        };
+        items.push(Item::action(keys, label, Timeline, Action::SaveForLater));
+        items.push(Item::action(keys, "Remind me…", Timeline, Action::RemindMe));
     }
     if message.sender_id.is_some() {
         items.push(Item::action(keys, "User info", Timeline, Action::UserInfo));
@@ -843,6 +854,7 @@ mod tests {
         can_pin: false,
         can_ban_sender: false,
         audio: crate::palette::AudioCaps::NONE,
+        can_keep: false,
     };
 
     #[test]

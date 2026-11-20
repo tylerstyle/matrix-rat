@@ -173,6 +173,12 @@ pub enum Action {
     PauseAudio,
     /// Jump back (`Left`) or forward (`Right`) in what plays (mpv only).
     SeekAudio(Dir),
+    /// Save the selected message for later, or take it off the saved list.
+    SaveForLater,
+    /// Set a reminder for the selected message (which saves it), or change it.
+    RemindMe,
+    /// Open the list of saved messages and their reminders, of all rooms.
+    OpenSaved,
     /// Show what the app found where it runs (terminal, pictures, the desktop's
     /// helpers, keys, config), to be copied into a bug report.
     Doctor,
@@ -218,6 +224,8 @@ impl Action {
             | Action::RetryDecryption
             | Action::UserInfo
             | Action::MessageDetails
+            | Action::SaveForLater
+            | Action::RemindMe
             // The composer.
             | Action::Send
             | Action::Newline
@@ -283,6 +291,8 @@ impl Action {
             | Action::MarkAllRead
             | Action::OpenThreads
             | Action::Devices(_)
+            // The saved messages are those of all rooms.
+            | Action::OpenSaved
             // About the app and the terminal, not about a room.
             | Action::Doctor => false,
         }

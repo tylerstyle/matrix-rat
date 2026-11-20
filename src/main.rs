@@ -40,6 +40,7 @@ mod people;
 mod portal;
 mod previews;
 mod rich;
+mod saved;
 mod terminal;
 mod termquery;
 #[cfg(test)]

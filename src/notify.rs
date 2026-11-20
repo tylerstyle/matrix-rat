@@ -152,6 +152,26 @@ pub fn title_and_text(notice: &Notice, preview: bool) -> (String, String) {
     (truncate(&title, 120), notice.body.clone())
 }
 
+/// Title and text of a reminder's notification (see `crate::saved`). The notice
+/// carries the message's sender and text only where they may be shown.
+pub fn reminder_title_and_text(notice: &Notice, preview: bool) -> (String, String) {
+    // Without preview: not the text, not who wrote, not where.
+    if !preview {
+        return ("matrix-rat".to_owned(), "A reminder is due".to_owned());
+    }
+    let title = if notice.room.is_empty() {
+        "Reminder".to_owned()
+    } else {
+        format!("Reminder: {}", notice.room)
+    };
+    let text = match (notice.sender.is_empty(), notice.body.is_empty()) {
+        (_, true) => "A saved message is due".to_owned(),
+        (true, false) => notice.body.clone(),
+        (false, false) => format!("{}: {}", notice.sender, notice.body),
+    };
+    (truncate(&title, 120), text)
+}
+
 /// Visual icon attached to a desktop notification.
 #[derive(Clone, Default)]
 pub enum NotifyIcon {
@@ -410,6 +430,32 @@ pub fn show(
     clicks: Option<&Clicks>,
 ) {
     let (title, text) = title_and_text(notice, preview);
+    show_as(mode, (title, text), notice, preview, icon, cache, clicks);
+}
+
+/// Shows the notification of a reminder that came due: as [`show`] does a message's,
+/// under a title and text of its own.
+pub fn show_reminder(
+    mode: NotifyMode,
+    notice: &Notice,
+    preview: bool,
+    icon: &NotifyIcon,
+    cache: Option<(Arc<IconCache>, u64)>,
+    clicks: Option<&Clicks>,
+) {
+    let shown = reminder_title_and_text(notice, preview);
+    show_as(mode, shown, notice, preview, icon, cache, clicks);
+}
+
+fn show_as(
+    mode: NotifyMode,
+    (title, text): (String, String),
+    notice: &Notice,
+    preview: bool,
+    icon: &NotifyIcon,
+    cache: Option<(Arc<IconCache>, u64)>,
+    clicks: Option<&Clicks>,
+) {
     match mode.resolved() {
         NotifyMode::Desktop => {
             let _ = desktop().unbounded_send(DesktopJob {
@@ -1133,6 +1179,28 @@ mod tests {
             highlight,
             thread: None,
         }
+    }
+
+    #[test]
+    fn a_reminder_shows_its_message_only_with_previews_on() {
+        let reminder = notice("Rust", "ann", "the secret plan", false);
+        assert_eq!(
+            reminder_title_and_text(&reminder, true),
+            ("Reminder: Rust".to_owned(), "ann: the secret plan".to_owned())
+        );
+        // Without preview: no text, no sender, no room.
+        assert_eq!(
+            reminder_title_and_text(&reminder, false),
+            ("matrix-rat".to_owned(), "A reminder is due".to_owned())
+        );
+        // A message whose text is not known (deleted, not loaded, a room that was left).
+        let bare = notice("", "", "", false);
+        assert_eq!(
+            reminder_title_and_text(&bare, true),
+            ("Reminder".to_owned(), "A saved message is due".to_owned())
+        );
+        let nameless = notice("Rust", "", "text", false);
+        assert_eq!(reminder_title_and_text(&nameless, true).1, "text");
     }
 
     #[test]

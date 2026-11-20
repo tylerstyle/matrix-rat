@@ -150,6 +150,9 @@ pub struct MessageCaps {
     pub can_pin: bool,
     pub can_forward: bool,
     pub can_user_info: bool,
+    /// The message can be saved for later, and whether it is.
+    pub can_keep: bool,
+    pub kept: bool,
     pub can_copy: bool,
     pub can_copy_code: bool,
     pub can_save: bool,
@@ -780,6 +783,9 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         Action::ForwardMessage,
         Action::UserInfo,
         Action::MessageDetails,
+        Action::SaveForLater,
+        Action::RemindMe,
+        Action::OpenSaved,
         Action::CreatePoll,
         Action::OpenStickers,
         // Named after the space, with the spaces.
@@ -952,6 +958,44 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         action_enabled(Action::MessageDetails, ctx),
         0,
     );
+    let keep_title = if ctx.selection.kept {
+        "Remove message from saved"
+    } else {
+        "Save message for later"
+    };
+    push_entry(
+        out,
+        Target::Action(Action::SaveForLater),
+        Category::Action,
+        keep_title,
+        key_of(Action::SaveForLater),
+        keep_title,
+        &["save", "unsave", "bookmark", "later", "mark message"],
+        action_enabled(Action::SaveForLater, ctx),
+        0,
+    );
+    push_entry(
+        out,
+        Target::Action(Action::RemindMe),
+        Category::Action,
+        "Remind me of this message…",
+        key_of(Action::RemindMe),
+        "Remind me of this message…",
+        &["reminder", "remind", "later", "snooze", "alarm"],
+        action_enabled(Action::RemindMe, ctx),
+        0,
+    );
+    push_entry(
+        out,
+        Target::Action(Action::OpenSaved),
+        Category::Action,
+        "Saved messages and reminders",
+        key_of(Action::OpenSaved),
+        "Saved messages and reminders",
+        &["saved", "bookmarks", "reminders", "later", "marked messages"],
+        true,
+        0,
+    );
     push_entry(
         out,
         Target::Action(Action::CreatePoll),
@@ -1046,6 +1090,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::RetryDecryption => sel.undecryptable,
         Action::UserInfo => sel.can_user_info,
         Action::MessageDetails => sel.has_selection,
+        Action::SaveForLater | Action::RemindMe => sel.can_keep,
         Action::OpenPinned => ctx.has_room && !in_pending,
         // About the room that room info would show, as in the room's menu.
         Action::OpenThreads => ctx
@@ -1202,6 +1247,9 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::RetryDecryption
                 | Action::UserInfo
                 | Action::MessageDetails
+                | Action::SaveForLater
+                | Action::RemindMe
+                | Action::OpenSaved
                 | Action::OpenPinned
                 | Action::OpenThreads
                 | Action::JumpToNewest

@@ -106,6 +106,22 @@ impl ThreadView {
         }
     }
 
+    /// Marks the room's put-aside messages that are saved for later (see
+    /// `super::saved`); `by_index`: the demo's messages, known by their place.
+    pub(super) fn apply_saved(&mut self, saved: &std::collections::HashSet<&str>, by_index: bool) {
+        super::saved::flag(&mut self.room_messages, saved, by_index);
+        if by_index {
+            self.root_message.saved = self
+                .room_messages
+                .get(self.root_index)
+                .is_some_and(|message| message.saved);
+        } else {
+            super::saved::flag(std::slice::from_mut(&mut self.root_message), saved, false);
+        }
+        // Laid out before the mark changed.
+        self.room_rows = None;
+    }
+
     pub(super) fn rename_own_sender(&mut self, name: &str) {
         if self.root_message.own && self.root_message.sender != name {
             self.root_message.sender = name.to_owned();

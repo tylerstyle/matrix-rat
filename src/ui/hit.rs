@@ -59,6 +59,8 @@ pub enum InputTarget {
     ThreadsFilter,
     /// The field of the notification keywords popup.
     Keyword,
+    /// The typed time of the reminder form.
+    Reminder,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +178,16 @@ pub enum HitId {
     KeywordRow(usize),
     /// The remove mark on a row of the notification keywords popup.
     KeywordRemove(usize),
+    /// An entry of the saved messages popup; clicking goes to the message.
+    SavedRow(usize),
+    /// The "remind" mark on an entry of the saved messages popup.
+    SavedRemind(usize),
+    /// The "remove" mark on an entry of the saved messages popup.
+    SavedRemove(usize),
+    /// A row of the reminder form: a fixed choice, the typed time, or "no reminder".
+    ReminderChoice(usize),
+    /// "n reminders due" in the status line.
+    ReminderDue,
 }
 
 #[derive(Debug, Default)]

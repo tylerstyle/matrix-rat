@@ -905,6 +905,29 @@ impl Timelines {
                     });
                 });
             }
+            MatrixCmd::Saved(super::SavedCmd::Fetch { request, items }) => {
+                // A room the account has left is known still, but not for reading.
+                let wanted = items
+                    .into_iter()
+                    .take(super::saved::MAX_FETCH)
+                    .map(|(room_id, event_id)| {
+                        let room = self
+                            .room(&room_id)
+                            .ok()
+                            .filter(|room| room.state() == matrix_sdk::RoomState::Joined);
+                        (room_id, event_id, room)
+                    })
+                    .collect();
+                let events = self.events.clone();
+                let cache = self.pinned_cache.clone();
+                tokio::spawn(async move {
+                    let items = super::saved::fetch(wanted, cache).await;
+                    let _ = events.send(MatrixEvent::Saved(super::SavedEvent::Details {
+                        request,
+                        items,
+                    }));
+                });
+            }
             MatrixCmd::Forward {
                 from_room_id,
                 event_id,

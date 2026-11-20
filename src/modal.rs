@@ -1936,6 +1936,8 @@ pub enum Modal {
     Keywords(crate::keywords::KeywordsPopup),
     /// What the app found where it runs, for a bug report.
     Doctor(crate::doctor::Popup),
+    /// The messages saved for later, of all rooms, and the form that sets a reminder.
+    Saved(crate::saved::SavedPopup),
 }
 
 /// Hand-written, so that a new kind of popup is added here by hand: each one holds
@@ -1971,6 +1973,7 @@ impl std::fmt::Debug for Modal {
             Self::Threads(popup) => ("Threads", popup),
             Self::Keywords(popup) => ("Keywords", popup),
             Self::Doctor(popup) => ("Doctor", popup),
+            Self::Saved(popup) => ("Saved", popup),
         };
         f.debug_tuple(name).field(popup).finish()
     }
@@ -2305,7 +2308,25 @@ mod tests {
             crate::keywords::KeywordsPopup::new(Some((vec!["secretword".into()], 1)));
         keywords.input.set("another secret");
 
+        let mut saved = crate::saved::SavedPopup::form(crate::saved::RemindForm::new(
+            "!secret-room:example.org".into(),
+            "$secret-event:example.org".into(),
+            true,
+        ));
+        if let crate::saved::Stage::Remind(form) = &mut saved.stage {
+            form.input.set("secret typing");
+        }
+        saved.put_details(crate::saved::SavedDetails {
+            room_id: "!secret-room:example.org".into(),
+            event_id: "$secret-event:example.org".into(),
+            sender: "Alice Secret".into(),
+            sender_id: Some("@alice:example.org".into()),
+            snippet: "a secret text".into(),
+            text: crate::saved::SavedText::Text,
+        });
+
         let popups = [
+            Modal::Saved(saved),
             Modal::Login(login),
             Modal::Recovery(recovery),
             Modal::Emoji(emoji),

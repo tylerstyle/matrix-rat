@@ -39,6 +39,10 @@ const MAX_PINNED_FETCH: usize = 50;
 const PINNED_CONCURRENCY: usize = 4;
 const PINNED_SNIPPET_MAX: usize = 120;
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(60);
+/// What stands for an event that could not be loaded.
+const UNAVAILABLE: &str = "[message unavailable]";
+/// What stands for an event that has no text to show.
+pub(super) const UNSUPPORTED: &str = "[unsupported pinned item]";
 
 #[derive(Clone)]
 struct CachedPinned {
@@ -204,6 +208,32 @@ pub(super) async fn fetch_pinned(
     (results, note)
 }
 
+/// One event summarised as the pinned list shows it, for the saved messages list.
+/// `None` if it could not be loaded.
+pub(super) async fn summarize_event(
+    room: &Room,
+    event_id: &str,
+    cache: &Arc<Mutex<PinnedCache>>,
+) -> Option<PinnedMessage> {
+    let eid = EventId::parse(event_id).ok()?;
+    let (event_id, found) = load_one_pinned(room, room.room_id().as_str(), &eid, cache).await;
+    // Only what could not be loaded has neither a sender nor a time.
+    if found.sender_id.is_none() && found.day.is_empty() && found.snippet == UNAVAILABLE {
+        return None;
+    }
+    Some(PinnedMessage {
+        event_id,
+        sender: found.sender,
+        sender_id: found.sender_id,
+        day: found.day,
+        time: found.time,
+        snippet: found.snippet,
+        redacted: found.redacted,
+        undecryptable: found.undecryptable,
+        ignored: false,
+    })
+}
+
 async fn load_one_pinned(
     room: &Room,
     room_id: &str,
@@ -262,7 +292,7 @@ async fn load_one_pinned(
                 sender: String::new(),
                 day: String::new(),
                 time: String::new(),
-                snippet: "[message unavailable]".to_owned(),
+                snippet: UNAVAILABLE.to_owned(),
                 redacted: false,
                 undecryptable: false,
             },
@@ -316,7 +346,7 @@ async fn build_cached_pinned(
                 truncate(clean.trim(), PINNED_SNIPPET_MAX)
             }
         }
-        None => "[unsupported pinned item]".to_owned(),
+        None => UNSUPPORTED.to_owned(),
     };
 
     CachedPinned {

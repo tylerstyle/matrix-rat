@@ -19,6 +19,7 @@ mod previews;
 mod receipts;
 mod rooms;
 mod safety;
+mod saved;
 pub(crate) mod search;
 mod session;
 mod source;
@@ -42,6 +43,7 @@ pub use keyring::SecretStoreMode;
 // For `crate::logsafe`, which turns it into a word for the log.
 pub(crate) use keyring::KeyringError;
 pub use keywords::{KeywordsCmd, KeywordsEvent, MAX_KEYWORDS, shown_keywords};
+pub use saved::{MAX_FETCH as SAVED_MAX_FETCH, SavedCmd, SavedEvent};
 #[cfg(test)]
 pub use manage::RoomSettingsPower;
 pub use manage::{
@@ -381,6 +383,8 @@ pub enum MatrixCmd {
     Devices(DevicesCmd),
     /// The account's notification keywords: list, add, remove.
     Keywords(KeywordsCmd),
+    /// Saved messages: who wrote them and what they say, for their list.
+    Saved(SavedCmd),
     /// Try once more to read a message that could not be decrypted: look for its key
     /// in the key backup and decrypt again. Answered with
     /// [`MatrixEvent::DecryptionRetried`].
@@ -583,6 +587,8 @@ impl MatrixCmd {
             Self::Devices(command) => ("Devices", vec![Some(format!("{command:?}"))]),
             // The inner command prints no keyword.
             Self::Keywords(command) => ("Keywords", vec![Some(format!("{command:?}"))]),
+            // The inner command prints no room and no message.
+            Self::Saved(command) => ("Saved", vec![Some(format!("{command:?}"))]),
             Self::RetryDecryption { room_id, .. } => ("RetryDecryption", vec![id(room_id)]),
             // Which message is private too.
             Self::FetchSource { request, .. } => {
@@ -993,6 +999,8 @@ pub enum MatrixEvent {
     Devices(DevicesEvent),
     /// An answer to a [`MatrixCmd::Keywords`], or the list for the keywords popup.
     Keywords(KeywordsEvent),
+    /// An answer to a [`MatrixCmd::Saved`].
+    Saved(SavedEvent),
     /// Outcome of [`MatrixCmd::RetryDecryption`]: whether the message can be read
     /// now, or what went wrong.
     DecryptionRetried {
@@ -1254,6 +1262,7 @@ impl MatrixEvent {
             } => ("ForwardResult", vec![id(to_room_id), ok(result.is_ok())]),
             Self::Devices(event) => ("Devices", vec![Some(format!("{event:?}"))]),
             Self::Keywords(event) => ("Keywords", vec![Some(format!("{event:?}"))]),
+            Self::Saved(event) => ("Saved", vec![Some(format!("{event:?}"))]),
             Self::DecryptionRetried {
                 room_id, result, ..
             } => (
@@ -2433,6 +2442,25 @@ mod tests {
             room_id: "!room:example.org".into(),
         });
         assert_eq!(format!("{command:?}"), "Manage(Leave)");
+        // Saved messages: neither which, nor what was found about them.
+        let command = MatrixCmd::Saved(SavedCmd::Fetch {
+            request: 3,
+            items: vec![("!room:example.org".into(), "$event:example.org".into())],
+        });
+        assert_eq!(format!("{command:?}"), "Saved(Fetch(request 3, 1 items))");
+        assert_eq!(command.describe(), "Saved(Fetch(request 3, 1 items))");
+        let event = MatrixEvent::Saved(SavedEvent::Details {
+            request: 3,
+            items: vec![crate::saved::SavedDetails {
+                room_id: "!room:example.org".into(),
+                event_id: "$event:example.org".into(),
+                sender: "Alice of example.org".into(),
+                sender_id: Some("@alice:example.org".into()),
+                snippet: "the secret plan for example.org".into(),
+                text: crate::saved::SavedText::Text,
+            }],
+        });
+        assert_eq!(format!("{event:?}"), "Saved(Details(request 3, 1 items))");
         // What `serve` asks for and is told: no room, no text, no event, no reason.
         let command = MatrixCmd::Agent(AgentCmd::Send {
             request: 4,
