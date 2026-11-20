@@ -151,6 +151,7 @@ impl Notes {
     }
 
     /// How many programs run.
+    #[cfg(test)]
     pub fn running(&self) -> usize {
         self.map
             .values()

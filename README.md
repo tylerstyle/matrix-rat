@@ -165,7 +165,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `x` play or stop a voice or audio message (with mpv: `Space` pause, `←` `→` 5 seconds back or on), `X` transcribe a voice or audio message, `L` translate a message (both only once set up, see Good to know), `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `x` play or stop a voice or audio message (with mpv: `Space` pause, `←` `→` 5 seconds back or on), `W` transcribe a voice or audio message, `L` translate a message (both only once set up, see Good to know), `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Esc` | one step back at a time: closes the help or a popup, clears the room list's filter, goes back to the composer, gives up a reply or an edit, leaves a thread. In the composer with nothing left to cancel it closes the chat: no room is open (nothing in it counts as read, and its messages notify you like any other room's), your draft waits there, and the room list has the focus; `Enter` or a click opens a room again. Set `esc_closes_chat = false` (or switch off "Esc closes the chat" in the settings) to have `Esc` stop at the composer |
@@ -398,7 +398,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
 | `download_dir` | where `s` saves attachments |
 | `audio_player` | what plays voice and audio messages in the app (`x`): `"auto"` (default) takes the first of `mpv`, `ffplay`, `pw-play`, `paplay` and `aplay` found on `PATH`; or a command line of your own, such as `"mpv --volume=70"`, to which the file is added at the end (split into words like `$EDITOR`, no shell). It must play the file and end when the sound does. Also **Audio player** in the settings, which says what was found. See Good to know |
-| `transcribe_command` | what turns a voice or audio message into text under it (`X`): `"auto"` (default) is `whisper-cli` of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) if it is on `PATH` and `transcribe_model` names a model; or a command line of your own, to which the audio file is added at the end and which writes the text to its standard output (split into words like `$EDITOR`, no shell). Also **Transcribe with** in the settings. See Good to know |
+| `transcribe_command` | what turns a voice or audio message into text under it (`W`): `"auto"` (default) is `whisper-cli` of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) if it is on `PATH` and `transcribe_model` names a model; or a command line of your own, to which the audio file is added at the end and which writes the text to its standard output (split into words like `$EDITOR`, no shell). Also **Transcribe with** in the settings. See Good to know |
 | `transcribe_model` | the model file for `whisper-cli`, e.g. `"~/models/ggml-base.bin"`. Empty (default): `"auto"` transcribes nothing and the button is not shown. Also **Whisper model** in the settings |
 | `translate_command` | the command line that translates a message (`L`). Empty (default): translating is not offered. It gets the message's text on its standard input, the language as `{lang}` in its arguments and in the variable `MATRIX_RAT_TRANSLATE_TO`, and writes the translation to its standard output (split into words like `$EDITOR`, no shell). Also **Translate with** in the settings. See Good to know |
 | `translate_language` | the language to translate into, handed to your command as you write it (`"en"` by default; a code or a name, whatever your command understands). Also **Translate into** in the settings |
@@ -543,7 +543,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
   transcribe and 2 minutes to translate, and what it writes is cut after 8000
   characters. Until a program is set up there is no button, and the entry in `Ctrl-P`
   is greyed and says what is missing; the doctor (see below) says it too.
-  - **Transcribing (`X`)** happens on your machine. Install whisper.cpp (its program
+  - **Transcribing (`W`)** happens on your machine. Install whisper.cpp (its program
     is `whisper-cli`; in nixpkgs the package is `whisper-cpp`), fetch a model (the
     package brings `whisper-cpp-download-ggml-model`; the models are on whisper.cpp's
     page) and name the file in `transcribe_model`. matrix-rat downloads the sound as

@@ -746,10 +746,10 @@ pub const DEFAULT: &[Binding] = &[
     ),
     bind(
         Timeline,
-        Char('X'),
+        Char('W'),
         NONE,
         Action::Transcribe,
-        "X",
+        "W",
         "Transcribe voice or audio",
     ),
     bind(

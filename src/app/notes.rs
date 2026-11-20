@@ -839,7 +839,7 @@ mod tests {
         let (mut app, mut commands) = app_with(vec![text("t", "hi"), voice("v1")], &dir, true);
         select(&mut app, 1);
         assert_eq!(app.note_caps().transcribe, NoteOffer::Run);
-        app.on_event(key(KeyCode::Char('X')));
+        app.on_event(key(KeyCode::Char('W')));
         assert_eq!(asked(&mut commands), ["FetchSpeech(run 1)"]);
         assert_eq!(
             note(&app, "$v1", NoteKind::Transcript),
@@ -889,7 +889,7 @@ mod tests {
             shown.contains("┊ transcript: Hello there. General Kenobi."),
             "{shown}"
         );
-        assert!(shown.contains("X hide transcript"), "{shown}");
+        assert!(shown.contains("W hide transcript"), "{shown}");
         // Nothing was sent to the room, and nothing more asked of the worker.
         assert!(commands.try_recv().is_err());
     }
@@ -917,10 +917,10 @@ mod tests {
         wrote(&mut app, 1, "spoken words");
         assert_eq!(asked(&mut commands), ["FetchSpeech(run 1)"]);
 
-        app.on_event(key(KeyCode::Char('X')));
+        app.on_event(key(KeyCode::Char('W')));
         assert_eq!(app.note_caps().transcribe, NoteOffer::Show);
         assert!(!screen(&mut app, 100, 30).contains("spoken words"));
-        app.on_event(key(KeyCode::Char('X')));
+        app.on_event(key(KeyCode::Char('W')));
         assert_eq!(app.note_caps().transcribe, NoteOffer::Hide);
         assert!(screen(&mut app, 100, 30).contains("spoken words"));
         assert!(asked(&mut commands).is_empty());
@@ -1069,7 +1069,7 @@ mod tests {
         // While the program runs: it is told to stop, and its last word is dropped.
         app.perform(Action::Transcribe);
         let mut request = fetched(&mut app, 2, &dir);
-        app.on_event(key(KeyCode::Char('X')));
+        app.on_event(key(KeyCode::Char('W')));
         assert_eq!(request.cancel.try_recv(), Ok(()));
         assert_eq!(note(&app, "$v1", NoteKind::Transcript), None);
         wrote(&mut app, 2, "too late");
@@ -1237,7 +1237,7 @@ mod tests {
         app.on_event(key(KeyCode::Char('L')));
         assert!(toast(&app).starts_with("Translating is not set up: "));
         select(&mut app, 0);
-        app.on_event(key(KeyCode::Char('X')));
+        app.on_event(key(KeyCode::Char('W')));
         assert!(toast(&app).starts_with("Transcribing is not set up: "));
         assert!(app.take_note_starts().is_empty());
         assert!(asked(&mut commands).is_empty());
@@ -1253,7 +1253,7 @@ mod tests {
         }
         let shown = screen(&mut app, 120, 30);
         assert!(
-            shown.contains("Translate message (translate_command"),
+            shown.contains("Translate message (set translate_command"),
             "{shown}"
         );
     }

@@ -241,7 +241,7 @@ impl NoteOffer {
     }
 }
 
-/// What `X` and `L` would do: transcripts and translations under messages.
+/// What `W` and `L` would do: transcripts and translations under messages.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NoteCaps {
     pub transcribe: NoteOffer,

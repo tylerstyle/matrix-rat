@@ -1162,6 +1162,9 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected();
         drain(&mut commands);
         app.on_event(key(KeyCode::F(2)));
+        // The list is longer than the screen: up from the first row is the last, and
+        // the end of the list comes into view.
+        app.on_event(key(KeyCode::Up));
         let text = screen(&mut app, &mut terminal);
         find(&text, "Enter to view");
         let (col, row) = find(&text, "Sessions");
