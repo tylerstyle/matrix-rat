@@ -319,4 +319,47 @@ mod tests {
             assert!(crate::text::width(symbol) <= usize::from(SYMBOLS.cell));
         }
     }
+
+    /// The composer alone, `width` columns wide: which buttons can be clicked.
+    fn clickable(app: &mut App, width: u16) -> Vec<Action> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, 3)).unwrap();
+        app.hits.clear();
+        terminal
+            .draw(|frame| draw(frame, app, Rect::new(0, 0, width, 3)))
+            .unwrap();
+        [Action::RecordVoice, Action::Attach, Action::OpenEmoji]
+            .into_iter()
+            .filter(|action| app.hits.rect_of(HitId::Do(*action)).is_some())
+            .collect()
+    }
+
+    #[test]
+    fn the_buttons_vanish_together_where_they_would_leave_no_room_for_text() {
+        // The pane's border and one column of padding each side: 4 columns around
+        // the text. The buttons need their room and more than 4 columns of text.
+        let edge = |mic: Mic| 4 + reserve(mic) + 4;
+
+        let mut app = App::demo();
+        assert_eq!(app.mic_button(), Mic::Hidden);
+        assert_eq!(edge(Mic::Hidden), 14);
+        assert!(clickable(&mut app, 14).is_empty());
+        assert_eq!(clickable(&mut app, 15), [Action::Attach, Action::OpenEmoji]);
+
+        // With the microphone the three need more room, and below it none is drawn:
+        // not the two that would still fit.
+        let tool = |name: &str| {
+            crate::audio::recorder::Tool::new(std::path::PathBuf::from(name), Vec::new())
+        };
+        app.set_test_recorder(tool("/nonexistent/capture"), tool("/nonexistent/encoder"));
+        assert_eq!(edge(Mic::Idle), 17);
+        assert!(clickable(&mut app, 15).is_empty());
+        assert!(clickable(&mut app, 17).is_empty());
+        let all = [Action::RecordVoice, Action::Attach, Action::OpenEmoji];
+        assert_eq!(clickable(&mut app, 18), all);
+        // The last button ends one column before the border.
+        let smiley = app.hits.rect_of(HitId::Do(Action::OpenEmoji)).unwrap();
+        assert_eq!(smiley.right(), 18 - 2);
+    }
 }
