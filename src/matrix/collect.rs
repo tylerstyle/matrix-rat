@@ -1688,7 +1688,8 @@ mod tests {
     /// 1. "What is loaded now" of an open room that shows more than a timeline of
     ///    its own starts with: the archive holds every message the app holds.
     /// 2. With a known read position, what is unread is exactly what came after it.
-    /// 3. With the read position further back than is looked for, the answer says
+    /// 3. With more unread than a summary holds: the newest unread, cut, where the
+    ///    read position is still among what the SDK holds; otherwise the answer says
     ///    that it is not known what is unread, and holds only the newest asked for.
     ///
     /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test -- --ignored`
@@ -1961,30 +1962,41 @@ mod tests {
         assert_eq!(unread.messages, news.len(), "unread count ({info})");
         assert!(!unread.cut, "unread should not be cut ({info})");
 
-        // 3. So many more that where we stopped reading is not among what is
-        // looked through: that is said, and only the newest asked for are given.
-        // `RoomEventCache` reloads persisted chunks whole (128 events) regardless of
-        // the requested page size, on top of any remaining lazy-skipped items
-        // (< `MIN_PAGE` near `UNREAD_EVENTS`), so stay past that worst-case reach.
+        // 3. So many more that the newest ones alone fill a summary. Whether the place
+        // where we stopped reading is still among what the SDK holds depends on its
+        // cache (an open room keeps what sync brought; `RoomEventCache` reloads stored
+        // chunks whole, 128 events, whatever page was asked for), so either answer may
+        // come, and each must be the truth:
+        // - the place was found: exactly the newest unread, cut to `SUMMARY_MESSAGES`;
+        // - it was not: that is said, and only the newest asked for are given.
+        // What must never come is "known" with a place guessed among the flood.
+        // (The unknown answer is pinned without a server by the tests of `unread_text`.)
         const STORE_CHUNK: usize = 128;
         let many = UNREAD_EVENTS + STORE_CHUNK + usize::from(MIN_PAGE) + 20;
         let flood: Vec<String> = (0..many).map(|n| format!("flood-{run}-{n:03}")).collect();
         for body in &flood {
             say(body.clone()).await;
         }
-        let newest = &flood[many - 7..];
         let unread = unread_until(&handle, &mut events, &room_id, 200, 7, |unread| {
             unread.text.trim_end().ends_with(flood[many - 1].as_str())
         })
         .await;
         let info = shape(&unread);
-        assert!(
-            !unread.known,
-            "the read position is too far back to be found ({info})"
-        );
-        assert!(!unread.cut, "newest slice should not be cut ({info})");
-        assert_eq!(unread.messages, newest.len(), "message count ({info})");
-        assert_eq!(bodies(&unread), newest, "newest bodies ({info})");
+        if unread.known {
+            let newest = &flood[many - collect::SUMMARY_MESSAGES..];
+            assert!(unread.cut, "more is unread than a summary holds ({info})");
+            assert_eq!(
+                unread.messages,
+                collect::SUMMARY_MESSAGES,
+                "a full summary ({info})"
+            );
+            assert_eq!(bodies(&unread), newest, "the newest unread ({info})");
+        } else {
+            let newest = &flood[many - 7..];
+            assert!(!unread.cut, "newest slice should not be cut ({info})");
+            assert_eq!(unread.messages, newest.len(), "message count ({info})");
+            assert_eq!(bodies(&unread), newest, "newest bodies ({info})");
+        }
 
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
