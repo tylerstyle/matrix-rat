@@ -1335,7 +1335,9 @@ impl App {
             return;
         }
         let several_reminders = room_id.is_empty();
-        let index = self.rooms.iter().position(|room| room.id == room_id);
+        let index = (!several_reminders)
+            .then(|| self.rooms.iter().position(|room| room.id == room_id))
+            .flatten();
         if index.is_none() && !several_reminders {
             return;
         }
@@ -1537,8 +1539,6 @@ impl App {
         self.devices = Default::default();
         // The worker's watch ended with the session.
         self.keywords.watch = None;
-        // Nobody answers what was asked, and no notification of the session is left
-        // to click on. The list itself is the profile's and stays.
         // No reminder comes due over the login form, and what is saved there belongs
         // to the account that left: the list is read again when a session is up.
         self.bookmarks.store = Default::default();

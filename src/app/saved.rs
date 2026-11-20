@@ -411,9 +411,11 @@ impl App {
         let rooms = &self.rooms;
         if let Some(Modal::Saved(popup)) = &mut self.modal {
             for details in items {
-                // Of a room that is not listed (yet) the worker may know more later.
+                // Of a room that is not joined (yet) the worker may know more later.
                 if details.text == SavedText::Unavailable
-                    && !rooms.iter().any(|room| room.id == details.room_id)
+                    && !rooms
+                        .iter()
+                        .any(|room| room.id == details.room_id && !room.is_pending())
                 {
                     popup
                         .retry
@@ -425,7 +427,7 @@ impl App {
     }
 
     /// The room list arrived: what could not be loaded because its room was not
-    /// known then is asked again (by the next tick) where the room is there now.
+    /// joined then is asked again (by the next tick) where the room is joined now.
     pub(super) fn saved_rooms_arrived(&mut self) {
         let rooms = &self.rooms;
         if let Some(Modal::Saved(popup)) = &mut self.modal
@@ -434,7 +436,11 @@ impl App {
             let here: Vec<(String, String)> = popup
                 .retry
                 .iter()
-                .filter(|(room_id, _)| rooms.iter().any(|room| room.id == *room_id))
+                .filter(|(room_id, _)| {
+                    rooms
+                        .iter()
+                        .any(|room| room.id == *room_id && !room.is_pending())
+                })
                 .cloned()
                 .collect();
             for key in here {
@@ -661,7 +667,10 @@ impl App {
     /// so, and the reminder stays due until the entry is removed.
     fn go_to_saved(&mut self, item: &SavedItem) {
         let now = self.bookmarks.clock.now_secs();
-        let room_there = self.rooms.iter().any(|room| room.id == item.room_id);
+        let room_there = self
+            .rooms
+            .iter()
+            .any(|room| room.id == item.room_id && !room.is_pending());
         if room_there
             && self
                 .bookmarks
@@ -765,7 +774,7 @@ impl App {
                 }
                 return;
             }
-            if self.user_id.is_some() {
+            if self.user_id.is_some() && self.rooms_received {
                 // One question for all of them.
                 self.bookmarks.next_request += 1;
                 let request = self.bookmarks.next_request;
@@ -1995,9 +2004,14 @@ mod tests {
         assert!(text.contains("could not be loaded"), "{text}");
         app.saved_tick(TEXT_WAIT);
         assert!(fetches(&mut commands).is_empty());
-        // The room is listed now: asked again, once.
+        // The room arrives as an invite first: still not joined, so not asked again yet.
         app.rooms
-            .push(Room::new("!late:example.org", "Late", RoomKind::Room));
+            .push(Room::new("!late:example.org", "Late", RoomKind::Invite));
+        app.saved_rooms_arrived();
+        app.saved_tick(TEXT_WAIT);
+        assert!(fetches(&mut commands).is_empty());
+        // The room is joined now: asked again, once.
+        app.rooms.last_mut().unwrap().kind = RoomKind::Room;
         app.saved_rooms_arrived();
         app.saved_tick(TEXT_WAIT);
         let again = fetches(&mut commands);
@@ -2027,6 +2041,30 @@ mod tests {
         );
         assert_eq!(app.reminders_due(), 1);
         assert!(!app.bookmarks.store.items()[0].done);
+
+        // An invited room refuses the jump too, and keeps the reminder due.
+        app.rooms
+            .push(Room::new("!left:example.org", "Invited", RoomKind::Invite));
+        app.click_due_reminder();
+        assert!(toast(&app).contains("Join this room"), "{}", toast(&app));
+        assert_eq!(app.reminders_due(), 1);
+        assert!(!app.bookmarks.store.items()[0].done);
+    }
+
+    #[test]
+    fn a_reminders_notification_sanitises_the_room_name() {
+        let (mut app, _terminal, _commands) = with_reminder();
+        app.rooms[0].name = "Garden\n\x1b[31mEvil\r\tRoom".to_owned();
+        app.notification_preview = false;
+        later(&mut app, 3600);
+        app.saved_tick(TEXT_WAIT);
+        assert_eq!(app.bookmarks.notices.len(), 1);
+        let room = &app.bookmarks.notices[0].notice.room;
+        assert!(
+            !room.contains('\n') && !room.contains('\x1b') && !room.contains('\r'),
+            "{room:?}"
+        );
+        assert!(room.contains("Garden") && room.contains("Room"), "{room:?}");
     }
 
     #[test]

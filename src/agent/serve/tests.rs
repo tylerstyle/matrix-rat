@@ -1024,6 +1024,7 @@ async fn what_is_meant_for_a_screen_makes_serve_ask_for_nothing() {
         },
         MatrixEvent::NoticeClicked {
             room_id: "!invite:example.org".into(),
+            event: None,
         },
         MatrixEvent::Draft {
             room_id: ROOM.into(),

@@ -2463,6 +2463,14 @@ mod tests {
             }],
         });
         assert_eq!(format!("{event:?}"), "Saved(Details(request 3, 1 items))");
+        let click = MatrixEvent::NoticeClicked {
+            room_id: "!room:example.org".into(),
+            event: Some((
+                "$event:example.org".into(),
+                Some("$root:example.org".into()),
+            )),
+        };
+        assert_eq!(format!("{click:?}"), "NoticeClicked");
         // What `serve` asks for and is told: no room, no text, no event, no reason.
         let command = MatrixCmd::Agent(AgentCmd::Send {
             request: 4,

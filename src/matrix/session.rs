@@ -1032,13 +1032,15 @@ mod tests {
         // an explicit logout, with everything put aside next to it.
         let saved = paths.saved_file();
         let aside = saved.with_file_name("saved.json.damaged");
+        let pending = saved.with_file_name("saved.json.new");
         std::fs::write(&saved, b"{}").unwrap();
         std::fs::write(&aside, b"{}").unwrap();
+        std::fs::write(&pending, b"{}").unwrap();
         let keyring = TestKeyring::default();
         forget_with(&paths, None, &keyring).await;
-        assert!(saved.exists() && aside.exists());
+        assert!(saved.exists() && aside.exists() && pending.exists());
         clear_with(&paths, None, &keyring).await;
-        assert!(!saved.exists() && !aside.exists());
+        assert!(!saved.exists() && !aside.exists() && !pending.exists());
         assert!(!paths.store_dir().exists());
         assert!(!paths.data_dir.join("store.previous").exists());
         assert!(!paths.search_dir().exists());

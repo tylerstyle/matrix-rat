@@ -429,7 +429,7 @@ impl SavedStore {
             // copy the entries are not dropped either.
             let copy = free_name(file, BEFORE_NAME)
                 .ok_or_else(|| std::io::Error::other("no name left for the copy"))?;
-            std::fs::copy(file, copy)?;
+            copy_private(file, &copy)?;
             self.copy_first = false;
         }
         let out = FileOut {
@@ -479,6 +479,9 @@ fn parse(text: &str, owner: &str) -> Parsed {
     let Some(version) = value.get("version").and_then(serde_json::Value::as_u64) else {
         return Parsed::NotOurs;
     };
+    if version == 0 {
+        return Parsed::NotOurs;
+    }
     // Before anything else of it is believed: its fields may mean something else.
     if version > VERSION {
         return Parsed::Newer;
@@ -522,7 +525,12 @@ fn free_name(file: &Path, name: &str) -> Option<PathBuf> {
             0 => file.with_file_name(name),
             n => file.with_file_name(format!("{name}.{n}")),
         })
-        .find(|candidate| !candidate.exists())
+        .find(|candidate| {
+            matches!(
+                std::fs::symlink_metadata(candidate),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound
+            )
+        })
 }
 
 /// Removes the list and everything put aside next to it: for a logout, after which
@@ -543,6 +551,27 @@ pub fn remove_files(file: &Path) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// Copies `source` into a new file at `target`, readable by the user only, and
+/// waits for it to reach the disk.
+fn copy_private(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let bytes = std::fs::read(source)?;
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(target)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(&bytes)?;
+        file.sync_all()
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(target);
+    }
+    written
 }
 
 /// Writes `bytes` to a new file next to `path`, for the user only, and puts it in
@@ -662,7 +691,7 @@ pub fn resolve<Tz: TimeZone>(when: When, now_secs: i64, zone: &Tz) -> Result<i64
         return Err(WhenError::Past);
     }
     // A day of slack for what the clocks do in five years.
-    if secs - now_secs > (MAX_AHEAD_DAYS + 1) * 24 * 3600 {
+    if secs.saturating_sub(now_secs) > (MAX_AHEAD_DAYS + 1) * 24 * 3600 {
         return Err(WhenError::TooFar);
     }
     Ok(secs)
@@ -1814,9 +1843,12 @@ pub mod tests {
         assert!(!dir.join(BEFORE_NAME).exists());
         store.add(item("$a", 1)).unwrap();
         store.write().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let copy = dir.join(BEFORE_NAME);
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), text);
         assert_eq!(
-            std::fs::read_to_string(dir.join(BEFORE_NAME)).unwrap(),
-            text
+            std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+            0o600
         );
         // Once: the next write copies nothing.
         store.add(item("$b", 2)).unwrap();
