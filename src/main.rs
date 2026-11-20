@@ -156,9 +156,11 @@ enum Command {
         /// The one room: its id (best), its exact name, or its address.
         #[arg(long)]
         room: String,
-        /// The agent's name; its messages are signed with it: `[NAME] text`.
+        /// The agent's name; its messages are signed with it: `[NAME] text`. Without
+        /// this it is read from the environment variable MATRIX_RAT_AGENT_NAME, so
+        /// that agents sharing one command line sign with their own names.
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         /// The user whose messages count as answers (`@user:server`). Everything
         /// else in the room is marked as not from the user.
         #[arg(long, value_name = "USER")]
@@ -229,7 +231,14 @@ fn main() -> Result<std::process::ExitCode> {
         Some(Command::Serve) => true,
         // The clients of a running `serve`: they make no folder, take no lock, open
         // no store and write no log. They end with their own exit codes.
-        Some(command) => std::process::exit(i32::from(client_command(command, &paths))),
+        Some(command) => {
+            let env_name = std::env::var_os(agent::mcp::NAME_ENV);
+            std::process::exit(i32::from(client_command(
+                command,
+                &paths,
+                env_name.as_deref(),
+            )))
+        }
         None => false,
     };
     if args.reload_theme {
@@ -273,12 +282,17 @@ fn main() -> Result<std::process::ExitCode> {
 
 /// Runs `send`, `read`, `listen` or `mcp` against the profile's `serve` and returns
 /// the exit code. What is wrong is said on standard error, where it is the user's (or
-/// the agent's) to read; nothing is logged.
+/// the agent's) to read; nothing is logged. `env_name` is the agent's name from the
+/// environment, which only `mcp` looks at.
 #[expect(
     clippy::disallowed_methods,
     reason = "a command-line client: its one thread runs the request to its end"
 )]
-fn client_command(command: Command, paths: &paths::Paths) -> u8 {
+fn client_command(
+    command: Command,
+    paths: &paths::Paths,
+    env_name: Option<&std::ffi::OsStr>,
+) -> u8 {
     use agent::client::{self, exit};
     let socket = paths.agent_socket();
     let profile = paths.profile.as_str();
@@ -370,7 +384,7 @@ fn client_command(command: Command, paths: &paths::Paths) -> u8 {
             from,
             allow_unverified,
         } => {
-            let name = match agent::mcp::check_name(&name) {
+            let name = match agent::mcp::agent_name(name.as_deref(), env_name) {
                 Ok(name) => name,
                 Err(what) => return usage(what),
             };
@@ -506,7 +520,7 @@ mod tests {
             parse(&["mcp", "--room", "Agents", "--name", "builder"]).command,
             Some(Command::Mcp {
                 room: "Agents".into(),
-                name: "builder".into(),
+                name: Some("builder".into()),
                 from: None,
                 allow_unverified: false,
             })
@@ -527,7 +541,7 @@ mod tests {
             .command,
             Some(Command::Mcp {
                 room: "Agents".into(),
-                name: "builder".into(),
+                name: Some("builder".into()),
                 from: Some("@ann:example.org".into()),
                 allow_unverified: true,
             })
@@ -573,7 +587,6 @@ mod tests {
             &["read", "--room", "Agents", "--limit", "101"],
             &["read", "--room", "Agents", "--limit", "many"],
             &["listen"],
-            &["mcp", "--room", "Agents"],
             &["mcp", "--name", "builder"],
             &[
                 "mcp",
@@ -626,6 +639,18 @@ mod tests {
             }
         }
         assert!(format!("{:?}", parse(&["mcp", "--room", "R", "--name", "n"])).contains("Mcp"));
+
+        // The name may be left to the environment; that there is one at all is
+        // checked when the command runs.
+        assert_eq!(
+            parse(&["mcp", "--room", "Agents"]).command,
+            Some(Command::Mcp {
+                room: "Agents".into(),
+                name: None,
+                from: None,
+                allow_unverified: false,
+            })
+        );
     }
 
     #[test]
@@ -651,8 +676,31 @@ mod tests {
             &["send", "--room", "Agents", "  "],
         ] {
             let command = parse(words).command.unwrap();
-            assert_eq!(client_command(command, &paths), 2, "{words:?}");
+            assert_eq!(client_command(command, &paths, None), 2, "{words:?}");
         }
+        // No name at all, and a name from the environment that is not fine: the
+        // same usage error as a bad `--name`.
+        let too_long = "n".repeat(agent::mcp::MAX_AGENT_NAME + 1);
+        let hostile: [Option<&str>; 7] = [
+            None,
+            Some(""),
+            Some("a]b"),
+            Some("two\nlines"),
+            Some("esc\u{1b}[31m"),
+            Some("flip\u{202e}"),
+            Some(too_long.as_str()),
+        ];
+        for env in hostile {
+            let command = parse(&["mcp", "--room", "Agents"]).command.unwrap();
+            let env = env.map(std::ffi::OsStr::new);
+            assert_eq!(client_command(command, &paths, env), 2, "{env:?}");
+        }
+        // A bad `--name` is not mended by a good name in the environment.
+        let command = parse(&["mcp", "--room", "Agents", "--name", "a]b"])
+            .command
+            .unwrap();
+        let env = Some(std::ffi::OsStr::new("builder"));
+        assert_eq!(client_command(command, &paths, env), 2);
         // With good arguments and no `serve`: said so, with its own code.
         for words in [
             &["rooms"][..],
@@ -661,7 +709,7 @@ mod tests {
             &["listen", "--room", "Agents", "--from", "@ann:example.org"],
         ] {
             let command = parse(words).command.unwrap();
-            assert_eq!(client_command(command, &paths), 3, "{words:?}");
+            assert_eq!(client_command(command, &paths, None), 3, "{words:?}");
         }
         assert!(!root.exists(), "a client made a folder");
     }

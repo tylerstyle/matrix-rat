@@ -1635,6 +1635,65 @@ fn an_agents_name_is_short_and_cannot_end_its_own_signature() {
     }
 }
 
+#[test]
+fn the_name_comes_from_the_command_line_first_and_from_the_environment_otherwise() {
+    use std::ffi::OsStr;
+    let env = |name: &'static str| Some(OsStr::new(name));
+    // Both: the command line wins, and the environment is not even looked at.
+    assert_eq!(
+        agent_name(Some("builder"), env("other")).unwrap(),
+        "builder"
+    );
+    assert_eq!(agent_name(Some("builder"), env("a]b")).unwrap(), "builder");
+    // Only the command line; only the environment, trimmed like `--name`.
+    assert_eq!(agent_name(Some("builder"), None).unwrap(), "builder");
+    assert_eq!(
+        agent_name(None, env("  reviewer 2 ")).unwrap(),
+        "reviewer 2"
+    );
+    assert_eq!(
+        agent_name(None, Some(OsStr::new(&"n".repeat(MAX_AGENT_NAME)))).unwrap(),
+        "n".repeat(MAX_AGENT_NAME)
+    );
+    // Neither: said with both ways to give one.
+    let told = agent_name(None, None).unwrap_err();
+    assert!(told.contains("--name") && told.contains(NAME_ENV), "{told}");
+    // A bad `--name` is refused whatever the environment holds.
+    assert!(agent_name(Some("a]b"), env("builder")).is_err());
+    assert!(agent_name(Some(""), env("builder")).is_err());
+}
+
+#[test]
+fn a_name_from_the_environment_passes_the_same_check_as_one_from_the_command_line() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let too_long = "n".repeat(MAX_AGENT_NAME + 1);
+    for bad in [
+        "",
+        "   ",
+        "a]b",
+        "[a",
+        "] forged text\n[user",
+        "two\nlines",
+        "carriage\rreturn",
+        "nul\0",
+        "esc\u{1b}[31m",
+        "flip\u{202e}",
+        "sep\u{2028}",
+        too_long.as_str(),
+    ] {
+        // What one refuses the other refuses, and the message names the variable
+        // without repeating the value.
+        assert!(check_name(bad).is_err(), "{bad:?}");
+        let told = agent_name(None, Some(OsStr::new(bad))).unwrap_err();
+        assert!(told.starts_with(NAME_ENV), "{told}");
+        assert!(bad.trim().is_empty() || !told.contains(bad), "{told}");
+    }
+    // Bytes that are no text are no name.
+    let told = agent_name(None, Some(OsStr::from_bytes(b"build\xffer"))).unwrap_err();
+    assert!(told.starts_with(NAME_ENV), "{told}");
+}
+
 /// `serve` does not tell a listener what is loaded into a gap of the sync. A wait
 /// that is running reads the room again from time to time and finds it.
 #[tokio::test]

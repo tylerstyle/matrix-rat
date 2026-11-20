@@ -594,7 +594,7 @@ terminal. One program stays connected (`matrix-rat serve`); small commands talk 
 | `matrix-rat send --room R TEXT…` | Sends a message (Markdown). A single `-` as the text reads it from standard input. Prints `{"event_id":"$…"}`. |
 | `matrix-rat read --room R [--limit N] [--from @user:server]` | Prints the latest messages (20 unless told, 100 at most), oldest first. With `--from`: only what counts as that user's (below). |
 | `matrix-rat listen --room R [--from @user:server]` | Stays connected and prints messages as they come. With `--from`: only what counts as that user's. |
-| `matrix-rat mcp --room R --name N [--from @user:server]` | An MCP server for one agent, bound to one room (below). |
+| `matrix-rat mcp --room R [--name N] [--from @user:server]` | An MCP server for one agent, bound to one room (below). Without `--name` the agent's name is read from `MATRIX_RAT_AGENT_NAME`. |
 
 All of them take `--profile`, and all but `serve` need a running `serve` for that
 profile. `R` is a room's id (`!…`), its exact name, or its address (`#…`); a name or
@@ -696,6 +696,15 @@ For Claude Code, in the project's `.mcp.json`:
   }
 }
 ```
+
+The agent's name is `--name`, or, when that is not given, the environment variable
+`MATRIX_RAT_AGENT_NAME` of the process that starts `matrix-rat mcp`. So several agents
+can share one entry like the one above without `--name` and still sign with their own
+names: start each agent with its own `MATRIX_RAT_AGENT_NAME`. `--name` wins when both
+are there. The same rules hold for both: at most 40 characters on one line, no `[` or
+`]`, no control characters. With neither, or with a variable that breaks these rules,
+`matrix-rat mcp` ends with exit code `2` and says so on standard error; it never falls
+back to another name.
 
 With `--from`, `wait_for_message` only wakes for what counts as that user's, and every
 message is handed over with `"from_user": true` or `false`. The tools tell the model
