@@ -361,7 +361,17 @@ impl Running {
                 }
                 said
             };
-            let ((), said) = tokio::join!(write, read);
+            // What it says decides: once that has ended (or is too much) the rest of
+            // the text is not waited for. A command that echoes more than is taken
+            // would otherwise stand still on its full pipe, and we on ours.
+            tokio::pin!(write, read);
+            let mut written = false;
+            let said = loop {
+                tokio::select! {
+                    () = &mut write, if !written => written = true,
+                    said = &mut read => break said,
+                }
+            };
             if said.len() > OUTPUT_MAX {
                 return (Outcome::Failed(Failure::TooMuch), false);
             }
@@ -525,6 +535,21 @@ mod tests {
         };
         assert!(text.starts_with("a line of text\n"));
         assert!(text.ends_with("[The summary was longer; the rest is not shown.]"));
+    }
+
+    #[tokio::test]
+    async fn a_command_that_echoes_more_than_is_taken_is_stopped_at_once() {
+        let dir = Dir::new("echo-flood");
+        // Far more than both pipes hold and than a summary may be: `cat` stands
+        // still on its output while we still write to it.
+        let input = "a line of text that is echoed\n".repeat(10_000);
+        assert!(input.len() > 4 * OUTPUT_MAX);
+        let outcome = tokio::time::timeout(WAIT, outcome_of(fake(&dir, "cat"), &input))
+            .await
+            .expect("no deadlock");
+        assert_eq!(outcome, Outcome::Failed(Failure::TooMuch));
+        let pid = number(&dir.0.join("pid")).await;
+        assert!(reaped(pid));
     }
 
     #[tokio::test]

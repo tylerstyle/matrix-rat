@@ -18,7 +18,7 @@ use std::fmt;
 use chrono::{DateTime, TimeZone};
 
 use crate::model::{MediaKind, Message, MsgKind};
-use crate::text::{sanitize_line, truncate};
+use crate::text::{sanitize, sanitize_line, truncate};
 
 /// How much of the message a reply answers is quoted, in columns.
 const REPLY_QUOTE: usize = 80;
@@ -33,7 +33,8 @@ pub enum Span {
     Loaded,
     /// The last so many days.
     Days(u32),
-    /// Back to the room's first message (or as far as the account may see).
+    /// As far back as the room goes (or as the account may see), up to the most
+    /// one archive takes.
     Everything,
 }
 
@@ -49,7 +50,7 @@ impl Span {
         match self {
             Span::Loaded => "What is loaded now".to_owned(),
             Span::Days(days) => format!("The last {days} days"),
-            Span::Everything => "Everything".to_owned(),
+            Span::Everything => "As far back as it goes".to_owned(),
         }
     }
 
@@ -173,7 +174,9 @@ pub fn entry(message: &Message) -> Option<Entry> {
         at: message.sent_at,
         sender: sanitize_line(&message.sender).trim().to_owned(),
         kind,
-        text,
+        // Cleaned here too, whatever was done before: nothing but `\n` ends a line
+        // in what is written from this.
+        text: sanitize(&text),
         name: name.map(|name| sanitize_line(&name).trim().to_owned()),
         reply,
         edited: message.edited,
@@ -282,6 +285,17 @@ pub(crate) mod tests {
             sent_at: Some(AT),
             ..Message::default()
         }
+    }
+
+    #[test]
+    fn nothing_but_a_newline_ends_a_line_of_a_messages_text() {
+        let entry = entry(&said(
+            "Ann",
+            "one\rtwo\u{2028}three\u{1b}[2J\r\nfour\u{85}five",
+        ))
+        .unwrap();
+        assert_eq!(entry.text, "onetwothree[2J\nfourfive");
+        assert_eq!(entry.text.lines().count(), 2);
     }
 
     fn file(kind: MediaKind, name: &str, body: &str) -> Message {

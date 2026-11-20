@@ -16,6 +16,7 @@ use crate::app::collect::{
 };
 use crate::collect::Span as Stretch;
 use crate::files;
+use crate::matrix::ARCHIVE_EVENTS;
 use crate::text::{sanitize_line, truncate, width, wrap_at_spaces};
 use crate::theme::{Role, Theme};
 
@@ -29,6 +30,7 @@ type Buttons = &'static [(&'static str, u8)];
 const ASK: Buttons = &[(" Write archive ", CLICK_GO), (" Cancel ", CLICK_CLOSE)];
 const CANCEL: Buttons = &[(" Cancel ", CLICK_CLOSE)];
 const CLOSE: Buttons = &[(" Close ", CLICK_CLOSE)];
+const ASK_NEWEST: Buttons = &[(" Summarise ", CLICK_GO), (" Cancel ", CLICK_CLOSE)];
 const SUMMARY: Buttons = &[(" Copy ", CLICK_COPY), (" Close ", CLICK_CLOSE)];
 
 /// A line of a popup, and the row of the "how far back" list it is, if one.
@@ -75,12 +77,12 @@ fn draw_archive(frame: &mut Frame, app: &mut App, area: Rect, archive: &ArchiveP
                 )),
                 None,
             ));
-            for (at, span) in Stretch::ALL.into_iter().enumerate() {
+            for (at, span) in archive.spans().iter().copied().enumerate() {
                 let chosen = at == archive.selected;
                 let mark = if chosen { "● " } else { "○ " };
                 let mut label = span.label();
                 if span == Stretch::Everything {
-                    label.push_str(" (can take long in a large room)");
+                    label = format!("{label}, at most {}", count(ARCHIVE_EVENTS, ""));
                 }
                 let style = if chosen {
                     theme.style(Role::Text).add_modifier(Modifier::BOLD)
@@ -137,7 +139,7 @@ fn draw_archive(frame: &mut Frame, app: &mut App, area: Rect, archive: &ArchiveP
                 &theme,
                 &format!(
                     "Archived {} to {}",
-                    count(archived.messages),
+                    count(archived.messages, ""),
                     files::display(&archived.path)
                 ),
                 room,
@@ -212,10 +214,32 @@ fn draw_catch_up(frame: &mut Frame, app: &mut App, area: Rect, catch_up: &mut Ca
             ));
             ("Esc cancel", CANCEL)
         }
+        CatchUpStage::Asking { messages, .. } => {
+            head.extend(sentences(
+                &theme,
+                "Where you stopped reading in this room was not found.",
+                room,
+                Role::StatusKey,
+            ));
+            head.extend(sentences(
+                &theme,
+                &format!(
+                    "Summarise the newest {} instead? Some of them you may have read. \
+                     Their text is then given to your summary command ({program}).",
+                    count(*messages, "")
+                ),
+                room,
+                Role::Text,
+            ));
+            ("Enter summarise · Esc leave", ASK_NEWEST)
+        }
         CatchUpStage::Summarising { messages, .. } => {
             head.extend(sentences(
                 &theme,
-                &format!("Waiting for {program} to summarise {}…", count(*messages)),
+                &format!(
+                    "Waiting for {program} to summarise {}…",
+                    count(*messages, "")
+                ),
                 room,
                 Role::Text,
             ));
@@ -231,17 +255,20 @@ fn draw_catch_up(frame: &mut Frame, app: &mut App, area: Rect, catch_up: &mut Ca
             summary,
             messages,
             cut,
+            known,
         } => {
-            let what = if *cut {
-                format!(
-                    "Summary of the newest {} that are unread (there are more), by {program}.",
-                    count(*messages)
-                )
-            } else {
-                format!(
-                    "Summary of {} that are unread, by {program}.",
-                    count(*messages)
-                )
+            let what = match (*known, *cut) {
+                (true, false) => {
+                    format!("Summary of {}, by {program}.", count(*messages, "unread"))
+                }
+                (true, true) => format!(
+                    "Summary of the newest {} (there are more), by {program}.",
+                    count(*messages, "unread")
+                ),
+                (false, _) => format!(
+                    "Summary of the newest {}, read or not, by {program}.",
+                    count(*messages, "")
+                ),
             };
             head.extend(sentences(&theme, &what, room, Role::SidebarSection));
             head.extend(sentences(

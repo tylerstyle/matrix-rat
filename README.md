@@ -506,34 +506,43 @@ Setting `preset = "vim"` keeps the default keys and adds:
   nobody voted. Votes of people you ignore are not counted.
 - **Archive a room**: "Archive this room as Markdown…" in the command palette,
   "Archive as Markdown…" in a room's menu, or `/archive` asks how far back (what is
-  loaded now, the last 7 days, the last 30 days, everything) and writes one Markdown
-  file into your download folder (`download_dir`): the room's name and the dates it
-  covers on top, then the messages by day with time, sender and text. **Text only**:
-  pictures, files and voice messages appear as a line with their kind and file name,
-  they are not in the archive; the popup says so before anything is written. Replies
-  name what they answer, edited messages show their current text, deleted and
-  undecryptable ones a marker, reactions a count. The file is readable by you only, is
-  written in one go, and never replaces one that is there (the new one gets a number).
-  "Everything" loads the room's history from the server, which can take long; the popup
-  counts along and `Esc` gives it up (no file is left then). One archive takes at most
-  the newest 50,000 events and says so when the room has more. Messages of people you
-  ignore are left out. It is of the room under the cursor while the room list has the
-  focus, otherwise of the open room.
+  loaded now, the last 7 days, the last 30 days, or as far back as it goes) and writes
+  one Markdown file into your download folder (`download_dir`): the room's name and
+  the dates it covers on top, then the messages by day with time, sender and text.
+  **Text only**: pictures, files and voice messages appear as a line with their kind
+  and file name, they are not in the archive; the popup says so before anything is
+  written. Replies name what they answer, edited messages show their current text,
+  deleted and undecryptable ones a marker, reactions a count. Times are your local
+  time; the file's top says which offset from UTC that is. The file is readable by you
+  only, is written in one go, and never replaces one that is there (the new one gets a
+  number). Older messages are loaded from the server, which can take a while; the
+  popup counts along and `Esc` gives it up (no file is left then). **One archive takes
+  at most the newest 5,000 messages**, also with "as far back as it goes", and says so
+  in the file and at the end when the room has more. Messages of people you ignore are
+  left out. It is of the room under the cursor while the room list has the focus,
+  otherwise of the open room; "what is loaded now" is offered for the open room only.
 - **Catch up**: "Catch up on unread messages" in the command palette, "Catch up
   (summary)" in the menu of an unread room, or `/catchup` collects what is unread in
   the room (at most the newest 300 messages or 24,000 characters; it says when there
   were more), gives that text to the program you named in `summary_command`, and shows
   what it prints in a popup that **only you see**: nothing is posted, and nothing is
-  marked as read. `c` copies the summary, `Esc` closes it and stops the program if it
-  still runs (it is given 3 minutes). matrix-rat has no service of its own for this and
-  starts nothing until you set a command and ask for a summary. **With a command that
-  sends its input to an online service, the text of the room leaves your machine, also
-  that of an encrypted room**: decide for yourself whom you trust with it. A program
-  that runs on your machine keeps it there. An example (only an example: not a
-  recommendation, and not tested by us) with [Ollama](https://ollama.com), which runs
-  a model on your machine and takes the prompt as an argument (`ollama run <model>
-  "prompt"`, see its CLI reference). As no shell is involved, a small script of your
-  own puts the text into the prompt, say `~/bin/summarise-chat` (executable):
+  marked as read. If matrix-rat cannot find where you stopped reading, it gives the
+  program nothing and asks first whether to summarise the newest messages instead (as
+  many as the room counts as unread, else 50), and the result then says that these
+  were the newest, read or not. `c` copies the summary, `Esc` closes it and stops the
+  program if it still runs (it is given 3 minutes). matrix-rat has no service of its
+  own for this and starts nothing until you set a command and ask for a summary.
+  **With a command that sends its input to an online service, the text of the room
+  leaves your machine, also that of an encrypted room**: decide for yourself whom you
+  trust with it. The text is what the people in the room wrote, and any of them may
+  have written something meant to steer the program that summarises it: read a summary
+  as that program's guess, and give the program no rights to do anything but print.
+  A program that runs on your machine keeps the text there. An example (only an
+  example: not a recommendation, and not tested by us) with
+  [Ollama](https://ollama.com), which runs a model on your machine and takes the
+  prompt as an argument (`ollama run <model> "prompt"`, see its CLI reference). As no
+  shell is involved, a small script of your own puts the text into the prompt, say
+  `~/bin/summarise-chat` (executable):
 
   ```sh
   #!/bin/sh

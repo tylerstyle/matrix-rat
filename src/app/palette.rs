@@ -295,7 +295,7 @@ impl App {
                 let mut menu = SettingsMenu::select(setting, self.has_theme_pair());
                 let text = match setting {
                     Setting::AudioPlayer => self.audio.setting.as_str(),
-                    Setting::SummaryCommand => self.collect.summary_setting.as_str(),
+                    Setting::SummaryCommand => self.collect.summary_setting(),
                     _ => self.download_dir.as_str(),
                 };
                 menu.editing = Some(LineEdit::from(text));

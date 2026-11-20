@@ -67,7 +67,9 @@ pub fn escape(line: &str) -> String {
                     && next.is_some_and(char::is_alphanumeric))
             }
             '&' => entity_follows(&chars[at + 1..]),
-            '#' | '>' | '+' | '-' | '=' | '|' => at == 0,
+            // A bar anywhere: two lines with bars can make a table.
+            '|' => true,
+            '#' | '>' | '+' | '-' | '=' => at == 0,
             '.' | ')' => digits > 0 && at == digits,
             _ => false,
         };
@@ -188,6 +190,7 @@ where
             "Archive of a Matrix room, written by matrix-rat on {}.",
             now.format("%Y-%m-%d at %H:%M")
         )?;
+        writeln!(self.out, "Times are local time (UTC{}).", now.format("%:z"))?;
         let day = |at: Option<u64>| {
             at.and_then(|at| local(&self.zone, at))
                 .map(|at| at.format("%Y-%m-%d").to_string())
@@ -367,7 +370,9 @@ mod tests {
             ("---", "\\---"),
             ("===", "\\==="),
             ("___", "\\_\\_\\_"),
-            ("| a | b |", "\\| a | b |"),
+            ("| a | b |", "\\| a \\| b \\|"),
+            ("a | b", "a \\| b"),
+            ("--- | ---", "\\--- \\| ---"),
             ("    not code", "\u{a0}\u{a0}\u{a0}\u{a0}not code"),
             ("<script>alert(1)</script>", "\\<script>alert(1)\\</script>"),
             (
@@ -542,6 +547,7 @@ mod tests {
             text,
             "# \\# Plans \\<b>\n\n\
              Archive of a Matrix room, written by matrix-rat on 2026-11-20 at 14:03.\n\
+             Times are local time (UTC+00:00).\n\
              Messages from 2026-11-17 to 2026-11-20.\n\n\
              Text only: pictures, files, voice messages and other attachments are named, \
              not included.\n\n"

@@ -2470,6 +2470,7 @@ mod tests {
             request: 6,
             room_id: "!room:example.org".into(),
             span: crate::collect::Span::Days(7),
+            held: 0,
             dir: "/home/alice/secret-folder".into(),
             room_name: "Plans of example.org".into(),
         });
@@ -2485,6 +2486,7 @@ mod tests {
             request: 7,
             room_id: "!room:example.org".into(),
             from: Some("$event:example.org".into()),
+            newest: 50,
         });
         assert_eq!(
             format!("{command:?}"),
@@ -2505,6 +2507,7 @@ mod tests {
                         text: "the secret plan for example.org".into(),
                         messages: 1,
                         cut: false,
+                        known: true,
                     }),
                 },
                 "Collect(Unread(request 7, 1 messages))",

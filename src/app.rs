@@ -554,7 +554,7 @@ impl App {
         app.found.ignored_settings = config.ignored.clone();
         app.download_dir = config.download_dir.clone();
         app.audio = playback::AudioState::new(&config.audio_player);
-        app.collect.summary_setting = config.summary_command.trim().to_owned();
+        app.collect.set_summary_setting(&config.summary_command);
         app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
         app.link_previews = config.link_previews;
@@ -1214,7 +1214,7 @@ impl App {
                 if delta == 0
                     && let Some(Modal::Settings(menu)) = &mut self.modal
                 {
-                    menu.editing = Some(LineEdit::from(self.collect.summary_setting.as_str()));
+                    menu.editing = Some(LineEdit::from(self.collect.summary_setting()));
                 }
             }
             Setting::Keys => {
@@ -1468,8 +1468,8 @@ impl App {
     pub(crate) fn reset_session(&mut self) {
         // The sound belongs to a room of the session.
         self.stop_audio();
-        // So does a summary that is being made.
-        self.stop_summary();
+        // So do a summary that is being made and an archive that is being written.
+        self.forget_collections();
         self.rooms.clear();
         self.active = 0;
         // The next session starts as every one does: its first room opens by itself.

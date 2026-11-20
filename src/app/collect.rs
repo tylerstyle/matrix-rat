@@ -13,11 +13,12 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::oneshot;
 
 use super::App;
-use crate::catchup::{self, Outcome};
-use crate::collect::{Cut, Span};
+use crate::catchup::{self, NoCommand, Outcome};
+use crate::collect::{Cut, SUMMARY_MESSAGES, Span};
 use crate::files;
-use crate::matrix::{Archived, CollectCmd, CollectEvent, MatrixCmd, UnreadText};
+use crate::matrix::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, MatrixCmd, UnreadText};
 use crate::modal::Modal;
+use crate::model::MsgKind;
 
 /// What a click in the popup is on (see `HitId::Collect`): a row of the "how far
 /// back" list by its place, or one of these.
@@ -25,17 +26,38 @@ pub const CLICK_GO: u8 = 10;
 pub const CLICK_CLOSE: u8 = 11;
 pub const CLICK_COPY: u8 = 12;
 
+/// How many of the newest messages are offered for a summary where it is not known
+/// what is unread, and the room does not count any as unread either.
+const NEWEST: usize = 50;
+
 /// What the app keeps for both features between events.
-#[derive(Default)]
 pub struct CollectState {
     /// Counts what is asked of the worker and of the summary command.
     requests: u64,
     /// The `summary_command` setting as written.
-    pub(super) summary_setting: String,
+    summary_setting: String,
+    /// What that setting comes to here. Looked up when it is set and when a summary
+    /// is asked for, not on every draw: it means looking through `PATH`.
+    command: Result<catchup::Command, NoCommand>,
     /// A summary command to start, for the event loop to take.
     start: Option<catchup::Request>,
     /// The way to stop the summary command that runs, and its number.
     running: Option<(u64, oneshot::Sender<()>)>,
+    /// The archive the worker is at, by its request: also when its popup is gone.
+    archive: Option<u64>,
+}
+
+impl Default for CollectState {
+    fn default() -> Self {
+        Self {
+            requests: 0,
+            summary_setting: String::new(),
+            command: Err(NoCommand::NotSet),
+            start: None,
+            running: None,
+            archive: None,
+        }
+    }
 }
 
 /// Hand-written: the setting is a command line of the user's.
@@ -43,10 +65,29 @@ impl std::fmt::Debug for CollectState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CollectState")
             .field("requests", &self.requests)
-            .field("summary_set", &!self.summary_setting.trim().is_empty())
+            .field("summary_set", &!self.summary_setting.is_empty())
+            .field("command", &self.command.is_ok())
             .field("start", &self.start.is_some())
             .field("running", &self.running.is_some())
+            .field("archive", &self.archive.is_some())
             .finish()
+    }
+}
+
+impl CollectState {
+    /// The setting as written, for the settings to edit.
+    pub(super) fn summary_setting(&self) -> &str {
+        &self.summary_setting
+    }
+
+    /// Takes the setting and looks its program up.
+    pub(super) fn set_summary_setting(&mut self, setting: &str) {
+        self.summary_setting = setting.trim().to_owned();
+        self.look_up();
+    }
+
+    fn look_up(&mut self) {
+        self.command = catchup::choose_here(&self.summary_setting);
     }
 }
 
@@ -69,7 +110,10 @@ pub enum ArchiveStage {
 pub struct ArchivePopup {
     pub room_id: String,
     pub room_name: String,
-    /// The chosen row of [`Span::ALL`].
+    /// How many messages the app holds of the room, if it is the open one: only
+    /// then is "what is loaded now" something the user sees, and offered.
+    pub held: Option<usize>,
+    /// The chosen row of [`ArchivePopup::spans`].
     pub selected: usize,
     /// Where the file goes.
     pub dir: PathBuf,
@@ -79,8 +123,17 @@ pub struct ArchivePopup {
 }
 
 impl ArchivePopup {
+    /// The rows of "how far back".
+    pub fn spans(&self) -> &'static [Span] {
+        match self.held {
+            Some(_) => &Span::ALL,
+            None => &Span::ALL[1..],
+        }
+    }
+
     pub fn span(&self) -> Span {
-        Span::ALL[self.selected.min(Span::ALL.len() - 1)]
+        let spans = self.spans();
+        spans[self.selected.min(spans.len() - 1)]
     }
 }
 
@@ -92,17 +145,26 @@ pub enum CatchUpStage {
         request: u64,
         loaded: usize,
     },
-    /// The user's command has the text.
+    /// Where the user stopped reading was not found: nothing is given to the
+    /// command unless the user says so here. Holds the newest messages as text.
+    Asking {
+        text: String,
+        messages: usize,
+    },
+    /// The user's command has the text. `known`: of unread messages; otherwise of
+    /// the newest ones, read or not.
     Summarising {
         run: u64,
         messages: usize,
         cut: bool,
+        known: bool,
     },
     /// The summary, for the user alone.
     Done {
         summary: String,
         messages: usize,
         cut: bool,
+        known: bool,
     },
     /// Nothing is unread.
     Nothing,
@@ -129,8 +191,8 @@ pub enum Popup {
     CatchUp(CatchUpPopup),
 }
 
-/// Hand-written: the popups hold a room's name, a folder and a summary of what was
-/// said. Only what they are at is shown.
+/// Hand-written: the popups hold a room's name, a folder, what was said in the room
+/// and a summary of it. Only what they are at is shown.
 impl std::fmt::Debug for Popup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (name, stage) = match self {
@@ -147,6 +209,7 @@ impl std::fmt::Debug for Popup {
                 "CatchUp",
                 match popup.stage {
                     CatchUpStage::Collecting { .. } => "Collecting",
+                    CatchUpStage::Asking { .. } => "Asking",
                     CatchUpStage::Summarising { .. } => "Summarising",
                     CatchUpStage::Done { .. } => "Done",
                     CatchUpStage::Nothing => "Nothing",
@@ -158,21 +221,37 @@ impl std::fmt::Debug for Popup {
     }
 }
 
-/// "1 message", "3 messages".
-pub fn count(messages: usize) -> String {
+/// "1 message", "3 messages", "5,000 messages"; with `what` between ("3 unread
+/// messages").
+pub fn count(messages: usize, what: &str) -> String {
+    let number = thousands(messages);
+    let gap = if what.is_empty() { "" } else { " " };
     if messages == 1 {
-        "1 message".to_owned()
+        format!("1{gap}{what} message")
     } else {
-        format!("{messages} messages")
+        format!("{number}{gap}{what} messages")
     }
+}
+
+/// 5000 as "5,000".
+pub fn thousands(number: usize) -> String {
+    let digits = number.to_string();
+    let mut out = String::new();
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// What to say about an archive that is not complete.
 pub fn cut_note(cut: Option<Cut>) -> Option<String> {
     match cut? {
         Cut::Limit => Some(format!(
-            "The room has more: one archive takes the newest {} events.",
-            crate::matrix::ARCHIVE_EVENTS
+            "Not complete: the room has more. One archive takes the newest {}.",
+            count(ARCHIVE_EVENTS, "")
         )),
         Cut::LoadFailed => Some("Not complete: older messages could not be loaded.".to_owned()),
     }
@@ -195,7 +274,24 @@ impl App {
         if self.matrix.is_none() {
             return Err("Not connected to an account".to_owned());
         }
+        // The worker does one collection at a time, and an archive that runs (its
+        // popup may have made way) must not be ended by the next one.
+        if self.collect.archive.is_some() {
+            return Err("An archive is still being written: wait for it to end".to_owned());
+        }
         Ok(index)
+    }
+
+    /// Whether `index` is the room whose messages are on screen (not one of its
+    /// threads).
+    fn shows_room(&self, index: usize) -> bool {
+        self.open_index() == Some(index) && !self.thread_open()
+    }
+
+    /// The session ends: nothing of it is waited for any more.
+    pub(super) fn forget_collections(&mut self) {
+        self.stop_summary();
+        self.collect.archive = None;
     }
 
     // ----- the archive -------------------------------------------------------------
@@ -208,10 +304,17 @@ impl App {
             Ok(index) => index,
             Err(why) => return self.show_toast(why),
         };
+        let held = self.shows_room(index).then(|| {
+            self.messages()
+                .iter()
+                .filter(|message| message.kind != MsgKind::ReadMarker)
+                .count()
+        });
         let room = &self.rooms[index];
         let popup = ArchivePopup {
             room_id: room.id.clone(),
             room_name: room.name.clone(),
+            held,
             selected: 0,
             dir: self.download_dir(),
             file_name: crate::archive::file_name(&room.name, chrono::Local::now().date_naive()),
@@ -222,25 +325,38 @@ impl App {
 
     /// Enter on the question: the worker starts.
     fn start_archive(&mut self) {
+        if !matches!(
+            &self.modal,
+            Some(Modal::Collect(Popup::Archive(ArchivePopup {
+                stage: ArchiveStage::Asking,
+                ..
+            })))
+        ) {
+            return;
+        }
         let request = self.next_collect_request();
         let Some(Modal::Collect(Popup::Archive(popup))) = &mut self.modal else {
             return;
         };
-        if popup.stage != ArchiveStage::Asking {
-            return;
-        }
         popup.stage = ArchiveStage::Running { request, loaded: 0 };
         let command = CollectCmd::Archive {
             request,
             room_id: popup.room_id.clone(),
             span: popup.span(),
+            held: popup.held.unwrap_or(0),
             dir: popup.dir.clone(),
             room_name: popup.room_name.clone(),
         };
+        self.collect.archive = Some(request);
         self.send_matrix(MatrixCmd::Collect(command));
     }
 
     fn on_archived(&mut self, request: u64, result: Result<Archived, String>) {
+        // Not ours: one that was given up, whose answer was on its way already.
+        let ours = self.collect.archive == Some(request);
+        if ours {
+            self.collect.archive = None;
+        }
         if let Some(Modal::Collect(Popup::Archive(popup))) = &mut self.modal
             && matches!(popup.stage, ArchiveStage::Running { request: asked, .. } if asked == request)
         {
@@ -250,34 +366,32 @@ impl App {
             };
             return;
         }
-        // Its popup is gone (another one took its place): the end is still told.
-        if request != self.collect.requests {
-            return;
-        }
+        // Its popup is gone. A file that was written is there, given up or not, and
+        // the user is told where; a failure only of an archive that is still wanted.
         match result {
             Ok(archived) => self.show_toast(format!(
                 "Archived {} to {}",
-                count(archived.messages),
+                count(archived.messages, ""),
                 files::display(&archived.path)
             )),
-            Err(why) => self.show_toast(format!("Could not archive the room: {why}")),
+            Err(why) if ours => self.show_toast(format!("Could not archive the room: {why}")),
+            Err(_) => {}
         }
     }
 
     // ----- catching up -------------------------------------------------------------
 
-    /// The `summary_command` setting as a command, or why there is none.
-    pub(super) fn summary_command(&self) -> Result<catchup::Command, catchup::NoCommand> {
-        catchup::choose_here(&self.collect.summary_setting)
+    /// The `summary_command` setting as a command, or why there is none: as it was
+    /// found when last looked up.
+    pub(super) fn summary_command(&self) -> Result<catchup::Command, NoCommand> {
+        self.collect.command.clone()
     }
 
     /// What the settings show for the summary command.
     pub(super) fn summary_setting_text(&self) -> String {
-        let setting = self.collect.summary_setting.trim();
-        if setting.is_empty() {
-            return "not set".to_owned();
-        }
-        match self.summary_command() {
+        let setting = self.collect.summary_setting();
+        match &self.collect.command {
+            Err(NoCommand::NotSet) => "not set".to_owned(),
             Ok(_) => setting.to_owned(),
             Err(_) => format!("{setting} (not found)"),
         }
@@ -285,15 +399,14 @@ impl App {
 
     /// Enter on the summary command row: the setting is kept, and looked up at once.
     pub(super) fn set_summary_command(&mut self, text: &str) {
-        let setting = text.trim().to_owned();
-        self.collect.summary_setting = setting.clone();
-        self.save_setting("summary_command", setting);
+        self.collect.set_summary_setting(text);
+        self.save_setting("summary_command", self.collect.summary_setting().to_owned());
         let said = match self.summary_command() {
             Ok(command) => format!(
                 "Catching up gives the unread text of a room to {}",
                 command.name()
             ),
-            Err(catchup::NoCommand::NotSet) => "Catching up is off: no summary command".to_owned(),
+            Err(NoCommand::NotSet) => "Catching up is off: no summary command".to_owned(),
             Err(why) => why.message().to_owned(),
         };
         self.show_toast(said);
@@ -303,6 +416,8 @@ impl App {
     /// in a popup. Not without a command; nothing is asked for where nothing is
     /// unread.
     pub(super) fn open_catch_up(&mut self) {
+        // The program may have come or gone since the setting was made.
+        self.collect.look_up();
         let command = match self.summary_command() {
             Ok(command) => command,
             Err(why) => return self.show_toast(why.message()),
@@ -313,7 +428,8 @@ impl App {
         };
         // The open room counts as read once it is looked at; its "new" line still
         // says from where it was unread.
-        let from = (self.open_index() == Some(index) && !self.thread_open())
+        let from = self
+            .shows_room(index)
             .then(|| self.first_unread_event().map(str::to_owned))
             .flatten();
         let room = &self.rooms[index];
@@ -322,6 +438,12 @@ impl App {
         }
         let room_id = room.id.clone();
         let room_name = room.name.clone();
+        // Should where reading stopped not be found: as many as the room counts as
+        // unread, or a handful.
+        let newest = match usize::try_from(room.unread).unwrap_or(0) {
+            0 => NEWEST,
+            unread => unread.min(SUMMARY_MESSAGES),
+        };
         let request = self.next_collect_request();
         self.stop_summary();
         self.open_modal(Modal::Collect(Popup::CatchUp(CatchUpPopup {
@@ -335,13 +457,11 @@ impl App {
             request,
             room_id,
             from,
+            newest,
         }));
     }
 
     fn on_unread_text(&mut self, request: u64, result: Result<UnreadText, String>) {
-        // The command is looked up again: the setting may have changed meanwhile.
-        let command = self.summary_command();
-        let run = self.next_collect_request();
         let Some(Modal::Collect(Popup::CatchUp(popup))) = &mut self.modal else {
             return;
         };
@@ -349,16 +469,40 @@ impl App {
         {
             return;
         }
-        let unread = match result {
-            Ok(unread) if unread.messages == 0 => {
-                popup.stage = CatchUpStage::Nothing;
-                return;
-            }
-            Ok(unread) => unread,
+        match result {
             Err(why) => {
                 popup.stage = CatchUpStage::Failed(format!("Could not load the messages: {why}"));
-                return;
             }
+            Ok(unread) if unread.messages == 0 => popup.stage = CatchUpStage::Nothing,
+            // Not known what is unread: the text stays here until the user has said
+            // that the newest messages may go to the command.
+            Ok(unread) if !unread.known => {
+                popup.stage = CatchUpStage::Asking {
+                    text: unread.text,
+                    messages: unread.messages,
+                };
+            }
+            Ok(unread) => self.start_summary(unread.text, unread.messages, unread.cut, true),
+        }
+    }
+
+    /// Enter on the question whether the newest messages are to be summarised.
+    fn confirm_catch_up(&mut self) {
+        let Some(Modal::Collect(Popup::CatchUp(popup))) = &mut self.modal else {
+            return;
+        };
+        let CatchUpStage::Asking { text, messages } = &mut popup.stage else {
+            return;
+        };
+        let (text, messages) = (std::mem::take(text), *messages);
+        self.start_summary(text, messages, false, false);
+    }
+
+    /// Hands `text` to the summary command, for the popup that is open.
+    fn start_summary(&mut self, text: String, messages: usize, cut: bool, known: bool) {
+        let command = self.summary_command();
+        let Some(Modal::Collect(Popup::CatchUp(popup))) = &mut self.modal else {
+            return;
         };
         let command = match command {
             Ok(command) => command,
@@ -367,17 +511,21 @@ impl App {
                 return;
             }
         };
+        // Counted only now that a command really starts.
+        self.collect.requests = self.collect.requests.wrapping_add(1);
+        let run = self.collect.requests;
         popup.stage = CatchUpStage::Summarising {
             run,
-            messages: unread.messages,
-            cut: unread.cut,
+            messages,
+            cut,
+            known,
         };
         let (stop, stopped) = oneshot::channel();
         self.collect.running = Some((run, stop));
         self.collect.start = Some(catchup::Request {
             id: run,
             command,
-            input: unread.text,
+            input: text,
             stop: stopped,
         });
     }
@@ -416,7 +564,13 @@ impl App {
         let Some(Modal::Collect(Popup::CatchUp(popup))) = &mut self.modal else {
             return;
         };
-        let CatchUpStage::Summarising { run, messages, cut } = popup.stage else {
+        let CatchUpStage::Summarising {
+            run,
+            messages,
+            cut,
+            known,
+        } = popup.stage
+        else {
             return;
         };
         if run != done.id {
@@ -427,6 +581,7 @@ impl App {
                 summary,
                 messages,
                 cut,
+                known,
             },
             Outcome::Failed(failure) => CatchUpStage::Failed(failure.message().to_owned()),
             Outcome::Stopped => CatchUpStage::Failed("Stopped".to_owned()),
@@ -473,9 +628,10 @@ impl App {
                 ..
             }) => {
                 self.send_matrix(MatrixCmd::Collect(CollectCmd::Cancel));
-                // Its answer, should it be on its way already, is nobody's.
-                self.next_collect_request();
-                self.show_toast("The archive was given up; no file was written");
+                // Its answer, should it be on its way already, is of no archive
+                // that is waited for (a file that was written is still told).
+                self.collect.archive = None;
+                self.show_toast("The archive was given up");
             }
             Popup::CatchUp(CatchUpPopup {
                 stage: CatchUpStage::Collecting { .. },
@@ -501,7 +657,7 @@ impl App {
                     popup.selected = popup.selected.saturating_sub(1);
                 }
                 (ArchiveStage::Asking, KeyCode::Down | KeyCode::Tab) => {
-                    popup.selected = (popup.selected + 1).min(Span::ALL.len() - 1);
+                    popup.selected = (popup.selected + 1).min(popup.spans().len() - 1);
                 }
                 (ArchiveStage::Asking, KeyCode::Enter) => self.start_archive(),
                 (ArchiveStage::Done(_) | ArchiveStage::Failed(_), KeyCode::Enter) => {
@@ -513,14 +669,11 @@ impl App {
                 let page = popup.page.saturating_sub(1).max(1) as isize;
                 match code {
                     KeyCode::Esc => self.close_collect(),
-                    KeyCode::Enter
-                        if !matches!(
-                            popup.stage,
-                            CatchUpStage::Collecting { .. } | CatchUpStage::Summarising { .. }
-                        ) =>
-                    {
-                        self.close_collect();
-                    }
+                    KeyCode::Enter => match popup.stage {
+                        CatchUpStage::Asking { .. } => self.confirm_catch_up(),
+                        CatchUpStage::Collecting { .. } | CatchUpStage::Summarising { .. } => {}
+                        _ => self.close_collect(),
+                    },
                     KeyCode::Up => self.scroll_collect(-1),
                     KeyCode::Char('k') if plain => self.scroll_collect(-1),
                     KeyCode::Down => self.scroll_collect(1),
@@ -555,10 +708,12 @@ impl App {
                 _ => self.close_collect(),
             },
             (Popup::Archive(popup), row)
-                if popup.stage == ArchiveStage::Asking && usize::from(row) < Span::ALL.len() =>
+                if popup.stage == ArchiveStage::Asking
+                    && usize::from(row) < popup.spans().len() =>
             {
                 popup.selected = usize::from(row);
             }
+            (Popup::CatchUp(_), CLICK_GO) => self.confirm_catch_up(),
             (Popup::CatchUp(_), CLICK_COPY) => self.copy_summary(),
             _ => {}
         }
@@ -636,7 +791,7 @@ mod tests {
     /// A summary command that is never started: `sh` is on every machine the tests
     /// run on, and only looked up.
     fn with_command(app: &mut App) {
-        app.collect.summary_setting = "/bin/sh -c 'never run'".to_owned();
+        app.collect.set_summary_setting("/bin/sh -c 'never run'");
         assert!(app.summary_command().is_ok());
     }
 
@@ -667,7 +822,7 @@ mod tests {
             "What is loaded now",
             "The last 7 days",
             "The last 30 days",
-            "Everything",
+            "As far back as it goes, at most 5,000 messages",
         ] {
             assert!(shown.contains(row), "{row} in {shown}");
         }
@@ -721,7 +876,7 @@ mod tests {
         let shown = flat(&screen(&mut app));
         assert!(shown.contains("280 messages"), "{shown}");
         assert!(shown.contains("Alpha-Plans-2026-11-20.md"), "{shown}");
-        assert!(shown.contains("The room has more"), "{shown}");
+        assert!(shown.contains("the room has more"), "{shown}");
         app.on_event(key(KeyCode::Enter));
         assert!(app.modal.is_none());
     }
@@ -748,6 +903,108 @@ mod tests {
             },
         ));
         assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn a_file_that_was_written_before_the_archive_was_given_up_is_still_told() {
+        let (mut app, _commands) = app();
+        app.perform(Action::ArchiveRoom);
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.toast.clone().unwrap().0, "The archive was given up");
+        // The worker had published the file already: it is there, so its place is said.
+        app.on_matrix(crate::matrix::MatrixEvent::Collect(
+            CollectEvent::Archived {
+                request: 1,
+                result: Ok(Archived {
+                    path: "/tmp/matrix-rat-never-written/Alpha.md".into(),
+                    messages: 4,
+                    cut: None,
+                }),
+            },
+        ));
+        assert_eq!(
+            app.toast.clone().unwrap().0,
+            "Archived 4 messages to /tmp/matrix-rat-never-written/Alpha.md"
+        );
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn what_is_loaded_is_offered_for_the_open_room_only_and_says_how_much_that_is() {
+        let (mut app, mut commands) = app();
+        app.rooms[0].messages = vec![
+            crate::model::Message::default(),
+            crate::model::Message {
+                kind: MsgKind::ReadMarker,
+                ..Default::default()
+            },
+            crate::model::Message::default(),
+        ];
+        app.perform(Action::ArchiveRoom);
+        app.on_event(key(KeyCode::Enter));
+        let sent = commands.try_recv().unwrap();
+        assert!(
+            matches!(
+                sent,
+                MatrixCmd::Collect(CollectCmd::Archive {
+                    span: Span::Loaded,
+                    held: 2,
+                    ..
+                })
+            ),
+            "{}",
+            sent.describe()
+        );
+        app.on_event(key(KeyCode::Esc));
+
+        // A room that is not on screen has nothing "loaded now" to see.
+        to_beta(&mut app);
+        app.perform(Action::ArchiveRoom);
+        let shown = flat(&screen(&mut app));
+        assert!(!shown.contains("What is loaded now"), "{shown}");
+        assert!(shown.contains("● The last 7 days"), "{shown}");
+        for _ in 0..5 {
+            app.on_event(key(KeyCode::Down));
+        }
+        let Some(Modal::Collect(Popup::Archive(popup))) = &app.modal else {
+            panic!("no archive popup");
+        };
+        assert!(popup.span() == Span::Everything);
+    }
+
+    #[test]
+    fn while_an_archive_runs_without_its_popup_nothing_else_is_collected() {
+        let (mut app, mut commands) = app();
+        with_command(&mut app);
+        app.perform(Action::ArchiveRoom);
+        app.on_event(key(KeyCode::Enter));
+        asked(&mut commands);
+        // Another popup took its place; the worker is still at it.
+        app.modal = None;
+        to_beta(&mut app);
+        for action in [Action::CatchUp, Action::ArchiveRoom] {
+            app.toast = None;
+            app.perform(action);
+            assert!(app.modal.is_none());
+            assert!(app.toast.clone().unwrap().0.contains("still being written"));
+        }
+        // Nothing reached the worker, which would have ended the archive for it.
+        assert!(asked(&mut commands).is_empty());
+        // No request was counted for what did not start.
+        app.on_matrix(crate::matrix::MatrixEvent::Collect(
+            CollectEvent::Archived {
+                request: 1,
+                result: Err("no space".into()),
+            },
+        ));
+        assert!(app.toast.clone().unwrap().0.contains("no space"));
+        app.perform(Action::ArchiveRoom);
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(
+            asked(&mut commands),
+            ["Collect(Archive(request 2, !b:example.org, Days(7)))"]
+        );
     }
 
     #[test]
@@ -787,14 +1044,13 @@ mod tests {
     #[test]
     fn the_archive_is_of_the_room_under_the_cursor_in_the_room_list() {
         let (mut app, mut commands) = app();
-        app.focus = Pane::Sidebar;
-        app.sidebar.cursor = 1;
+        to_beta(&mut app);
         let target = app.rooms[app.cursor_room().unwrap()].id.clone();
         app.perform(Action::ArchiveRoom);
         app.on_event(key(KeyCode::Enter));
         assert_eq!(
             asked(&mut commands),
-            [format!("Collect(Archive(request 1, {target}, Loaded))")]
+            [format!("Collect(Archive(request 1, {target}, Days(7)))")]
         );
     }
 
@@ -818,14 +1074,14 @@ mod tests {
     #[test]
     fn catching_up_is_not_offered_without_a_summary_command() {
         let (mut app, mut commands) = app();
-        app.focus = Pane::Sidebar;
-        app.sidebar.cursor = 1;
+        to_beta(&mut app);
         app.perform(Action::CatchUp);
         assert!(app.modal.is_none());
         assert!(asked(&mut commands).is_empty());
         assert!(app.toast.clone().unwrap().0.contains("summary_command"));
 
-        app.collect.summary_setting = "no-such-summary-program-anywhere".to_owned();
+        app.collect
+            .set_summary_setting("no-such-summary-program-anywhere");
         app.perform(Action::CatchUp);
         assert!(app.modal.is_none());
         assert!(app.toast.clone().unwrap().0.contains("was not found"));
@@ -845,10 +1101,8 @@ mod tests {
         assert!(asked(&mut commands).is_empty());
     }
 
-    /// Opens the catch-up of the unread room under the cursor.
-    fn catching_up() -> (App, UnboundedReceiver<MatrixCmd>) {
-        let (mut app, mut commands) = app();
-        with_command(&mut app);
+    /// The cursor of the room list on the room that is not open.
+    fn to_beta(app: &mut App) {
         app.focus = Pane::Sidebar;
         let at = app
             .visible_rooms()
@@ -856,6 +1110,13 @@ mod tests {
             .position(|index| app.rooms[*index].id == "!b:example.org")
             .unwrap();
         app.sidebar.cursor = at;
+    }
+
+    /// Opens the catch-up of the unread room under the cursor.
+    fn catching_up() -> (App, UnboundedReceiver<MatrixCmd>) {
+        let (mut app, mut commands) = app();
+        with_command(&mut app);
+        to_beta(&mut app);
         app.perform(Action::CatchUp);
         assert_eq!(
             asked(&mut commands),
@@ -865,12 +1126,17 @@ mod tests {
     }
 
     fn unread(app: &mut App, request: u64, messages: usize, cut: bool) {
+        unread_of(app, request, messages, cut, true);
+    }
+
+    fn unread_of(app: &mut App, request: u64, messages: usize, cut: bool, known: bool) {
         app.on_matrix(crate::matrix::MatrixEvent::Collect(CollectEvent::Unread {
             request,
             result: Ok(UnreadText {
                 text: "[2026-11-20 14:03] Ann: the secret plan\n".repeat(messages),
                 messages,
                 cut,
+                known,
             }),
         }));
     }
@@ -903,7 +1169,10 @@ mod tests {
         let shown = flat(&screen(&mut app));
         assert!(shown.contains("Ann has a plan."), "{shown}");
         assert!(shown.contains("Bob agrees."), "{shown}");
-        assert!(shown.contains("newest 2 messages"), "{shown}");
+        assert!(
+            shown.contains("newest 2 unread messages (there are more)"),
+            "{shown}"
+        );
         assert!(shown.contains("Only you see this"), "{shown}");
         // Nothing was sent to the room, or anywhere.
         assert!(asked(&mut commands).is_empty());
@@ -915,6 +1184,115 @@ mod tests {
         );
         app.on_event(key(KeyCode::Esc));
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn where_reading_stopped_is_not_found_nothing_is_started_until_the_user_says_so() {
+        let (mut app, mut commands) = catching_up();
+        unread_of(&mut app, 1, 3, false, false);
+        assert!(matches!(
+            catch_up_stage(&app),
+            CatchUpStage::Asking { messages: 3, .. }
+        ));
+        // The text has gone nowhere.
+        assert!(app.take_summary_start().is_none());
+        let shown = flat(&screen(&mut app));
+        assert!(shown.contains("was not found"), "{shown}");
+        assert!(
+            shown.contains("Summarise the newest 3 messages instead?"),
+            "{shown}"
+        );
+        assert!(shown.contains("Enter summarise"), "{shown}");
+
+        // Esc: it never does.
+        let (mut left, _other) = catching_up();
+        unread_of(&mut left, 1, 3, false, false);
+        left.on_event(key(KeyCode::Esc));
+        assert!(left.modal.is_none());
+        assert!(left.take_summary_start().is_none());
+
+        // Enter: the newest go to the command, and the result says what they were.
+        app.on_event(key(KeyCode::Enter));
+        let request = app.take_summary_start().expect("started now");
+        assert_eq!(request.input.lines().count(), 3);
+        // A second Enter starts nothing more.
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.take_summary_start().is_none());
+        app.on_summary(catchup::Done {
+            id: request.id,
+            outcome: Outcome::Summary("Ann has a plan.".to_owned()),
+        });
+        let shown = flat(&screen(&mut app));
+        assert!(
+            shown.contains("Summary of the newest 3 messages, read or not"),
+            "{shown}"
+        );
+        assert!(!shown.contains("unread messages"), "{shown}");
+        assert!(asked(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn the_worker_is_told_how_many_of_the_newest_to_take_if_need_be() {
+        // The room counts 3 as unread.
+        let (mut app, mut commands) = app();
+        with_command(&mut app);
+        to_beta(&mut app);
+        app.perform(Action::CatchUp);
+        let sent = commands.try_recv().unwrap();
+        assert!(
+            matches!(
+                sent,
+                MatrixCmd::Collect(CollectCmd::Unread { newest: 3, .. })
+            ),
+            "{}",
+            sent.describe()
+        );
+        // Unread without a count (marked so by hand): a handful.
+        app.modal = None;
+        let other = app.cursor_room().unwrap();
+        app.rooms[other].unread = 0;
+        app.rooms[other].marked_unread = true;
+        app.perform(Action::CatchUp);
+        let sent = commands.try_recv().unwrap();
+        assert!(
+            matches!(
+                sent,
+                MatrixCmd::Collect(CollectCmd::Unread { newest: 50, .. })
+            ),
+            "{}",
+            sent.describe()
+        );
+        // More than a summary takes: no more than that.
+        app.modal = None;
+        app.rooms[other].unread = 5000;
+        app.perform(Action::CatchUp);
+        let sent = commands.try_recv().unwrap();
+        assert!(
+            matches!(
+                sent,
+                MatrixCmd::Collect(CollectCmd::Unread { newest: 300, .. })
+            ),
+            "{}",
+            sent.describe()
+        );
+    }
+
+    #[test]
+    fn a_summary_of_all_that_is_unread_says_so() {
+        let (mut app, _commands) = catching_up();
+        unread(&mut app, 1, 2, false);
+        let request = app.take_summary_start().unwrap();
+        // The collection was request 1; the command is counted when it starts.
+        assert_eq!(request.id, 2);
+        app.on_summary(catchup::Done {
+            id: request.id,
+            outcome: Outcome::Summary("Ann has a plan.".to_owned()),
+        });
+        let shown = flat(&screen(&mut app));
+        assert!(
+            shown.contains("Summary of 2 unread messages, by sh."),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -1032,7 +1410,7 @@ mod tests {
         let (mut app, _commands) = app();
         assert_eq!(app.summary_setting_text(), "not set");
         app.set_summary_command("  /bin/sh -c cat ");
-        assert_eq!(app.collect.summary_setting, "/bin/sh -c cat");
+        assert_eq!(app.collect.summary_setting(), "/bin/sh -c cat");
         assert_eq!(app.summary_setting_text(), "/bin/sh -c cat");
         assert!(app.toast.clone().unwrap().0.contains("to sh"));
         app.set_summary_command("no-such-summary-program-anywhere");
@@ -1046,6 +1424,10 @@ mod tests {
     fn the_debug_output_of_the_popups_and_the_state_holds_nothing_private() {
         let (mut app, _commands) = catching_up();
         app.collect.summary_setting = "/home/alice/bin/summarise --key=hunter2".to_owned();
+        app.collect.command = Ok(catchup::Command::for_test(
+            "/home/alice/bin/summarise".into(),
+            vec!["--key=hunter2".to_owned()],
+        ));
         unread(&mut app, 1, 1, false);
         let mut shown = vec![format!("{app:?}")];
         let request = app.take_summary_start();

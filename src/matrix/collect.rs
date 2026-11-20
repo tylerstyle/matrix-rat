@@ -12,10 +12,16 @@
 //!
 //! What bounds memory: the SDK's timeline holds the messages while they are loaded
 //! (at most [`ARCHIVE_EVENTS`]); they are then turned into text and written one by
-//! one, so no second copy of the room exists. A room with more gets its newest
-//! messages archived, and the archive says so.
+//! one, so the text of the room is never held as a whole. A room with more gets its
+//! newest messages archived, and the archive says so.
+//!
+//! What it costs: the timeline here pages the room's event cache, which the open
+//! room's own timeline shares. Every page loaded for an archive therefore also
+//! reaches that timeline, which grows and tells the app its messages again. That is
+//! why one archive takes so few events; loading history outside the live cache would
+//! lift that.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -38,12 +44,15 @@ use super::MatrixEvent;
 use super::safety::IgnoredSet;
 use crate::collect::{self, Cut, Span};
 use crate::logsafe;
-use crate::model::{ItemRef, Message, MsgKind};
+use crate::model::Message;
 
 /// The most events one archive takes; of a room with more, the newest.
-pub const ARCHIVE_EVENTS: usize = 50_000;
+pub const ARCHIVE_EVENTS: usize = 5_000;
 /// How many events are loaded at most to find where the user stopped reading.
 const UNREAD_EVENTS: usize = collect::SUMMARY_MESSAGES + 50;
+/// How many of the oldest loaded events must be older than an archive wants before
+/// loading ends.
+const OLDEST: usize = 5;
 /// Events asked for at a time.
 const PAGE: u16 = 100;
 /// How long opening a room's messages may take, and one request for older ones.
@@ -61,8 +70,12 @@ pub enum CollectCmd {
         request: u64,
         room_id: String,
         /// The first unread message as the app shows it (the "new" line of the open
-        /// room), by its event id. Without it the account's read marker decides.
+        /// room), by its event id. Without it the account's read marker and its
+        /// read receipt decide.
         from: Option<String>,
+        /// How many of the newest messages to take where none of them is found;
+        /// the answer then says that it is not known what is unread.
+        newest: usize,
     },
     /// Write the messages of a joined room into a new Markdown file in `dir`;
     /// answered with [`CollectEvent::Archived`].
@@ -70,6 +83,10 @@ pub enum CollectCmd {
         request: u64,
         room_id: String,
         span: Span,
+        /// For [`Span::Loaded`]: how many messages the app holds of the room. At
+        /// least so many events are loaded (a timeline of its own starts with a
+        /// handful, whatever the app has).
+        held: usize,
         dir: PathBuf,
         /// The room's name as the app shows it, for the heading and the file name.
         room_name: String,
@@ -95,6 +112,7 @@ impl CollectCmd {
                 request: r,
                 room_id,
                 from,
+                ..
             } => (
                 "Unread",
                 vec![
@@ -125,9 +143,11 @@ pub struct UnreadText {
     pub text: String,
     /// How many messages are in it.
     pub messages: usize,
-    /// There is more unread than this, or where the user stopped reading was not
-    /// found: these are the newest.
+    /// There is more unread than this: these are the newest.
     pub cut: bool,
+    /// Where the user stopped reading was found, so these are unread ones. Without
+    /// it they are the newest messages of the room, read or not.
+    pub known: bool,
 }
 
 /// Hand-written: the text is what people wrote.
@@ -136,6 +156,7 @@ impl std::fmt::Debug for UnreadText {
         f.debug_struct("UnreadText")
             .field("messages", &self.messages)
             .field("cut", &self.cut)
+            .field("known", &self.known)
             .finish_non_exhaustive()
     }
 }
@@ -254,6 +275,7 @@ impl Collector {
                 request,
                 room_id,
                 from,
+                newest,
             } => {
                 let room = super::agent::joined_room(&self.client, &self.left, &room_id);
                 let events = self.events.clone();
@@ -261,7 +283,7 @@ impl Collector {
                 self.running.spawn(async move {
                     let work = async {
                         let progress = Progress::new(&events, request);
-                        unread(&room?, from, &ignored, &progress).await
+                        unread(&room?, from, newest, &ignored, &progress).await
                     };
                     let result = match tokio::time::timeout(UNREAD_BUDGET, work).await {
                         Ok(result) => result,
@@ -280,6 +302,7 @@ impl Collector {
                 request,
                 room_id,
                 span,
+                held,
                 dir,
                 room_name,
             } => {
@@ -289,7 +312,7 @@ impl Collector {
                 self.running.spawn(async move {
                     let result = async {
                         let progress = Progress::new(&events, request);
-                        archive(&room?, span, dir, room_name, &ignored, &progress).await
+                        archive(&room?, span, held, dir, room_name, &ignored, &progress).await
                     }
                     .await;
                     if let Err(err) = &result {
@@ -356,12 +379,17 @@ fn event_count(items: &Items) -> usize {
         .count()
 }
 
-/// When the oldest loaded event was sent, in milliseconds since 1970.
-fn oldest(items: &Items) -> Option<u64> {
-    items
+/// Whether what is loaded reaches back beyond `since` (milliseconds since 1970): the
+/// oldest few events were all sent before it. One event alone does not say so: the
+/// time is the sender's server's word, and a forged old one must not end an archive
+/// of the last days early.
+fn reaches_before(items: &Items, since: u64) -> bool {
+    let mut oldest = items
         .iter()
-        .find_map(|item| item.as_event())
-        .map(|event| u64::from(event.timestamp().get()))
+        .filter_map(|item| item.as_event())
+        .take(OLDEST)
+        .peekable();
+    oldest.peek().is_some() && oldest.all(|event| u64::from(event.timestamp().get()) < since)
 }
 
 /// The items of `timeline` once `enough` says so, loading older messages page by page
@@ -436,76 +464,141 @@ fn has_marker(items: &Items) -> bool {
         .any(|item| matches!(item.as_virtual(), Some(VirtualTimelineItem::ReadMarker)))
 }
 
+/// The newest event the account sent itself that the server has, by its id.
+fn last_own(items: &Items) -> Option<String> {
+    items.iter().rev().find_map(|item| {
+        let event = item.as_event().filter(|event| event.is_own())?;
+        Some(event.event_id()?.to_string())
+    })
+}
+
+/// One place in a room's timeline, for finding where reading stopped: also the
+/// events the app shows nothing of keep their place.
+struct Slot {
+    /// The event's id, if it is one that the server has.
+    id: Option<String>,
+    /// The SDK's "new" line.
+    line: bool,
+    /// The message as the app would show it, if it would.
+    message: Option<Message>,
+}
+
+fn slots(
+    items: &Items,
+    own: &UserId,
+    ignored: &std::collections::HashSet<OwnedUserId>,
+) -> Vec<Slot> {
+    let now = chrono::Local::now();
+    items
+        .iter()
+        .map(|item| match item.as_event() {
+            Some(event) => Slot {
+                id: event.event_id().map(|id| id.to_string()),
+                line: false,
+                message: super::convert::event_message(
+                    item.unique_id().0.clone(),
+                    event,
+                    own,
+                    ignored,
+                    &now,
+                ),
+            },
+            None => Slot {
+                id: None,
+                line: matches!(item.as_virtual(), Some(VirtualTimelineItem::ReadMarker)),
+                message: None,
+            },
+        })
+        .collect()
+}
+
 /// Collects what is unread in `room`.
 async fn unread(
     room: &Room,
     from: Option<String>,
+    newest: usize,
     ignored: &watch::Receiver<IgnoredSet>,
     progress: &Progress<'_>,
 ) -> Result<UnreadText> {
     let timeline = open(room).await?;
-    let marker = read_marker(room).await;
-    let (items, cut) = load(&timeline, UNREAD_EVENTS, progress, |items| {
+    let own = room.own_user_id().to_owned();
+    // Every sign of how far the account has read: its read marker, its receipt (as
+    // the server has it, and as the timeline places it among what it shows), and
+    // the last message it sent itself.
+    let mut read = Vec::new();
+    read.extend(read_marker(room).await);
+    read.extend(
+        timeline
+            .latest_user_read_receipt(&own)
+            .await
+            .map(|(id, _)| id.to_string()),
+    );
+    let (items, _) = load(&timeline, UNREAD_EVENTS, progress, |items| {
         has_marker(items)
-            || [&from, &marker]
-                .into_iter()
-                .flatten()
-                .any(|id| has_event(items, id))
+            || from.iter().chain(&read).any(|id| has_event(items, id))
+            // The app's line, where it has one, is looked for beyond our own messages.
+            || (from.is_none() && last_own(items).is_some())
     })
     .await;
-    let own = room.own_user_id().to_owned();
-    let messages = super::convert::convert(&items, &own, &ignored.borrow());
+    read.extend(
+        timeline
+            .latest_user_read_receipt_timeline_event_id(&own)
+            .await
+            .map(|id| id.to_string()),
+    );
+    // What the account wrote itself, it has read up to.
+    read.extend(last_own(&items));
+    let slots = slots(&items, &own, &ignored.borrow());
+    let read: Vec<&str> = read.iter().map(String::as_str).collect();
     Ok(unread_text(
-        &messages,
+        &slots,
         from.as_deref(),
-        marker.as_deref(),
-        cut.is_some(),
+        &read,
+        newest,
         &chrono::Local,
     ))
 }
 
-fn event_id(message: &Message) -> Option<&str> {
-    match &message.item {
-        Some(ItemRef::Event(id)) => Some(id),
-        _ => None,
-    }
-}
-
-/// The text of what is unread among `messages` (oldest first, with the "new" line of
-/// the SDK where it has one). Unread is what comes from the message `from` on; else
-/// what comes after the SDK's line; else what comes after the message `marker`. With
-/// none of them found, all of `messages` count and the text is marked as cut, as it
-/// is when loading `stopped` before the room's start.
+/// The text of what is unread in `slots` (a room's timeline, oldest first).
+///
+/// Unread is what comes from the message `from` on (the app's own "new" line).
+/// Without it: what comes after the last sign that the account has read up to there,
+/// which is the SDK's line and each event in `read` (the read marker, the read
+/// receipt, the account's own last message). An event the app shows nothing of still marks its place: what is unread
+/// starts at the next message after it.
+///
+/// With no such place among what is loaded nothing is known: the answer then holds
+/// the `newest` messages, read or not, and says so.
 fn unread_text<Tz: chrono::TimeZone>(
-    messages: &[Message],
+    slots: &[Slot],
     from: Option<&str>,
-    marker: Option<&str>,
-    stopped: bool,
+    read: &[&str],
+    newest: usize,
     zone: &Tz,
 ) -> UnreadText
 where
     Tz::Offset: std::fmt::Display,
 {
-    let place =
-        |id: Option<&str>| id.and_then(|id| messages.iter().position(|m| event_id(m) == Some(id)));
-    let start = place(from)
-        .or_else(|| {
-            messages
-                .iter()
-                .position(|m| m.kind == MsgKind::ReadMarker)
-                .map(|line| line + 1)
-        })
-        .or_else(|| place(marker).map(|read| read + 1));
-    let lines: Vec<String> = messages[start.unwrap_or(0)..]
+    let place = |id: &str| slots.iter().position(|slot| slot.id.as_deref() == Some(id));
+    let start = from.and_then(place).or_else(|| {
+        let line = slots.iter().rposition(|slot| slot.line);
+        let read = read.iter().filter_map(|id| place(id));
+        line.into_iter().chain(read).max().map(|at| at + 1)
+    });
+    let mut lines: Vec<String> = slots[start.unwrap_or(0)..]
         .iter()
-        .filter_map(collect::entry)
+        .filter_map(|slot| collect::entry(slot.message.as_ref()?))
         .map(|entry| collect::summary_line(zone, &entry))
         .collect();
+    if start.is_none() {
+        lines.drain(..lines.len().saturating_sub(newest));
+    }
     let (text, kept) = collect::summary_text(&lines);
     UnreadText {
         text,
         messages: kept,
-        cut: kept < lines.len() || (start.is_none() && stopped),
+        cut: kept < lines.len(),
+        known: start.is_some(),
     }
 }
 
@@ -523,25 +616,29 @@ impl Drop for StopOnDrop {
 async fn archive(
     room: &Room,
     span: Span,
+    held: usize,
     dir: PathBuf,
     room_name: String,
     ignored: &watch::Receiver<IgnoredSet>,
     progress: &Progress<'_>,
 ) -> Result<Archived> {
-    let timeline = open(room).await?;
     let now = chrono::Local::now();
+    // The file first: a folder that cannot be written to is said at once, not after
+    // the whole room was loaded. Nothing of it stays if this is given up.
+    let name = crate::archive::file_name(&room_name, now.date_naive());
+    let file = tokio::task::spawn_blocking(move || crate::files::NewFile::create(&dir, &name))
+        .await
+        .map_err(|_| anyhow!("could not write to the folder"))?
+        .map_err(|err| anyhow!("could not write to the folder: {err}"))?;
+    let timeline = open(room).await?;
     let since = span.since(u64::try_from(now.timestamp_millis()).unwrap_or(0));
-    let most = match span {
-        // Nothing is asked of the server.
-        Span::Loaded => 0,
-        Span::Days(_) | Span::Everything => ARCHIVE_EVENTS,
-    };
-    let (items, cut) = load(&timeline, most, progress, |items| {
-        since.is_some_and(|since| oldest(items).is_some_and(|oldest| oldest < since))
+    let (items, cut) = load(&timeline, ARCHIVE_EVENTS, progress, |items| match span {
+        // As much as the app shows of the room, which it has loaded already.
+        Span::Loaded => event_count(items) >= held,
+        Span::Days(_) => since.is_some_and(|since| reaches_before(items, since)),
+        Span::Everything => false,
     })
     .await;
-    // "What is loaded" is complete as it is.
-    let cut = cut.filter(|_| span != Span::Loaded);
     progress.tell(event_count(&items));
     let own = room.own_user_id().to_owned();
     let ignored = ignored.borrow().clone();
@@ -550,7 +647,7 @@ async fn archive(
     let _guard = StopOnDrop(stop.clone());
     let written = tokio::task::spawn_blocking(move || {
         let messages = || messages_of(&items, &own, &ignored);
-        write(messages, since, cut, &dir, &room_name, &now, &stop)
+        write(file, messages, since, cut, &room_name, &now, &stop)
     })
     .await
     .map_err(|_| anyhow!("writing the file failed"))?;
@@ -575,15 +672,18 @@ fn messages_of<'a>(
     })
 }
 
-/// Writes the archive of `messages` (gone through twice, oldest first; those sent before `since` are left
-/// out) into a new private file in `dir`, named after the room and the day. Gives the
-/// file's path and how many messages are in it. Ends early, leaving no file, when
-/// `stop` is set.
+/// Writes the archive of `messages` (gone through twice, oldest first) into `file`
+/// and gives it its name. Gives the file's path and how many messages are in it.
+/// Ends early, leaving no file, when `stop` is set.
+///
+/// With `since`, the oldest messages are left out as long as they were sent before
+/// it. Only those: a message between newer ones stays whatever time it claims, so
+/// nobody can keep their message out of an archive with a forged date.
 fn write<Tz: chrono::TimeZone, I: Iterator<Item = Message>>(
+    file: crate::files::NewFile,
     messages: impl Fn() -> I,
     since: Option<u64>,
     cut: Option<Cut>,
-    dir: &Path,
     room_name: &str,
     now: &chrono::DateTime<Tz>,
     stop: &AtomicBool,
@@ -591,28 +691,33 @@ fn write<Tz: chrono::TimeZone, I: Iterator<Item = Message>>(
 where
     Tz::Offset: std::fmt::Display,
 {
-    let wanted =
-        |message: &Message| since.is_none_or(|since| message.sent_at.is_some_and(|at| at >= since));
+    let too_old =
+        |message: &Message| since.is_some_and(|since| message.sent_at.is_none_or(|at| at < since));
     let entries = || {
         messages()
-            .filter(|message| wanted(message))
+            .skip_while(|message| too_old(message))
             .filter_map(|message| collect::entry(&message))
     };
     // Once through for the days the heading names; nothing is kept of it.
-    let mut times = entries().filter_map(|entry| entry.at);
-    let first = times.next();
-    let last = times.last().or(first);
-    let name = crate::archive::file_name(room_name, now.date_naive());
-    let file = crate::files::NewFile::create(dir, &name)?;
+    let (mut first, mut last) = (None, None);
+    for at in entries().filter_map(|entry| entry.at) {
+        first = Some(first.map_or(at, |first: u64| first.min(at)));
+        last = Some(last.map_or(at, |last: u64| last.max(at)));
+    }
+    let given_up = || std::io::Error::other("given up");
     let mut writer = crate::archive::Writer::new(file, now.timezone());
     writer.header(room_name, now, first, last, cut)?;
     for entry in entries() {
         if stop.load(Ordering::Relaxed) {
-            return Err(std::io::Error::other("given up"));
+            return Err(given_up());
         }
         writer.entry(&entry)?;
     }
     let (file, count) = writer.finish();
+    // Once more before the file gets its name: after that it is there to stay.
+    if stop.load(Ordering::Relaxed) {
+        return Err(given_up());
+    }
     Ok((file.finish()?, count))
 }
 
@@ -620,19 +725,31 @@ where
 mod tests {
     use super::*;
     use crate::collect::tests::{AT, said};
+    use crate::files::NewFile;
     use chrono::Utc;
 
-    fn with_id(id: &str, sender: &str, body: &str) -> Message {
-        Message {
-            item: Some(ItemRef::Event(id.to_owned())),
-            ..said(sender, body)
+    fn with_id(id: &str, sender: &str, body: &str) -> Slot {
+        Slot {
+            id: Some(id.to_owned()),
+            line: false,
+            message: Some(said(sender, body)),
         }
     }
 
-    fn line() -> Message {
-        Message {
-            kind: MsgKind::ReadMarker,
-            ..Message::default()
+    /// An event the app shows nothing of (of someone ignored, say).
+    fn hidden(id: &str) -> Slot {
+        Slot {
+            id: Some(id.to_owned()),
+            line: false,
+            message: None,
+        }
+    }
+
+    fn line() -> Slot {
+        Slot {
+            id: None,
+            line: true,
+            message: None,
         }
     }
 
@@ -644,76 +761,102 @@ mod tests {
 
     #[test]
     fn unread_is_what_comes_from_the_apps_new_line_on() {
-        let messages = [
+        let slots = [
             with_id("$1", "Ann", "old"),
             with_id("$2", "Bob", "new one"),
             line(),
             with_id("$3", "Ann", "new two"),
         ];
         // The app's own line wins over the SDK's and over the read marker.
-        let unread = unread_text(&messages, Some("$2"), Some("$3"), false, &Utc);
+        let unread = unread_text(&slots, Some("$2"), &["$3"], 50, &Utc);
         assert_eq!(
             unread.text,
             "[2026-11-20 14:03] Bob: new one\n[2026-11-20 14:03] Ann: new two\n"
         );
-        assert_eq!((unread.messages, unread.cut), (2, false));
+        assert_eq!(
+            (unread.messages, unread.cut, unread.known),
+            (2, false, true)
+        );
     }
 
     #[test]
-    fn without_it_the_sdks_line_and_then_the_read_marker_decide() {
-        let messages = [
+    fn without_it_the_last_sign_of_reading_decides() {
+        let slots = [
             with_id("$1", "Ann", "old"),
             line(),
             with_id("$2", "Bob", "new one"),
             with_id("$3", "Ann", "new two"),
         ];
-        let unread = unread_text(&messages, None, Some("$2"), false, &Utc);
+        let unread = unread_text(&slots, None, &["$1"], 50, &Utc);
         assert_eq!(unread.messages, 2);
+        assert!(unread.known);
         assert!(unread.text.starts_with("[2026-11-20 14:03] Bob: new one\n"));
         // An event the app named but that is not there: the same.
-        assert_eq!(
-            unread_text(&messages, Some("$9"), None, false, &Utc),
-            unread
-        );
+        assert_eq!(unread_text(&slots, Some("$9"), &[], 50, &Utc), unread);
 
         // No line (the SDK shows none): after the message the marker is at.
-        let messages = [
+        let slots = [
             with_id("$1", "Ann", "old"),
             with_id("$2", "Bob", "read"),
             with_id("$3", "Ann", "new"),
         ];
-        let unread = unread_text(&messages, None, Some("$2"), false, &Utc);
+        let unread = unread_text(&slots, None, &["$2"], 50, &Utc);
         assert_eq!(unread.text, "[2026-11-20 14:03] Ann: new\n");
-        assert!(!unread.cut);
-        // The marker at the newest message: nothing is unread.
-        let unread = unread_text(&messages, None, Some("$3"), false, &Utc);
+        assert!(unread.known && !unread.cut);
+        // A read receipt further on than the read marker: what was read is read.
+        assert_eq!(unread_text(&slots, None, &["$1", "$2"], 50, &Utc), unread);
+        assert_eq!(unread_text(&slots, None, &["$2", "$1"], 50, &Utc), unread);
+        // The marker at the newest message: nothing is unread, and that is known.
+        let unread = unread_text(&slots, None, &["$3"], 50, &Utc);
         assert_eq!(
-            (unread.text.as_str(), unread.messages, unread.cut),
-            ("", 0, false)
+            (unread.text.as_str(), unread.messages, unread.known),
+            ("", 0, true)
         );
     }
 
     #[test]
-    fn where_reading_stopped_is_not_found_the_newest_are_taken_and_it_says_so() {
-        let messages = [with_id("$1", "Ann", "one"), with_id("$2", "Bob", "two")];
-        // Loading stopped before the marker came into view.
-        let unread = unread_text(&messages, None, Some("$0"), true, &Utc);
-        assert_eq!((unread.messages, unread.cut), (2, true));
-        // The whole room is loaded and was never read: that is all of it.
-        let unread = unread_text(&messages, None, None, false, &Utc);
-        assert_eq!((unread.messages, unread.cut), (2, false));
+    fn a_marked_event_that_is_not_shown_still_marks_its_place() {
+        let slots = [
+            with_id("$1", "Ann", "old"),
+            hidden("$2"),
+            with_id("$3", "Bob", "new"),
+        ];
+        for unread in [
+            unread_text(&slots, None, &["$2"], 50, &Utc),
+            unread_text(&slots, Some("$2"), &[], 50, &Utc),
+        ] {
+            assert_eq!(unread.text, "[2026-11-20 14:03] Bob: new\n");
+            assert!(unread.known);
+        }
+    }
+
+    #[test]
+    fn where_reading_stopped_is_not_found_only_the_newest_are_taken_and_it_says_so() {
+        let slots = [
+            with_id("$1", "Ann", "one"),
+            with_id("$2", "Bob", "two"),
+            with_id("$3", "Ann", "three"),
+        ];
+        // The marker is at an event that is not among what is loaded.
+        let unread = unread_text(&slots, None, &["$0"], 2, &Utc);
+        assert!(!unread.known);
+        assert_eq!(unread.messages, 2);
+        assert!(unread.text.starts_with("[2026-11-20 14:03] Bob: two\n"));
+        // Nothing says how far the account has read: the same.
+        assert!(!unread_text(&slots, None, &[], 50, &Utc).known);
+        assert_eq!(unread_text(&slots, None, &[], 50, &Utc).messages, 3);
     }
 
     #[test]
     fn more_unread_than_a_summary_takes_is_cut_to_the_newest() {
-        let mut messages = vec![with_id("$read", "Ann", "read")];
-        messages.extend(
+        let mut slots = vec![with_id("$read", "Ann", "read")];
+        slots.extend(
             (0..collect::SUMMARY_MESSAGES + 5)
                 .map(|n| with_id(&format!("${n}"), "Bob", &format!("m{n}"))),
         );
-        let unread = unread_text(&messages, None, Some("$read"), false, &Utc);
+        let unread = unread_text(&slots, None, &["$read"], 50, &Utc);
         assert_eq!(unread.messages, collect::SUMMARY_MESSAGES);
-        assert!(unread.cut);
+        assert!(unread.cut && unread.known);
         assert!(unread.text.starts_with("[2026-11-20 14:03] Bob: m5\n"));
     }
 
@@ -726,14 +869,19 @@ mod tests {
         old.sent_at = Some(AT - 10 * day);
         let mut first = said("Ann", "# hello");
         first.sent_at = Some(AT - 2 * day);
-        let messages = vec![old, first, line(), said("Bob", "bye")];
+        let marker = Message {
+            kind: crate::model::MsgKind::ReadMarker,
+            ..Message::default()
+        };
+        let messages = vec![old, first, marker, said("Bob", "bye")];
         let now = collect::local(&Utc, AT).unwrap();
         let stop = AtomicBool::new(false);
+        let name = crate::archive::file_name("Plans / 2026", now.date_naive());
         let (path, count) = write(
+            NewFile::create(&dir, &name).unwrap(),
             || messages.clone().into_iter(),
             Some(AT - 7 * day),
             None,
-            &dir,
             "Plans / 2026",
             &now,
             &stop,
@@ -745,6 +893,10 @@ mod tests {
         assert!(text.starts_with("# Plans / 2026\n\n"), "{text}");
         assert!(
             text.contains("Messages from 2026-11-18 to 2026-11-20.\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Times are local time (UTC+00:00).\n"),
             "{text}"
         );
         assert!(text.contains("Text only:"), "{text}");
@@ -759,10 +911,10 @@ mod tests {
 
         // Again: beside the first, which stays as it is.
         let (second, _) = write(
+            NewFile::create(&dir, &name).unwrap(),
             || messages.clone().into_iter(),
             None,
             Some(Cut::Limit),
-            &dir,
             "Plans / 2026",
             &now,
             &stop,
@@ -779,6 +931,48 @@ mod tests {
     }
 
     #[test]
+    fn a_forged_old_date_keeps_no_message_out_of_an_archive_of_the_last_days() {
+        let dir = temp("archive-forged");
+        let day = 86_400_000;
+        let at = |body: &str, at: u64| {
+            let mut message = said("Ann", body);
+            message.sent_at = Some(at);
+            message
+        };
+        let messages = vec![
+            at("really old", AT - 20 * day),
+            at("also old", AT - 19 * day),
+            at("recent", AT - day),
+            // Between newer ones, whatever it claims.
+            at("claims to be from 1970", 1),
+            at("newest", AT),
+        ];
+        let now = collect::local(&Utc, AT).unwrap();
+        let stop = AtomicBool::new(false);
+        let (path, count) = write(
+            NewFile::create(&dir, "forged.md").unwrap(),
+            || messages.clone().into_iter(),
+            Some(AT - 7 * day),
+            None,
+            "Plans",
+            &now,
+            &stop,
+        )
+        .unwrap();
+        assert_eq!(count, 3);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("claims to be from 1970"), "{text}");
+        assert!(text.contains("recent") && text.contains("newest"), "{text}");
+        assert!(!text.contains("old\n"), "{text}");
+        // The days it covers are the oldest and the newest in it, in whatever order.
+        assert!(
+            text.contains("Messages from 1970-01-01 to 2026-11-20.\n"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_archive_that_is_given_up_leaves_no_file() {
         let dir = temp("archive-stop");
         let now = collect::local(&Utc, AT).unwrap();
@@ -786,10 +980,24 @@ mod tests {
         let messages = vec![said("Ann", "one")];
         assert!(
             write(
+                NewFile::create(&dir, "Plans.md").unwrap(),
                 || messages.clone().into_iter(),
                 None,
                 None,
-                &dir,
+                "Plans",
+                &now,
+                &stop
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        // Given up after the last message, before the file has its name: the same.
+        assert!(
+            write(
+                NewFile::create(&dir, "Plans.md").unwrap(),
+                std::iter::empty,
+                None,
+                None,
                 "Plans",
                 &now,
                 &stop
@@ -805,8 +1013,16 @@ mod tests {
         let dir = temp("archive-empty");
         let now = collect::local(&Utc, AT).unwrap();
         let stop = AtomicBool::new(false);
-        let (path, count) =
-            write(std::iter::empty, None, None, &dir, "Plans", &now, &stop).unwrap();
+        let (path, count) = write(
+            NewFile::create(&dir, "Plans.md").unwrap(),
+            std::iter::empty,
+            None,
+            None,
+            "Plans",
+            &now,
+            &stop,
+        )
+        .unwrap();
         assert_eq!(count, 0);
         assert!(
             std::fs::read_to_string(&path)
@@ -814,5 +1030,305 @@ mod tests {
                 .contains("No messages.\n")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_written_to_is_said_before_anything_is_loaded() {
+        // What `archive` does first, and what it then says.
+        let dir = temp("archive-no-folder");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("in-the-way"), "a file, not a folder").unwrap();
+        assert!(NewFile::create(&dir.join("in-the-way"), "Plans.md").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Against a real homeserver, through the worker, with two accounts: the test
+    /// account (ours) and a second one that writes. In a fresh room of theirs:
+    ///
+    /// 1. "What is loaded now" of an open room that shows more than a timeline of
+    ///    its own starts with: the archive holds every message the app holds.
+    /// 2. With a known read position, what is unread is exactly what came after it.
+    /// 3. With the read position further back than is looked for, the answer says
+    ///    that it is not known what is unread, and holds only the newest asked for.
+    ///
+    /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test -- --ignored`
+    /// (the second account: `MATRIX_RAT_TEST_USER2` and `MATRIX_RAT_TEST_PASSWORD2`,
+    /// by default bob and bobpass). The third part sends several hundred messages.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn an_open_room_is_archived_whole_and_unread_is_what_came_after_reading_or_not_known() {
+        use matrix_sdk::Client;
+        use matrix_sdk::config::SyncSettings;
+        use matrix_sdk::ruma::api::client::room::create_room::v3::Request as CreateRoom;
+        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+        use tokio::sync::mpsc::UnboundedReceiver;
+
+        use crate::matrix::{MatrixCmd, RoomCategory, spawn};
+        use crate::model::MsgKind;
+
+        let var = |name: &str| std::env::var(name).ok();
+        let homeserver =
+            var("MATRIX_RAT_TEST_HOMESERVER").unwrap_or_else(|| "http://127.0.0.1:6167".into());
+        let username = var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let other_name = var("MATRIX_RAT_TEST_USER2").unwrap_or_else(|| "bob".into());
+        let other_password = var("MATRIX_RAT_TEST_PASSWORD2").unwrap_or_else(|| "bobpass".into());
+        let run = std::process::id();
+        let within = Duration::from_secs;
+
+        let other = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .expect("client");
+        other
+            .matrix_auth()
+            .login_username(&other_name, &other_password)
+            .initial_device_display_name("matrix-rat collect test")
+            .send()
+            .await
+            .expect("login of the second user");
+        other
+            .sync_once(SyncSettings::default())
+            .await
+            .expect("sync");
+
+        let root = std::env::temp_dir().join(format!("matrix-rat-collect-{run}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::paths::Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password: password.into(),
+        });
+        let logged_in = async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    MatrixEvent::LoggedIn { user_id } => return user_id,
+                    _ => {}
+                }
+            }
+        };
+        let own_id = tokio::time::timeout(within(30), logged_in)
+            .await
+            .expect("login in time");
+
+        // A room of the other's, without encryption (theirs is a plain client), that
+        // we are invited to and join.
+        let room_name = format!("collect test {run}");
+        let mut create = CreateRoom::new();
+        create.invite = vec![UserId::parse(&own_id).expect("a user id")];
+        create.name = Some(room_name.clone());
+        let other_room = other.create_room(create).await.expect("room");
+        let room_id = other_room.room_id().to_string();
+        let joined = async {
+            let mut asked = false;
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::Error(err) | MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) => {
+                        match rooms.iter().find(|room| room.id == room_id) {
+                            Some(room) if room.category == RoomCategory::Invite => {
+                                if !asked {
+                                    asked = true;
+                                    handle.send(MatrixCmd::Join {
+                                        room_id: room_id.clone(),
+                                    });
+                                }
+                            }
+                            Some(_) => return,
+                            None => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(within(60), joined)
+            .await
+            .expect("the invitation arrives and is accepted");
+
+        let say = |body: String| {
+            let other_room = other_room.clone();
+            async move {
+                other_room
+                    .send(RoomMessageEventContent::text_plain(body))
+                    .await
+                    .expect("message of the second user");
+            }
+        };
+        // The answer to a collection, whatever else the worker says meanwhile.
+        async fn answer(events: &mut UnboundedReceiver<MatrixEvent>, request: u64) -> CollectEvent {
+            let wait = async {
+                loop {
+                    let MatrixEvent::Collect(event) = events.recv().await.expect("worker stopped")
+                    else {
+                        continue;
+                    };
+                    let of = match &event {
+                        CollectEvent::Unread { request, .. }
+                        | CollectEvent::Archived { request, .. } => Some(*request),
+                        CollectEvent::Progress { .. } => None,
+                    };
+                    if of == Some(request) {
+                        return event;
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(120), wait)
+                .await
+                .expect("the collection is answered")
+        }
+        // What is unread, asked again until `done` accepts it (our sync may be behind
+        // what the other one just sent).
+        async fn unread_until(
+            handle: &crate::matrix::MatrixHandle,
+            events: &mut UnboundedReceiver<MatrixEvent>,
+            room_id: &str,
+            first_request: u64,
+            newest: usize,
+            done: impl Fn(&UnreadText) -> bool,
+        ) -> UnreadText {
+            let mut last = None;
+            for attempt in 0..30 {
+                let request = first_request + attempt;
+                handle.send(MatrixCmd::Collect(CollectCmd::Unread {
+                    request,
+                    room_id: room_id.to_owned(),
+                    from: None,
+                    newest,
+                }));
+                let CollectEvent::Unread { result, .. } = answer(events, request).await else {
+                    panic!("not the answer to what is unread");
+                };
+                let unread = result.expect("what is unread");
+                if done(&unread) {
+                    return unread;
+                }
+                last = Some((unread.messages, unread.known));
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            panic!("what is unread never came to what was expected; last: {last:?}");
+        }
+        // The texts of the lines handed to a summary command.
+        let bodies = |unread: &UnreadText| -> Vec<String> {
+            unread
+                .text
+                .lines()
+                .map(|line| line.rsplit(": ").next().unwrap_or_default().to_owned())
+                .collect()
+        };
+
+        // 1. More messages than a fresh timeline shows, all of them on our screen.
+        let early: Vec<String> = (0..30).map(|n| format!("early-{run}-{n:02}")).collect();
+        for body in &early {
+            say(body.clone()).await;
+        }
+        handle.send(MatrixCmd::OpenRoom {
+            room_id: room_id.clone(),
+            generation: 1,
+        });
+        let shown = async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::Timeline {
+                        messages,
+                        generation: 1,
+                        ..
+                    } => {
+                        let has = |body: &String| messages.iter().any(|m| &m.body == body);
+                        if early.iter().all(has) {
+                            return messages
+                                .iter()
+                                .filter(|m| m.kind != MsgKind::ReadMarker)
+                                .count();
+                        }
+                        // Not all of them yet: older ones are asked for, as the app
+                        // does when one scrolls up.
+                        if has(&early[29]) {
+                            handle.send(MatrixCmd::Paginate {
+                                room_id: room_id.clone(),
+                                generation: 1,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let held = tokio::time::timeout(within(60), shown)
+            .await
+            .expect("the open room shows all the messages");
+        assert!(held >= 30, "{held}");
+        let out = root.join("archives");
+        handle.send(MatrixCmd::Collect(CollectCmd::Archive {
+            request: 1,
+            room_id: room_id.clone(),
+            span: Span::Loaded,
+            held,
+            dir: out.clone(),
+            room_name: room_name.clone(),
+        }));
+        let CollectEvent::Archived { result, .. } = answer(&mut events, 1).await else {
+            panic!("not the answer to an archive");
+        };
+        let archived = result.expect("the archive is written");
+        assert!(archived.path.starts_with(&out));
+        assert!(archived.messages >= 30, "{}", archived.messages);
+        let text = std::fs::read_to_string(&archived.path).expect("the archive");
+        for body in &early {
+            assert!(text.contains(body.as_str()), "{body} is not in the archive");
+        }
+        assert_eq!(archived.cut, None);
+
+        // 2. We read everything; then three more come.
+        handle.send(MatrixCmd::MarkRead {
+            room_id: room_id.clone(),
+            public: false,
+        });
+        // Reading is not answered: give it the time to reach the server, or what
+        // comes next would be read along with the rest.
+        tokio::time::sleep(within(2)).await;
+        let news: Vec<String> = (0..3).map(|n| format!("news-{run}-{n}")).collect();
+        for body in &news {
+            say(body.clone()).await;
+        }
+        let unread = unread_until(&handle, &mut events, &room_id, 100, 50, |unread| {
+            unread.known && unread.messages >= 3
+        })
+        .await;
+        assert_eq!(bodies(&unread), news, "exactly what was not read");
+        assert!(!unread.cut);
+
+        // 3. So many more that where we stopped reading is not among what is
+        // looked through: that is said, and only the newest asked for are given.
+        let many = UNREAD_EVENTS + usize::from(PAGE) + 10;
+        let flood: Vec<String> = (0..many).map(|n| format!("flood-{run}-{n:03}")).collect();
+        for body in &flood {
+            say(body.clone()).await;
+        }
+        let newest = &flood[many - 7..];
+        let unread = unread_until(&handle, &mut events, &room_id, 200, 7, |unread| {
+            unread.text.trim_end().ends_with(flood[many - 1].as_str())
+        })
+        .await;
+        assert!(
+            !unread.known,
+            "the read position is too far back to be found"
+        );
+        assert_eq!(bodies(&unread), newest);
+
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = other.matrix_auth().logout().await;
+        let _ = std::fs::remove_dir_all(root);
     }
 }
