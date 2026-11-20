@@ -4,7 +4,9 @@ Every piece of work is reviewed by the agent that did not write it (`matrix-agy`
 `matrix-claude`; helpers write under one of them) before it is merged. This table has one row per
 review, oldest first; the reviews themselves are in [`docs/reviews/`](reviews/). Section numbers
 such as §4 or §6a in early rows refer to the original plan,
-[`docs/history/original-plan.md`](history/original-plan.md).
+[`docs/history/original-plan.md`](history/original-plan.md). "PLAN §6a" and "§6b" in the rows of
+M33 to M38 mean [`history/0.8-ideas-from-faro.md`](history/0.8-ideas-from-faro.md) and
+[`history/0.9-agent-channel.md`](history/0.9-agent-channel.md), where those sections moved on 2026-11-20.
 
 | Date | Reviewer | Verdict | Outcome |
 |---|---|---|---|

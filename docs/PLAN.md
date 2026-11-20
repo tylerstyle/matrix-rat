@@ -9,7 +9,8 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-20, with the road to 1.0.0 (§6); releases up to 0.9.1.
+Last brought up to date: 2026-11-20, with the road to 1.0.0 (§6); releases up to 0.9.1. The
+plans of 0.8 and 0.9 moved to [`docs/history/`](history/) that day.
 
 ## 1. What it is for
 
@@ -135,34 +136,21 @@ Rust 1.96 or newer.
 | 2026-11-15 | The icon: the chef rat, with a one-colour and an outline variant; a launcher entry is installed. |
 | 2026-11-15 | No Windows build. The README says how to run under WSL. |
 | 2026-11-15 | Pictures: kitty graphics and coloured blocks are enough; no sixel or iTerm2 for now. Opening a picture in the system's viewer covers the rest. |
-| 2026-11-20 | The order to 1.0.0: features first (§6, "The road to 1.0.0"), the three passes over the code last. |
+| 2026-11-15 | For 0.7: the sync guard, custom emoji pictures, space management, the rest of the debug hardening, prebuilt binaries. Popping out a chat, audio inside the app and several accounts wait. |
+| 2026-11-20 | The order to 1.0.0: features first (§6.1), the three passes over the code last. |
 | 2026-11-20 | Voice and video calls wait until after 1.0.0 and until the SDK can join calls itself. |
 | 2026-11-20 | No plugin system. What is wanted of it is built in: transcription, translation, catching up, saved messages with reminders, archiving a room as text. |
 | 2026-11-20 | Not wanted: sticker packs, an image generator, a lock screen, popping out a chat, feeds or Home Assistant posting into rooms (a server's job). Several accounts are run as several profiles. Other languages wait; AUR and `.deb` later. |
-| 2026-11-15 | For 0.7: the sync guard, custom emoji pictures, space management, the rest of the debug hardening, prebuilt binaries. Popping out a chat, audio inside the app and several accounts wait. |
 
 ## 6. What comes next
 
-See §6a for the plan that came out of looking at faro (0.8, done) and §6b for 0.9. Besides that, the list of what could
-be done, by demand:
+Features first, then the passes over the code as it will ship (the user, 2026-11-20). What
+0.8 and 0.9 were planned as is kept in [`history/0.8-ideas-from-faro.md`](history/0.8-ideas-from-faro.md)
+and [`history/0.9-agent-channel.md`](history/0.9-agent-channel.md).
 
-- Playing audio and voice messages inside the app (asked for by the user).
-- QR login; later.
-- macOS: notifications and their click, the secret store and following dark/light are
-  Linux-only today (D-Bus); a medium piece of work, with nobody to test it.
-- More Linux packaging (AUR, a `.deb`): small now that release archives exist; later.
-- A gallery of a room's files; later.
-- Reading the shortcode a received custom-emoji reaction carries (the SDK does not expose it).
+### 6.1 The road to 1.0.0 (agreed with the user on 2026-11-20)
 
-Dropped by the user on 2026-11-20: popping out a chat, several accounts in one window (the
-README is to say how to run one window per `--profile`), a lock screen, sticker packs beyond
-the picker that exists, an image generator, feeds and Home Assistant posting into rooms.
-Other languages wait.
-
-### The road to 1.0.0 (agreed with the user on 2026-11-20)
-
-Features first, each written by matrix-claude with helpers and reviewed by matrix-agy as
-always; the passes over the code (next heading) come last, over the code as it will ship.
+Each piece is written by matrix-claude with helpers and reviewed by matrix-agy as always.
 
 1. **Sending voice notes.** A microphone symbol next to the clip and the smiley in the
    composer. Holding it with the mouse records, letting go stops; from the keyboard one key
@@ -170,7 +158,8 @@ always; the passes over the code (next heading) come last, over the code as it w
    recording is put into the message box and is sent only when the user sends it. Recording
    is done by a program on the system (as playback is); the symbol shows only where a
    recorder and a microphone are found, which over ssh means the machine matrix-rat runs on.
-   With it: the three composer symbols get one size and one style (open: which, see below).
+   With it: the three composer symbols get one size and one style, chosen by one setting
+   (open with the user: which look is the default).
 2. **A rooms bar for the single chat view.** With the room list hidden, a one-line bar above
    the chat labelled "Rooms"; a click closes the chat and shows the room list. Rooms with new
    notifications appear in it with the icon the room list shows (initials where there is no
@@ -197,22 +186,11 @@ always; the passes over the code (next heading) come last, over the code as it w
    `matrix-rat mcp` takes the agent's name from an environment variable when `--name` is
    not given, so that two agents sharing one MCP entry sign with their own names.
 
-Link previews are there since 0.5.0 (`link_previews`); nothing to do.
+### 6.2 The passes before 1.0.0 (asked for by the user on 2026-11-17)
 
-Decided on 2026-11-20 as well: QR login, macOS and the file gallery stay for later; no
-update notice; a line saying that a call is running goes with calls, after 1.0.0; stricter
-lints and the weekly dependency update go with the review at the end. Right-to-left scripts
-were looked into (ratatui has no support, terminals disagree, other terminal chat clients
-do nothing) and are not pursued. The four old branches are deleted; all were superseded on
-`main` or throwaway.
-
-Open with the user: the look of the composer symbols.
-
-### Before 1.0.0 (asked for by the user on 2026-11-17)
-
-Not features: three passes over what is there, each ending in a report the user reads. They
-run after the features above (2026-11-20), in two prongs: the measured look at memory and
-CPU first, so that the review that follows has numbers to hold its findings against.
+Not features: passes over what is there, each ending in a report the user reads. They run in
+two prongs: the measured look at memory and CPU first, so that the review that follows has
+numbers to hold its findings against.
 
 - **A deep look at memory and CPU use.** Measured, not guessed: memory at rest and over a
   day with a real account (many rooms, large timelines, pictures), CPU at rest, while
@@ -220,7 +198,7 @@ CPU first, so that the review that follows has numbers to hold its findings agai
   the time of a frame goes. Then the fixes the numbers call for.
 - **Another round of optimisation over the whole codebase**: what is computed more often
   than needed, copied where it could be borrowed, held longer than needed; also build time
-  and binary size (the branch `release-profile` has an earlier try).
+  and binary size.
 - **A second opinion from a tool from outside**: the codebase checked again by something
   that is not one of the agents that wrote and reviewed it. Which tool is open (candidates:
   `cargo audit`/`cargo deny` are in use already; `cargo geiger` for unsafe code in the tree,
@@ -230,150 +208,40 @@ CPU first, so that the review that follows has numbers to hold its findings agai
   `docs/reviews/`, for bugs and for speed and efficiency. It writes a report with evidence
   for each finding; matrix-claude checks it; what all three agree on is implemented, small
   local fixes by agy, anything in encryption, sync or the agent channel by matrix-claude.
+- **With the review:** the rest of the lints that enforce our rules (forbid wildcard match
+  arms on our own enums through clippy's configuration) and a weekly grouped dependency
+  update.
 
-## 6a. Ideas from faro (0.8: A to E approved by the user on 2026-11-16)
+### 6.3 Later, after 1.0.0 or by demand
 
-[faro](https://github.com/harababurel/faro) is a terminal Signal client on the same libraries
-(ratatui, ratatui-image, crossterm, tokio). Its design documents and source were read on
-2026-11-16 at the user's request. Its licence is AGPL-3.0 and ours is Apache-2.0: **behaviour
-and ideas are taken up, no code is copied.** Every piece below is written fresh against our
-own types.
-
-**Already the same here:** UI thread and worker apart, one action table behind keys, mouse and
-palette, key hints read from the live keymap, live theme preview, config written back with
-comments kept, private data kept out of debug output, `↑` from the composer selecting messages,
-a panic hook that restores the terminal, a message counting as read only when it is really on screen in a focused window, release actions pinned to commits.
-
-### Proposed for 0.8, in this order
-
-| # | Piece | What changes | Size |
-|---|---|---|---|
-| A (merged, M33) | **Esc closes one layer at a time, down to "no chat open"** | Esc keeps its order (popup, completion, reply or edit, selection) and gets one more step at the end: with nothing left to cancel, it closes the chat. The draft is saved, typing notice stopped, the room list is shown (also if hidden with `Ctrl-B`) and focused with the cursor on the room just left; the chat area shows the icon and a few key hints. `Enter` or a click opens it again with the draft. While no chat is open nothing is marked read (reading already needs the chat on screen in a focused window). (With the vim preset, Esc moves between composer and messages and never closes the chat.) On a narrow window the room list fills the window, which our one-pane mode already does. A setting keeps the old behaviour. | Small to medium |
-| B (merged, M35) | **Voice messages and audio played from inside the app** | `x` (and the menu, and a click on `▶`) on a voice or audio message plays it; the row shows `■ 0:05 / 0:14` with a waveform whose played part is coloured; one sound at a time; leaving the chat, closing it or quitting stops it. As in faro, **no audio library is linked**: a player already on the system is started (`mpv`, `ffplay`, `pw-play`, `paplay`, `aplay`; a setting names another). That keeps the binary and the Nix package free of ALSA/PipeWire. Matrix voice messages carry their duration and waveform in the event, so, unlike faro, we need no ffmpeg for either. With `mpv` we can go further than faro: its control socket gives real position, pause and seek (`←`/`→`); other players get start/stop and an estimated position. Over SSH, play is refused with a hint to save the file. The downloaded file is a temporary one with mode 0600, removed afterwards. | Medium |
-| C (merged, M34) | **`matrix-rat doctor`** | One screen (command and palette entry) saying what the app found: terminal, colour depth, picture protocol and why, keyboard protocol, clipboard tool, notification service, secret store, audio player, key bindings that clash or actions without a key, settings that have no effect. One key copies it as text, with nothing private in it. Bug reports become one paste; it would have shortened several of our own hunts. | Small to medium |
-| D (merged, M34) | **Unread count in the window title** | `matrix-rat (3)`, without room names, restored on exit; a setting turns it off. | Small |
-| E (merged, M34) | **A bad config value does not take the rest with it** | Each key is read on its own: a wrong value keeps its default and the status line names the key. To check first how far ours already goes. | Small |
-
-A is what the user noticed in faro. B is the audio the user asked for on 2026-11-15. C to E
-are cheap and stand alone.
-
-### Worth doing later
-
-- **A lock screen** (key or idle time): hides content, stops audio, holds back read receipts,
-  makes notifications generic. Medium.
-- **Popups over pictures**: faro cuts the covered part out of a picture instead of hiding the
+- **Calls.** Voice calls wait until the SDK can join calls itself; with them a line in the
+  room saying that a call is running, and a key that opens it in the browser. Video after
+  that, if at all.
+- **QR login.**
+- **macOS**: notifications and their click, the secret store and following dark/light are
+  Linux-only today (D-Bus); a medium piece of work, with nobody to test it.
+- **More Linux packaging** (AUR, a `.deb` wrapping the release archives).
+- **A gallery of a room's files.**
+- **Popups over pictures**: cut the covered part out of a picture instead of hiding the
   whole picture while a popup is open. To check how ours behaves in kitty first.
-- **Transcribing voice messages** with a local `whisper` program, off by default. Small once B
-  exists; remote services are not wanted without a clear consent step.
-- **An update notice**: not wanted (2026-11-20).
-- **Lints that enforce our rules**, the rest: forbid wildcard match arms on our own enums
-  through clippy's configuration; a weekly grouped dependency update. (Blocking calls and
-  `cargo deny` are done, see §6b.)
-- **A numbered decisions file** in faro's manner, should §5 outgrow a table.
-- **Packaging**: AUR and a `.deb` wrapping the release archives (already on our list).
+- **Other languages.**
+- **Reading the shortcode a received custom-emoji reaction carries** (the SDK does not
+  expose it).
+- **A numbered decisions file**, should §5 outgrow a table.
 
-### Looked at and not proposed
+### 6.4 Not wanted or not pursued
 
-- **A demo mode** with scripted people: the user does not want it (2026-11-16).
-- **A line-by-line mode** for screen readers and pipes: valuable, but it wants the state logic
-  free of the terminal, which is a large restructuring here.
-- **Splitting into several crates, a web demo, a website**: much work for what a one-person
-  project gains.
-- **Bubbles**, **more picture protocols** (decided against on 2026-11-15), **an encrypted
-  vault** (the SDK's store is already encrypted with a key from the secret store), **mosh
-  emoji handling** (no one has asked).
-
-## 6b. 0.9: a channel for agents (approved by the user on 2026-11-16)
-
-**Why.** The user wants agents working on their machines to ask them questions while they are
-away, through Matrix. Today that runs on an outside tool (`matrix-commander-rs`) with a bot
-account and polling. matrix-rat's Matrix side already runs without the screen, so it can
-offer this itself. The account used is a dummy that is only in the rooms it shares with the
-user, so handing an agent the whole instance is acceptable (the user's decision).
-
-**What is built.**
-
-| Piece | What it is |
-|---|---|
-| `matrix-rat serve` | The worker without the screen, on a profile that is already logged in (log in once with the normal app, `--profile bot`). Holds the profile lock, stays in sync, and listens on a private socket in the runtime directory (mode 0600, owner checked). Never accepts an invitation by itself. Ends cleanly on SIGTERM; made to run as a user service. |
-| `matrix-rat send` / `read` / `listen` | Talk to a running `serve` over the socket. `send --room R "text"`; `read --room R [--limit n] [--from @user]` prints JSON, one message a line; `listen --room R` stays connected and prints messages as they come. Without a `serve` running they say so (they do not open the store themselves: two processes on one store is what the lock forbids). |
-| `matrix-rat mcp --room R --name N` | An MCP server on stdin/stdout for one agent, bound to one room: tools to send (signed `[N]`), to read the latest messages, and to wait some minutes for a new one. It can reach no other room, whatever the agent asks. `--from @user` makes it hand over only that user's messages as answers; everything else in the room is marked as not from the user. |
-
-**Rules for it.**
-
-- The socket protocol is one JSON object a line, with bounded line length and a small fixed
-  set of requests; room names are resolved by `serve` against the rooms the account is in.
-- Text from Matrix that reaches an agent is data, never instructions: the tools' descriptions
-  say so, and each message carries who sent it and whether that is the configured user.
-- Nothing of it is logged beyond kinds and counts, as everywhere.
-- An idle agent cannot be woken by this; that limit is known and accepted for now.
-
-**State (2026-11-16):** built, reviewed (M36) and merged. Tried by hand against the test
-homeserver: a bot profile logged in with the normal app, `serve`, `rooms`, `send`, `read`,
-`listen` and the MCP server over a pipe all work, and `serve` ends cleanly on SIGTERM. Seen
-once and not again in seven tries: a `read` right after the first `send` of a fresh `serve`
-listed the new message twice.
-
-Tried with Claude Code as the MCP client (a second account
-answering after 50 seconds): it found the three tools, sent, was refused a `room` argument,
-and waited 47 seconds for the right answer. The first try found a fault, fixed on
-`leftovers-09`: older messages that a `read` loaded into a watched room were told to
-listeners as new, so `wait_for_message` came back at once with an old message. Two things
-were done about it, the second after an independent review of the first:
-
-- `serve` takes a message it did not know for news only if it stands after the newest one
-  it knew, and a watch loads older messages first until the room shows one.
-- The MCP server no longer goes by a message's place alone. It remembers what each look at
-  the room showed, what it handed to the agent and what the agent is still owed. Before the
-  point the agent has seen, a message is news only if it was not there at the time (an
-  answer missed in a gap of the sync and loaded later), if it was handed over and was edited
-  since, or if it named the user without counting as theirs and counts now. What is owed
-  stays owed until it is handed over: a read that does not show it or a cancelled wait
-  loses nothing. A room that showed no message is not taken for an empty one (a failed
-  load looks the same), so its history is not news later.
-
-Reviewed by independent reviewers of `matrix-claude`, each starting from the code alone (`matrix-agy`
-was not available). Four rounds asked for changes,
-which are in (see `docs/reviews/M37-review.md`).
-
-Still open:
-
-- `listen` on the command line does not tell an answer that arrived during a gap in the
-  sync and is loaded later, and in a room that shows no message within three pages when a
-  watch begins it can tell loaded history as new once. The MCP tools do neither.
-- (Mended after 0.9.0, branch `fixes-091`.) A `wait_for_message` that is already waiting
-  now looks at the room anew once a minute (a long wait is a row of short ones, each by
-  the rules of a new call) and hands over an answer loaded into a gap, if it is among
-  the room's newest hundred. With `after_event_id`, what is loaded after that point ends
-  the wait; what is loaded before it is owed and handed over by a later wait that names
-  no point. A room that has shown no message is listened to in one piece, as
-  before. A later part that cannot begin (the connection is being started again) is
-  tried again and does not end the wait (if `serve` stays away, the wait ends with
-  "nothing new" and the next call says what is wrong). Left as it is: the progress notices start
-  their beat anew with each look, so about one a minute is left out; and a look that loads history into a room that showed nothing before can make `serve`
-  tell it to listeners as new (the case of the first point above).
-- In a room that holds no message at all, what is written between an agent's first wait or
-  read and its next call is not handed over, unless the agent sent something first. The MCP
-  server cannot tell an empty room from one whose messages could not be loaded, and taking
-  the second for the first made old history news. `serve` would have to say whether a read
-  reached the room's start.
-- When the user verifies a device, or a key comes late, messages that were shown as
-  untrusted or unreadable before are handed over as theirs, however old; the tool's
-  description tells the agent to look at the time.
-- A wait hands over twenty messages at most; with more, the older ones of the backlog are
-  left to `read_messages` (as designed), except those owed, which come with the next wait.
-
-**Also in 0.9:** the user tried 0.8 (audio with and without a waveform, leaving a room stops
-it, `Esc`, the unread count, the doctor: all work; a config with a bad value is not tried
-yet) and nothing had to be fixed. Merged with M37: the three open notes of the 0.8 reviews (a playing message inside a
-thread view, empty continuation rows of a playing row with a long name, the doctor breaking
-`Alt-Enter` across lines), and the stricter build checks:
-
-- `clippy.toml` refuses calls that block their thread (`sleep`, waiting for a program or a
-  thread, `block_on`, blocking channel calls). The fifteen places that do so on purpose say
-  why with `#[expect(clippy::disallowed_methods, reason = "…")]`; tests are exempt.
-- `deny.toml` and `.github/workflows/checks.yml`: `cargo deny check` for every change and
-  once a week. Three advisories are ignored there, each with its reason (see §7).
+- **By the user's decision** (2026-11-20 unless dated otherwise): a plugin system; sticker
+  packs beyond the picker that exists; an image generator; a lock screen; popping out a
+  chat; several accounts in one window (one window per `--profile` instead); feeds, Home
+  Assistant and the like posting into rooms (a server's job); an update notice; a demo mode
+  (2026-11-16); more picture protocols (2026-11-15).
+- **Right-to-left scripts**: looked into on 2026-11-20. ratatui has no support, terminals
+  disagree with each other, and other terminal chat clients do nothing; not pursued.
+- **Looked at and not proposed**: a line-by-line mode for screen readers and pipes
+  (valuable, but it wants the state logic free of the terminal, a large restructuring);
+  splitting into several crates, a web demo, a website; bubbles; an encrypted vault (the
+  SDK's store is already encrypted with a key from the secret store); mosh emoji handling.
 
 ## 7. Known limits and open questions
 
@@ -409,3 +277,26 @@ thread view, empty continuation rows of a playing row with a long name, the doct
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.
+
+### The agent channel (as of 0.9.1)
+
+- `listen` on the command line does not tell an answer that arrived during a gap in the
+  sync and is loaded later, and in a room that shows no message within three pages when a
+  watch begins it can tell loaded history as new once. The MCP tools do neither.
+- A long `wait_for_message` is a row of short ones, each looking at the room anew. Its
+  progress notices start their beat anew with each look, so about one a minute is left out;
+  and if `serve` stays away, the wait ends with "nothing new" and only the next call says
+  what is wrong.
+- In a room that holds no message at all, what is written between an agent's first wait or
+  read and its next call is not handed over, unless the agent sent something first. The MCP
+  server cannot tell an empty room from one whose messages could not be loaded, and taking
+  the second for the first made old history news. `serve` would have to say whether a read
+  reached the room's start.
+- When the user verifies a device, or a key comes late, messages that were shown as
+  untrusted or unreadable before are handed over as theirs, however old; the tool's
+  description tells the agent to look at the time.
+- A wait hands over twenty messages at most; with more, the older ones of the backlog are
+  left to `read_messages` (as designed), except those owed, which come with the next wait.
+- Seen once and not again in seven tries: a `read` right after the first `send` of a fresh
+  `serve` listed the new message twice.
+- A config file with a bad value (0.8) has not been tried by the user yet.
