@@ -1,3 +1,4 @@
+mod notes;
 mod receipts;
 
 use ratatui::Frame;
@@ -1143,6 +1144,8 @@ struct RowKey {
     emotes: u64,
     /// Changes when a custom emoji's picture arrives or goes: two cells or its name.
     emote_pictures: u64,
+    /// Changes when a transcript or translation comes, goes, is hidden or shown.
+    notes: u64,
 }
 
 /// Hand-written: the room's id and the theme's name stay out of logs.
@@ -1156,7 +1159,26 @@ impl std::fmt::Debug for RowKey {
             .field("previews", &self.previews)
             .field("emotes", &self.emotes)
             .field("emote_pictures", &self.emote_pictures)
+            .field("notes", &self.notes)
             .finish_non_exhaustive()
+    }
+}
+
+/// The message the mouse is on, by whatever of it.
+fn hovered_message(hover: Option<HitId>) -> Option<usize> {
+    match hover? {
+        HitId::Message(m)
+        | HitId::Reaction(m, _)
+        | HitId::Link(m, _)
+        | HitId::Image(m)
+        | HitId::PlayMedia(m)
+        | HitId::PollAnswer(m, _)
+        | HitId::Thread(m)
+        | HitId::CopyCode(m, _)
+        | HitId::ReplyQuote(m)
+        | HitId::Sender(m)
+        | HitId::NoteButton(m, _) => Some(m),
+        _ => None,
     }
 }
 
@@ -1370,6 +1392,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
         ),
         emotes: app.emotes.rev,
         emote_pictures: app.images.emote_rev,
+        notes: app.notes().rev,
     };
     let previous = app.row_cache.take();
     let mut cache = match previous {
@@ -1397,6 +1420,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
                 &app.images,
                 Some(&view),
                 &emote_view,
+            );
+            // Transcripts and translations, under their messages; a read marker then
+            // sits at the end of the last of those rows.
+            rows = notes::add(
+                rows,
+                room,
+                app.notes(),
+                &|message, kind, note| app.note_current(message, kind, note),
+                content.width as usize,
+                theme,
             );
             if app.read_markers {
                 rows = receipts::add(rows, room, content.width as usize, theme);
@@ -1486,6 +1519,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
 
     // A short conversation sits at the bottom, next to the composer.
     let pad = height.saturating_sub(rows.len()) as u16;
+    let hovered = hovered_message(app.hover);
+    // The message whose buttons are still to be put on a row with room for them.
+    let mut waiting: Option<(usize, notes::Buttons)> = None;
     for (n, row) in rows.iter().skip(top).take(height).enumerate() {
         let rect = Rect::new(content.x, content.y + pad + n as u16, content.width, 1);
         if let Some(msg) = row.msg {
@@ -1493,8 +1529,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if matches!(app.hover, Some(HitId::Message(m) | HitId::Reaction(m, _) | HitId::Link(m, _) | HitId::Image(m) | HitId::PlayMedia(m) | HitId::PollAnswer(m, _) | HitId::Thread(m) | HitId::CopyCode(m, _) | HitId::ReplyQuote(m) | HitId::Sender(m)) if m == msg)
-            {
+            } else if hovered == Some(msg) {
                 frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }
             app.hits.add(rect, HitId::Message(msg));
@@ -1542,6 +1577,35 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
             let end = (*end).min(rect.width);
             app.hits
                 .add(Rect::new(rect.x + start, rect.y, end - start, 1), *id);
+        }
+        // The buttons that transcribe and translate, at the free end of the first row
+        // of their message that has room for them (see `notes`).
+        if let Some(msg) = row.msg {
+            let lit = selected == Some(msg) || hovered == Some(msg);
+            if waiting.as_ref().is_none_or(|(of, _)| *of != msg) {
+                let buttons = room
+                    .messages
+                    .get(msg)
+                    .map(|message| notes::buttons(app, message, lit))
+                    .unwrap_or_default();
+                waiting = Some((msg, buttons));
+            }
+            let free = row.image.is_none() && sounding.is_none();
+            // What the row says, and where its read marker begins if it has one.
+            let (taken, end) = notes::free_part(&row.line, usize::from(rect.width));
+            if let Some((_, buttons)) = &mut waiting
+                && free
+                && let Some(placed) = notes::place(buttons, taken, end)
+            {
+                for (col, label, kind) in placed {
+                    let spot = Rect::new(rect.x + col, rect.y, width(&label) as u16, 1);
+                    let style =
+                        notes::button_style(theme, lit, notes::is_hovered(app.hover, msg, kind));
+                    frame.render_widget(Line::from(Span::styled(label, style)), spot);
+                    app.hits.add(spot, HitId::NoteButton(msg, kind));
+                }
+                buttons.clear();
+            }
         }
         // All of the row that took the first line's place stops the sound.
         if let (Some(part), Some(line)) = (row.audio, &sounding)

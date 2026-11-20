@@ -17,6 +17,7 @@ mod keywords;
 mod media;
 mod menu;
 mod moderation;
+mod notes;
 mod palette;
 mod paste_picture;
 mod people;
@@ -409,6 +410,8 @@ pub struct App {
     pub emotes: emotes::EmoteState,
     /// Voice and audio played in here: the player, and the sound there is.
     audio: playback::AudioState,
+    /// Transcripts and translations under messages, and the programs that make them.
+    notes: notes::NotesState,
 }
 
 /// Hand-written: the app holds everything private there is (messages, drafts, ids,
@@ -469,6 +472,7 @@ impl std::fmt::Debug for App {
             .field("keywords", &self.keywords)
             .field("emotes", &self.emotes)
             .field("audio", &self.audio)
+            .field("notes", &self.notes)
             .finish_non_exhaustive()
     }
 }
@@ -552,6 +556,7 @@ impl App {
         app.found.ignored_settings = config.ignored.clone();
         app.download_dir = config.download_dir.clone();
         app.audio = playback::AudioState::new(&config.audio_player, &config.audio_recorder);
+        app.notes = notes::NotesState::new(config);
         app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
         app.link_previews = config.link_previews;
@@ -720,6 +725,7 @@ impl App {
             keywords: Default::default(),
             emotes: Default::default(),
             audio: Default::default(),
+            notes: Default::default(),
         }
     }
 
@@ -1077,6 +1083,14 @@ impl App {
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::AudioPlayer => self.audio.setting_text(),
             Setting::AudioRecorder => self.audio.recorder_setting_text(),
+            Setting::TranscribeCommand => self.notes.transcribe_text(),
+            Setting::TranscribeModel => match self.notes.transcribe_model.trim() {
+                "" => "(not set)".to_owned(),
+                model => crate::text::sanitize_line(model),
+            },
+            Setting::TranslateCommand => self.notes.translate_text(),
+            Setting::TranslateLanguage => crate::notes::language(&self.notes.translate_language),
+            Setting::KeepNotes => switch(self.notes.keep),
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Profile => self.own_profile_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
@@ -1199,11 +1213,16 @@ impl App {
                     menu.editing = Some(LineEdit::from(self.download_dir.as_str()));
                 }
             }
-            Setting::AudioPlayer => {
+            Setting::AudioPlayer
+            | Setting::TranscribeCommand
+            | Setting::TranscribeModel
+            | Setting::TranslateCommand
+            | Setting::TranslateLanguage => {
+                let text = self.setting_text(setting);
                 if delta == 0
                     && let Some(Modal::Settings(menu)) = &mut self.modal
                 {
-                    menu.editing = Some(LineEdit::from(self.audio.setting.as_str()));
+                    menu.editing = Some(LineEdit::from(text.as_str()));
                 }
             }
             Setting::AudioRecorder => {
@@ -1213,6 +1232,7 @@ impl App {
                     menu.editing = Some(LineEdit::from(self.audio.recorder_setting.as_str()));
                 }
             }
+            Setting::KeepNotes => self.toggle_keep_notes(),
             Setting::Keys => {
                 if delta == 0 {
                     self.open_keybinds_editor();
@@ -1464,6 +1484,8 @@ impl App {
     pub(crate) fn reset_session(&mut self) {
         // The sound belongs to a room of the session.
         self.stop_audio();
+        // So do the transcripts and translations: they are the account's messages.
+        self.forget_notes();
         self.rooms.clear();
         self.active = 0;
         // The next session starts as every one does: its first room opens by itself.
@@ -2712,6 +2734,11 @@ impl App {
             Action::Suspend => {
                 // Nothing could stop it while the app is away.
                 self.stop_audio();
+                // The programs that transcribe and translate go on: they use neither
+                // the terminal nor the sound device and are in process groups of their
+                // own, and a long transcription is not thrown away for a look at the
+                // shell. Their time limits run on meanwhile and are applied when the
+                // app is back; if the app is killed while away, the system kills them.
                 self.suspend_requested = true;
             }
             Action::FocusNext => self.set_focus(match self.focus {
@@ -3030,6 +3057,10 @@ impl App {
                 }
             }
             Action::PlayAudio => self.play_audio(),
+            Action::Transcribe => self.toggle_note(crate::notes::NoteKind::Transcript),
+            Action::TranscribeAgain => self.redo_note(crate::notes::NoteKind::Transcript),
+            Action::TranslateAgain => self.redo_note(crate::notes::NoteKind::Translation),
+            Action::Translate => self.toggle_note(crate::notes::NoteKind::Translation),
             Action::PauseAudio => self.control_audio(crate::audio::Control::TogglePause),
             Action::SeekAudio(dir) => {
                 let seconds = match dir {
@@ -3355,6 +3386,10 @@ impl App {
                     match menu.current() {
                         Setting::AudioPlayer => self.set_audio_player(&text),
                         Setting::AudioRecorder => self.set_audio_recorder(&text),
+                        Setting::TranscribeCommand => self.set_transcribe_command(&text),
+                        Setting::TranscribeModel => self.set_transcribe_model(&text),
+                        Setting::TranslateCommand => self.set_translate_command(&text),
+                        Setting::TranslateLanguage => self.set_translate_language(&text),
                         _ => self.set_download_dir(&text),
                     }
                 }
@@ -3496,6 +3531,7 @@ impl App {
                     let messages = self.place_unread_line(messages, detached.is_some());
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
+                    self.forget_notes_of_deleted();
                     self.sync_pinned_flags(&room_id);
                     self.search_sync();
                     if empty_reset {
@@ -3595,6 +3631,7 @@ impl App {
             MatrixEvent::NoticeClicked { room_id } => self.on_notice_click(&room_id),
             MatrixEvent::FileSaved { key, open, result } => self.on_file_saved(key, open, result),
             MatrixEvent::AudioFetched { id, result } => self.on_audio_fetched(id, result),
+            MatrixEvent::SpeechFetched { id, result } => self.on_speech_fetched(id, result),
             MatrixEvent::Security(security) => self.on_security(security),
             MatrixEvent::Verification(update) => self.on_verification(update),
             MatrixEvent::CrossSigningSetUp(result) => self.on_cross_signing_set_up(result),
@@ -3875,6 +3912,8 @@ impl App {
         } else if self.audio_loading() {
             // A sound's download is given up first: it is what is under way.
             self.stop_audio();
+        } else if self.focus == Pane::Timeline && self.stop_selected_note() {
+            // So is the program that runs for the selected message.
         } else if self.focus == Pane::Sidebar
             && (!self.sidebar.filter.is_empty()
                 || self.sidebar.unread_only
@@ -4375,6 +4414,7 @@ impl App {
                     }
                     Some(HitId::Overlay) | None => {}
                     Some(HitId::Image(index) | HitId::PlayMedia(index)) => self.click_image(index),
+                    Some(HitId::NoteButton(index, kind)) => self.click_note(index, kind),
                     Some(HitId::ReplyQuote(index)) => {
                         self.cancel_pending_jump();
                         self.set_focus(Pane::Timeline);
@@ -4951,6 +4991,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     app.startup_target = target;
     // Copies of sounds and mpv's sockets; what an earlier run left there goes now.
     app.set_audio_dir(paths.audio_dir());
+    // The demo keeps no notes in a file, as it writes no settings.
+    if !demo {
+        app.set_note_paths(paths.audio_dir(), paths.notes_file());
+    }
     if demo {
         app.add_demo_space();
         app.maybe_open_startup_target();
@@ -4973,6 +5017,9 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // What the audio players say comes back here; their tasks end with them.
     let (player_news, mut player_back) = tokio::sync::mpsc::unbounded_channel();
     let mut players = tokio::task::JoinSet::new();
+    // So do the programs that transcribe and translate, and what they wrote.
+    let (note_news, mut note_back) = tokio::sync::mpsc::unbounded_channel();
+    let mut note_programs = tokio::task::JoinSet::new();
 
     while !app.should_quit {
         if app.suspend_requested {
@@ -5040,6 +5087,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             players.spawn(crate::audio::run(request, player_news.clone()));
         }
         while players.try_join_next().is_some() {}
+        for request in app.take_note_starts() {
+            note_programs.spawn(crate::textcmd::run(request, note_news.clone()));
+        }
+        while note_programs.try_join_next().is_some() {}
         terminal::set_mouse(app.mouse)?;
         terminal::set_window_title(app.window_title)?;
         if std::mem::take(&mut app.repaint) {
@@ -5087,6 +5138,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             Some(room_id) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked { room_id }),
             Some(done) = pasted_back.recv() => app.finish_paste(done),
             Some(update) = player_back.recv() => app.on_audio(update),
+            Some(done) = note_back.recv() => app.on_note_done(done),
             _ = theme_watch.changed() => app.reload_theme(),
             scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),
@@ -5103,9 +5155,15 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // What plays stops with the app, and its file goes; a player that does not end in
     // time is killed as its task is dropped.
     app.stop_audio();
-    let stopped = async { while players.join_next().await.is_some() {} };
+    // So do the programs that transcribe and translate.
+    app.stop_notes();
+    let stopped = async {
+        while players.join_next().await.is_some() {}
+        while note_programs.join_next().await.is_some() {}
+    };
     let _ = tokio::time::timeout(Duration::from_secs(2), stopped).await;
     drop(players);
+    drop(note_programs);
     crate::audio::remove_leftovers(&paths.audio_dir());
     // Let the worker stop syncing cleanly, but never hang on the way out.
     if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
@@ -9646,6 +9704,16 @@ mod tests {
         app.ignored_users.insert("@troll:example.org".into());
         app.timeline.marked_read = Some("$needle:example.org".into());
         app.sidebar.filter.set("garden filter");
+        // A translation under a message, and the commands and files that make notes.
+        app.notes.notes.set(
+            "$launch:example.org",
+            crate::notes::NoteKind::Translation,
+            crate::notes::NoteState::Done("the launch codes, translated".into()),
+        );
+        app.notes.transcribe_command = "/home/alice/bin/hear".into();
+        app.notes.transcribe_model = "/home/alice/model.bin".into();
+        app.notes.translate_command = "raise-alice-translate --key Hush".into();
+        app.notes.translate_language = "Hush".into();
         // The window title as written, and what the doctor keeps.
         assert!(app.take_window_title().is_some());
         app.found.key_problems = 2;

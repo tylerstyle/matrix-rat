@@ -544,10 +544,13 @@ mod tests {
         assert!(!app.help_open);
 
         // Open Settings -> click "Key bindings" to open the editor.
+        // On a screen tall enough for the whole list of settings: the row is clicked.
         app.perform(Action::OpenSettings);
-        redraw(&mut app, &mut term);
-        let (col, row) = find(&term, "Key bindings");
+        let mut tall = terminal(100, 60);
+        redraw(&mut app, &mut tall);
+        let (col, row) = find(&tall, "Key bindings");
         app.on_event(click(col, row));
+        redraw(&mut app, &mut term);
         assert!(matches!(app.modal, Some(Modal::Keybinds(_))));
         assert!(!app.help_open);
         let screen = redraw(&mut app, &mut term);

@@ -99,6 +99,10 @@ pub struct Facts {
     pub audio: Audio,
     /// What would record a voice message.
     pub recording: Recording,
+    /// What would transcribe a voice message, and what would translate a message
+    /// (never the commands themselves).
+    pub transcribe: crate::notes::TranscribeFound,
+    pub translate: crate::notes::TranslateFound,
     /// `VISUAL` or `EDITOR` names an editor (never what it names).
     pub editor_set: bool,
     pub secret_store: SecretStoreMode,
@@ -268,6 +272,56 @@ fn with(label: &'static str, value: impl Into<String>, level: Level, hint: &str)
         value: value.into(),
         hint: Some(hint.to_owned()),
         level,
+    }
+}
+
+/// Transcribing is optional: nothing set up is a remark, something set up wrongly is
+/// worth an exclamation mark.
+fn transcribe_line(found: crate::notes::TranscribeFound) -> Line {
+    use crate::notes::{NoTranscriber, TranscribeFound};
+    const LABEL: &str = "Transcribing voice messages";
+    match found {
+        TranscribeFound::Whisper { ffmpeg: true } => fine(LABEL, "whisper-cli, with ffmpeg"),
+        TranscribeFound::Whisper { ffmpeg: false } => with(
+            LABEL,
+            "whisper-cli",
+            Level::Note,
+            "ffmpeg was not found: the file goes to whisper-cli as it is, which reads Ogg/Opus (most voice messages) only if built with FFmpeg support",
+        ),
+        TranscribeFound::Own => fine(LABEL, "a command of your own"),
+        TranscribeFound::Not(why @ NoTranscriber::NoProgram) => with(
+            LABEL,
+            "not offered",
+            Level::Note,
+            &format!("{} (optional: whisper.cpp)", why.message()),
+        ),
+        TranscribeFound::Not(why @ NoTranscriber::NoModel) => with(
+            LABEL,
+            "not offered",
+            Level::Note,
+            &format!("whisper-cli is there; {}", why.message()),
+        ),
+        TranscribeFound::Not(why) => with(LABEL, "not possible", Level::Missing, why.message()),
+    }
+}
+
+fn translate_line(found: crate::notes::TranslateFound) -> Line {
+    use crate::notes::{NoTranslator, TranslateFound};
+    const LABEL: &str = "Translating messages";
+    match found {
+        TranslateFound::Own => with(
+            LABEL,
+            "a command of your own",
+            Level::Note,
+            "a message's text is handed to it when you ask; if it asks a service, the text leaves this machine",
+        ),
+        TranslateFound::Not(NoTranslator::NotSet) => with(
+            LABEL,
+            "not offered",
+            Level::Note,
+            "translate_command names no program (optional)",
+        ),
+        TranslateFound::Not(why) => with(LABEL, "not possible", Level::Missing, why.message()),
     }
 }
 
@@ -593,6 +647,8 @@ fn desktop(facts: &Facts) -> Section {
             "the command named by audio_recorder was not found",
         ),
     });
+    lines.push(transcribe_line(facts.transcribe));
+    lines.push(translate_line(facts.translate));
     lines.push(if facts.editor_set {
         fine("Writing in an editor", "VISUAL or EDITOR names one")
     } else {
@@ -784,6 +840,13 @@ fn command_line_facts(
         config_broken,
         audio: Audio::found(&config.audio_player),
         recording: Recording::found(&config.audio_recorder),
+        transcribe: crate::notes::TranscribeFound::of(&crate::notes::transcriber_here(
+            &config.transcribe_command,
+            &config.transcribe_model,
+        )),
+        translate: crate::notes::TranslateFound::of(&crate::notes::translator_here(
+            &config.translate_command,
+        )),
         ..Facts::from_environment()
     }
 }
@@ -820,6 +883,8 @@ impl Facts {
             opener: on_path("xdg-open", path.as_deref()),
             audio: Audio::NoneFound,
             recording: Recording::NoMicrophone,
+            transcribe: crate::notes::TranscribeFound::Not(crate::notes::NoTranscriber::NoProgram),
+            translate: crate::notes::TranslateFound::Not(crate::notes::NoTranslator::NotSet),
             editor_set: crate::editor::command_from_env().is_ok(),
             secret_store: SecretStoreMode::File,
             own_theme: false,
@@ -866,6 +931,8 @@ pub(crate) fn sample() -> Facts {
             crate::audio::recorder::Capture::PwRecord,
             crate::audio::recorder::Encoder::Opusenc,
         ),
+        transcribe: crate::notes::TranscribeFound::Whisper { ffmpeg: true },
+        translate: crate::notes::TranslateFound::Not(crate::notes::NoTranslator::NotSet),
         editor_set: true,
         secret_store: SecretStoreMode::File,
         own_theme: false,
@@ -880,6 +947,69 @@ pub(crate) fn sample() -> Facts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcribing_and_translating_say_what_is_set_up_and_why_not() {
+        use crate::notes::{NoTranscriber, NoTranslator, TranscribeFound, TranslateFound};
+        let line = |facts: &Facts, label: &str| {
+            Report::new(facts)
+                .sections
+                .iter()
+                .flat_map(|section| section.lines.clone())
+                .find(|line| line.label == label)
+                .unwrap()
+        };
+        let mut facts = sample();
+        let heard = "Transcribing voice messages";
+        assert_eq!(line(&facts, heard).value, "whisper-cli, with ffmpeg");
+        assert_eq!(line(&facts, heard).level, Level::Fine);
+        facts.transcribe = TranscribeFound::Whisper { ffmpeg: false };
+        assert!(line(&facts, heard).hint.unwrap().contains("Ogg/Opus"));
+        facts.transcribe = TranscribeFound::Own;
+        assert_eq!(line(&facts, heard).value, "a command of your own");
+        // Not installed, or no model yet: optional, so a remark.
+        facts.transcribe = TranscribeFound::Not(NoTranscriber::NoProgram);
+        assert_eq!(line(&facts, heard).value, "not offered");
+        assert_eq!(line(&facts, heard).level, Level::Note);
+        assert!(line(&facts, heard).hint.unwrap().contains("whisper-cli"));
+        facts.transcribe = TranscribeFound::Not(NoTranscriber::NoModel);
+        assert_eq!(line(&facts, heard).level, Level::Note);
+        assert!(
+            line(&facts, heard)
+                .hint
+                .unwrap()
+                .contains("transcribe_model")
+        );
+        // Set, and wrong.
+        for why in [
+            NoTranscriber::ModelMissing,
+            NoTranscriber::BadCommand,
+            NoTranscriber::Missing,
+        ] {
+            facts.transcribe = TranscribeFound::Not(why);
+            assert_eq!(line(&facts, heard).level, Level::Missing);
+        }
+
+        let read = "Translating messages";
+        assert_eq!(line(&facts, read).value, "not offered");
+        assert_eq!(line(&facts, read).level, Level::Note);
+        facts.translate = TranslateFound::Own;
+        assert_eq!(line(&facts, read).value, "a command of your own");
+        assert!(
+            line(&facts, read)
+                .hint
+                .unwrap()
+                .contains("leaves this machine")
+        );
+        facts.translate = TranslateFound::Not(NoTranslator::Missing);
+        assert_eq!(line(&facts, read).level, Level::Missing);
+        assert!(
+            line(&facts, read)
+                .hint
+                .unwrap()
+                .contains("translate_command")
+        );
+    }
 
     #[test]
     fn the_audio_line_says_what_plays_and_never_the_users_command() {

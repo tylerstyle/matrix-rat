@@ -300,34 +300,39 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
             | Setting::WindowTitle
             | Setting::ReadMarkers
             | Setting::RoomPreviews
+            | Setting::KeepNotes
             | Setting::Notifications => {
                 let on = value == "on";
                 let role = if on { Role::StatusOk } else { Role::Muted };
                 let dot = if on { "● " } else { "○ " };
                 spans.push(Span::styled(format!("{dot}{value}"), theme.style(role)));
             }
-            Setting::DownloadDir | Setting::AudioPlayer | Setting::AudioRecorder => {
-                match (&mut menu.editing, selected) {
-                    (Some(typed), true) => {
-                        let view = typed.view(room.saturating_sub(1), false);
-                        frame.set_cursor_position(Position::new(
-                            (value_x + view.cursor_col as u16).min(rect.right().saturating_sub(1)),
-                            rect.y,
-                        ));
-                        let rest = "_".repeat(room.saturating_sub(width(&view.text)));
-                        spans.push(Span::styled(view.text, theme.style(Role::Text)));
-                        spans.push(Span::styled(rest, theme.style(Role::Border)));
-                        app.hits.add(
-                            Rect::new(value_x, rect.y, room as u16, 1),
-                            HitId::Input(InputTarget::DownloadDir),
-                        );
-                    }
-                    _ => spans.push(Span::styled(
-                        truncate(&value, room),
-                        theme.style(Role::Text),
-                    )),
+            Setting::DownloadDir
+            | Setting::AudioPlayer
+            | Setting::AudioRecorder
+            | Setting::TranscribeCommand
+            | Setting::TranscribeModel
+            | Setting::TranslateCommand
+            | Setting::TranslateLanguage => match (&mut menu.editing, selected) {
+                (Some(typed), true) => {
+                    let view = typed.view(room.saturating_sub(1), false);
+                    frame.set_cursor_position(Position::new(
+                        (value_x + view.cursor_col as u16).min(rect.right().saturating_sub(1)),
+                        rect.y,
+                    ));
+                    let rest = "_".repeat(room.saturating_sub(width(&view.text)));
+                    spans.push(Span::styled(view.text, theme.style(Role::Text)));
+                    spans.push(Span::styled(rest, theme.style(Role::Border)));
+                    app.hits.add(
+                        Rect::new(value_x, rect.y, room as u16, 1),
+                        HitId::Input(InputTarget::DownloadDir),
+                    );
                 }
-            }
+                _ => spans.push(Span::styled(
+                    truncate(&value, room),
+                    theme.style(Role::Text),
+                )),
+            },
             Setting::Keys => spans.push(Span::styled(
                 truncate(&value, room),
                 theme.style(Role::StatusKey),

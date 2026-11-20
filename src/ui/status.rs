@@ -7,6 +7,7 @@ use crate::action::{Action, Dir, Pane};
 use crate::app::App;
 use crate::keymap::Context;
 use crate::matrix::SyncStatus;
+use crate::notes::NoteKind;
 use crate::text::width;
 use crate::theme::Role;
 
@@ -177,6 +178,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     }
                 } else if audio.can_play {
                     push_action(&mut hints, Context::Timeline, A::PlayAudio, "play");
+                }
+                // Text under the message, where a program for it is set up.
+                let notes = app.note_caps();
+                for (offer, kind, action) in [
+                    (notes.transcribe, NoteKind::Transcript, A::Transcribe),
+                    (notes.translate, NoteKind::Translation, A::Translate),
+                ] {
+                    if offer.possible() {
+                        push_action(&mut hints, Context::Timeline, action, offer.word(kind));
+                    }
                 }
                 let in_app = audio.selected || audio.can_play;
                 // What opening the selected message does, if anything.

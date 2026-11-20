@@ -1163,7 +1163,7 @@ mod tests {
         drain(&mut commands);
         app.on_event(key(KeyCode::F(2)));
         // On a screen tall enough for the whole list of settings: the row is clicked.
-        let mut tall = Terminal::new(TestBackend::new(100, 34)).unwrap();
+        let mut tall = Terminal::new(TestBackend::new(100, 60)).unwrap();
         let text = screen(&mut app, &mut tall);
         find(&text, "Enter to view");
         let (col, row) = find(&text, "Sessions");

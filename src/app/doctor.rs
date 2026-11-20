@@ -55,6 +55,8 @@ impl App {
             config_broken: self.found.config_broken,
             audio: self.audio_found(),
             recording: self.recording_found(),
+            transcribe: self.notes_found().0,
+            translate: self.notes_found().1,
             ..Facts::from_environment()
         }
     }

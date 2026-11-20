@@ -165,7 +165,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | Key | Does |
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
-| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `x` play or stop a voice or audio message (with mpv: `Space` pause, `←` `→` 5 seconds back or on), `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
+| `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `x` play or stop a voice or audio message (with mpv: `Space` pause, `←` `→` 5 seconds back or on), `W` transcribe a voice or audio message, `L` translate a message (both only once set up, see Good to know), `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Esc` | one step back at a time: closes the help or a popup, clears the room list's filter, goes back to the composer, gives up a reply or an edit, leaves a thread. In the composer with nothing left to cancel it closes the chat: no room is open (nothing in it counts as read, and its messages notify you like any other room's), your draft waits there, and the room list has the focus; `Enter` or a click opens a room again. Set `esc_closes_chat = false` (or switch off "Esc closes the chat" in the settings) to have `Esc` stop at the composer |
@@ -370,7 +370,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `record_voice`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`.
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`, `transcribe`, `translate`, `transcribe_again`, `translate_again` (these two unbound by default).
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**
@@ -400,6 +400,11 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `download_dir` | where `s` saves attachments |
 | `audio_player` | what plays voice and audio messages in the app (`x`): `"auto"` (default) takes the first of `mpv`, `ffplay`, `pw-play`, `paplay` and `aplay` found on `PATH`; or a command line of your own, such as `"mpv --volume=70"`, to which the file is added at the end (split into words like `$EDITOR`, no shell). It must play the file and end when the sound does. Also **Audio player** in the settings, which says what was found. See Good to know |
 | `audio_recorder` | what records voice messages: `"auto"` (default) takes the first of `parec`, `parecord`, `pw-record`, `ffmpeg` and `arecord` that is on `PATH` and whose sound server is there (PulseAudio's socket, which PipeWire usually answers on too, PipeWire's own, or an ALSA device that records), and offers recording only where a microphone is plausible (ALSA lists a device that records, or `PULSE_SERVER` names a server; with a server named there, only it is recorded from). **Over SSH** `"auto"` offers nothing, as with playing: the microphone would be the far machine's. Or a capture command of your own, to pick a device or to record over SSH all the same, such as `"parec --device=<your microphone> --raw --format=s16le --rate=48000 --channels=1"` or, with PipeWire 1.4 or newer (older ones cannot write to their output), `"pw-record --target=<your microphone> --raw --format=s16 --rate=48000 --channels=1 -"` (split into words like `$EDITOR`, no shell). It must write raw sound (signed 16-bit little-endian, mono, 48 kHz) to its standard output and end on `SIGTERM`. The sound is encoded to Opus by `opusenc` (the package `opus-tools`), else `ffmpeg`; `opusenc` writes its own name and version into the file, as encoders do, which the room can see, and nothing else of your machine is in it. Nothing is run to find all this out. Also **Voice recorder** in the settings, which says what was found |
+| `transcribe_command` | what turns a voice or audio message into text under it (`W`): `"auto"` (default) is `whisper-cli` of [whisper.cpp](https://github.com/ggml-org/whisper.cpp) if it is on `PATH` and `transcribe_model` names a model; or a command line of your own, to which the audio file is added at the end and which writes the text to its standard output (split into words like `$EDITOR`, no shell). Also **Transcribe with** in the settings. See Good to know |
+| `transcribe_model` | the model file for `whisper-cli`, e.g. `"~/models/ggml-base.bin"`. Empty (default): `"auto"` transcribes nothing and the button is not shown. Also **Whisper model** in the settings |
+| `translate_command` | the command line that translates a message (`L`). Empty (default): translating is not offered. It gets the message's text on its standard input, the language as `{lang}` in its arguments and in the variable `MATRIX_RAT_TRANSLATE_TO`, and writes the translation to its standard output (split into words like `$EDITOR`, no shell). Also **Translate with** in the settings. See Good to know |
+| `translate_language` | the language to translate into, handed to your command as you write it (`"en"` by default; a code or a name, whatever your command understands). Also **Translate into** in the settings |
+| `keep_notes` | `false` (default): transcripts and translations are gone when matrix-rat ends. `true` keeps them in `notes.json` in the profile's data folder, **as plain text outside the encrypted store** (see Good to know). Also **Keep transcripts** in the settings |
 | `mouse` | turn off to use the terminal's own text selection |
 | `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
 | `notification_preview` (file only) | `false` hides message text, names and pictures in notifications |
@@ -570,6 +575,59 @@ There is no command that lists or removes profiles; a profile is its two folders
   system's player, `s` only saves it. A video shows its preview picture where the sender
   gave one. A shared place shows its description and opens in your map program with
   `o`.
+- **Transcripts and translations** are text under a message that only you see; nothing
+  is sent to the room, and nothing runs until you ask for it on that message: the key,
+  the small button at the right end of the message (on voice and audio messages always,
+  on other messages while they are selected or under the mouse), the message's menu or
+  `Ctrl-P`. The same again while the program runs stops it (so does `Esc` on that
+  message), on a finished text hides it, and once more shows it again without running
+  anything. One program runs per message and two at once. A program gets 15 minutes to
+  transcribe and 2 minutes to translate, and what it writes is cut after 8000
+  characters. Until a program is set up there is no button, and the entry in `Ctrl-P`
+  is greyed and says what is missing; the doctor (see below) says it too.
+  - **Transcribing (`W`)** happens on your machine. Install whisper.cpp (its program
+    is `whisper-cli`; in nixpkgs the package is `whisper-cpp`), fetch a model (the
+    package brings `whisper-cpp-download-ggml-model`; the models are on whisper.cpp's
+    page) and name the file in `transcribe_model`. matrix-rat downloads the sound as
+    the player does (same private temporary folder, same 100 MB limit) and runs
+    `whisper-cli -m <model> -l auto -nt -np -f <file>`. If `ffmpeg` is on `PATH`, the
+    sound is first made a 16 kHz mono WAV (the first 30 minutes of it), which every
+    build of whisper.cpp reads. Without `ffmpeg` the file is handed over as it came:
+    Matrix voice messages are Ogg/Opus, which `whisper-cli` reads only when it was built
+    with FFmpeg support (the nixpkgs package on Linux is). Both files are removed when
+    the program ends. A command of your own in `transcribe_command` gets the file as it
+    came, as its last argument, and must write the text to its standard output and end
+    with exit code 0.
+  - **Translating (`L`)** has no service built in: you name a command in
+    `translate_command`, and whether it runs a model on your machine or asks a service
+    is your choice. **With a service, the text of the message leaves your machine, also
+    when the room is encrypted**; matrix-rat hands a message's text to the command only
+    when you ask for that message. It works on text messages (an edited one: its text
+    as it is now), on the caption of a picture or file, and on a voice message once it
+    has a transcript; not on deleted messages or ones that could not be decrypted. At
+    most 16 000 characters are handed over. When a message is edited, or you set
+    another language, its translation is no longer shown and `L` makes a new one;
+    "Translate again" and "Transcribe again" in the message's menu (actions
+    `translate_again` and `transcribe_again`, without a key by default) make a
+    finished one anew. A language must not start with `-`. The command line is shown
+    in the settings, so **keep a service's key out of it**: put it into the
+    environment matrix-rat is started in, or into a small script of your own that you
+    name as the command. Two examples (examples only: neither is
+    tested with matrix-rat, and each is another project's program with its own terms):
+    - on your machine, [Argos Translate](https://github.com/argosopentech/argos-translate),
+      which must be told the language of the message too:
+      `translate_command = "argos-translate --from-lang de --to-lang {lang}"` with
+      `translate_language = "en"`, after `argospm install translate-de_en`;
+    - with a service, [translate-shell](https://github.com/soimort/translate-shell),
+      which asks Google Translate by default:
+      `translate_command = "trans -b -no-ansi -t {lang}"`.
+  - **Keeping them**: by default they last as long as the app runs (also when you open
+    another room and come back). With `keep_notes = true` the finished ones (the 200
+    newest) are written to `notes.json` in the profile's data folder, readable by you
+    only (mode 0600), and read again at the next start. **That file holds the text of
+    messages, also of encrypted rooms, in plain form outside the encrypted store.**
+    Switching the setting off removes the file, and so does logging out. A message
+    that is deleted loses its transcript and translation, in the file too.
 - **Custom emoji and stickers** come from image packs: your own, the open room's, and
   those of other rooms you switched on for everywhere (packs are made in another client,
   such as Cinny or FluffyChat). They are loaded the first time something needs them

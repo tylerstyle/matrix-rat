@@ -87,6 +87,12 @@ impl Paths {
         self.data_dir.join("search")
     }
 
+    /// Transcripts and translations kept across restarts (the `keep_notes` setting):
+    /// message text in plain form, outside the encrypted store.
+    pub fn notes_file(&self) -> PathBuf {
+        self.data_dir.join("notes.json")
+    }
+
     pub fn lock_file(&self) -> PathBuf {
         self.data_dir.join("lock")
     }

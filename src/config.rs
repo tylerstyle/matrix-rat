@@ -60,6 +60,23 @@ pub struct Config {
     /// What records voice messages: "auto" (the first capture program whose sound
     /// server is there), or a command line that writes raw sound to its output.
     pub audio_recorder: String,
+    /// What turns a voice or audio message into text, on this machine: "auto"
+    /// (`whisper-cli` on `PATH`, with `transcribe_model`), or a command line to which
+    /// the sound's file is added and which writes the text to its standard output.
+    pub transcribe_command: String,
+    /// The model file `whisper-cli` is given. Empty: transcribing is not offered
+    /// with "auto".
+    pub transcribe_model: String,
+    /// What translates a message: a command line that reads the text on its standard
+    /// input and writes the translation to its standard output. Empty: translating
+    /// is not offered. Whether it works on this machine or asks a service is up to
+    /// the command.
+    pub translate_command: String,
+    /// The language to translate into, handed to `translate_command` as it is.
+    pub translate_language: String,
+    /// Keep transcripts and translations across restarts, in a file that holds them
+    /// in plain form. Off: they last as long as the app runs.
+    pub keep_notes: bool,
     /// How pictures are shown: "auto", "halfblocks" or "off".
     pub images: ImageMode,
     /// Where the local store passphrase is kept: "auto", "keyring" or "file".
@@ -112,6 +129,13 @@ impl std::fmt::Debug for Config {
                 "audio_recorder_auto",
                 &crate::audio::is_auto(&self.audio_recorder),
             )
+            .field(
+                "transcribe_command_auto",
+                &crate::audio::is_auto(&self.transcribe_command),
+            )
+            .field("transcribe_model", &!self.transcribe_model.is_empty())
+            .field("translate_command", &!self.translate_command.is_empty())
+            .field("keep_notes", &self.keep_notes)
             .field("images", &self.images)
             .field("secret_store", &self.secret_store)
             .field("preset", &self.preset.is_some())
@@ -236,6 +260,11 @@ impl Default for Config {
             download_dir: String::new(),
             audio_player: "auto".to_owned(),
             audio_recorder: "auto".to_owned(),
+            transcribe_command: "auto".to_owned(),
+            transcribe_model: String::new(),
+            translate_command: String::new(),
+            translate_language: crate::notes::DEFAULT_LANGUAGE.to_owned(),
+            keep_notes: crate::notes::KEEP_BY_DEFAULT,
             images: ImageMode::Auto,
             secret_store: crate::matrix::SecretStoreMode::File,
             preset: None,
@@ -734,7 +763,11 @@ mod tests {
              download_dir = \"/home/alice/secret-downloads\"\n\
              notification_click_command = \"raise-window --title alice\"\n\
              audio_player = \"/home/alice/bin/play-quietly\"\n\
-             audio_recorder = \"/home/alice/bin/record-softly --device alice\"\n",
+             audio_recorder = \"/home/alice/bin/record-softly --device alice\"\n\
+             transcribe_command = \"/home/alice/bin/hear-it\"\n\
+             transcribe_model = \"/home/alice/models/ggml-base.bin\"\n\
+             translate_command = \"trans-tool --key=sesame\"\n\
+             translate_language = \"Klingon\"\n",
         )
         .unwrap();
         let shown = format!("{config:?}");
@@ -744,6 +777,11 @@ mod tests {
             "raise-window",
             "play-quietly",
             "record-softly",
+            "hear-it",
+            "ggml",
+            "sesame",
+            "trans-tool",
+            "Klingon",
         ] {
             assert!(!shown.contains(private), "{private} in {shown}");
         }
@@ -762,6 +800,13 @@ mod tests {
         assert_eq!(config.theme, "terminal");
         assert_eq!(config.audio_player, "auto");
         assert_eq!(config.audio_recorder, "auto");
+        // Transcribing looks for whisper-cli but has no model; translating has no
+        // command; notes are in no file.
+        assert_eq!(config.transcribe_command, "auto");
+        assert_eq!(config.transcribe_model, "");
+        assert_eq!(config.translate_command, "");
+        assert_eq!(config.translate_language, "en");
+        assert!(!config.keep_notes);
         assert_eq!(config.sidebar_width, 24);
         assert!(config.mouse);
         assert!(config.read_receipts);

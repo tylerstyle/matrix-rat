@@ -948,7 +948,7 @@ mod tests {
         let last = app.keymap.bindings().last().unwrap().description;
         // When tall enough, everything is there at once; smaller windows scroll.
         app.perform(Action::ToggleHelp);
-        let text = render(&mut app, 100, 40);
+        let text = render(&mut app, 100, 60);
         for binding in app.keymap.bindings() {
             assert!(
                 text.contains(binding.description),

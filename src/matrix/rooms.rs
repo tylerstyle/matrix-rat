@@ -1159,6 +1159,8 @@ impl Timelines {
             MatrixCmd::SaveFile { file, dir, open } => self.media.save(file, dir, open),
             MatrixCmd::FetchAudio { id, file, dir } => self.media.fetch_audio(id, file, dir),
             MatrixCmd::CancelAudio => self.media.cancel_audio(),
+            MatrixCmd::FetchSpeech { id, file, dir } => self.media.fetch_speech(id, file, dir),
+            MatrixCmd::CancelSpeech { id } => self.media.cancel_speech(id),
             MatrixCmd::OpenThread {
                 room_id,
                 root,
