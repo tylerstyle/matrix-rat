@@ -303,7 +303,12 @@ impl App {
             ) => self.open_message_menu(index, at),
             Some(HitId::Room(index) | HitId::BarRoom(index)) => self.open_room_menu(index, at),
             Some(HitId::Do(Action::SpaceNext | Action::SpacePrev)) => self.open_space_menu(at),
-            Some(HitId::ComposerText | HitId::Attachment(_) | HitId::Pane(Pane::Composer)) => {
+            Some(
+                HitId::ComposerText
+                | HitId::Attachment(_)
+                | HitId::AttachmentPlay(_)
+                | HitId::Pane(Pane::Composer),
+            ) => {
                 self.open_composer_menu(at);
             }
             _ => {}

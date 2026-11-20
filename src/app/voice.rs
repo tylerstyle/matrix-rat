@@ -9,6 +9,7 @@
 
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
@@ -76,9 +77,10 @@ pub struct RecordingView {
     pub held: bool,
 }
 
-/// A voice message recorded here, waiting to be sent. Its file goes with it.
+/// A voice message recorded here, waiting to be sent. Its file goes with it (and can
+/// be shared with the player while previewed without moving or removing it).
 pub struct VoiceNote {
-    file: TempAudio,
+    file: Arc<TempAudio>,
     pub duration: Duration,
     waveform: Vec<u16>,
 }
@@ -94,6 +96,11 @@ impl fmt::Debug for VoiceNote {
 impl VoiceNote {
     pub fn path(&self) -> &Path {
         self.file.path()
+    }
+
+    /// A shared handle to the waiting note's file, for preview playback.
+    pub(super) fn file_arc(&self) -> Arc<TempAudio> {
+        Arc::clone(&self.file)
     }
 
     /// What makes the file a voice message when it is sent.
@@ -497,7 +504,7 @@ impl App {
         }
         let here = self.attach_scope().as_ref() == Some(&scope);
         let voice = VoiceNote {
-            file,
+            file: Arc::new(file),
             duration,
             waveform,
         };
@@ -1366,7 +1373,7 @@ mod tests {
 
         // Image viewer: Esc closes viewer, recording still runs.
         app.images.open_viewer(&crate::model::ImageInfo {
-            key: crate::images::DEMO_IMAGE.to_owned(),
+            key: crate::model::DEMO_IMAGE.to_owned(),
             source: crate::model::ImageSource::Demo,
             name: "photo.png".to_owned(),
             caption: None,
@@ -1379,11 +1386,14 @@ mod tests {
         assert!(!app.images.viewer_open());
         assert_eq!(told(&mut request), None);
 
-        // Saving in the open chat: Esc does NOT discard it.
+        // Saving in the open chat: Esc does NOT discard it (it does its normal job
+        // instead, here returning focus from Timeline to Composer).
+        app.set_focus(Pane::Timeline);
         app.on_event(alt_m());
         assert_eq!(told(&mut request), Some(RecordControl::Stop));
         app.on_event(key(KeyCode::Esc));
         assert_eq!(told(&mut request), None);
+        assert_eq!(app.focus, Pane::Composer);
         assert_eq!(app.mic_button(), Mic::Recording);
         let path = done(&mut app, &dir, 7);
         assert!(path.exists());
@@ -1615,8 +1625,8 @@ mod tests {
         // Even if the recorder disappears mid-recording, stopping stays offered.
         app.audio.recorder = Err(NoRecorder::Missing);
 
-        // Status line hint says "stop recording".
-        let text = screen(&mut app, 140);
+        // Status line hint says "stop recording" (wide enough for the 5th composer hint).
+        let text = screen(&mut app, 180);
         assert!(text.contains("stop recording"), "{text}");
 
         // Palette entry says "Stop recording" and is enabled.
@@ -1637,5 +1647,262 @@ mod tests {
             panic!("composer menu did not open");
         };
         assert!(menu.items.iter().any(|item| item.label == "Stop recording"));
+    }
+
+    #[test]
+    fn clicking_play_on_a_waiting_voice_note_plays_and_stops_it_without_removing_the_file() {
+        use crate::audio::{Control, End, Kind, NoPlayer, PlayerEvent, PlayerUpdate};
+
+        let alt_l = || Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
+        let down = MouseEventKind::Down(MouseButton::Left);
+
+        let dir = Bin::new("preview", &[]);
+        let mut app = offered();
+        app.set_focus(Pane::Composer);
+
+        // No waiting note: Alt-L says so.
+        app.on_event(alt_l());
+        assert_eq!(toast(&app), "No voice message waiting in the composer");
+
+        // Record a waiting voice note in demo mode (no Matrix worker needed).
+        app.perform(Action::RecordVoice);
+        let _rec = recording(&mut app);
+        let path = done(&mut app, &dir, 12);
+        assert!(path.exists());
+
+        // Without a player: clicking ▶ explains why.
+        let text = screen(&mut app, 100);
+        assert!(text.contains("▶"), "{text}");
+        let play_hit = app.hits.rect_of(HitId::AttachmentPlay(0)).unwrap();
+        app.on_event(mouse(down, play_hit.x, play_hit.y));
+        assert_eq!(toast(&app), NoPlayer::NoneFound.message());
+        assert!(app.take_audio_start().is_none());
+
+        // Over SSH: explains why.
+        app.set_test_player(Kind::Other, dir.0.clone());
+        app.audio.ssh = true;
+        app.on_event(mouse(down, play_hit.x, play_hit.y));
+        assert_eq!(toast(&app), "Audio plays on the machine matrix-rat runs on");
+        assert!(app.take_audio_start().is_none());
+        app.audio.ssh = false;
+
+        // Click ▶: starts playback on the note's file; chip flips to ■ and shows 0:00 / 0:12.
+        app.toast = None;
+        app.on_event(mouse(down, play_hit.x, play_hit.y));
+        let req = app.take_audio_start().expect("player request");
+        assert_eq!(req.file.path(), path.as_path());
+        let play_id = req.id;
+        assert!(app.playing_voice_note_here());
+        let text = screen(&mut app, 100);
+        assert!(text.contains("■"), "{text}");
+        assert!(text.contains("0:00 / 0:12"), "{text}");
+        assert!(text.contains("stop voice"), "{text}");
+
+        // Player finishes and drops its Arc<TempAudio>: the note's file MUST stay intact!
+        drop(req);
+        app.on_audio(PlayerUpdate {
+            id: play_id,
+            event: PlayerEvent::Ended(End::Finished),
+        });
+        assert!(!app.playing_voice_note_here());
+        assert!(
+            path.exists(),
+            "playing must not remove the waiting note's file"
+        );
+
+        // Alt-L plays it; clicking ■ stops it, file still intact.
+        app.on_event(alt_l());
+        let mut req = app.take_audio_start().expect("player request via Alt-L");
+        let _ = screen(&mut app, 100);
+        let stop_hit = app.hits.rect_of(HitId::AttachmentPlay(0)).unwrap();
+        app.on_event(mouse(down, stop_hit.x, stop_hit.y));
+        assert_eq!(req.control.try_recv(), Ok(Control::Stop));
+        drop(req);
+        assert!(path.exists());
+
+        // Starting a recording stops a playing waiting note; playing while recording is refused.
+        app.on_event(alt_l());
+        let mut req = app.take_audio_start().expect("player request");
+        app.perform(Action::RecordVoice);
+        let _rec = recording(&mut app);
+        assert_eq!(req.control.try_recv(), Ok(Control::Stop));
+        drop(req);
+        assert!(!app.playing_voice_note_here());
+        app.on_event(alt_l());
+        assert_eq!(toast(&app), "Stop the recording before playing a sound");
+        app.cancel_recording();
+
+        // Opening a thread stops composer draft playback immediately.
+        app.on_event(alt_l());
+        let mut req = app.take_audio_start().expect("player request");
+        let msg_idx = app
+            .messages()
+            .iter()
+            .position(|m| matches!(m.kind, crate::model::MsgKind::Text))
+            .unwrap();
+        app.open_thread(msg_idx);
+        assert_eq!(req.control.try_recv(), Ok(Control::Stop));
+        drop(req);
+        app.close_thread();
+
+        // Removing the waiting note (✕) stops its playback and unlinks once the player drops.
+        app.on_event(alt_l());
+        let mut req = app.take_audio_start().expect("player request");
+        let _ = screen(&mut app, 100);
+        let close_hit = app.hits.rect_of(HitId::Attachment(0)).unwrap();
+        app.on_event(mouse(down, close_hit.x, close_hit.y));
+        assert_eq!(req.control.try_recv(), Ok(Control::Stop));
+        assert!(app.attachments().is_empty());
+        drop(req);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn multiple_waiting_voice_notes_can_be_played_removed_and_sent_independently() {
+        use crate::audio::{Control, Kind};
+
+        let alt_l = || Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
+        let dir = Bin::new("multi", &[]);
+        let mut app = offered();
+        app.set_test_player(Kind::Other, dir.0.clone());
+        app.set_focus(Pane::Composer);
+
+        app.perform(Action::RecordVoice);
+        let _r1 = recording(&mut app);
+        let path1 = done(&mut app, &dir, 5);
+
+        app.perform(Action::RecordVoice);
+        let _r2 = recording(&mut app);
+        let path2 = done(&mut app, &dir, 12);
+
+        assert_eq!(app.attachments().len(), 2);
+        let _ = screen(&mut app, 100);
+        assert!(app.hits.rect_of(HitId::AttachmentPlay(0)).is_some());
+        assert!(app.hits.rect_of(HitId::AttachmentPlay(1)).is_some());
+        assert!(app.hits.rect_of(HitId::Attachment(0)).is_some());
+        assert!(app.hits.rect_of(HitId::Attachment(1)).is_some());
+
+        // Alt-L plays the newest waiting note (index 1, 0:12).
+        app.on_event(alt_l());
+        let mut req = app.take_audio_start().expect("newest note plays");
+        assert_eq!(req.file.path(), path2.as_path());
+
+        // Removing the OTHER note (index 0) leaves index 1's playback running.
+        app.remove_attachment(0);
+        assert!(!path1.exists());
+        assert!(req.control.try_recv().is_err());
+        assert!(app.playing_voice_note_here());
+
+        // Record a third note, then send both: stops playback and sends both notes.
+        app.stop_audio();
+        drop(req);
+        app.perform(Action::RecordVoice);
+        let _r3 = recording(&mut app);
+        let path3 = done(&mut app, &dir, 8);
+        assert_eq!(app.attachments().len(), 2);
+
+        app.on_event(alt_l());
+        let mut req = app.take_audio_start().expect("plays newest before send");
+        let before = app.messages().len();
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(req.control.try_recv(), Ok(Control::Stop));
+        drop(req);
+        assert_eq!(app.messages().len(), before + 2);
+        assert_eq!(app.messages()[before].body, "🎤 Voice message · 0:12");
+        assert_eq!(app.messages()[before + 1].body, "🎤 Voice message · 0:08");
+        assert!(!path2.exists());
+        assert!(!path3.exists());
+    }
+
+    #[test]
+    fn voice_chip_and_recording_line_render_cleanly_at_80x24_and_narrow_widths() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        let dir = Bin::new("widths", &[]);
+        let mut app = offered();
+        app.set_focus(Pane::Composer);
+
+        // 80x24 while recording: full recording row fits cleanly.
+        app.perform(Action::RecordVoice);
+        let _req = recording(&mut app);
+        update(
+            &mut app,
+            RecordEvent::Level {
+                elapsed: Duration::from_secs(7),
+                level: 1024,
+            },
+        );
+        let text_80 = screen(&mut app, 80);
+        assert!(
+            text_80.contains("● 0:07 █ · Alt-M stops · Esc discards"),
+            "{text_80}"
+        );
+
+        // 80x24 with waiting voice note: full chip + ▶ and ✕ clickable.
+        let _path1 = done(&mut app, &dir, 12);
+        let text_80 = screen(&mut app, 80);
+        assert!(text_80.contains("🎤 Voice message · 0:12 · "), "{text_80}");
+        assert!(text_80.contains("▶"), "{text_80}");
+        assert!(text_80.contains("✕"), "{text_80}");
+        assert!(app.hits.rect_of(HitId::AttachmentPlay(0)).is_some());
+        assert!(app.hits.rect_of(HitId::Attachment(0)).is_some());
+
+        // Narrow screen (26 cols): drops size & label to `🎤 0:12 ▶  ✕`, both clickable!
+        let text_26 = screen(&mut app, 26);
+        assert!(text_26.contains("🎤 0:12"), "{text_26}");
+        assert!(app.hits.rect_of(HitId::AttachmentPlay(0)).is_some());
+        assert!(app.hits.rect_of(HitId::Attachment(0)).is_some());
+
+        // Direct chip progressive-drop check across exact widths:
+        // 30 cols -> drops size first ("🎤 Voice message · 0:12"), keeps ▶ and ✕.
+        // 22 cols and 14 cols -> drops label next ("🎤 0:12"), keeps ▶ and ✕.
+        let render_chip = |app: &App, w: u16, h: u16| -> (String, crate::ui::hit::HitMap) {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut hits = crate::ui::hit::HitMap::default();
+            let files = app.attachments();
+            terminal
+                .draw(|frame| {
+                    crate::ui::attach::draw(
+                        frame,
+                        files,
+                        &app.attach,
+                        &app.audio,
+                        &app.theme,
+                        None,
+                        &mut hits,
+                        Rect::new(0, 0, w, h),
+                    );
+                })
+                .unwrap();
+            (format!("{}", terminal.backend()), hits)
+        };
+
+        let (r30, h30) = render_chip(&app, 30, 1);
+        assert!(r30.contains("🎤 Voice message · 0:12"), "{r30}");
+        assert!(!r30.contains("kB"), "{r30}");
+        assert!(h30.rect_of(HitId::AttachmentPlay(0)).is_some());
+        assert!(h30.rect_of(HitId::Attachment(0)).is_some());
+
+        for w in [22u16, 14u16] {
+            let (row, hits) = render_chip(&app, w, 1);
+            assert!(row.contains("🎤 0:12"), "width={w}: {row}");
+            assert!(row.contains("▶"), "width={w}: {row}");
+            assert!(row.contains("✕"), "width={w}: {row}");
+            assert!(
+                hits.rect_of(HitId::AttachmentPlay(0)).is_some(),
+                "width={w}"
+            );
+            assert!(hits.rect_of(HitId::Attachment(0)).is_some(), "width={w}");
+        }
+
+        // Overflow single row with a voice note first uses 🎤, not 📎.
+        app.perform(Action::RecordVoice);
+        let _req2 = recording(&mut app);
+        let _path2 = done(&mut app, &dir, 5);
+        let (overflow, _) = render_chip(&app, 30, 1);
+        assert!(overflow.contains("🎤 Voice message  +1 more"), "{overflow}");
+        assert!(!overflow.contains("📎"), "{overflow}");
     }
 }

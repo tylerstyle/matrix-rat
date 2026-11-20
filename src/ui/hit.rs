@@ -109,6 +109,8 @@ pub enum HitId {
     ReplyQuote(usize),
     /// The ✕ of the waiting file at this index in the composer.
     Attachment(usize),
+    /// The ▶ / ■ of a waiting voice message at this index in the composer.
+    AttachmentPlay(usize),
     /// A row in the command palette (index into its filtered entries).
     Palette(usize),
     /// A result row in the global search popup.

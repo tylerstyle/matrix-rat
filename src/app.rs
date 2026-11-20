@@ -38,7 +38,7 @@ mod verify;
 mod voice;
 
 pub use attach::AttachState;
-pub use playback::AudioView;
+pub use playback::{AudioState, AudioView};
 pub use voice::{RecordingView, TakePhase};
 
 use std::path::PathBuf;
@@ -423,7 +423,7 @@ pub struct App {
     /// Custom emoji and stickers from image packs.
     pub emotes: emotes::EmoteState,
     /// Voice and audio played in here: the player, and the sound there is.
-    audio: playback::AudioState,
+    pub(crate) audio: playback::AudioState,
     /// Transcripts and translations under messages, and the programs that make them.
     notes: notes::NotesState,
 }
@@ -3178,6 +3178,11 @@ impl App {
                     self.record_voice();
                 }
             }
+            Action::PlayVoiceNote => {
+                if self.modal.is_none() {
+                    self.play_voice_note();
+                }
+            }
             Action::PastePicture => {
                 if self.modal.is_none() {
                     self.request_paste_picture();
@@ -4565,6 +4570,10 @@ impl App {
                     Some(HitId::Attachment(index)) => {
                         self.cancel_pending_jump();
                         self.remove_attachment(index);
+                    }
+                    Some(HitId::AttachmentPlay(index)) => {
+                        self.cancel_pending_jump();
+                        self.play_voice_note_at(index);
                     }
                     Some(HitId::Palette(index)) => self.run_palette_at(index),
                     Some(HitId::GlobalSearch(index)) => self.activate_global_search(index),
@@ -10030,6 +10039,46 @@ mod tests {
         )));
         type_text(&mut app, "typed into the password");
         shown.push(format!("{app:?}"));
+
+        // A waiting voice note, a draft playback, and a running recording with private
+        // folders/commands: none of them leak into Debug.
+        app.modal = None;
+        let voice_dir =
+            std::env::temp_dir().join(format!("matrix-rat-Hush-debug-{}", std::process::id()));
+        std::fs::create_dir_all(&voice_dir).unwrap();
+        app.audio.dir = Some(voice_dir.clone());
+        app.audio.recorder_setting = "/home/alice/bin/Hush-rec".into();
+        app.set_test_recorder(
+            crate::audio::recorder::Tool::new(PathBuf::from("/home/alice/Hush-cap"), Vec::new()),
+            crate::audio::recorder::Tool::new(PathBuf::from("/home/alice/Hush-enc"), Vec::new()),
+        );
+        app.set_test_player(crate::audio::Kind::Other, voice_dir.clone());
+        app.perform(Action::RecordVoice);
+        let _req = app.take_record_start();
+        let temp_voice = crate::audio::TempAudio::voice(&voice_dir, b"OggS").unwrap();
+        let voice_id = app.audio.next_id;
+        app.on_recording(crate::audio::record::RecordUpdate {
+            id: voice_id,
+            event: crate::audio::record::RecordEvent::Done(crate::audio::record::Recording {
+                file: temp_voice,
+                duration: Duration::from_secs(7),
+                waveform: vec![123, 456, 789],
+                size: 4,
+                silent: false,
+                full: false,
+            }),
+        });
+        assert_eq!(app.attachments().len(), 1);
+        app.perform(Action::PlayVoiceNote);
+        let _play_req = app.take_audio_start().expect("draft player request");
+        shown.push(format!("{app:?}"));
+        app.stop_audio();
+        app.perform(Action::RecordVoice);
+        let _rec_req = app.take_record_start().expect("recording request");
+        shown.push(format!("{app:?}"));
+        app.cancel_recording();
+        let _ = app.clear_attachments();
+        let _ = std::fs::remove_dir_all(&voice_dir);
 
         // A thread, with the room's draft put aside.
         app.modal = None;

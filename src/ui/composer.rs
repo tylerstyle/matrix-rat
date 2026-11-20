@@ -191,6 +191,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             frame,
             files,
             &app.attach,
+            &app.audio,
             theme,
             app.hover,
             &mut app.hits,

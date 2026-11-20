@@ -259,7 +259,8 @@ impl App {
             && let Some(waiting) = self.attach.pending.get_mut(&scope)
             && index < waiting.len()
         {
-            waiting.remove(index);
+            let removed = waiting.remove(index);
+            self.stop_draft_audio_for(&removed.path);
             self.attach.sweep();
         }
     }
@@ -276,6 +277,9 @@ impl App {
             .pending
             .remove(&scope)
             .is_some_and(|waiting| !waiting.is_empty());
+        if had_files {
+            self.stop_draft_audio();
+        }
         self.attach.sweep();
         had_draft || had_files
     }
@@ -509,6 +513,7 @@ impl App {
                 });
             }
         }
+        self.stop_draft_audio();
         self.attach.pending.remove(&scope);
         if self.matrix.is_some() {
             let handed = Handed {

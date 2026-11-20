@@ -100,8 +100,9 @@ pub struct Request {
     /// The app's number for it, carried by every answer.
     pub id: u64,
     pub player: Player,
-    /// Removed when the player has ended.
-    pub file: TempAudio,
+    /// Removed when the last owner drops it (on player exit for downloaded messages;
+    /// kept alive by a waiting voice note while it remains in the composer).
+    pub file: std::sync::Arc<TempAudio>,
     /// Where mpv opens its control socket; `None` for other players, or when no path
     /// would do.
     pub socket: Option<PathBuf>,
@@ -395,7 +396,7 @@ mod tests {
         let request = Request {
             id: 7,
             player,
-            file,
+            file: std::sync::Arc::new(file),
             socket,
             control: receiver,
         };

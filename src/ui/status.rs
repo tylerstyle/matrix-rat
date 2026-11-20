@@ -158,15 +158,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         match app.focus {
             Pane::Composer => {
-                // While a recording runs, stopping it is the main action (even if
-                // the recorder became unavailable since).
-                if app.recording().is_some() {
+                if app.playing_voice_note_here() {
                     push_action(
                         &mut hints,
                         Context::Composer,
-                        A::RecordVoice,
-                        "stop recording",
+                        A::PlayVoiceNote,
+                        "stop voice",
                     );
+                } else if app.can_play_voice_note() && app.recording().is_none() {
+                    push_action(&mut hints, Context::Composer, A::PlayVoiceNote, "listen");
                 }
                 push_action(&mut hints, Context::Composer, A::Send, "send");
                 push_action(&mut hints, Context::Composer, A::Newline, "line break");
@@ -184,8 +184,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     "edit last message",
                 );
                 push_action(&mut hints, Context::Composer, A::Attach, "attach file");
-                // Only where the machine has something to record with.
-                if app.recording().is_none() && app.recording_refused().is_none() {
+                // Only where the machine has something to record with — or while one
+                // runs, when the key stops it.
+                if app.recording().is_some() {
+                    push_action(
+                        &mut hints,
+                        Context::Composer,
+                        A::RecordVoice,
+                        "stop recording",
+                    );
+                } else if app.recording_refused().is_none() {
                     push_action(
                         &mut hints,
                         Context::Composer,

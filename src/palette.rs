@@ -443,6 +443,10 @@ pub struct PaletteContext {
     pub record_refused: Option<&'static str>,
     /// A voice message recording is running (or saving) right now.
     pub recording: bool,
+    /// A recorded voice message waits in the composer and can be played here.
+    pub can_play_voice_note: bool,
+    /// A waiting voice message in the open composer is playing right now.
+    pub playing_voice_note: bool,
     pub audio: AudioCaps,
     pub notes: NoteCaps,
     /// What the settings show for the commands that transcribe and translate, the
@@ -503,6 +507,8 @@ impl std::fmt::Debug for PaletteContext {
             .field("link_previews", &self.link_previews)
             .field("notifications", &self.notifications)
             .field("recording", &self.recording)
+            .field("can_play_voice_note", &self.can_play_voice_note)
+            .field("playing_voice_note", &self.playing_voice_note)
             .field("audio", &self.audio)
             .field("verify_status", &self.verify_status)
             .field("backup_status", &self.backup_status)
@@ -1225,6 +1231,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
                     && !in_pending
                     && !matches!(ctx.compose_mode, ComposeMode::Edit(_)))
         }
+        Action::PlayVoiceNote => ctx.playing_voice_note || ctx.can_play_voice_note,
         Action::ComposeInEditor => ctx.has_room && !in_pending,
         Action::JumpToNewest | Action::JumpToOldest | Action::JumpToUnread => {
             ctx.has_room && ctx.has_messages
@@ -1333,6 +1340,20 @@ fn action_meta<'a>(
                 "stop recording",
             ],
         ),
+        Action::PlayVoiceNote => (
+            Cow::Borrowed(if ctx.playing_voice_note {
+                "Stop waiting voice message"
+            } else {
+                description
+            }),
+            &[
+                "voice note",
+                "listen",
+                "play voice",
+                "preview",
+                "stop voice",
+            ],
+        ),
         Action::PastePicture => (
             Cow::Borrowed(description),
             &["paste image", "screenshot", "clipboard", "attach picture"],
@@ -1424,6 +1445,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
             Action::OpenEmoji
                 | Action::Attach
                 | Action::RecordVoice
+                | Action::PlayVoiceNote
                 | Action::PastePicture
                 | Action::CreatePoll
                 | Action::OpenStickers
@@ -2069,6 +2091,8 @@ mod tests {
             audio_recorder: "auto: pw-record + opusenc".to_owned(),
             record_refused: None,
             recording: false,
+            can_play_voice_note: false,
+            playing_voice_note: false,
             audio: AudioCaps::default(),
             notes: NoteCaps::default(),
             transcribe_command: "auto: whisper-cli".to_owned(),
@@ -2334,6 +2358,27 @@ mod tests {
         ctx.recording = false;
         ctx.record_refused = None;
         ctx.compose_mode = ComposeMode::Normal;
+
+        // Waiting voice note playback follows context and flips label while playing.
+        assert!(!enabled(&p, Action::PlayVoiceNote));
+        ctx.can_play_voice_note = true;
+        let p = Palette::open(ctx.clone());
+        assert!(enabled(&p, Action::PlayVoiceNote));
+        let voice_play_title = |p: &Palette| -> String {
+            p.entries
+                .iter()
+                .find(|e| e.target == Target::Action(Action::PlayVoiceNote))
+                .expect("entry present")
+                .title
+                .clone()
+        };
+        assert_eq!(voice_play_title(&p), "Listen to waiting voice message");
+        ctx.can_play_voice_note = false;
+        ctx.playing_voice_note = true;
+        let p = Palette::open(ctx.clone());
+        assert!(enabled(&p, Action::PlayVoiceNote));
+        assert_eq!(voice_play_title(&p), "Stop waiting voice message");
+        ctx.playing_voice_note = false;
 
         // Editing disables Attach; invite rooms also disable Attach.
         ctx.thread_open = false;
