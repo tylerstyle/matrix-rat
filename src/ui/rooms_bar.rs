@@ -8,9 +8,9 @@
 //! is written in superscript digits directly behind the tile, in the colours of the
 //! room list's badge.
 //!
-//! The whole line is for the pointer or a finger: a room's tile, its count and the
-//! gap behind it open that room, everything else (the label, the `(n)>`, the empty
-//! rest) leads to the room list.
+//! For the pointer or a finger: a room's tile, its count and the gap behind it open
+//! that room; the label and the `(n)>` lead to the room list. The empty rest of the
+//! line does nothing: it is too easy to hit by accident.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -30,13 +30,21 @@ const ICON: &str = "☰";
 const TILE: u16 = 2;
 /// The gap behind a room's count. It belongs to the room, for a wider target.
 const GAP: u16 = 1;
-/// A chat area lower than this keeps every line for the chat.
-const MIN_HEIGHT: u16 = 5;
+/// The bar never takes the last lines from the messages: this many stay.
+const MESSAGE_ROWS: u16 = 3;
 
 /// How many lines the bar takes from the chat area: one, or none where it is not
 /// shown (the setting is off, the room list is in view, or the window is too low).
 pub fn height(app: &App, one_pane: bool, chat: Rect) -> u16 {
-    u16::from(app.rooms_bar && one_pane && chat.height >= MIN_HEIGHT && chat.width > 0)
+    if !app.rooms_bar || !one_pane || chat.width == 0 {
+        return 0;
+    }
+    // Under the bar: the messages in their frame of two lines, and the composer
+    // as high as it is right now.
+    let needed = super::composer::height(app, chat.width)
+        .saturating_add(2)
+        .saturating_add(MESSAGE_ROWS);
+    u16::from(chat.height > needed)
 }
 
 /// A count in superscript digits ("12" becomes "¹²", "99+" becomes "⁹⁹⁺").
@@ -71,18 +79,10 @@ struct Plan {
     more: Option<String>,
 }
 
-/// The label in at most `budget` columns: whole, else cut, else the sign alone.
-fn label_text(label: &str, budget: u16) -> String {
-    let full = format!(" {ICON} {label} ");
-    let budget = budget as usize;
+/// The sign alone in at most `budget` columns, with its margins where they fit.
+fn sign_text(budget: usize) -> String {
     let sign = width(ICON);
-    // The sign, the margins and the gap between sign and text.
-    let fixed = sign + 3;
-    if width(&full) <= budget {
-        full
-    } else if budget >= fixed + 2 {
-        format!(" {ICON} {} ", truncate(label, budget - fixed))
-    } else if budget >= sign + 2 {
+    if budget >= sign + 2 {
         format!(" {ICON} ")
     } else if budget >= sign {
         ICON.to_owned()
@@ -91,47 +91,61 @@ fn label_text(label: &str, budget: u16) -> String {
     }
 }
 
-/// Lays the bar out in `bar` columns for rooms of these widths.
-///
-/// The label is the way back to the room list, so it comes first: it gives way to
-/// the rooms only down to half of the bar, and never gives up its sign. Then as many
-/// rooms as fit, with the `(n)>` for the rest; where not even that fits, the label
-/// stands alone.
-fn plan(label: &str, rooms: &[u16], bar: u16) -> Plan {
-    let wanted = rooms.iter().fold(0u16, |sum, w| sum.saturating_add(*w));
-    let keep = bar.div_ceil(2).max(width(ICON) as u16 + 2).min(bar);
-    let budget = bar.saturating_sub(wanted).max(keep);
-    let label = label_text(label, budget);
-    let rest = bar.saturating_sub(width(&label) as u16);
-    // The last room's gap may fall off the edge.
-    if wanted.saturating_sub(GAP) <= rest {
-        return Plan {
-            label,
-            shown: rooms.len(),
-            more: None,
-        };
+/// The label in at most `budget` columns: whole, else cut, else the sign alone.
+fn label_text(label: &str, budget: usize) -> String {
+    let full = format!(" {ICON} {label} ");
+    if width(&full) <= budget {
+        return full;
     }
-    let mut used: Vec<u16> = Vec::with_capacity(rooms.len());
+    // The sign, the margins and the gap between sign and text.
+    let fixed = width(ICON) + 3;
+    let cut = truncate(label, budget.saturating_sub(fixed));
+    if cut.is_empty() || cut == "…" {
+        sign_text(budget)
+    } else {
+        format!(" {ICON} {cut} ")
+    }
+}
+
+/// As many of the rooms as fit `rest` columns, with the `(n)>` for the others: how
+/// many, the `(n)>`, and the columns they take. More columns never show fewer rooms.
+fn fit(rooms: &[u16], rest: u16) -> (usize, Option<String>, u16) {
+    let wanted = rooms.iter().fold(0u16, |sum, w| sum.saturating_add(*w));
+    // The last room's gap may fall off the edge.
+    let all = wanted.saturating_sub(GAP);
+    if all <= rest {
+        return (rooms.len(), None, all);
+    }
+    // `before[n]`: the columns of the first `n` rooms.
+    let mut before: Vec<u16> = Vec::with_capacity(rooms.len());
     let mut sum = 0u16;
     for w in rooms {
-        used.push(sum);
+        before.push(sum);
         sum = sum.saturating_add(*w);
     }
-    // `used[n]`: the columns of the first `n` rooms.
     for shown in (0..rooms.len()).rev() {
         let more = format!("({})>", rooms.len() - shown);
-        if used[shown].saturating_add(width(&more) as u16) <= rest {
-            return Plan {
-                label,
-                shown,
-                more: Some(more),
-            };
+        let used = before[shown].saturating_add(width(&more) as u16);
+        if used <= rest {
+            return (shown, Some(more), used);
         }
     }
+    (0, None, 0)
+}
+
+/// Lays the bar out in `bar` columns for rooms of these widths.
+///
+/// The sign of the label is the way back to the room list and always there. The
+/// rooms come next: as many as fit beside the sign, with the `(n)>` for the rest.
+/// The label's text has what they leave, whole or cut. So a wider bar never shows
+/// fewer rooms, which a label that kept a share of its own did.
+fn plan(label: &str, rooms: &[u16], bar: u16) -> Plan {
+    let sign = width(&sign_text(bar as usize)) as u16;
+    let (shown, more, used) = fit(rooms, bar.saturating_sub(sign));
     Plan {
-        label,
-        shown: 0,
-        more: None,
+        label: label_text(label, bar.saturating_sub(used) as usize),
+        shown,
+        more,
     }
 }
 
@@ -148,9 +162,8 @@ fn draw_labelled(frame: &mut Frame, app: &mut App, area: Rect, label: &str) {
     frame
         .buffer_mut()
         .set_style(area, theme.style(Role::Status));
-    // The line as a whole leads to the room list; the rooms lie on top of it.
+    // The label and the `(n)>` lead to the room list.
     let to_list = HitId::Do(Action::CloseChat);
-    app.hits.add(area, to_list);
     let list_style = if app.hover == Some(to_list) {
         theme.style(Role::Hover)
     } else {
@@ -173,10 +186,14 @@ fn draw_labelled(frame: &mut Frame, app: &mut App, area: Rect, label: &str) {
         Line::from(Span::styled(plan.label, list_style)),
         Rect::new(area.x, area.y, label_width, 1),
     );
+    app.hits
+        .add(Rect::new(area.x, area.y, label_width, 1), to_list);
 
     // The pictures are those of the room list, at its one-line size. The list is
     // not drawn while the bar is, so the two never ask for different sizes in one
     // frame.
+    // With room previews on the list wants them larger, so going between list and
+    // chat encodes them anew each time: left for the pass over memory and CPU.
     app.images.set_avatar_cells((TILE, 1));
     let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
     let mut x = area.x + label_width;
@@ -204,10 +221,9 @@ fn draw_labelled(frame: &mut Frame, app: &mut App, area: Rect, label: &str) {
     if let Some(more) = plan.more
         && x < area.right()
     {
-        frame.render_widget(
-            Line::from(Span::styled(more, list_style)),
-            Rect::new(x, area.y, area.right() - x, 1),
-        );
+        let rect = Rect::new(x, area.y, width(&more) as u16, 1).intersection(area);
+        frame.render_widget(Line::from(Span::styled(more, list_style)), rect);
+        app.hits.add(rect, to_list);
     }
 }
 
@@ -312,21 +328,18 @@ mod tests {
         // All fit; the last one's gap may fall off the edge.
         assert_eq!(plan("Rooms", &[4, 4, 5], 23), of(" ☰ Rooms ", 3, None));
         assert_eq!(plan("Rooms", &[4, 4, 5], 22), of(" ☰ Rooms ", 3, None));
-        // One column less: the count of what is left out needs room of its own.
-        assert_eq!(
-            plan("Rooms", &[4, 4, 5], 21),
-            of(" ☰ Rooms ", 1, Some("(2)>"))
-        );
+        // Narrower: the label's text gives way to the rooms, down to the sign.
+        assert_eq!(plan("Rooms", &[4, 4, 5], 21), of(" ☰ Roo… ", 3, None));
+        assert_eq!(plan("Rooms", &[4, 4, 5], 16), of(" ☰ ", 3, None));
+        // Then the rooms do, and what is left out is counted.
+        assert_eq!(plan("Rooms", &[4, 4, 5], 15), of(" ☰ R… ", 1, Some("(2)>")));
+        assert_eq!(plan("Rooms", &[4, 4, 5], 12), of(" ☰ ", 1, Some("(2)>")));
+        assert_eq!(plan("Rooms", &[4, 4, 5], 11), of(" ☰ R… ", 0, Some("(3)>")));
+        assert_eq!(plan("Rooms", &[4, 4, 5], 8), of(" ☰ ", 0, Some("(3)>")));
         // The number is that of the rooms not shown.
-        assert_eq!(
-            plan("Rooms", &[4; 40], 30),
-            of(" ☰ Rooms ", 3, Some("(37)>"))
-        );
-        // Narrow: the label gives way down to half of the bar, then the rooms do.
-        assert_eq!(plan("Rooms", &[4; 3], 16), of(" ☰ Ro… ", 1, Some("(2)>")));
-        assert_eq!(plan("Rooms", &[4; 3], 12), of(" ☰ ", 1, Some("(2)>")));
-        assert_eq!(plan("Rooms", &[4; 3], 10), of(" ☰ ", 0, Some("(3)>")));
+        assert_eq!(plan("Rooms", &[4; 40], 30), of(" ☰ ", 5, Some("(35)>")));
         // The sign stays where nothing else fits.
+        assert_eq!(plan("Rooms", &[4; 3], 7), of(" ☰ R… ", 0, None));
         assert_eq!(plan("Rooms", &[4; 3], 6), of(" ☰ ", 0, None));
         assert_eq!(plan("Rooms", &[4; 3], 3), of("☰", 0, None));
         assert_eq!(plan("Rooms", &[4; 3], 2), of("☰", 0, None));
@@ -343,18 +356,78 @@ mod tests {
     }
 
     #[test]
-    fn a_very_long_label_is_cut_and_leaves_the_rooms_half_of_the_bar() {
+    fn a_wider_bar_never_shows_fewer_rooms_and_nothing_is_wider_than_the_bar() {
+        let mixed: Vec<u16> = (0..60).map(|n| 4 + (n * 7 % 3)).collect();
+        let sets: [&[u16]; 9] = [
+            &[],
+            &[4],
+            &[6],
+            &[4, 4, 5],
+            &[4; 3],
+            &[6, 5, 4, 4, 6, 5],
+            &[5; 12],
+            &[4; 200],
+            &mixed,
+        ];
+        let long = "Rooms and everything else that could ever be said about them";
+        for label in ["Rooms", "", "部屋", long] {
+            for rooms in sets {
+                let mut before = 0;
+                for bar in 0..=130u16 {
+                    let plan = plan(label, rooms, bar);
+                    let what = format!("{label:?} {rooms:?} at {bar}: {plan:?}");
+                    // Never fewer rooms than in a narrower bar.
+                    assert!(plan.shown >= before, "{what}");
+                    before = plan.shown;
+                    assert!(plan.shown <= rooms.len(), "{what}");
+                    // The number is exactly that of the rooms not shown, and it is
+                    // there whenever a room is shown and another is not.
+                    let hidden = rooms.len() - plan.shown;
+                    match &plan.more {
+                        Some(more) => {
+                            assert!(hidden > 0, "{what}");
+                            assert_eq!(*more, format!("({hidden})>"), "{what}");
+                        }
+                        None => assert!(hidden == 0 || plan.shown == 0, "{what}"),
+                    }
+                    // Label, rooms and the count together fit the bar; only the
+                    // last room's gap may fall off the edge.
+                    let drawn: u16 = rooms[..plan.shown].iter().sum();
+                    let more = plan.more.as_deref().map_or(0, width) as u16;
+                    let total = width(&plan.label) as u16 + drawn + more;
+                    let spare = if hidden == 0 && plan.shown > 0 {
+                        GAP
+                    } else {
+                        0
+                    };
+                    assert!(total <= bar + spare, "{what}");
+                    // The sign is there from the width it fits in.
+                    assert_eq!(plan.label.contains(ICON), bar >= 2, "{what}");
+                }
+                // Wide enough, everything is there and whole.
+                let all: u16 = rooms.iter().sum();
+                let wide = plan(label, rooms, all + width(label) as u16 + 5);
+                assert_eq!((wide.shown, wide.more), (rooms.len(), None));
+                assert_eq!(wide.label, format!(" {ICON} {label} "));
+            }
+        }
+    }
+
+    #[test]
+    fn a_very_long_label_is_cut_and_leaves_the_rooms_their_place() {
         let long = "Rooms and everything else that could ever be said about them";
         let cut = plan(long, &[4; 3], 40);
-        assert_eq!(width(&cut.label), 28);
+        assert_eq!(width(&cut.label), 29);
         assert!(cut.label.ends_with("… "), "{cut:?}");
         assert_eq!((cut.shown, cut.more.as_deref()), (3, None));
         let cut = plan(long, &[4; 30], 40);
-        assert_eq!(width(&cut.label), 20);
-        assert_eq!((cut.shown, cut.more.as_deref()), (3, Some("(27)>")));
-        // Wide characters are cut at a whole one.
+        assert_eq!(cut.label, " ☰ R… ");
+        assert_eq!((cut.shown, cut.more.as_deref()), (7, Some("(23)>")));
+        // Wide characters are cut at a whole one, or the sign stands alone.
         let wide = plan("部屋の一覧はこちら", &[4; 30], 24);
-        assert!(width(&wide.label) <= 12, "{wide:?}");
+        assert_eq!(wide.label, " ☰ ");
+        let wide = plan("部屋の一覧はこちら", &[4; 2], 24);
+        assert_eq!(wide.label, " ☰ 部屋の一覧… ");
 
         // Drawn: the same, in every width, with nothing outside the line.
         let mut app = app_with(vec![room("bob", 2), room("design", 5), room("nixos", 12)]);
@@ -394,11 +467,67 @@ mod tests {
     fn with_no_active_room_the_bar_still_leads_to_the_room_list() {
         let mut app = app_with(vec![room("quiet", 0), room("calm", 0)]);
         insta::assert_snapshot!("rooms_bar_no_active_room", top(&mut app, 60, 12, 2));
-        // The whole line is the label's.
+        // The label with its margins is the target; the empty rest of the line is
+        // none, and a click there changes nothing.
         let _ = terminal(&mut app, 60, 12);
-        for x in [0, 5, 30, 59] {
+        for x in 0..10 {
             assert_eq!(app.hits.at(x, 0), Some(HitId::Do(Action::CloseChat)), "{x}");
         }
+        for x in [10, 11, 30, 59] {
+            assert!(
+                !matches!(
+                    app.hits.at(x, 0),
+                    Some(HitId::Do(_) | HitId::BarRoom(_) | HitId::Pane(_))
+                ),
+                "{x}"
+            );
+            app.on_event(click(x));
+            assert!(!app.chat_closed(), "{x}");
+            assert_eq!(app.focus, Pane::Composer, "{x}");
+            assert_eq!(open_name(&app), Some("rust"), "{x}");
+        }
+        // The same behind the last room, where there are some.
+        let mut app = App::demo();
+        let shown = terminal(&mut app, 50, 20);
+        let end = column(&shown, "¹²") + 3;
+        assert!(matches!(app.hits.at(end - 1, 0), Some(HitId::BarRoom(_))));
+        for x in [end, end + 1, 49] {
+            app.on_event(click(x));
+            assert!(!app.chat_closed(), "{x}");
+            assert_eq!(open_name(&app), Some("rust"), "{x}");
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_label_does_not_give_up_an_edit_in_progress() {
+        let mut app = App::demo();
+        app.perform(Action::EditLast);
+        assert!(matches!(app.compose_mode, crate::app::ComposeMode::Edit(_)));
+        let shown = terminal(&mut app, 50, 20);
+        app.on_event(click(column(&shown, "Rooms")));
+        assert!(!app.chat_closed());
+        assert!(matches!(app.compose_mode, crate::app::ComposeMode::Edit(_)));
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("Finish or cancel the edit first")
+        );
+    }
+
+    #[test]
+    fn with_no_rooms_at_all_a_click_on_the_label_goes_to_the_room_list() {
+        let mut app = App::demo();
+        app.rooms.clear();
+        app.sidebar.hidden = true;
+        let shown = terminal(&mut app, 80, 20);
+        assert_eq!(app.focus, Pane::Composer);
+        let line = top(&mut app, 80, 20, 1);
+        assert!(line.contains("☰ Rooms"), "{line}");
+        app.on_event(click(column(&shown, "Rooms")));
+        assert_eq!(app.focus, Pane::Sidebar);
+        assert!(!app.chat_closed());
+        // The list is in the chat's place now, and the bar went with the chat.
+        let line = top(&mut app, 80, 20, 1);
+        assert!(!line.contains(ICON), "{line}");
     }
 
     #[test]
@@ -527,16 +656,37 @@ mod tests {
         let mut app = app_with(rooms);
         let shown = terminal(&mut app, 40, 12);
         let more = column(&shown, "(");
-        // To the end of the line, it is one target.
-        for x in [more, more + 2, 39] {
+        let screen = format!("{}", shown.backend());
+        let line = screen.lines().next().unwrap_or_default().to_owned();
+        let hidden: usize = line
+            .split('(')
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_default();
+        // The number is that of the rooms the bar does not show.
+        let mut tiles: Vec<usize> = (0..40)
+            .filter_map(|x| match app.hits.at(x, 0) {
+                Some(HitId::BarRoom(index)) => Some(index),
+                _ => None,
+            })
+            .collect();
+        tiles.dedup();
+        assert!(hidden > 0 && !tiles.is_empty(), "{line}");
+        assert_eq!(hidden + tiles.len(), 30, "{line}");
+        // From its bracket to its arrow it is one target.
+        let end = column(&shown, ")>") + 1;
+        for x in [more, more + 1, end] {
             let mut app = app_with((1..=30).map(|n| room(&format!("room {n}"), n)).collect());
             let _ = terminal(&mut app, 40, 12);
             app.on_event(click(x));
             assert!(app.chat_closed(), "{x}");
             assert_eq!(app.focus, Pane::Sidebar, "{x}");
         }
-        let screen = format!("{}", shown.backend());
-        assert!(screen.lines().next().unwrap_or_default().contains(")>"));
+        // Behind it there is nothing to hit.
+        for x in end + 1..40 {
+            assert!(!matches!(app.hits.at(x, 0), Some(HitId::Do(_))), "{x}");
+        }
     }
 
     #[test]
@@ -544,10 +694,17 @@ mod tests {
         let mut app = App::demo();
         let shown = terminal(&mut app, 50, 20);
         app.on_event(press(MouseButton::Right, column(&shown, "D "), 0));
-        assert!(
-            matches!(app.modal, Some(crate::modal::Modal::Menu(_))),
-            "no menu"
-        );
+        // The menu of the room under the pointer, not of the open one.
+        let design = app.rooms.iter().find(|room| room.name == "design");
+        let design = design.map(|room| room.id.clone()).unwrap_or_default();
+        match &app.modal {
+            Some(crate::modal::Modal::Menu(menu)) => match &menu.target {
+                crate::menu::Target::Room { id, .. } => assert_eq!(*id, design),
+                _ => panic!("the menu is not a room's"),
+            },
+            _ => panic!("no menu"),
+        }
+        assert_ne!(app.room().map(|room| room.id.clone()), Some(design));
         // The chat stays as it is.
         assert_eq!(open_name(&app), Some("rust"));
     }
@@ -595,9 +752,24 @@ mod tests {
         assert!(!has_bar(&mut app, 50, 20));
         app.perform(Action::Focus(Pane::Composer));
         assert!(has_bar(&mut app, 50, 20));
-        // Too low a window keeps its lines for the chat.
-        assert!(!has_bar(&mut app, 50, 5));
-        assert!(has_bar(&mut app, 50, 6));
+        // Too low a window keeps its lines for the messages: three of them stay
+        // (under the bar: the frame of the messages, the composer of three lines,
+        // the status line).
+        assert!(!has_bar(&mut app, 50, 9));
+        assert!(has_bar(&mut app, 50, 10));
+        // A composer grown by what is written in it counts as high as it is.
+        app.composer.insert("one\ntwo\nthree");
+        assert!(!has_bar(&mut app, 50, 11));
+        assert!(has_bar(&mut app, 50, 12));
+        app.composer.set_text("");
+        assert!(has_bar(&mut app, 50, 10));
+        // So does the line that says what is answered.
+        app.perform(Action::SelectOlder);
+        app.perform(Action::Reply);
+        assert!(!has_bar(&mut app, 50, 10));
+        assert!(has_bar(&mut app, 50, 11));
+        app.perform(Action::Back);
+        assert!(has_bar(&mut app, 50, 10));
         // No chat open: the room list is all there is.
         app.perform(Action::CloseChat);
         assert!(!has_bar(&mut app, 50, 20));
@@ -616,6 +788,34 @@ mod tests {
             app.hits.at(2, 0),
             Some(HitId::Do(Action::CloseChat) | HitId::BarRoom(_))
         ));
+    }
+
+    #[test]
+    fn the_bar_coming_and_going_leaves_the_messages_where_they_are() {
+        // The screen without its last line (the status line says what was set) and
+        // without the scroll bar's thumb, which is as long as the view is high.
+        let rows = |app: &mut App| -> Vec<String> {
+            let screen = format!("{}", terminal(app, 50, 20).backend());
+            let lines: Vec<String> = screen.lines().map(|line| line.replace('┃', "│")).collect();
+            lines[..lines.len() - 1].to_vec()
+        };
+        for scroll in [0, 3] {
+            let mut app = App::demo();
+            app.timeline.scroll = scroll;
+            let with = rows(&mut app);
+            assert_eq!(app.timeline.scroll, scroll);
+            app.perform(Action::Setting(crate::modal::Setting::RoomsBar));
+            let without = rows(&mut app);
+            assert_eq!(app.timeline.scroll, scroll);
+            assert!(with[0].contains(ICON) && !without[0].contains(ICON));
+            // Counted from the newest message, the view keeps its lower end: every
+            // line under the bar and the frame's edge stands where it stood, and
+            // the line the bar gave back shows one message line more at the top.
+            assert_eq!(with[2..], without[2..], "{scroll}");
+            app.perform(Action::Setting(crate::modal::Setting::RoomsBar));
+            assert_eq!(rows(&mut app), with, "{scroll}");
+            assert_eq!(app.timeline.scroll, scroll);
+        }
     }
 
     #[test]

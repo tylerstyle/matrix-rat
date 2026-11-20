@@ -4,8 +4,8 @@ expression: "lines.join(\"\\n\")"
 ---
 " ☰ Rooms B ² D ⁵ N ⁹⁹⁺       " Hidden by multi-width symbols: [(2, " ")]
 " ☰ Rooms B ² D ⁵ N ⁹⁹⁺ " Hidden by multi-width symbols: [(2, " ")]
-" ☰ Rooms B ² (2)>  " Hidden by multi-width symbols: [(2, " ")]
-" ☰ Ro… B ² (2)>" Hidden by multi-width symbols: [(2, " ")]
+" ☰ R… B ² D ⁵ N ⁹⁹⁺" Hidden by multi-width symbols: [(2, " ")]
+" ☰ B ² D ⁵ (1)>" Hidden by multi-width symbols: [(2, " ")]
 " ☰ B ² (2)>" Hidden by multi-width symbols: [(2, " ")]
 " ☰ (3)> " Hidden by multi-width symbols: [(2, " ")]
 " ☰   " Hidden by multi-width symbols: [(2, " ")]

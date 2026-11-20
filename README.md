@@ -168,7 +168,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `x` play or stop a voice or audio message (with mpv: `Space` pause, `←` `→` 5 seconds back or on), `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
-| `Alt-N` | open the room with the newest notifications (the first one in the rooms bar); again for the next one |
+| `Alt-N` | open the room with the newest notifications (the first one in the rooms bar); again for the next one, round through all of them |
 | `Esc` | one step back at a time: closes the help or a popup, clears the room list's filter, goes back to the composer, gives up a reply or an edit, leaves a thread. In the composer with nothing left to cancel it closes the chat: no room is open (nothing in it counts as read, and its messages notify you like any other room's), your draft waits there, and the room list has the focus; `Enter` or a click opens a room again. Set `esc_closes_chat = false` (or switch off "Esc closes the chat" in the settings) to have `Esc` stop at the composer |
 | `Alt-U` | jump to the first unread message (the "new" line) |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
@@ -415,14 +415,17 @@ Setting `preset = "vim"` keeps the default keys and adds:
 
 - **The rooms bar.** While the room list is out of sight (put away with `Ctrl-B`, or a
   chat is open in a window below 60 columns) the line above the chat reads
-  `☰ Rooms R ³ D ¹²`. A click on **Rooms** (or on the empty rest of the line) closes
-  the chat and shows the room list in its place. After it come the rooms with new
+  `☰ Rooms R ³ D ¹²`. A click on **Rooms** closes the chat and shows the room list in its
+  place (while you edit a message it asks you to finish or cancel the edit first;
+  the empty rest of the line does nothing). After it come the rooms with new
   notifications, the newest on the left and never the open one: each with the picture
   or the coloured initial the room list shows for it, and its count in small raised
   digits behind it, in the colours of the list's badge (a mention stands out). They
   are the rooms and the numbers the window title adds up: muted rooms, invitations
   and rooms that are only marked unread are not among them. A click on one opens it,
-  a right-click gives the room's menu, and `Alt-N` opens the first of them. When more
+  a right-click gives the room's menu, and `Alt-N` opens the first of them, pressed again
+  the next, and so on round. The line is left out where fewer than three lines would
+  stay for the messages. When more
   rooms are active than fit, the line ends in `(4)>` for the four that are not shown;
   a click there shows the room list. "Rooms bar" in the settings (`rooms_bar = false`)
   turns the line off.
