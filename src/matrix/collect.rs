@@ -660,6 +660,29 @@ where
     }
 }
 
+/// `items` with each event once, at its first place. A batch of events can reach a
+/// timeline twice (seen in the server test while sync still brought the newest
+/// messages of a flood): a message must not count, or be archived, twice. Items
+/// without a key (virtual ones, a local echo) all stay.
+fn without_repeats<T, K: std::hash::Hash + Eq>(
+    items: Vector<T>,
+    key: impl Fn(&T) -> Option<K>,
+) -> Vector<T>
+where
+    T: Clone,
+{
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| key(item).is_none_or(|key| seen.insert(key)))
+        .collect()
+}
+
+/// The event id of a timeline item, for [`without_repeats`].
+fn event_key(item: &Arc<TimelineItem>) -> Option<String> {
+    Some(item.as_event()?.event_id()?.to_string())
+}
+
 /// The items of `timeline` once `enough` says so, loading older messages page by page
 /// until then. It also ends at the room's start, at `most` events ([`Cut::Limit`]) and
 /// when a page cannot be loaded ([`Cut::LoadFailed`]); what is there by then is the
@@ -795,6 +818,7 @@ async fn unread(
             || (from.is_none() && last_own(items).is_some())
     })
     .await;
+    let items = without_repeats(items, event_key);
     read.extend(
         timeline
             .latest_user_read_receipt_timeline_event_id(&own)
@@ -894,6 +918,7 @@ async fn archive(
         Span::Everything => false,
     })
     .await;
+    let items = without_repeats(items, event_key);
     progress.tell(event_count(&items));
     let own = room.own_user_id().to_owned();
     let ignored = ignored.borrow().clone();
@@ -979,6 +1004,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_event_that_reached_the_timeline_twice_counts_once() {
+        // The shape the server test met: a block of four, again right after itself.
+        let items: Vector<(Option<u32>, &str)> = [
+            (None, "date"),
+            (Some(470), "a"),
+            (Some(471), "b"),
+            (Some(472), "c"),
+            (Some(471), "b again"),
+            (Some(472), "c again"),
+            (None, "marker"),
+            (None, "echo"),
+            (Some(473), "d"),
+        ]
+        .into_iter()
+        .collect();
+        let kept: Vec<&str> = without_repeats(items, |item| item.0)
+            .into_iter()
+            .map(|item| item.1)
+            .collect();
+        assert_eq!(kept, ["date", "a", "b", "c", "marker", "echo", "d"]);
+    }
     use crate::collect::tests::{AT, said};
     use crate::files::NewFile;
     use chrono::Utc;
