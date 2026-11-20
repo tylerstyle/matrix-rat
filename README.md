@@ -737,8 +737,10 @@ The agent's name is `--name`, or, when that is not given, the environment variab
 `MATRIX_RAT_AGENT_NAME` of the process that starts `matrix-rat mcp`. So several agents
 can share one entry like the one above without `--name` and still sign with their own
 names: start each agent with its own `MATRIX_RAT_AGENT_NAME`. `--name` wins when both
-are there. The same rules hold for both: at most 40 characters on one line, no `[` or
-`]`, no control characters. With neither, or with a variable that breaks these rules,
+are there. The same rules hold for both: at most 40 characters on one line; no `[` or
+`]`, no `"`, backtick or backslash; no control characters and nothing that cannot be
+seen (zero-width and blank characters, combining marks, any blank but a plain space
+between words). With neither, or with a variable that breaks these rules,
 `matrix-rat mcp` ends with exit code `2` and says so on standard error; it never falls
 back to another name.
 

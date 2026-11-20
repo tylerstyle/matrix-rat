@@ -1633,7 +1633,45 @@ fn an_agents_name_is_short_and_cannot_end_its_own_signature() {
     ] {
         assert!(check_name(bad).is_err(), "{bad:?}");
     }
+    for bad in UNSEEN_OR_QUOTING {
+        assert!(check_name(bad).is_err(), "{bad:?}");
+    }
+    // Letters of any script, digits, signs and plain spaces between words are fine.
+    for good in [
+        "Zo\u{eb}",
+        "\u{30d3}\u{30eb}\u{30c0}\u{30fc} 2",
+        "build_agent-3.1 (b)",
+        "a b c",
+    ] {
+        assert_eq!(check_name(good).unwrap(), good);
+    }
 }
+
+/// Names that hold what cannot be seen (so that two names could look the same and
+/// differ, or a name look empty), or what could end a quoted name.
+const UNSEEN_OR_QUOTING: [&str; 21] = [
+    "\u{200b}",
+    "a\u{200b}b",
+    "a\u{200c}b",
+    "a\u{200d}b",
+    "a\u{2060}b",
+    "a\u{feff}b",
+    "a\u{ad}b",
+    "\u{2800}",
+    "a\u{2800}b",
+    "\u{3164}",
+    "a\u{3164}b",
+    "a\u{115f}b",
+    "a\u{1160}b",
+    "a\u{e0041}b",
+    "a\u{e007f}b",
+    "a\u{a0}b",
+    "a\u{3000}b",
+    "e\u{301}",
+    "a\"b",
+    "a`b",
+    "a\\b",
+];
 
 #[test]
 fn the_name_comes_from_the_command_line_first_and_from_the_environment_otherwise() {
@@ -1681,7 +1719,10 @@ fn a_name_from_the_environment_passes_the_same_check_as_one_from_the_command_lin
         "flip\u{202e}",
         "line\u{2028}separator",
         too_long.as_str(),
-    ] {
+    ]
+    .into_iter()
+    .chain(UNSEEN_OR_QUOTING)
+    {
         // What one refuses the other refuses, and the message names the variable
         // without repeating the value.
         assert!(check_name(bad).is_err(), "{bad:?}");
