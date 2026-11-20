@@ -192,7 +192,6 @@ impl Running {
         loop {
             tokio::select! {
                 status = self.program.wait() => {
-                    self.program.sweep();
                     return match status {
                         Ok(status) if status.success() => End::Finished,
                         _ => End::Failed,

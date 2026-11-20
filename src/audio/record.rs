@@ -191,9 +191,9 @@ impl fmt::Debug for RecordRequest {
 /// Makes the recording of `request` and reports on it to `events` until it has ended.
 /// Run it as a task of its own.
 ///
-/// While it finishes (after [`RecordControl::Stop`], a few seconds at most) it hears
-/// no more commands: an app that does not want the result any more drops it, and the
-/// file with it; dropping the task kills both programs at any time.
+/// While it finishes (after [`RecordControl::Stop`], a few seconds at most) it does
+/// not stop for a command, but one to give it up that came meanwhile is honoured
+/// before anything is written. Dropping the task kills both programs at any time.
 pub async fn run(request: RecordRequest, events: UnboundedSender<RecordUpdate>) {
     let RecordRequest {
         id,
@@ -207,6 +207,8 @@ pub async fn run(request: RecordRequest, events: UnboundedSender<RecordUpdate>) 
         let _ = events.send(RecordUpdate { id, event });
     };
     let event = match record(&capture, &encoder, limits, &mut control, &send).await {
+        // Given up while it finished: nothing is written.
+        Ok(_) if given_up(&mut control) => RecordEvent::Cancelled,
         Ok(taken) => keep(taken, limits, dir).await,
         Err(end) => end,
     };
@@ -216,6 +218,18 @@ pub async fn run(request: RecordRequest, events: UnboundedSender<RecordUpdate>) 
         _ => tracing::debug!("a recording ended"),
     }
     send(event);
+}
+
+/// Whether the app has said, or shown by going, that it wants no recording.
+fn given_up(control: &mut UnboundedReceiver<RecordControl>) -> bool {
+    use tokio::sync::mpsc::error::TryRecvError;
+    loop {
+        match control.try_recv() {
+            Ok(RecordControl::Cancel) | Err(TryRecvError::Disconnected) => return true,
+            Ok(RecordControl::Stop) => {}
+            Err(TryRecvError::Empty) => return false,
+        }
+    }
 }
 
 /// What a recording brought, before it is checked and written.
@@ -275,9 +289,9 @@ async fn record(
         }
     };
     let (Some(mut sound), Some(mut feed), Some(mut coded)) = (
-        capture.child.stdout.take(),
-        encoder.child.stdin.take(),
-        encoder.child.stdout.take(),
+        capture.take_stdout(),
+        encoder.take_stdin(),
+        encoder.take_stdout(),
     ) else {
         capture.put_down().await;
         encoder.put_down().await;
@@ -354,17 +368,21 @@ async fn record(
         Leave::Stop | Leave::Full | Leave::CaptureEnded => None,
     };
     if let Some(end) = nothing {
+        // Both are killed before either is waited for.
+        capture.kill();
+        encoder.kill();
         capture.put_down().await;
         encoder.put_down().await;
         return Err(end);
     }
 
-    // The capture ends first. What it still holds is taken (a full recording takes no
-    // more: the meter counts none beyond its limit).
-    if leave != Leave::CaptureEnded {
+    // The capture ends first. What it still holds is taken, within the bounds that
+    // held so far: one that does not end when told, and keeps giving sound, is not
+    // listened to for long. A full recording takes no more at all.
+    if leave == Leave::Stop {
         capture.signal(libc::SIGTERM);
         let rest = async {
-            loop {
+            while !meter.full() && waiting.len() <= MAX_WAITING {
                 match sound.read(&mut heard).await {
                     Ok(0) | Err(_) => break,
                     Ok(count) => meter.take(&heard[..count], &mut waiting),
@@ -376,44 +394,47 @@ async fn record(
     drop(sound);
     capture.put_down().await;
 
+    // Too little to keep: the encoder is not asked to make something of it (some
+    // fail on next to nothing, which would hide the real reason).
+    if meter.elapsed() < limits.shortest {
+        encoder.put_down().await;
+        return failed(Failure::TooShort);
+    }
+
     // Then the encoder gets the rest and the end of its input, while what it writes
     // is read: it must never wait for us with a full pipe while we wait for it.
+    // Either side failing ends both: the other would wait for it in vain.
     let feeding = async {
-        let fed = feed.write_all(&waiting).await.is_ok();
+        if feed.write_all(&waiting).await.is_err() {
+            return Err(Failure::Encoder);
+        }
         let _ = feed.shutdown().await;
         drop(feed);
-        fed
+        Ok::<(), Failure>(())
     };
     let reading = async {
         loop {
             match coded.read(&mut packed).await {
-                Ok(0) => break true,
-                Err(_) => break false,
-                Ok(count) => {
-                    ogg.extend_from_slice(&packed[..count]);
-                    if ogg.len() > limits.bytes {
-                        break false;
-                    }
-                }
+                Ok(0) => break Ok::<(), Failure>(()),
+                Err(_) => break Err(Failure::Encoder),
+                Ok(count) if ogg.len() + count > limits.bytes => break Err(Failure::TooLarge),
+                Ok(count) => ogg.extend_from_slice(&packed[..count]),
             }
         }
     };
     let finished =
-        tokio::time::timeout(ENCODE_TIME, async { tokio::join!(feeding, reading) }).await;
-    let ended = match finished {
-        Ok((true, true)) => tokio::time::timeout(EXIT_TIME, encoder.wait()).await.ok(),
-        _ => None,
+        tokio::time::timeout(ENCODE_TIME, async { tokio::try_join!(feeding, reading) }).await;
+    let failure = match finished {
+        Ok(Ok(_)) => match tokio::time::timeout(EXIT_TIME, encoder.wait()).await {
+            Ok(Ok(status)) if status.success() => None,
+            _ => Some(Failure::Encoder),
+        },
+        Ok(Err(why)) => Some(why),
+        Err(_) => Some(Failure::Encoder),
     };
-    match ended {
-        Some(Ok(status)) if status.success() => encoder.sweep(),
-        _ => {
-            encoder.put_down().await;
-            return failed(if ogg.len() > limits.bytes {
-                Failure::TooLarge
-            } else {
-                Failure::Encoder
-            });
-        }
+    if let Some(why) = failure {
+        encoder.put_down().await;
+        return failed(why);
     }
     Ok(Taken {
         ogg,
@@ -1045,6 +1066,131 @@ mod tests {
         assert!(kept(&folder).is_empty());
     }
 
+    /// Waits until the process whose number is in `path` runs no more.
+    async fn gone(path: &Path) {
+        let pid = number(path).await;
+        let wait = async {
+            while alive(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(WAIT, wait).await.expect("it is gone");
+    }
+
+    #[tokio::test]
+    async fn what_a_failing_encoder_started_does_not_stay_behind() {
+        let dir = Dir::new("record-encoder-child");
+        let at = dir.0.display();
+        // It lets go of everything, starts something that stays, and fails.
+        let body = format!(
+            "printf '{HEAD}'\ncat\nsleep 60 >/dev/null 2>&1 &\necho $! > '{at}/left.pid'\nexit 4"
+        );
+        let session = start(
+            &dir,
+            capture(&dir, 1, "exit 0"),
+            tool(&dir, "encoder", &body),
+            Limits::default(),
+        );
+        let (last, _folder) = session.end().await;
+        assert_eq!(failure(last), Failure::Encoder);
+        gone(&dir.0.join("left.pid")).await;
+    }
+
+    #[tokio::test]
+    async fn the_rest_goes_to_a_slow_encoder_while_its_answer_is_read() {
+        // Two seconds of sound wait, far more than a pipe holds, for an encoder that
+        // starts late and then answers as much.
+        let slow = |dir: &Dir| {
+            tool(
+                dir,
+                "encoder",
+                &format!("printf '{HEAD}'\nsleep 1\nexec cat"),
+            )
+        };
+        let dir = Dir::new("record-slow");
+        let session = start(
+            &dir,
+            capture(&dir, 2, "exit 0"),
+            slow(&dir),
+            Limits::default(),
+        );
+        let (last, _folder) = session.end().await;
+        assert_eq!(done(last).size, (HEAD.len() + 2 * SECOND) as u64);
+
+        // Too much of an answer ends it at once, not after the encoder's time is up.
+        let dir = Dir::new("record-slow-large");
+        let limits = Limits {
+            bytes: 100_000,
+            ..Limits::default()
+        };
+        let session = start(&dir, capture(&dir, 2, "exit 0"), slow(&dir), limits);
+        let began = std::time::Instant::now();
+        let (last, folder) = session.end().await;
+        assert_eq!(failure(last), Failure::TooLarge);
+        assert!(
+            began.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(kept(&folder).is_empty());
+    }
+
+    #[tokio::test]
+    async fn stopping_too_early_says_so_whatever_the_encoder_makes_of_it() {
+        let dir = Dir::new("record-early");
+        let limits = Limits {
+            shortest: Duration::from_secs(5),
+            ..Limits::default()
+        };
+        let mut session = start(
+            &dir,
+            capture(&dir, 1, "exec sleep 60"),
+            tool(&dir, "encoder", "cat > /dev/null\nexit 4"),
+            limits,
+        );
+        let (first, second) = both(&dir).await;
+        session.runs_for(Duration::from_secs(1)).await;
+        session.control.send(RecordControl::Stop).unwrap();
+        let (last, folder) = session.end().await;
+        assert_eq!(failure(last), Failure::TooShort);
+        assert!(reaped(first) && reaped(second));
+        assert!(kept(&folder).is_empty());
+    }
+
+    #[tokio::test]
+    async fn giving_it_up_while_it_finishes_writes_nothing() {
+        let dir = Dir::new("record-late-cancel");
+        let mut session = start(
+            &dir,
+            capture(&dir, 1, "exec sleep 60"),
+            encoder(&dir),
+            Limits::default(),
+        );
+        session.runs_for(Duration::from_secs(1)).await;
+        // Both are waiting before the task looks: the first is taken, the second is
+        // found when the recording is ready to be written.
+        session.control.send(RecordControl::Stop).unwrap();
+        session.control.send(RecordControl::Cancel).unwrap();
+        let (last, folder) = session.end().await;
+        assert!(matches!(last, RecordEvent::Cancelled));
+        assert!(kept(&folder).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_recording_that_cannot_be_written_fails() {
+        let dir = Dir::new("record-not-kept");
+        // Where the folder for recordings should be, there is a file.
+        dir.file("audio", "in the way", 0o600);
+        let session = start(
+            &dir,
+            capture(&dir, 1, "exit 0"),
+            encoder(&dir),
+            Limits::default(),
+        );
+        let (last, _folder) = session.end().await;
+        assert_eq!(failure(last), Failure::NotKept);
+    }
+
     #[tokio::test]
     async fn what_is_not_ogg_opus_is_not_kept() {
         let dir = Dir::new("record-not-opus");
@@ -1067,13 +1213,10 @@ mod tests {
             longest: Duration::from_millis(500),
             ..Limits::default()
         };
-        // A capture that never ends and gives sound far faster than a microphone.
-        let session = start(
-            &dir,
-            tool(&dir, "capture", "exec yes"),
-            encoder(&dir),
-            limits,
-        );
+        // A capture that never ends, not even when told, and gives sound far faster
+        // than a microphone.
+        let body = "trap '' TERM\nexec yes";
+        let session = start(&dir, tool(&dir, "capture", body), encoder(&dir), limits);
         let (first, second) = both(&dir).await;
         let (last, _folder) = session.end().await;
         let recording = done(last);
@@ -1171,7 +1314,11 @@ mod tests {
             limits: Limits::default(),
             control: receiver,
         };
-        let shown = format!("{:?} {request:?}", RecordEvent::Done(recording));
+        let shown = format!(
+            "{:?} {request:?} {:?}",
+            RecordEvent::Done(recording),
+            request.capture
+        );
         let folder = dir.0.to_string_lossy();
         for private in [folder.as_ref(), "secret", "777", "voice-"] {
             assert!(!shown.contains(private), "{shown}");
