@@ -31,9 +31,9 @@ use futures::{FutureExt, StreamExt, pin_mut};
 use matrix_sdk::Room;
 use matrix_sdk::ruma::events::fully_read::FullyReadEventContent;
 use matrix_sdk::ruma::{OwnedUserId, UserId};
-use matrix_sdk_ui::eyeball_im::Vector;
+use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
-    RoomExt, Timeline, TimelineFocus, TimelineItem, TimelineReadReceiptTracking,
+    RoomExt, Timeline, TimelineFocus, TimelineItem, TimelineReadReceiptTracking, TimelineUniqueId,
     VirtualTimelineItem,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -55,6 +55,9 @@ const UNREAD_EVENTS: usize = collect::SUMMARY_MESSAGES + 50;
 const OLDEST: usize = 5;
 /// Events asked for at a time.
 const PAGE: u16 = 100;
+/// Fewest events asked for in one page near a collection's limit, so a tail of
+/// filtered events (reactions, edits) does not turn into one-event pages.
+const MIN_PAGE: u16 = 20;
 /// How long opening a room's messages may take, and one request for older ones.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 const PAGE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -62,6 +65,9 @@ const PAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const UNREAD_BUDGET: Duration = Duration::from_secs(60);
 /// How long a collection waits for the messages it asked for to show in the timeline.
 const SETTLE: Duration = Duration::from_secs(2);
+/// How long a collection waits for a follow-up event-cache batch after a short lazy
+/// unskip or an early `TimelineStart` marker.
+const SETTLE_MORE: Duration = Duration::from_secs(1);
 
 pub enum CollectCmd {
     /// The unread messages of a joined room as text for a summary; answered with
@@ -392,29 +398,232 @@ fn reaches_before(items: &Items, since: u64) -> bool {
     oldest.peek().is_some() && oldest.all(|event| u64::from(event.timestamp().get()) < since)
 }
 
-/// The items of `timeline` once `enough` says so, loading older messages page by page
-/// until then. It also ends at the room's start, at `most` events ([`Cut::Limit`]) and
-/// when a page cannot be loaded ([`Cut::LoadFailed`]); what is there by then is the
-/// answer.
-async fn load(
-    timeline: &Timeline,
+trait LoadItem: Clone {
+    type Key: Clone + PartialEq;
+
+    fn is_event(&self) -> bool;
+    fn is_start(&self) -> bool;
+    fn key(&self) -> &Self::Key;
+}
+
+impl LoadItem for Arc<TimelineItem> {
+    type Key = TimelineUniqueId;
+
+    fn is_event(&self) -> bool {
+        self.as_event().is_some()
+    }
+
+    fn is_start(&self) -> bool {
+        self.is_timeline_start()
+    }
+
+    fn key(&self) -> &Self::Key {
+        self.unique_id()
+    }
+}
+
+/// How long [`load_from`] waits for one page's diffs to show on the stream.
+#[derive(Clone, Copy)]
+struct SettleTimes {
+    page: Duration,
+    more: Duration,
+}
+
+/// Applies `diffs` to `items`; returns `true` if the stream was cleared or reset.
+fn apply_diffs<T: Clone>(items: &mut Vector<T>, diffs: Vec<VectorDiff<T>>) -> bool {
+    let mut reset = false;
+    for diff in diffs {
+        if matches!(diff, VectorDiff::Clear | VectorDiff::Reset { .. }) {
+            reset = true;
+        }
+        diff.apply(items);
+    }
+    reset
+}
+
+/// The oldest event item in `items` and its index, used to measure items and events
+/// prepended ahead of it even if virtual items (like date dividers) at index 0 change.
+struct PageAnchor<K> {
+    oldest: Option<(K, usize)>,
+    len: usize,
+}
+
+impl<K: Clone> PageAnchor<K> {
+    fn of<T: LoadItem<Key = K>>(items: &Vector<T>) -> Self {
+        let oldest = items
+            .iter()
+            .enumerate()
+            .find_map(|(pos, item)| item.is_event().then(|| (item.key().clone(), pos)));
+        Self {
+            oldest,
+            len: items.len(),
+        }
+    }
+}
+
+/// How many items and events were prepended ahead of `anchor`, or `None` if the
+/// anchored oldest event is no longer in `items`.
+fn prepended_before<T: LoadItem>(
+    items: &Vector<T>,
+    anchor: &PageAnchor<T::Key>,
+) -> Option<(usize, usize)> {
+    match &anchor.oldest {
+        Some((key, old_pos)) => {
+            let pos = items.iter().position(|item| item.key() == key)?;
+            let added_items = pos.saturating_sub(*old_pos);
+            let added_events = items
+                .iter()
+                .take(pos)
+                .filter(|item| item.is_event())
+                .count();
+            Some((added_items, added_events))
+        }
+        None => {
+            let added_items = items.len().saturating_sub(anchor.len);
+            let added_events = items.iter().filter(|item| item.is_event()).count();
+            Some((added_items, added_events))
+        }
+    }
+}
+
+/// Waits for the events of one `paginate_backwards(ask)` call to show on `changes`.
+/// Returns `false` if `changes` ended.
+///
+/// The SDK can split one page into two batches when the lazy skip buffer runs out
+/// (`0 < skip_count < ask`: the skipped tail arrives first, while the disk or network
+/// chunk arrives later from the event-cache task), and can emit `TimelineStart` ahead
+/// of the final page's events when `reached_start` is true. Unrelated live-sync or
+/// in-place update diffs do not cut the wait short.
+async fn settle_page<T, S>(
+    items: &mut Vector<T>,
+    changes: &mut std::pin::Pin<&mut S>,
+    mut anchor: PageAnchor<T::Key>,
+    ask: u16,
+    reached_start: bool,
+    lazy_possible: &mut bool,
+    times: SettleTimes,
+) -> bool
+where
+    T: LoadItem,
+    S: futures::Stream<Item = Vec<VectorDiff<T>>>,
+{
+    let ask = usize::from(ask);
+    let mut deadline = tokio::time::Instant::now() + times.page;
+    let mut waiting_second = false;
+    let mut saw_start_wait = false;
+
+    loop {
+        let Ok(next) = tokio::time::timeout_at(deadline, changes.as_mut().next()).await else {
+            return true;
+        };
+        let Some(diffs) = next else {
+            return false;
+        };
+        if apply_diffs(items, diffs) {
+            *lazy_possible = true;
+            return true;
+        }
+        let Some((added_items, added_events)) = prepended_before(items, &anchor) else {
+            *lazy_possible = true;
+            return true;
+        };
+        let has_start = items.iter().any(LoadItem::is_start);
+
+        if waiting_second {
+            if added_events > 0 {
+                return true;
+            }
+            continue;
+        }
+
+        if reached_start {
+            if added_events > 0 && has_start {
+                if added_items != ask {
+                    *lazy_possible = false;
+                }
+                return true;
+            }
+            if *lazy_possible && added_items > 0 && added_items < ask && !has_start {
+                *lazy_possible = false;
+                waiting_second = true;
+                anchor = PageAnchor::of(items);
+                deadline = deadline.min(tokio::time::Instant::now() + times.more);
+                continue;
+            }
+            if added_events > 0 {
+                if added_items != ask {
+                    *lazy_possible = false;
+                }
+                return true;
+            }
+            if has_start && !saw_start_wait {
+                saw_start_wait = true;
+                deadline = deadline.min(tokio::time::Instant::now() + times.more);
+            }
+            continue;
+        }
+
+        if *lazy_possible {
+            if added_items == 0 {
+                continue;
+            }
+            if added_items == ask {
+                return true;
+            }
+            *lazy_possible = false;
+            if added_items > ask {
+                return true;
+            }
+            // `0 < added_items < ask`: likely the tail of the lazy skip buffer; wait
+            // for the event-cache task's disk or network batch before asking again.
+            waiting_second = true;
+            anchor = PageAnchor::of(items);
+            deadline = deadline.min(tokio::time::Instant::now() + times.more);
+            continue;
+        }
+
+        if added_events > 0 {
+            return true;
+        }
+    }
+}
+
+async fn load_from<T, S, F>(
+    mut items: Vector<T>,
+    changes: S,
     most: usize,
-    progress: &Progress<'_>,
-    mut enough: impl FnMut(&Items) -> bool,
-) -> (Items, Option<Cut>) {
-    let (mut items, changes) = timeline.subscribe().await;
+    mut on_progress: impl FnMut(usize),
+    mut enough: impl FnMut(&Vector<T>) -> bool,
+    mut paginate: impl FnMut(u16) -> F,
+    times: SettleTimes,
+) -> (Vector<T>, Option<Cut>)
+where
+    T: LoadItem,
+    S: futures::Stream<Item = Vec<VectorDiff<T>>>,
+    F: std::future::Future<Output = Option<bool>>,
+{
+    let changes = changes.fuse();
     pin_mut!(changes);
     let mut failed = false;
     let mut at_start = false;
+    let mut lazy_possible = true;
     loop {
         // What the timeline has worked in meanwhile, without waiting for more.
-        while let Some(Some(diffs)) = changes.next().now_or_never() {
-            for diff in diffs {
-                diff.apply(&mut items);
+        while let Some(next) = changes.next().now_or_never() {
+            match next {
+                Some(diffs) => {
+                    if apply_diffs(&mut items, diffs) {
+                        lazy_possible = true;
+                    }
+                }
+                None => {
+                    failed = true;
+                    break;
+                }
             }
         }
-        let loaded = event_count(&items);
-        if at_start || items.iter().any(|item| item.is_timeline_start()) || enough(&items) {
+        let loaded = items.iter().filter(|item| item.is_event()).count();
+        if at_start || items.iter().any(LoadItem::is_start) || enough(&items) {
             return (items, None);
         }
         if loaded >= most {
@@ -423,22 +632,68 @@ async fn load(
         if failed {
             return (items, Some(Cut::LoadFailed));
         }
-        progress.tell(loaded);
-        match tokio::time::timeout(PAGE_TIMEOUT, timeline.paginate_backwards(PAGE)).await {
-            Ok(Ok(reached_start)) => at_start = reached_start,
-            Ok(Err(err)) => {
-                tracing::debug!(why = %logsafe::kind(&err), "collect: could not load older messages");
-                failed = true;
-            }
-            Err(_) => failed = true,
-        }
+        on_progress(loaded);
+        let remaining = most.saturating_sub(loaded);
+        let ask = PAGE
+            .min(u16::try_from(remaining).unwrap_or(PAGE))
+            .max(MIN_PAGE);
+        let anchor = PageAnchor::of(&items);
+        let Some(reached_start) = paginate(ask).await else {
+            failed = true;
+            continue;
+        };
+        at_start = reached_start;
         // What was loaded reaches the timeline a moment later.
-        if let Ok(Some(diffs)) = tokio::time::timeout(SETTLE, changes.next()).await {
-            for diff in diffs {
-                diff.apply(&mut items);
-            }
+        if !settle_page(
+            &mut items,
+            &mut changes,
+            anchor,
+            ask,
+            reached_start,
+            &mut lazy_possible,
+            times,
+        )
+        .await
+        {
+            failed = true;
         }
     }
+}
+
+/// The items of `timeline` once `enough` says so, loading older messages page by page
+/// until then. It also ends at the room's start, at `most` events ([`Cut::Limit`]) and
+/// when a page cannot be loaded ([`Cut::LoadFailed`]); what is there by then is the
+/// answer.
+async fn load(
+    timeline: &Timeline,
+    most: usize,
+    progress: &Progress<'_>,
+    enough: impl FnMut(&Items) -> bool,
+) -> (Items, Option<Cut>) {
+    let (items, changes) = timeline.subscribe().await;
+    let times = SettleTimes {
+        page: SETTLE,
+        more: SETTLE_MORE,
+    };
+    load_from(
+        items,
+        changes,
+        most,
+        |loaded| progress.tell(loaded),
+        enough,
+        |ask| async move {
+            match tokio::time::timeout(PAGE_TIMEOUT, timeline.paginate_backwards(ask)).await {
+                Ok(Ok(reached_start)) => Some(reached_start),
+                Ok(Err(err)) => {
+                    tracing::debug!(why = %logsafe::kind(&err), "collect: could not load older messages");
+                    None
+                }
+                Err(_) => None,
+            }
+        },
+        times,
+    )
+    .await
 }
 
 /// The event the account's read marker (`m.fully_read`) is at, if it has one.
@@ -1041,6 +1296,392 @@ mod tests {
         assert!(NewFile::create(&dir.join("in-the-way"), "Plans.md").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum FakeItem {
+        Event(u32),
+        Divider(u32),
+        Start,
+    }
+
+    impl LoadItem for FakeItem {
+        type Key = Self;
+
+        fn is_event(&self) -> bool {
+            matches!(self, Self::Event(_))
+        }
+
+        fn is_start(&self) -> bool {
+            matches!(self, Self::Start)
+        }
+
+        fn key(&self) -> &Self::Key {
+            self
+        }
+    }
+
+    fn fake_events(range: std::ops::Range<u32>) -> Vector<FakeItem> {
+        range.map(FakeItem::Event).collect()
+    }
+
+    fn push_front_events(range: std::ops::Range<u32>) -> Vec<VectorDiff<FakeItem>> {
+        // Applied in order, pushing newest-of-batch first leaves `range` oldest-first.
+        range
+            .rev()
+            .map(|id| VectorDiff::PushFront {
+                value: FakeItem::Event(id),
+            })
+            .collect()
+    }
+
+    fn diff_stream(
+        rx: tokio::sync::mpsc::UnboundedReceiver<Vec<VectorDiff<FakeItem>>>,
+    ) -> impl futures::Stream<Item = Vec<VectorDiff<FakeItem>>> {
+        futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|diffs| (diffs, rx))
+        })
+    }
+
+    fn fast_settle() -> SettleTimes {
+        SettleTimes {
+            page: Duration::from_millis(500),
+            more: Duration::from_millis(250),
+        }
+    }
+
+    #[tokio::test]
+    async fn loading_waits_for_the_cache_batch_after_a_short_lazy_page_and_does_not_overshoot() {
+        // Reproduces a lazy-to-cache boundary (0 < skip_count < PAGE) followed by
+        // 128-event disk chunks, with the read position at event 0. Without waiting
+        // for the first call's follow-up disk chunk, a second page would be fired
+        // while the first is still in flight and load past UNREAD_EVENTS into event 0.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked_in = asked.clone();
+
+        let (items, cut) = load_from(
+            fake_events(440..460),
+            diff_stream(rx),
+            UNREAD_EVENTS,
+            |_| {},
+            |items| items.iter().any(|item| item == &FakeItem::Event(0)),
+            move |ask| {
+                let tx = tx.clone();
+                let call = {
+                    let mut asked = asked_in.lock().unwrap();
+                    asked.push(ask);
+                    asked.len()
+                };
+                async move {
+                    match call {
+                        1 => {
+                            // Lazy skip tail arrives at once (< ask); disk chunk arrives later.
+                            let _ = tx.send(push_front_events(410..440));
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(15)).await;
+                                let _ = tx.send(push_front_events(282..410));
+                            });
+                            Some(false)
+                        }
+                        2 => {
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(15)).await;
+                                let _ = tx.send(push_front_events(154..282));
+                            });
+                            Some(false)
+                        }
+                        3 => {
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(15)).await;
+                                let _ = tx.send(push_front_events(26..154));
+                            });
+                            Some(false)
+                        }
+                        4 => {
+                            // Reaching a 4th page would pull in the read marker at event 0.
+                            let _ = tx.send(push_front_events(0..26));
+                            Some(true)
+                        }
+                        _ => panic!("unexpected page {call}"),
+                    }
+                }
+            },
+            fast_settle(),
+        )
+        .await;
+
+        assert_eq!(cut, Some(Cut::Limit));
+        assert_eq!(*asked.lock().unwrap(), vec![100, 100, 44]);
+        assert!(!items.iter().any(|item| item == &FakeItem::Event(0)));
+        assert_eq!(items.len(), 434);
+        assert_eq!(items.front(), Some(&FakeItem::Event(26)));
+        assert_eq!(items.back(), Some(&FakeItem::Event(459)));
+    }
+
+    #[tokio::test]
+    async fn loading_ignores_live_arrivals_and_updates_while_waiting_for_a_page() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked_in = asked.clone();
+
+        let (items, cut) = load_from(
+            fake_events(100..120),
+            diff_stream(rx),
+            120,
+            |_| {},
+            |_| false,
+            move |ask| {
+                let tx = tx.clone();
+                asked_in.lock().unwrap().push(ask);
+                async move {
+                    let _ = tx.send(vec![VectorDiff::PushBack {
+                        value: FakeItem::Event(120),
+                    }]);
+                    let _ = tx.send(vec![VectorDiff::Set {
+                        index: 0,
+                        value: FakeItem::Event(100),
+                    }]);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(15)).await;
+                        let _ = tx.send(push_front_events(0..100));
+                    });
+                    Some(false)
+                }
+            },
+            fast_settle(),
+        )
+        .await;
+
+        assert_eq!(cut, Some(Cut::Limit));
+        assert_eq!(*asked.lock().unwrap(), vec![100]);
+        assert_eq!(items.len(), 121);
+        assert_eq!(items.front(), Some(&FakeItem::Event(0)));
+        assert_eq!(items.back(), Some(&FakeItem::Event(120)));
+    }
+
+    #[tokio::test]
+    async fn loading_keeps_the_oldest_page_when_timeline_start_arrives_first() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let (items, cut) = load_from(
+            fake_events(30..50),
+            diff_stream(rx),
+            500,
+            |_| {},
+            |_| false,
+            move |_| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(vec![VectorDiff::PushFront {
+                        value: FakeItem::Start,
+                    }]);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(15)).await;
+                        let diffs = (0..30)
+                            .map(|id| VectorDiff::Insert {
+                                index: usize::try_from(id).unwrap() + 1,
+                                value: FakeItem::Event(id),
+                            })
+                            .collect();
+                        let _ = tx.send(diffs);
+                    });
+                    Some(true)
+                }
+            },
+            fast_settle(),
+        )
+        .await;
+
+        assert_eq!(cut, None);
+        assert_eq!(items.front(), Some(&FakeItem::Start));
+        let events: Vec<u32> = items
+            .iter()
+            .filter_map(|item| match item {
+                FakeItem::Event(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events, (0..50).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn loading_keeps_the_oldest_page_across_a_lazy_boundary_at_the_start() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked_in = asked.clone();
+
+        let (items, cut) = load_from(
+            fake_events(40..60),
+            diff_stream(rx),
+            500,
+            |_| {},
+            |_| false,
+            move |ask| {
+                let tx = tx.clone();
+                asked_in.lock().unwrap().push(ask);
+                async move {
+                    // Lazy tail first, then TimelineStart, then the final cache chunk.
+                    let _ = tx.send(push_front_events(30..40));
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        let _ = tx.send(vec![VectorDiff::PushFront {
+                            value: FakeItem::Start,
+                        }]);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        let diffs = (0..30)
+                            .map(|id| VectorDiff::Insert {
+                                index: usize::try_from(id).unwrap() + 1,
+                                value: FakeItem::Event(id),
+                            })
+                            .collect();
+                        let _ = tx.send(diffs);
+                    });
+                    Some(true)
+                }
+            },
+            fast_settle(),
+        )
+        .await;
+
+        assert_eq!(cut, None);
+        assert_eq!(*asked.lock().unwrap(), vec![100]);
+        assert_eq!(items.front(), Some(&FakeItem::Start));
+        let events: Vec<u32> = items
+            .iter()
+            .filter_map(|item| match item {
+                FakeItem::Event(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events, (0..60).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn loading_clamps_page_size_near_the_limit_with_a_minimum_floor() {
+        // 30 remaining -> asks for 30, not PAGE (100).
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked_in = asked.clone();
+        let (items, cut) = load_from(
+            fake_events(30..350),
+            diff_stream(rx),
+            UNREAD_EVENTS,
+            |_| {},
+            |_| false,
+            move |ask| {
+                let tx = tx.clone();
+                asked_in.lock().unwrap().push(ask);
+                async move {
+                    let count = u32::from(ask);
+                    let _ = tx.send(push_front_events((30 - count)..30));
+                    Some(false)
+                }
+            },
+            fast_settle(),
+        )
+        .await;
+        assert_eq!(cut, Some(Cut::Limit));
+        assert_eq!(*asked.lock().unwrap(), vec![30]);
+        assert_eq!(items.len(), UNREAD_EVENTS);
+
+        // 5 remaining -> floored at MIN_PAGE (20).
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked_in = asked.clone();
+        let (_, cut) = load_from(
+            fake_events(20..365),
+            diff_stream(rx),
+            UNREAD_EVENTS,
+            |_| {},
+            |_| false,
+            move |ask| {
+                let tx = tx.clone();
+                asked_in.lock().unwrap().push(ask);
+                async move {
+                    let _ = tx.send(push_front_events(0..u32::from(ask)));
+                    Some(false)
+                }
+            },
+            fast_settle(),
+        )
+        .await;
+        assert_eq!(cut, Some(Cut::Limit));
+        assert_eq!(*asked.lock().unwrap(), vec![MIN_PAGE]);
+    }
+
+    #[tokio::test]
+    async fn loading_tracks_prepended_events_when_a_front_date_divider_is_replaced() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut initial = Vector::new();
+        initial.push_back(FakeItem::Divider(1));
+        for id in 50..70 {
+            initial.push_back(FakeItem::Event(id));
+        }
+
+        let started = tokio::time::Instant::now();
+        let (items, cut) = load_from(
+            initial,
+            diff_stream(rx),
+            50,
+            |_| {},
+            |_| false,
+            move |_| {
+                let tx = tx.clone();
+                async move {
+                    // DateDividerAdjuster removes the front divider, prepends the page
+                    // of 30 events and inserts a new front divider: net +30 items.
+                    let mut diffs = vec![VectorDiff::Remove { index: 0 }];
+                    diffs.extend(push_front_events(20..50));
+                    diffs.push(VectorDiff::PushFront {
+                        value: FakeItem::Divider(0),
+                    });
+                    let _ = tx.send(diffs);
+                    Some(false)
+                }
+            },
+            SettleTimes {
+                page: Duration::from_secs(5),
+                more: Duration::from_secs(5),
+            },
+        )
+        .await;
+
+        assert_eq!(cut, Some(Cut::Limit));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let events: Vec<u32> = items
+            .iter()
+            .filter_map(|item| match item {
+                FakeItem::Event(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events, (20..70).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn loading_stops_at_once_when_pagination_fails() {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let started = tokio::time::Instant::now();
+
+        let (items, cut) = load_from(
+            fake_events(0..20),
+            diff_stream(rx),
+            100,
+            |_| {},
+            |_| false,
+            |_| async { None },
+            SettleTimes {
+                page: Duration::from_secs(5),
+                more: Duration::from_secs(5),
+            },
+        )
+        .await;
+
+        assert_eq!(cut, Some(Cut::LoadFailed));
+        assert_eq!(items.len(), 20);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
     /// Against a real homeserver, through the worker, with two accounts: the test
     /// account (ours) and a second one that writes. In a fresh room of theirs:
     ///
@@ -1187,6 +1828,25 @@ mod tests {
                 .await
                 .expect("the collection is answered")
         }
+        // The texts of the lines handed to a summary command.
+        fn bodies(unread: &UnreadText) -> Vec<String> {
+            unread
+                .text
+                .lines()
+                .map(|line| line.rsplit(": ").next().unwrap_or_default().to_owned())
+                .collect()
+        }
+        fn shape(unread: &UnreadText) -> String {
+            let got = bodies(unread);
+            format!(
+                "known={}, messages={}, cut={}, first={:?}, last={:?}",
+                unread.known,
+                unread.messages,
+                unread.cut,
+                got.first(),
+                got.last(),
+            )
+        }
         // What is unread, asked again until `done` accepts it (our sync may be behind
         // what the other one just sent).
         async fn unread_until(
@@ -1213,19 +1873,11 @@ mod tests {
                 if done(&unread) {
                     return unread;
                 }
-                last = Some((unread.messages, unread.known));
+                last = Some(shape(&unread));
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             panic!("what is unread never came to what was expected; last: {last:?}");
         }
-        // The texts of the lines handed to a summary command.
-        let bodies = |unread: &UnreadText| -> Vec<String> {
-            unread
-                .text
-                .lines()
-                .map(|line| line.rsplit(": ").next().unwrap_or_default().to_owned())
-                .collect()
-        };
 
         // 1. More messages than a fresh timeline shows, all of them on our screen.
         let early: Vec<String> = (0..30).map(|n| format!("early-{run}-{n:02}")).collect();
@@ -1304,12 +1956,18 @@ mod tests {
             unread.known && unread.messages >= 3
         })
         .await;
-        assert_eq!(bodies(&unread), news, "exactly what was not read");
-        assert!(!unread.cut);
+        let info = shape(&unread);
+        assert_eq!(bodies(&unread), news, "exactly what was not read ({info})");
+        assert_eq!(unread.messages, news.len(), "unread count ({info})");
+        assert!(!unread.cut, "unread should not be cut ({info})");
 
         // 3. So many more that where we stopped reading is not among what is
         // looked through: that is said, and only the newest asked for are given.
-        let many = UNREAD_EVENTS + usize::from(PAGE) + 10;
+        // `RoomEventCache` reloads persisted chunks whole (128 events) regardless of
+        // the requested page size, on top of any remaining lazy-skipped items
+        // (< `MIN_PAGE` near `UNREAD_EVENTS`), so stay past that worst-case reach.
+        const STORE_CHUNK: usize = 128;
+        let many = UNREAD_EVENTS + STORE_CHUNK + usize::from(MIN_PAGE) + 20;
         let flood: Vec<String> = (0..many).map(|n| format!("flood-{run}-{n:03}")).collect();
         for body in &flood {
             say(body.clone()).await;
@@ -1319,11 +1977,14 @@ mod tests {
             unread.text.trim_end().ends_with(flood[many - 1].as_str())
         })
         .await;
+        let info = shape(&unread);
         assert!(
             !unread.known,
-            "the read position is too far back to be found"
+            "the read position is too far back to be found ({info})"
         );
-        assert_eq!(bodies(&unread), newest);
+        assert!(!unread.cut, "newest slice should not be cut ({info})");
+        assert_eq!(unread.messages, newest.len(), "message count ({info})");
+        assert_eq!(bodies(&unread), newest, "newest bodies ({info})");
 
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
