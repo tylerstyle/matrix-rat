@@ -558,6 +558,16 @@ pub enum Setting {
     DownloadDir,
     /// What plays voice and audio messages (text, like the download folder).
     AudioPlayer,
+    /// What transcribes voice and audio messages (text): `auto`, or a command.
+    TranscribeCommand,
+    /// The model file `whisper-cli` is given (text).
+    TranscribeModel,
+    /// What translates a message (text): a command; empty for none.
+    TranslateCommand,
+    /// The language translated into (text).
+    TranslateLanguage,
+    /// Whether transcripts and translations are kept in a file across restarts.
+    KeepNotes,
     Keys,
     Encryption,
     Profile,
@@ -583,7 +593,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 26] = [
+    pub const ALL: [Setting; 31] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -602,6 +612,11 @@ impl Setting {
         Setting::Keywords,
         Setting::DownloadDir,
         Setting::AudioPlayer,
+        Setting::TranscribeCommand,
+        Setting::TranscribeModel,
+        Setting::TranslateCommand,
+        Setting::TranslateLanguage,
+        Setting::KeepNotes,
         Setting::Keys,
         Setting::Doctor,
         Setting::Profile,
@@ -642,6 +657,11 @@ impl Setting {
             Setting::Keywords => "Notification keywords",
             Setting::DownloadDir => "Download folder",
             Setting::AudioPlayer => "Audio player",
+            Setting::TranscribeCommand => "Transcribe with",
+            Setting::TranscribeModel => "Whisper model",
+            Setting::TranslateCommand => "Translate with",
+            Setting::TranslateLanguage => "Translate into",
+            Setting::KeepNotes => "Keep transcripts",
             Setting::Keys => "Key bindings",
             Setting::Profile => "Profile",
             Setting::Encryption => "Encryption",
@@ -690,6 +710,21 @@ impl Setting {
             }
             Setting::AudioPlayer => {
                 "What x plays voice and audio with: auto, or a command (the file is added). Enter to change."
+            }
+            Setting::TranscribeCommand => {
+                "What turns voice and audio into text under the message, on this machine: auto (whisper-cli with the model below), or a command (the file is added, the text is what it prints). Enter to change."
+            }
+            Setting::TranscribeModel => {
+                "The model file whisper-cli is given, such as ~/models/ggml-base.bin. Without one, auto does not offer transcribing. Enter to change."
+            }
+            Setting::TranslateCommand => {
+                "A command that reads a message and prints its translation; {lang} in it is the language below. With a service, the text of encrypted rooms leaves this machine. Empty: not offered. Enter to change."
+            }
+            Setting::TranslateLanguage => {
+                "The language messages are translated into, as your command wants it (en, German). Enter to change."
+            }
+            Setting::KeepNotes => {
+                "On: transcripts and translations survive a restart, in a file that holds them unencrypted. Off: they last while the app runs, and the file is removed."
             }
             Setting::Keys => {
                 "Edit key bindings or switch presets (F1 still opens the key overview)."

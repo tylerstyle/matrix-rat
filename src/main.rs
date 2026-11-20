@@ -33,6 +33,7 @@ mod matrix;
 mod menu;
 mod modal;
 mod model;
+mod notes;
 mod notify;
 mod palette;
 mod paths;
@@ -45,6 +46,7 @@ mod termquery;
 #[cfg(test)]
 mod testbus;
 mod text;
+mod textcmd;
 mod theme;
 mod ui;
 mod upload;

@@ -162,6 +162,7 @@ impl App {
             can_pin,
             can_ban_sender,
             audio: self.audio_caps(),
+            notes: self.note_caps(),
         };
         let items = menu::message_items(message, facts, &self.keymap);
         self.show_menu(Target::Message(target), "", items, at);
@@ -291,6 +292,7 @@ impl App {
                 | HitId::Reaction(index, _)
                 | HitId::Image(index)
                 | HitId::PlayMedia(index)
+                | HitId::NoteButton(index, _)
                 | HitId::Thread(index)
                 | HitId::CopyCode(index, _)
                 | HitId::ReplyQuote(index),

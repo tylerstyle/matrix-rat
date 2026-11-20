@@ -406,6 +406,8 @@ pub struct MessageFacts {
     pub can_ban_sender: bool,
     /// Whether the message plays in here, or plays now (see `AudioCaps`).
     pub audio: crate::palette::AudioCaps,
+    /// What transcribing and translating would do with the message (see `NoteCaps`).
+    pub notes: crate::palette::NoteCaps,
 }
 
 /// The entries for a message. Empty for lines that are not messages.
@@ -498,6 +500,29 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
             "Play audio"
         };
         items.push(Item::action(keys, label, Timeline, Action::PlayAudio));
+    }
+    // Text under the message, for the user only: offered where it is set up and the
+    // message is one for it.
+    for (offer, kind, action) in [
+        (
+            facts.notes.transcribe,
+            crate::notes::NoteKind::Transcript,
+            Action::Transcribe,
+        ),
+        (
+            facts.notes.translate,
+            crate::notes::NoteKind::Translation,
+            Action::Translate,
+        ),
+    ] {
+        let label = match (offer, kind) {
+            (crate::palette::NoteOffer::Run, crate::notes::NoteKind::Transcript) => "Transcribe",
+            (crate::palette::NoteOffer::Run, crate::notes::NoteKind::Translation) => "Translate",
+            _ => offer.title(kind),
+        };
+        if offer.possible() {
+            items.push(Item::action(keys, label, Timeline, action));
+        }
     }
     if !deleted {
         let open = if let Some(file) = &message.file {
@@ -843,6 +868,10 @@ mod tests {
         can_pin: false,
         can_ban_sender: false,
         audio: crate::palette::AudioCaps::NONE,
+        notes: crate::palette::NoteCaps {
+            transcribe: crate::palette::NoteOffer::NotThis,
+            translate: crate::palette::NoteOffer::NotThis,
+        },
     };
 
     #[test]

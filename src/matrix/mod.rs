@@ -283,6 +283,21 @@ pub enum MatrixCmd {
     },
     /// Give up the download of [`MatrixCmd::FetchAudio`]; it is not answered.
     CancelAudio,
+    /// Download a voice or audio message into a private file in `dir`, to be
+    /// transcribed, under the limits of [`MatrixCmd::FetchAudio`] but beside it (what
+    /// plays is left alone, and several may be on their way); answered with
+    /// [`MatrixEvent::SpeechFetched`].
+    FetchSpeech {
+        /// The app's number for the run.
+        id: u64,
+        file: crate::model::Attachment,
+        dir: std::path::PathBuf,
+    },
+    /// Give up the download of [`MatrixCmd::FetchSpeech`] with this number; it is not
+    /// answered.
+    CancelSpeech {
+        id: u64,
+    },
     /// Ask the homeserver what a web address is about; answered with
     /// [`MatrixEvent::LinkPreview`]. Only sent when the user turned link previews on.
     LinkPreview {
@@ -544,6 +559,8 @@ impl MatrixCmd {
             // The source of an encrypted file carries its key; the folder is a path.
             Self::FetchAudio { id, .. } => ("FetchAudio", vec![Some(format!("sound {id}"))]),
             Self::CancelAudio => ("CancelAudio", vec![]),
+            Self::FetchSpeech { id, .. } => ("FetchSpeech", vec![Some(format!("run {id}"))]),
+            Self::CancelSpeech { id } => ("CancelSpeech", vec![Some(format!("run {id}"))]),
             Self::OpenThread { room_id, root, .. } => ("OpenThread", vec![id(room_id), id(root)]),
             Self::InThread { root, command } => {
                 ("InThread", vec![id(root), Some(command.shown(ids))])
@@ -894,6 +911,12 @@ pub enum MatrixEvent {
         id: u64,
         result: Result<crate::audio::TempAudio, String>,
     },
+    /// Outcome of [`MatrixCmd::FetchSpeech`]: the private copy to transcribe (removed
+    /// when dropped), or a short reason for the user.
+    SpeechFetched {
+        id: u64,
+        result: Result<crate::audio::TempAudio, String>,
+    },
     /// Outcome of [`MatrixCmd::LinkPreview`]: what the server said about the address
     /// (`None`: nothing, for whatever reason).
     LinkPreview {
@@ -1162,6 +1185,10 @@ impl MatrixEvent {
             Self::AudioFetched { id, result } => (
                 "AudioFetched",
                 vec![Some(format!("sound {id}")), ok(result.is_ok())],
+            ),
+            Self::SpeechFetched { id, result } => (
+                "SpeechFetched",
+                vec![Some(format!("run {id}")), ok(result.is_ok())],
             ),
             Self::UploadLimit(bytes) => ("UploadLimit", vec![Some(bytes.to_string())]),
             // The reason names a file.
@@ -2433,6 +2460,18 @@ mod tests {
             room_id: "!room:example.org".into(),
         });
         assert_eq!(format!("{command:?}"), "Manage(Leave)");
+        // A sound to transcribe: its number, and no reason as anything worded it.
+        let event = MatrixEvent::SpeechFetched {
+            id: 3,
+            result: Err("the download from private.example.org failed".into()),
+        };
+        let shown = format!("{event:?} {}", event.describe());
+        assert!(shown.contains("SpeechFetched(run 3"), "{shown}");
+        assert!(!shown.contains("private"), "{shown}");
+        assert_eq!(
+            format!("{:?}", MatrixCmd::CancelSpeech { id: 3 }),
+            "CancelSpeech(run 3)"
+        );
         // What `serve` asks for and is told: no room, no text, no event, no reason.
         let command = MatrixCmd::Agent(AgentCmd::Send {
             request: 4,

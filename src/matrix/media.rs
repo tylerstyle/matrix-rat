@@ -1,7 +1,7 @@
 //! Fetching pictures: a download that stops at a byte limit, the SDK's cache for what
 //! passed it, decoding on a blocking thread, pixels handed to the UI.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -65,6 +65,9 @@ pub struct Media {
     /// The download of the sound to play, if one is on its way: one at a time, given
     /// up when another is asked for, when the app cancels it, and with the session.
     audio: Mutex<JoinSet<()>>,
+    /// The downloads of sounds to transcribe, by the app's number for each: given up
+    /// one by one when the app cancels, and all with the session.
+    speech: Mutex<(JoinSet<()>, HashMap<u64, tokio::task::AbortHandle>)>,
 }
 
 impl Media {
@@ -79,6 +82,7 @@ impl Media {
             save_slot: Arc::new(Semaphore::new(1)),
             fetches: Mutex::default(),
             audio: Mutex::default(),
+            speech: Mutex::default(),
         }
     }
 
@@ -251,6 +255,38 @@ impl Media {
     /// Gives up the download of the sound to play, if one is on its way.
     pub fn cancel_audio(&self) {
         self.audio.lock().expect("not poisoned").abort_all();
+    }
+}
+
+impl Media {
+    /// As [`Media::fetch_audio`], for a sound that is to be transcribed: beside what is
+    /// fetched to be played, and beside others of its kind. The outcome arrives as
+    /// [`MatrixEvent::SpeechFetched`]; a download given up is not answered.
+    pub fn fetch_speech(&self, id: u64, file: Attachment, dir: PathBuf) {
+        let client = self.client.clone();
+        let events = self.events.clone();
+        let mut speech = self.speech.lock().expect("not poisoned");
+        let (tasks, handles) = &mut *speech;
+        while tasks.try_join_next().is_some() {}
+        handles.retain(|_, handle| !handle.is_finished());
+        let handle = tasks.spawn(async move {
+            let result =
+                match tokio::time::timeout(AUDIO_TIMEOUT, load_audio(&client, &file, dir)).await {
+                    Ok(result) => result,
+                    Err(_) => Err("the download took too long".to_owned()),
+                };
+            let _ = events.send(MatrixEvent::SpeechFetched { id, result });
+        });
+        handles.insert(id, handle);
+    }
+
+    /// Gives up the download of the sound to transcribe with this number, if it is on
+    /// its way.
+    pub fn cancel_speech(&self, id: u64) {
+        let mut speech = self.speech.lock().expect("not poisoned");
+        if let Some(handle) = speech.1.remove(&id) {
+            handle.abort();
+        }
     }
 }
 
@@ -891,6 +927,43 @@ mod tests {
             attachment("mxc://example.org/endless", None),
             dir.clone(),
         );
+        media.cancel_audio();
+        let late = tokio::time::timeout(Duration::from_millis(500), answers.recv()).await;
+        assert!(late.is_err(), "a download given up is not answered");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().next().is_none(),
+            "nothing is left"
+        );
+
+        // A sound to transcribe is fetched beside the one to play and beside others
+        // of its kind; one is given up by its number, and then not answered.
+        media.fetch_audio(
+            4,
+            attachment("mxc://example.org/endless", None),
+            dir.clone(),
+        );
+        media.fetch_speech(
+            5,
+            attachment("mxc://example.org/endless", None),
+            dir.clone(),
+        );
+        media.fetch_speech(6, attachment("mxc://example.org/secret", None), dir.clone());
+        let answer = tokio::time::timeout(Duration::from_secs(10), answers.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match answer {
+            MatrixEvent::SpeechFetched {
+                id: 6,
+                result: Ok(sound),
+            } => {
+                assert_eq!(std::fs::read(sound.path()).unwrap(), plain);
+                assert_eq!(sound.path().parent(), Some(dir.as_path()));
+            }
+            other => panic!("{}", other.describe()),
+        }
+        media.cancel_speech(5);
+        media.cancel_speech(99);
         media.cancel_audio();
         let late = tokio::time::timeout(Duration::from_millis(500), answers.recv()).await;
         assert!(late.is_err(), "a download given up is not answered");

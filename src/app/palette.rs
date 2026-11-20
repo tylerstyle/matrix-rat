@@ -101,6 +101,11 @@ impl App {
             download_dir: crate::files::display(&self.download_dir()),
             audio_player: self.audio.setting_text(),
             audio: self.audio_caps(),
+            notes: self.note_caps(),
+            transcribe_command: self.notes.transcribe_text(),
+            translate_command: self.notes.translate_text(),
+            translate_language: crate::notes::language(&self.notes.translate_language),
+            keep_notes: self.notes.keep,
             verify_status: crate::verify::setting_text(self.verify.security),
             backup_status: crate::devices::backup_setting_text(self.verify.security),
             ignored_users: self.ignored_users.len(),
@@ -281,6 +286,7 @@ impl App {
             | Setting::ReadMarkers
             | Setting::RoomPreviews
             | Setting::LinkPreviews
+            | Setting::KeepNotes
             | Setting::Notifications => {
                 self.change_setting(setting, 0);
                 self.show_toast(format!(
@@ -289,14 +295,19 @@ impl App {
                     self.setting_value(setting)
                 ));
             }
-            Setting::DownloadDir | Setting::AudioPlayer => {
+            Setting::DownloadDir
+            | Setting::AudioPlayer
+            | Setting::TranscribeCommand
+            | Setting::TranscribeModel
+            | Setting::TranslateCommand
+            | Setting::TranslateLanguage => {
                 let mut menu = SettingsMenu::select(setting, self.has_theme_pair());
-                let text = if setting == Setting::AudioPlayer {
-                    self.audio.setting.as_str()
+                let text = if setting == Setting::DownloadDir {
+                    self.download_dir.clone()
                 } else {
-                    self.download_dir.as_str()
+                    self.setting_text(setting)
                 };
-                menu.editing = Some(LineEdit::from(text));
+                menu.editing = Some(LineEdit::from(text.as_str()));
                 self.open_modal(Modal::Settings(menu));
             }
             Setting::Keys => self.change_setting(Setting::Keys, 0),

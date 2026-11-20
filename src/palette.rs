@@ -187,6 +187,67 @@ impl AudioCaps {
     };
 }
 
+/// What transcribing or translating would do with the selected message now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NoteOffer {
+    /// Not set up on this system; why, in our own words.
+    Unavailable(&'static str),
+    /// Set up, but no message for it is selected.
+    #[default]
+    NotThis,
+    /// Run the program.
+    Run,
+    /// It runs: stop it.
+    Stop,
+    /// Its text is shown: hide it.
+    Hide,
+    /// Its text is hidden: show it.
+    Show,
+}
+
+impl NoteOffer {
+    /// Whether the action would do something.
+    pub fn possible(self) -> bool {
+        !matches!(self, NoteOffer::Unavailable(_) | NoteOffer::NotThis)
+    }
+
+    /// What the menu and the palette call the action now.
+    pub fn title(self, kind: crate::notes::NoteKind) -> &'static str {
+        use crate::notes::NoteKind::{Transcript, Translation};
+        match (self, kind) {
+            (NoteOffer::Stop, Transcript) => "Stop transcribing",
+            (NoteOffer::Stop, Translation) => "Stop translating",
+            (NoteOffer::Hide, Transcript) => "Hide transcript",
+            (NoteOffer::Hide, Translation) => "Hide translation",
+            (NoteOffer::Show, Transcript) => "Show transcript",
+            (NoteOffer::Show, Translation) => "Show translation",
+            (_, Transcript) => "Transcribe voice or audio message",
+            (_, Translation) => "Translate message",
+        }
+    }
+
+    /// The word on the message's button and in the status line.
+    pub fn word(self, kind: crate::notes::NoteKind) -> &'static str {
+        use crate::notes::NoteKind::{Transcript, Translation};
+        match (self, kind) {
+            (NoteOffer::Stop, _) => "stop",
+            (NoteOffer::Hide, Transcript) => "hide transcript",
+            (NoteOffer::Hide, Translation) => "hide translation",
+            (NoteOffer::Show, Transcript) => "show transcript",
+            (NoteOffer::Show, Translation) => "show translation",
+            (_, Transcript) => "transcribe",
+            (_, Translation) => "translate",
+        }
+    }
+}
+
+/// What `X` and `L` would do: transcripts and translations under messages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoteCaps {
+    pub transcribe: NoteOffer,
+    pub translate: NoteOffer,
+}
+
 /// Source message details when the palette is acting as a "Forward to room" picker.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ForwardTarget {
@@ -368,6 +429,13 @@ pub struct PaletteContext {
     /// What the settings show for the audio player.
     pub audio_player: String,
     pub audio: AudioCaps,
+    pub notes: NoteCaps,
+    /// What the settings show for the commands that transcribe and translate, the
+    /// language translated into, and whether notes are kept in a file.
+    pub transcribe_command: String,
+    pub translate_command: String,
+    pub translate_language: String,
+    pub keep_notes: bool,
     pub verify_status: &'static str,
     pub backup_status: &'static str,
     pub ignored_users: usize,
@@ -1057,6 +1125,8 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Save | Action::OpenExternal => sel.can_save,
         Action::PlayAudio => ctx.audio.can_play || ctx.audio.active,
         Action::PauseAudio => ctx.audio.can_pause,
+        Action::Transcribe => ctx.notes.transcribe.possible(),
+        Action::Translate => ctx.notes.translate.possible(),
         Action::Open => sel.can_open,
         Action::OpenThread => sel.can_open_thread,
         Action::JumpToReply => sel.can_jump_to_reply,
@@ -1139,6 +1209,15 @@ fn action_meta<'a>(
             }),
             &["sound", "voice message"],
         ),
+        // Greyed with the reason where it is not set up.
+        Action::Transcribe => (
+            note_title(ctx.notes.transcribe, crate::notes::NoteKind::Transcript),
+            &["speech to text", "voice message", "whisper", "transcript"],
+        ),
+        Action::Translate => (
+            note_title(ctx.notes.translate, crate::notes::NoteKind::Translation),
+            &["translation", "language"],
+        ),
         Action::OpenThread => (Cow::Borrowed(description), &["thread", "replies"]),
         Action::JumpToReply => (Cow::Borrowed(description), &["parent", "original", "reply"]),
         Action::Attach => (
@@ -1177,6 +1256,15 @@ fn action_meta<'a>(
     }
 }
 
+/// The palette's name for transcribing or translating: what it would do now, or why it
+/// is not on offer.
+fn note_title(offer: NoteOffer, kind: crate::notes::NoteKind) -> Cow<'static, str> {
+    match offer {
+        NoteOffer::Unavailable(why) => Cow::Owned(format!("{} ({why})", offer.title(kind))),
+        offer => Cow::Borrowed(offer.title(kind)),
+    }
+}
+
 fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
     if action == Action::WithdrawKnock {
         return ctx.in_knock;
@@ -1195,6 +1283,8 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::OpenExternal
                 | Action::PlayAudio
                 | Action::PauseAudio
+                | Action::Transcribe
+                | Action::Translate
                 | Action::OpenThread
                 | Action::JumpToReply
                 | Action::PinMessage
@@ -1567,6 +1657,41 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::TranscribeCommand)),
+            title: Setting::TranscribeCommand.label(),
+            hint: Some(ctx.transcribe_command.clone()),
+            aliases: &["speech to text", "whisper", "transcript", "setting"],
+            enabled: true,
+        },
+        SettingItem {
+            target: Target::Action(Action::Setting(Setting::TranscribeModel)),
+            title: Setting::TranscribeModel.label(),
+            hint: None,
+            aliases: &["speech to text", "transcribe", "ggml", "setting"],
+            enabled: true,
+        },
+        SettingItem {
+            target: Target::Action(Action::Setting(Setting::TranslateCommand)),
+            title: Setting::TranslateCommand.label(),
+            hint: Some(ctx.translate_command.clone()),
+            aliases: &["translation", "translator", "setting"],
+            enabled: true,
+        },
+        SettingItem {
+            target: Target::Action(Action::Setting(Setting::TranslateLanguage)),
+            title: Setting::TranslateLanguage.label(),
+            hint: Some(ctx.translate_language.clone()),
+            aliases: &["translation", "language", "setting"],
+            enabled: true,
+        },
+        SettingItem {
+            target: Target::Action(Action::Setting(Setting::KeepNotes)),
+            title: Setting::KeepNotes.label(),
+            hint: Some(switch(ctx.keep_notes)),
+            aliases: &["keep translations", "notes file", "transcript", "setting"],
+            enabled: true,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::Keys)),
             title: Setting::Keys.label(),
             hint: Some(ctx.keymap.preset_summary()),
@@ -1808,6 +1933,11 @@ mod tests {
             download_dir: "~/Downloads".to_owned(),
             audio_player: "auto: mpv".to_owned(),
             audio: AudioCaps::default(),
+            notes: NoteCaps::default(),
+            transcribe_command: "auto: whisper-cli".to_owned(),
+            translate_command: "(not set)".to_owned(),
+            translate_language: "en".to_owned(),
+            keep_notes: false,
             verify_status: "unknown",
             backup_status: "unknown",
             ignored_users: 0,

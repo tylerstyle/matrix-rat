@@ -173,6 +173,11 @@ pub enum Action {
     PauseAudio,
     /// Jump back (`Left`) or forward (`Right`) in what plays (mpv only).
     SeekAudio(Dir),
+    /// Transcribe the selected voice or audio message with a local program: the text
+    /// goes under it, for the user only. Again: stop it, hide the text, show it.
+    Transcribe,
+    /// Translate the selected message with the user's command, in the same manner.
+    Translate,
     /// Show what the app found where it runs (terminal, pictures, the desktop's
     /// helpers, keys, config), to be copied into a bug report.
     Doctor,
@@ -233,6 +238,8 @@ impl Action {
             | Action::PlayAudio
             | Action::PauseAudio
             | Action::SeekAudio(_)
+            | Action::Transcribe
+            | Action::Translate
             // The room as the open one.
             | Action::AcceptInvite
             | Action::DeclineInvite

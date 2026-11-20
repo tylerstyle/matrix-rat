@@ -93,6 +93,9 @@ pub enum HitId {
     Image(usize),
     /// The play badge / summary line of an audio, voice, or video message.
     PlayMedia(usize),
+    /// The button on a message that transcribes or translates it (or stops that,
+    /// hides or shows the text): message index and which of the two.
+    NoteButton(usize, crate::notes::NoteKind),
     /// The "copy" label on the first line of a code block: message index and the
     /// block's index among that message's code blocks.
     CopyCode(usize, usize),
