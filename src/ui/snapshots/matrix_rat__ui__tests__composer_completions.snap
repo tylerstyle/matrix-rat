@@ -29,6 +29,6 @@ expression: "render(&mut app, 100, 30)"
 "│                      ││  Sh│  @room  Notify everyone in this room│eek 🐀                         │" Hidden by multi-width symbols: [(73, " ")]
 "│                      │╰ car╰─────────────────────────────────────╯───────────────────────────────╯"
 "│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
-"│                      ││ hey @                                                              📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│                      ││ hey @                                                              📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ● demo data  Enter send  Shift-Enter line break  Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

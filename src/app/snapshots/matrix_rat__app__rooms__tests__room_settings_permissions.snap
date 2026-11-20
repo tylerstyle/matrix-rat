@@ -29,6 +29,6 @@ expression: text
 "│            │ Members  ⌕ type to filter…                                             │            │"
 "│            │   me (you)                  @me:example.org                      admin │────────────╯"
 "│            │                                                                        │──── M  me ─╮"
-"│            │ Enter to change who can send, invite, kick, ban, redact, and edit.     │      📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│            │ Enter to change who can send, invite, kick, ban, redact, and edit.     │      📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰────────────╰───────────────────────────────────────── ↑↓ select · Enter · Esc close ╯────────────╯"
 " ◌ connecting…   Marked as a direct chat                          F1 help  F2 settings  F3 rat-dark "

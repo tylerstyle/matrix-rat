@@ -23,6 +23,6 @@ expression: "render(&mut app, 80, 24)"
 "│              ││  Shipping a TUI client on top of it this week 🐀            ┃│" Hidden by multi-width symbols: [(65, " ")]
 "│              │╰ carol is typing… ────────────────────────────────────────────╯"
 "│              │╭ 3 Message ───────────────────────────────────────────────────╮"
-"│              ││ Type a message…                                        📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
+"│              ││ Type a message…                                        📎 🙂 │" Hidden by multi-width symbols: [(74, " "), (77, " ")]
 "╰──────────────╯╰──────────────────────────────────────────────────────────────╯"
 " ● demo data  Enter send      Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

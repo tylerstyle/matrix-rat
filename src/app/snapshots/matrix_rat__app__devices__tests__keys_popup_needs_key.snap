@@ -29,6 +29,6 @@ expression: text
 "│                      ││  device to read it                                                       │"
 "│                      │╰──────────────────────────────────────────────────────────────────────────╯"
 "│                      │╭ 3 Message ──────────────────────────────────────────────────── A  alice ─╮"
-"│                      ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│                      ││ Type a message…                                                    📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ◌ connecting…  ⚠ unverified device — verify   Nothing to unlock: F1 help  F2 settings  F3 rat-dark "

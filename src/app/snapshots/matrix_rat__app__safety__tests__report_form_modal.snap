@@ -29,6 +29,6 @@ expression: "screen(&mut app, &mut terminal)"
 "│                      ││  hello from bob                                                          │"
 "│                      │╰──────────────────────────────────────────────────────────────────────────╯"
 "│                      │╭ 3 Message ──────────────────────────────────────────────────── A  alice ─╮"
-"│                      ││ Click here or press Alt-3 to write                                 📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│                      ││ Click here or press Alt-3 to write                                 📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ◌ connecting…  Enter reply  t thread  e edit  r react            F1 help  F2 settings  F3 rat-dark "

@@ -32,6 +32,7 @@ mod thread_list;
 mod title;
 mod unread;
 mod verify;
+mod voice;
 
 pub use playback::AudioView;
 
@@ -511,7 +512,8 @@ impl App {
         let mut app = Self::new_in_scheme(config, themes_dir, matrix, ColorScheme::Dark);
         // Tests may well run inside a desktop that would obey: no window is raised.
         app.notification_click_command = None;
-        // Nor do they depend on the players the machine has, or on running over SSH.
+        // Nor do they depend on the players and recorders the machine has, or on
+        // running over SSH.
         app.audio = playback::AudioState::default();
         app
     }
@@ -549,7 +551,7 @@ impl App {
         app.found.secret_store = config.secret_store;
         app.found.ignored_settings = config.ignored.clone();
         app.download_dir = config.download_dir.clone();
-        app.audio = playback::AudioState::new(&config.audio_player);
+        app.audio = playback::AudioState::new(&config.audio_player, &config.audio_recorder);
         app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
         app.link_previews = config.link_previews;
@@ -1074,6 +1076,7 @@ impl App {
             Setting::WindowTitle => switch(self.window_title),
             Setting::DownloadDir => crate::files::display(&self.download_dir()),
             Setting::AudioPlayer => self.audio.setting_text(),
+            Setting::AudioRecorder => self.audio.recorder_setting_text(),
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Profile => self.own_profile_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
@@ -1201,6 +1204,13 @@ impl App {
                     && let Some(Modal::Settings(menu)) = &mut self.modal
                 {
                     menu.editing = Some(LineEdit::from(self.audio.setting.as_str()));
+                }
+            }
+            Setting::AudioRecorder => {
+                if delta == 0
+                    && let Some(Modal::Settings(menu)) = &mut self.modal
+                {
+                    menu.editing = Some(LineEdit::from(self.audio.recorder_setting.as_str()));
                 }
             }
             Setting::Keys => {
@@ -3042,6 +3052,11 @@ impl App {
                     self.begin_attach();
                 }
             }
+            Action::RecordVoice => {
+                if self.modal.is_none() {
+                    self.record_voice();
+                }
+            }
             Action::PastePicture => {
                 if self.modal.is_none() {
                     self.request_paste_picture();
@@ -3337,10 +3352,10 @@ impl App {
                 KeyCode::Esc => menu.editing = None,
                 KeyCode::Enter => {
                     let text = menu.editing.take().unwrap_or_default();
-                    if menu.current() == Setting::AudioPlayer {
-                        self.set_audio_player(&text);
-                    } else {
-                        self.set_download_dir(&text);
+                    match menu.current() {
+                        Setting::AudioPlayer => self.set_audio_player(&text),
+                        Setting::AudioRecorder => self.set_audio_recorder(&text),
+                        _ => self.set_download_dir(&text),
                     }
                 }
                 _ => {
@@ -6457,7 +6472,7 @@ mod tests {
     #[test]
     fn emoji_picker_by_mouse() {
         let (mut app, mut terminal) = drawn();
-        let (col, row) = find(&terminal, "☺");
+        let (col, row) = find(&terminal, "🙂");
         app.on_event(click(col, row));
         assert!(matches!(app.modal, Some(Modal::Emoji(_))));
         redraw(&mut app, &mut terminal);

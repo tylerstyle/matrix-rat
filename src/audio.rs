@@ -9,7 +9,8 @@
 //!
 //! This file holds the pure parts: which player, with which arguments, and how a
 //! length, a waveform and a position are shown. [`temp`] keeps the files and sockets,
-//! [`ipc`] speaks to mpv, [`play`] runs the player.
+//! [`ipc`] speaks to mpv, [`play`] runs the player. [`recorder`] chooses the programs
+//! a voice message is recorded with.
 
 mod child;
 mod ipc;
@@ -219,16 +220,7 @@ pub fn choose(
     }
     let words = shlex::split(setting.trim()).ok_or(NoPlayer::BadCommand)?;
     let (first, args) = words.split_first().ok_or(NoPlayer::BadCommand)?;
-    let program = if first.contains('/') {
-        let named = match (first.strip_prefix("~/"), home) {
-            (Some(rest), Some(home)) => Path::new(home).join(rest),
-            _ => PathBuf::from(first),
-        };
-        is_executable(&named).then_some(named)
-    } else {
-        find_on_path(first, path)
-    }
-    .ok_or(NoPlayer::Missing)?;
+    let program = named_program(first, path, home).ok_or(NoPlayer::Missing)?;
     // A known player under the user's own arguments is still that player: mpv gets
     // its control socket.
     let kind = Kind::KNOWN
@@ -250,6 +242,21 @@ pub fn choose_here(setting: &str) -> Result<Player, NoPlayer> {
         std::env::var_os("PATH").as_deref(),
         std::env::var_os("HOME").as_deref(),
     )
+}
+
+/// The program a command of the user's starts with: looked up on `path`, unless it
+/// names a file (`~/bin/play`, with `home` for `~`). `None`: not there, or not to be
+/// run.
+fn named_program(first: &str, path: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    if first.contains('/') {
+        let named = match (first.strip_prefix("~/"), home) {
+            (Some(rest), Some(home)) => Path::new(home).join(rest),
+            _ => PathBuf::from(first),
+        };
+        is_executable(&named).then_some(named)
+    } else {
+        find_on_path(first, path)
+    }
 }
 
 /// The first executable file called `name` in a folder of `path`. Relative folders

@@ -1162,7 +1162,9 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected();
         drain(&mut commands);
         app.on_event(key(KeyCode::F(2)));
-        let text = screen(&mut app, &mut terminal);
+        // On a screen tall enough for the whole list of settings: the row is clicked.
+        let mut tall = Terminal::new(TestBackend::new(100, 34)).unwrap();
+        let text = screen(&mut app, &mut tall);
         find(&text, "Enter to view");
         let (col, row) = find(&text, "Sessions");
         app.on_event(click(col, row));

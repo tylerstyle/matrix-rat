@@ -29,6 +29,6 @@ expression: "screen(&mut app, &mut terminal)"
 "│                      ││                                                                          │"
 "│                      │╰──────────────────────────────────────────────────────────────────────────╯"
 "│                      │╭ 3 Message ─────────────────────────────────────────────────────── M  me ─╮"
-"│                      ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│                      ││ Type a message…                                                    📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ◌ connecting…  Enter send  Shift-Enter line break                F1 help  F2 settings  F3 rat-dark "

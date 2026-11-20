@@ -232,7 +232,8 @@ impl App {
             !room.is_pending() && !matches!(self.compose_mode, super::ComposeMode::Edit(_));
         let has_draft = !self.composer.is_empty() || !self.attachments().is_empty();
         self.set_focus(Pane::Composer);
-        let items = menu::composer_items(can_attach, has_draft, &self.keymap);
+        let can_record = self.recording_refused().is_none();
+        let items = menu::composer_items(can_attach, can_record, has_draft, &self.keymap);
         self.show_menu(target, "", items, at);
     }
 

@@ -13,6 +13,6 @@ expression: "render(&mut app, 100, 14)"
 "│ C  carol       │  Cancel                                                        │               ┃│"
 "│ Rooms          │                                                                │────────────────╯"
 "│ D  design      ╰────────────────────────── Tab move · Enter choose · Esc cancel ╯──────── M  me ─╮"
-"│ N  nixos             ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│ N  nixos             ││ Type a message…                                                    📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ● demo data  ⚠ unverified device — verify  Enter send            F1 help  F2 settings  F3 rat-dark "

@@ -29,6 +29,6 @@ expression: "screen(&mut app, &mut terminal)"
 "│               │                                                                  │               │"
 "│               │                                                                  │───────────────╯"
 "│               │                                                                  │──── A  alice ─╮"
-"│               │ Enter to run · c to copy user ID.                                │         📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│               │ Enter to run · c to copy user ID.                                │         📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰───────────────╰─────────────────────── ↑↓ select · Enter · c copy ID · Esc close ╯───────────────╯"
 " ◌ connecting…  Enter send  Shift-Enter line break                F1 help  F2 settings  F3 rat-dark "

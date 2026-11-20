@@ -558,6 +558,8 @@ pub enum Setting {
     DownloadDir,
     /// What plays voice and audio messages (text, like the download folder).
     AudioPlayer,
+    /// What records voice messages (text, like the audio player).
+    AudioRecorder,
     Keys,
     Encryption,
     Profile,
@@ -583,7 +585,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 26] = [
+    pub const ALL: [Setting; 27] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -602,6 +604,7 @@ impl Setting {
         Setting::Keywords,
         Setting::DownloadDir,
         Setting::AudioPlayer,
+        Setting::AudioRecorder,
         Setting::Keys,
         Setting::Doctor,
         Setting::Profile,
@@ -642,6 +645,7 @@ impl Setting {
             Setting::Keywords => "Notification keywords",
             Setting::DownloadDir => "Download folder",
             Setting::AudioPlayer => "Audio player",
+            Setting::AudioRecorder => "Voice recorder",
             Setting::Keys => "Key bindings",
             Setting::Profile => "Profile",
             Setting::Encryption => "Encryption",
@@ -690,6 +694,9 @@ impl Setting {
             }
             Setting::AudioPlayer => {
                 "What x plays voice and audio with: auto, or a command (the file is added). Enter to change."
+            }
+            Setting::AudioRecorder => {
+                "What records voice messages: auto, or a command that writes raw sound (16-bit, mono, 48 kHz) to its output. Enter to change."
             }
             Setting::Keys => {
                 "Edit key bindings or switch presets (F1 still opens the key overview)."

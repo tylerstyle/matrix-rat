@@ -18,6 +18,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::App;
 use crate::action::Action;
+use crate::audio::recorder::{NoRecorder, Recorder};
 use crate::audio::{
     self, Control, End, NoPlayer, Player, PlayerEvent, PlayerUpdate, Reported, TempAudio,
 };
@@ -33,8 +34,19 @@ pub struct AudioState {
     pub setting: String,
     /// What the setting comes to on this system; looked up again when it changes.
     player: Result<Player, NoPlayer>,
-    /// Over SSH a sound would play on the far machine: playing is not offered.
-    ssh: bool,
+    /// The `audio_recorder` setting as written.
+    pub recorder_setting: String,
+    /// What records a voice message here, or why nothing does; looked up again when
+    /// the setting changes (see `voice.rs`).
+    pub(super) recorder: Result<Recorder, NoRecorder>,
+    /// A recording runs: the microphone button shows a stop sign. Nothing sets it yet.
+    pub(super) recording: bool,
+    /// Where tests look for the recorder: nothing of the machine they run on.
+    #[cfg(test)]
+    pub(super) recorder_env: audio::recorder::Env,
+    /// Over SSH a sound would play on the far machine, and its microphone would
+    /// record: neither is offered.
+    pub(super) ssh: bool,
     /// The private folder for the copies and mpv's sockets; set by the event loop.
     dir: Option<PathBuf>,
     next_id: u64,
@@ -51,6 +63,11 @@ impl Default for AudioState {
         Self {
             setting: "auto".to_owned(),
             player: Err(NoPlayer::NoneFound),
+            recorder_setting: "auto".to_owned(),
+            recorder: Err(NoRecorder::NoMicrophone),
+            recording: false,
+            #[cfg(test)]
+            recorder_env: audio::recorder::Env::default(),
             ssh: false,
             dir: None,
             next_id: 0,
@@ -68,6 +85,9 @@ impl fmt::Debug for AudioState {
         f.debug_struct("AudioState")
             .field("auto", &audio::is_auto(&self.setting))
             .field("player", &self.player)
+            .field("recorder_auto", &audio::is_auto(&self.recorder_setting))
+            .field("recorder", &self.recorder)
+            .field("recording", &self.recording)
             .field("ssh", &self.ssh)
             .field("dir", &self.dir.is_some())
             .field("current", &self.current)
@@ -142,12 +162,14 @@ pub enum AudioView {
 }
 
 impl AudioState {
-    /// For the app on this system: the setting, the player it names, and whether this
-    /// is a session over SSH.
-    pub fn new(setting: &str) -> Self {
+    /// For the app on this system: the settings, the player and the recorder they
+    /// name, and whether this is a session over SSH.
+    pub fn new(setting: &str, recorder_setting: &str) -> Self {
         Self {
             setting: setting.to_owned(),
             player: audio::choose_here(setting),
+            recorder_setting: recorder_setting.to_owned(),
+            recorder: audio::recorder::choose_here(recorder_setting),
             ssh: crate::portal::in_ssh_session(),
             ..Self::default()
         }

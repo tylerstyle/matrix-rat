@@ -10,7 +10,7 @@ expression: "render(&mut app, 100, 30)"
 "│ M  matrix-rat        ││                                                                          │"
 "│ People        ╭ Command palette ─────────────────────────────────────────────────╮               │"
 "│ B  bob        │ ⌕ type a command, room, or theme…                                │ from disk.    │"
-"│ C  carol      │ ──────────────────────────────────────────────────────── 102/102 │               │"
+"│ C  carol      │ ──────────────────────────────────────────────────────── 104/104 │               │"
 "│ Rooms         │ › Action   Emoji picker                                    Alt-E │al for large   │"
 "│ D  design     │   Action   Attach a file                                   Alt-A │erything from  │"
 "│ N  nixos      │   Action   Find a room                                    Ctrl-K │               │"
@@ -29,6 +29,6 @@ expression: "render(&mut app, 100, 30)"
 "│                      ││  Shipping a TUI client on top of it this week 🐀                         │" Hidden by multi-width symbols: [(73, " ")]
 "│                      │╰ carol is typing… ────────────────────────────────────────────────────────╯"
 "│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
-"│                      ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│                      ││ Type a message…                                                    📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ● demo data  Enter send  Shift-Enter line break  Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "
