@@ -319,6 +319,9 @@ pub async fn clear_with<K: KeyringBackend>(
     let _ = std::fs::remove_dir_all(paths.store_dir());
     let _ = std::fs::remove_dir_all(paths.data_dir.join("store.previous"));
     let _ = std::fs::remove_dir_all(paths.search_dir());
+    // Transcripts and translations kept by `keep_notes`: message text in plain form.
+    let _ = std::fs::remove_file(paths.notes_file());
+    let _ = std::fs::remove_file(paths.notes_file().with_extension("json.new"));
 }
 
 fn write_saved(path: &Path, saved: &Saved) -> Result<()> {
@@ -1029,6 +1032,20 @@ mod tests {
         assert!(!paths.store_dir().exists());
         assert!(!paths.data_dir.join("store.previous").exists());
         assert!(!paths.search_dir().exists());
+
+        let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_logout_removes_the_kept_transcripts_and_translations() {
+        let paths = temp_paths("clear-notes");
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(paths.notes_file(), b"{}").unwrap();
+        let half_written = paths.notes_file().with_extension("json.new");
+        std::fs::write(&half_written, b"{").unwrap();
+        clear_with(&paths, None, &TestKeyring::default()).await;
+        assert!(!paths.notes_file().exists());
+        assert!(!half_written.exists());
 
         let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
     }

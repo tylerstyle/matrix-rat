@@ -227,13 +227,28 @@ impl Running {
         }
     }
 
+    /// The program was waited for just now: whatever it started and left behind in
+    /// its group goes too. Call it at once after the wait, with nothing awaited in
+    /// between.
+    fn was_reaped(&mut self) {
+        self.reaped = true;
+        // SAFETY: a plain system call. While anything is left in the group its number
+        // stays taken; if nothing is, the number is free from here on, and that it is
+        // given out again within this instant is as good as impossible.
+        unsafe { libc::kill(-self.group, libc::SIGKILL) };
+    }
+
     /// Feeds the program `input` and reads what it writes, both at once (a program
-    /// that writes before it has read everything must not stop us, nor we it), then
-    /// waits for its end.
+    /// that writes before it has read everything must not stop us, nor we it), and
+    /// waits for its end. The end of the program counts, not the end of its output:
+    /// something it started and left behind can hold the output open for as long as
+    /// it likes, and what the program wrote is there all the same.
     async fn talk(&mut self, input: Option<Vec<u8>>, max: usize) -> Result<Output, Failure> {
         let pipe = self.child.stdin.take();
         let mut stdout = self.child.stdout.take().ok_or(Failure::Start)?;
-        let (kept, truncated) = {
+        let mut kept = Vec::new();
+        let mut status = None;
+        let truncated = {
             let feed = async move {
                 if let (Some(mut pipe), Some(bytes)) = (pipe, input) {
                     // A program that does not read all of it is no error by itself:
@@ -243,27 +258,40 @@ impl Running {
                 }
                 // Dropped here: the program sees the end of its input.
             };
-            let read = read_bounded(&mut stdout, max);
+            let read = read_bounded(&mut stdout, &mut kept, max);
             tokio::pin!(feed);
             tokio::pin!(read);
             let mut fed = false;
             loop {
                 tokio::select! {
-                    out = &mut read => break out,
+                    more = &mut read => break more,
                     () = &mut feed, if !fed => fed = true,
+                    ended = self.child.wait() => {
+                        status = Some(ended);
+                        // What it left behind is killed, so the output ends; what is
+                        // still in the pipe is read. Something that left the group
+                        // and holds the output is not waited for beyond this.
+                        self.was_reaped();
+                        break tokio::time::timeout(READ_GRACE, &mut read)
+                            .await
+                            .unwrap_or(false);
+                    }
                 }
             }
             // What was not fed by now never is: the pipe closes with this block.
         };
-        if truncated {
-            // It would go on writing to nobody.
-            self.kill();
-        }
-        let status = self.child.wait().await;
-        self.reaped = true;
-        // Whatever it started and left behind in its group, if anything.
-        // SAFETY: a plain system call.
-        unsafe { libc::kill(-self.group, libc::SIGKILL) };
+        let status = match status {
+            Some(status) => status,
+            None => {
+                if truncated {
+                    // It would go on writing to nobody.
+                    self.kill();
+                }
+                let status = self.child.wait().await;
+                self.was_reaped();
+                status
+            }
+        };
         let output = Output {
             text: String::from_utf8_lossy(&kept).into_owned(),
             truncated,
@@ -294,19 +322,26 @@ impl Drop for Running {
     }
 }
 
-/// Reads until the end or until more than `max` bytes came: what was read, at most
-/// `max` bytes of it, and whether there was more.
-async fn read_bounded(from: &mut tokio::process::ChildStdout, max: usize) -> (Vec<u8>, bool) {
-    let mut kept = Vec::new();
+/// How long the rest of the output is read for once the program has ended.
+const READ_GRACE: Duration = Duration::from_millis(500);
+
+/// Reads into `kept` until the end or until more than `max` bytes came: at most `max`
+/// bytes are kept; whether there was more. What was read so far stays in `kept` if
+/// this is given up.
+async fn read_bounded(
+    from: &mut tokio::process::ChildStdout,
+    kept: &mut Vec<u8>,
+    max: usize,
+) -> bool {
     let mut buffer = [0u8; 8192];
     loop {
         match from.read(&mut buffer).await {
-            Ok(0) | Err(_) => return (kept, false),
+            Ok(0) | Err(_) => return false,
             Ok(count) => {
                 let room = max - kept.len();
                 if count > room {
                     kept.extend_from_slice(&buffer[..room]);
-                    return (kept, true);
+                    return true;
                 }
                 kept.extend_from_slice(&buffer[..count]);
             }
@@ -605,6 +640,33 @@ pub(crate) mod tests {
         let (task, _cancel, mut done) = start(Vec::new(), Vec::new());
         assert_eq!(outcome(&mut done).await, Err(Failure::Start));
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_program_that_leaves_something_holding_its_output_still_brings_its_text() {
+        let dir = Dir::new("left-open");
+        let child = dir.0.join("child");
+        // What it starts inherits the output and outlives it by far.
+        let body = format!("sleep 600 &\necho $! > '{}'\necho good", child.display());
+        let command = dir.script("wrapper", &body);
+        let (task, _cancel, mut done) = start(
+            vec![Step {
+                command,
+                time: Duration::from_secs(8),
+                max_output: MAX_OUTPUT,
+            }],
+            Vec::new(),
+        );
+        let started = number(&child).await;
+        assert_eq!(
+            outcome(&mut done).await,
+            Ok(Output {
+                text: "good\n".into(),
+                truncated: false
+            })
+        );
+        task.await.unwrap();
+        assert!(stops_running(started).await, "what it left behind is gone");
     }
 
     #[tokio::test]

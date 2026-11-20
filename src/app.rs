@@ -1474,6 +1474,8 @@ impl App {
     pub(crate) fn reset_session(&mut self) {
         // The sound belongs to a room of the session.
         self.stop_audio();
+        // So do the transcripts and translations: they are the account's messages.
+        self.forget_notes();
         self.rooms.clear();
         self.active = 0;
         // The next session starts as every one does: its first room opens by itself.
@@ -2722,6 +2724,11 @@ impl App {
             Action::Suspend => {
                 // Nothing could stop it while the app is away.
                 self.stop_audio();
+                // The programs that transcribe and translate go on: they use neither
+                // the terminal nor the sound device and are in process groups of their
+                // own, and a long transcription is not thrown away for a look at the
+                // shell. Their time limits run on meanwhile and are applied when the
+                // app is back; if the app is killed while away, the system kills them.
                 self.suspend_requested = true;
             }
             Action::FocusNext => self.set_focus(match self.focus {
@@ -3041,6 +3048,8 @@ impl App {
             }
             Action::PlayAudio => self.play_audio(),
             Action::Transcribe => self.toggle_note(crate::notes::NoteKind::Transcript),
+            Action::TranscribeAgain => self.redo_note(crate::notes::NoteKind::Transcript),
+            Action::TranslateAgain => self.redo_note(crate::notes::NoteKind::Translation),
             Action::Translate => self.toggle_note(crate::notes::NoteKind::Translation),
             Action::PauseAudio => self.control_audio(crate::audio::Control::TogglePause),
             Action::SeekAudio(dir) => {
@@ -3506,6 +3515,7 @@ impl App {
                     let messages = self.place_unread_line(messages, detached.is_some());
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
+                    self.forget_notes_of_deleted();
                     self.sync_pinned_flags(&room_id);
                     self.search_sync();
                     if empty_reset {

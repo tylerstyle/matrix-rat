@@ -1423,7 +1423,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
             );
             // Transcripts and translations, under their messages; a read marker then
             // sits at the end of the last of those rows.
-            rows = notes::add(rows, room, app.notes(), content.width as usize, theme);
+            rows = notes::add(
+                rows,
+                room,
+                app.notes(),
+                &|message, kind, note| app.note_current(message, kind, note),
+                content.width as usize,
+                theme,
+            );
             if app.read_markers {
                 rows = receipts::add(rows, room, content.width as usize, theme);
             }
@@ -1514,7 +1521,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
     let pad = height.saturating_sub(rows.len()) as u16;
     let hovered = hovered_message(app.hover);
     // The message whose buttons are still to be put on a row with room for them.
-    let mut waiting: Option<(usize, Vec<notes::NoteButton>)> = None;
+    let mut waiting: Option<(usize, notes::Buttons)> = None;
     for (n, row) in rows.iter().skip(top).take(height).enumerate() {
         let rect = Rect::new(content.x, content.y + pad + n as u16, content.width, 1);
         if let Some(msg) = row.msg {
@@ -1584,10 +1591,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
                 waiting = Some((msg, buttons));
             }
             let free = row.image.is_none() && sounding.is_none();
+            // What the row says, and where its read marker begins if it has one.
+            let (taken, end) = notes::free_part(&row.line, usize::from(rect.width));
             if let Some((_, buttons)) = &mut waiting
                 && free
-                && let Some(placed) =
-                    notes::place(buttons, row.line.width(), usize::from(rect.width))
+                && let Some(placed) = notes::place(buttons, taken, end)
             {
                 for (col, label, kind) in placed {
                     let spot = Rect::new(rect.x + col, rect.y, width(&label) as u16, 1);

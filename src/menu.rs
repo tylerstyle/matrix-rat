@@ -524,6 +524,14 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
             items.push(Item::action(keys, label, Timeline, action));
         }
     }
+    if facts.notes.transcribe_again {
+        let again = Action::TranscribeAgain;
+        items.push(Item::action(keys, "Transcribe again", Timeline, again));
+    }
+    if facts.notes.translate_again {
+        let again = Action::TranslateAgain;
+        items.push(Item::action(keys, "Translate again", Timeline, again));
+    }
     if !deleted {
         let open = if let Some(file) = &message.file {
             let label = match file.kind {
@@ -871,6 +879,8 @@ mod tests {
         notes: crate::palette::NoteCaps {
             transcribe: crate::palette::NoteOffer::NotThis,
             translate: crate::palette::NoteOffer::NotThis,
+            transcribe_again: false,
+            translate_again: false,
         },
     };
 

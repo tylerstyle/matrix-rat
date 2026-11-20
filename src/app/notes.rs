@@ -131,7 +131,7 @@ impl NotesState {
             transcribe_model: config.transcribe_model.clone(),
             translator: notes::translator_here(&config.translate_command),
             translate_command: config.translate_command.clone(),
-            translate_language: config.translate_language.clone(),
+            translate_language: notes::language(&config.translate_language),
             keep: config.keep_notes,
             ..Self::default()
         }
@@ -251,6 +251,39 @@ impl App {
         })
     }
 
+    /// What a note of `kind` under `message` is made from (see `notes::source`): the
+    /// sound, or the text and the language. `None`: there is nothing to make one from.
+    fn note_source(&self, message: &Message, kind: NoteKind) -> Option<u64> {
+        match kind {
+            NoteKind::Transcript => message
+                .file
+                .as_ref()
+                .filter(|_| message.is_sound())
+                .map(|file| notes::source(&[&file.key])),
+            NoteKind::Translation => {
+                let text = self.translatable(message)?;
+                let language = notes::language(&self.notes.translate_language);
+                Some(notes::source(&[&text, &language]))
+            }
+        }
+    }
+
+    /// Whether `note` is what its message says now: not the translation of a text
+    /// that was edited since or into another language than the one set, and nothing
+    /// under a deleted message. A stale note is as good as none: it is not drawn, and
+    /// the action makes it anew.
+    pub fn note_current(&self, message: &Message, kind: NoteKind, note: &notes::Note) -> bool {
+        if message.kind == MsgKind::Redacted {
+            return false;
+        }
+        match note.state {
+            NoteState::Running => true,
+            _ => self
+                .note_source(message, kind)
+                .is_some_and(|source| note.is_of(source)),
+        }
+    }
+
     /// What the action of `kind` would do with `message` now.
     pub fn note_offer(&self, message: &Message, kind: NoteKind) -> NoteOffer {
         let Some(event) = message.event_id() else {
@@ -259,12 +292,23 @@ impl App {
         if message.state != SendState::Sent {
             return NoteOffer::NotThis;
         }
-        let note = self.notes.notes.get(event, kind);
+        let note = self
+            .notes
+            .notes
+            .get(event, kind)
+            .filter(|note| self.note_current(message, kind, note));
         match note.map(|note| (&note.state, note.hidden)) {
-            Some((NoteState::Running, _)) => return NoteOffer::Stop,
-            Some((NoteState::Done(_), true)) => return NoteOffer::Show,
-            Some((NoteState::Done(_), false)) => return NoteOffer::Hide,
-            Some((NoteState::Failed(_), _)) | None => {}
+            Some((NoteState::Running, _)) => NoteOffer::Stop,
+            Some((NoteState::Done(_), true)) => NoteOffer::Show,
+            Some((NoteState::Done(_), false)) => NoteOffer::Hide,
+            Some((NoteState::Failed(_), _)) | None => self.note_run(message, kind),
+        }
+    }
+
+    /// Whether a note of `kind` could be made for `message` now: `Run`, or why not.
+    fn note_run(&self, message: &Message, kind: NoteKind) -> NoteOffer {
+        if message.kind == MsgKind::Redacted {
+            return NoteOffer::NotThis;
         }
         match kind {
             NoteKind::Transcript if !message.is_sound() => NoteOffer::NotThis,
@@ -297,7 +341,18 @@ impl App {
             }
             Some(offer) => offer,
         };
+        // A finished note can be made anew where one could be made at all.
+        let again = |kind: NoteKind| {
+            selected.is_some_and(|message| {
+                matches!(
+                    self.note_offer(message, kind),
+                    NoteOffer::Hide | NoteOffer::Show
+                ) && self.note_run(message, kind) == NoteOffer::Run
+            })
+        };
         NoteCaps {
+            transcribe_again: again(NoteKind::Transcript),
+            translate_again: again(NoteKind::Translation),
             transcribe: offer(
                 NoteKind::Transcript,
                 self.notes
@@ -358,6 +413,36 @@ impl App {
         self.dirty = true;
     }
 
+    /// "Transcribe again" and "Translate again": the finished note under the selected
+    /// message is made anew and replaced.
+    pub(super) fn redo_note(&mut self, kind: NoteKind) {
+        let message = self
+            .timeline
+            .selected
+            .and_then(|index| self.messages().get(index))
+            .cloned();
+        let event = message
+            .as_ref()
+            .and_then(Message::event_id)
+            .map(str::to_owned);
+        let (Some(message), Some(event)) = (message, event) else {
+            return;
+        };
+        let finished = matches!(
+            self.note_offer(&message, kind),
+            NoteOffer::Hide | NoteOffer::Show
+        );
+        if finished && self.note_run(&message, kind) == NoteOffer::Run {
+            self.start_note(event, &message, kind);
+        } else {
+            self.show_toast(match kind {
+                NoteKind::Transcript => "There is no transcript here that could be made again",
+                NoteKind::Translation => "There is no translation here that could be made again",
+            });
+        }
+        self.dirty = true;
+    }
+
     /// A click on a message's button: as the key on that message.
     pub(super) fn click_note(&mut self, index: usize, kind: NoteKind) {
         self.cancel_pending_jump();
@@ -386,6 +471,7 @@ impl App {
         }
         self.notes.next_id += 1;
         let id = self.notes.next_id;
+        let source = self.note_source(message, kind).unwrap_or(0);
         let (phase, one_paragraph) = match kind {
             NoteKind::Transcript => {
                 let (Some(file), Some(dir)) = (message.file.clone(), self.notes.dir.clone()) else {
@@ -433,7 +519,9 @@ impl App {
             phase,
             one_paragraph,
         });
-        self.notes.notes.set(&event, kind, NoteState::Running);
+        self.notes
+            .notes
+            .set_from(&event, kind, NoteState::Running, source);
     }
 
     /// Stops what runs for this note; the note goes.
@@ -479,7 +567,47 @@ impl App {
         }
     }
 
-    /// Stops every program (the app ends, or the account goes).
+    /// The account goes (logout, or its session is reset): nothing of its messages
+    /// stays. What runs is stopped (a sound still on its way from the worker would
+    /// never come), the notes are forgotten, and the file of kept ones is removed.
+    pub(super) fn forget_notes(&mut self) {
+        self.stop_notes();
+        self.notes.notes.clear();
+        if let Some(file) = &self.notes.file
+            && let Err(err) = notes::remove_file(file)
+        {
+            tracing::warn!(why = %crate::logsafe::kind(&err), "could not remove the notes");
+        }
+    }
+
+    /// A deleted message loses its notes, here and in the file of kept ones: what it
+    /// said is to be gone. Called when the open room's messages change.
+    pub(super) fn forget_notes_of_deleted(&mut self) {
+        if self.notes.notes.is_empty() {
+            return;
+        }
+        let gone: Vec<String> = self
+            .messages()
+            .iter()
+            .filter(|message| message.kind == MsgKind::Redacted)
+            .filter_map(Message::event_id)
+            .filter(|event| self.notes.notes.of(event).next().is_some())
+            .map(str::to_owned)
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        for event in &gone {
+            for kind in NoteKind::ALL {
+                self.stop_note(event, kind);
+                self.notes.notes.remove(event, kind);
+            }
+        }
+        self.note_kept();
+    }
+
+    /// Stops every program: each is told to end (or its download given up) and its
+    /// "…ing" note goes. Finished notes stay. The app ends, or the account goes.
     pub(super) fn stop_notes(&mut self) {
         let running: Vec<(String, NoteKind)> = self
             .notes
@@ -646,6 +774,11 @@ impl App {
 
     pub(super) fn set_translate_language(&mut self, text: &str) {
         let setting = notes::language(text);
+        if text.trim().starts_with('-') {
+            self.show_toast("A language cannot start with \"-\": it would read as an option");
+        }
+        // Translations into the language before are not shown as the current ones.
+        self.notes.notes.rev += 1;
         self.notes.translate_language = setting.clone();
         self.save_setting("translate_language", setting);
     }

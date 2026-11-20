@@ -107,8 +107,36 @@ pub struct Note {
     pub state: NoteState,
     /// Put away by the user: not drawn, and shown again without running anything.
     pub hidden: bool,
+    /// What it was made from (see [`source`]): the note of something else is not
+    /// shown as this message's. 0: not known, and taken as it is.
+    pub source: u64,
     /// Notes in the order they were made, for the oldest to go first.
     seq: u64,
+}
+
+impl Note {
+    /// Whether the note was made from what `source` stands for.
+    pub fn is_of(&self, source: u64) -> bool {
+        self.source == 0 || self.source == source
+    }
+}
+
+/// A number for what a note is made from, the same at every start (it is kept with
+/// the note): the sound's address for a transcript; the text and the language for a
+/// translation. Never 0. It tells an edited message from the one that was translated;
+/// it is no secret and guards nothing (FNV-1a).
+pub fn source(parts: &[&str]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |byte: u8| {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for part in parts {
+        part.bytes().for_each(&mut eat);
+        // Between the parts, a byte no text holds.
+        eat(0xff);
+    }
+    hash.max(1)
 }
 
 /// The notes of the session, by the event id of their message and their kind. A thread
@@ -159,17 +187,31 @@ impl Notes {
             .count()
     }
 
-    /// Puts a note under a message in place of the one of its kind there, shown.
+    /// Puts a note under a message in place of the one of its kind there, shown. It
+    /// is made from what the one before was made from (a run's end follows its start).
     pub fn set(&mut self, event: &str, kind: NoteKind, state: NoteState) {
+        let source = self.get(event, kind).map_or(0, |note| note.source);
+        self.set_from(event, kind, state, source);
+    }
+
+    /// [`Self::set`], for a note made from `source`.
+    pub fn set_from(&mut self, event: &str, kind: NoteKind, state: NoteState, source: u64) {
         self.next_seq += 1;
         let note = Note {
             state,
             hidden: false,
+            source,
             seq: self.next_seq,
         };
         self.map.insert((event.to_owned(), kind), note);
         self.rev += 1;
         self.forget_oldest();
+    }
+
+    /// Forgets every note (the account goes).
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.rev += 1;
     }
 
     pub fn remove(&mut self, event: &str, kind: NoteKind) {
@@ -217,6 +259,7 @@ impl Notes {
                     kind: *kind,
                     text: text.clone(),
                     hidden: note.hidden,
+                    source: note.source,
                 }),
                 _ => None,
             })
@@ -227,7 +270,7 @@ impl Notes {
     /// text in plain form: only done where the user turned `keep_notes` on.
     pub fn save(&self, file: &Path) -> io::Result<()> {
         let kept = File {
-            version: 1,
+            version: FILE_VERSION,
             notes: self.kept(),
         };
         let json = serde_json::to_vec(&kept).map_err(io::Error::other)?;
@@ -252,33 +295,48 @@ impl Notes {
 
     /// Takes in the notes of `file`, as far as they are sound: bounded in number and
     /// size, and made safe for the screen again (the file may have been written by
-    /// anything). A file that is not there or not readable gives none.
+    /// anything). A file that is not there, not a plain file (a link is not followed),
+    /// too large, of another version or not readable gives none.
     pub fn load(&mut self, file: &Path) {
-        // Far more than `save` ever writes.
-        const MAX_FILE: u64 = 16 * 1024 * 1024;
-        if !std::fs::metadata(file).is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_FILE) {
+        let plain = std::fs::symlink_metadata(file)
+            .is_ok_and(|meta| meta.file_type().is_file() && meta.len() <= MAX_FILE);
+        if !plain {
             return;
         }
         let Ok(bytes) = std::fs::read(file) else {
             return;
         };
-        let Ok(kept) = serde_json::from_slice::<File>(&bytes) else {
-            tracing::debug!("the file of kept notes could not be read");
-            return;
-        };
-        let skip = kept.notes.len().saturating_sub(MAX_NOTES);
-        for note in kept.notes.into_iter().skip(skip) {
-            let text = clean(&note.text, false);
-            if note.event.is_empty() || note.event.len() > 255 || text.is_empty() {
-                continue;
+        let kept = match serde_json::from_slice::<File>(&bytes) {
+            Ok(kept) if kept.version == FILE_VERSION => kept,
+            _ => {
+                tracing::debug!("the file of kept notes could not be read");
+                return;
             }
-            self.set(&note.event, note.kind, NoteState::Done(text));
+        };
+        // Only what is sound counts toward the bound, and the newest of that stay.
+        let sound: Vec<(Kept, String)> = kept
+            .notes
+            .into_iter()
+            .filter_map(|note| {
+                let text = clean(&note.text, false);
+                let fine = !note.event.is_empty() && note.event.len() <= 255 && !text.is_empty();
+                fine.then_some((note, text))
+            })
+            .collect();
+        let skip = sound.len().saturating_sub(MAX_NOTES);
+        for (note, text) in sound.into_iter().skip(skip) {
+            self.set_from(&note.event, note.kind, NoteState::Done(text), note.source);
             if note.hidden {
                 self.toggle_hidden(&note.event, note.kind);
             }
         }
     }
 }
+
+/// The file's format; a file of another is not read.
+const FILE_VERSION: u32 = 1;
+/// The largest file read: far more than `save` ever writes.
+const MAX_FILE: u64 = 16 * 1024 * 1024;
 
 /// Removes the file of kept notes (the setting was turned off). Not there: fine.
 pub fn remove_file(file: &Path) -> io::Result<()> {
@@ -301,6 +359,8 @@ struct Kept {
     text: String,
     #[serde(default)]
     hidden: bool,
+    #[serde(default)]
+    source: u64,
 }
 
 /// What a program wrote, as a note: safe for the terminal (no control characters),
@@ -478,7 +538,9 @@ impl Transcriber {
                 let mut heard = sound;
                 if let (Some(ffmpeg), Some(wav)) = (ffmpeg, wav) {
                     let mut args = os(&["-nostdin", "-hide_banner", "-loglevel", "error", "-y"]);
-                    args.push("-i".into());
+                    // Only the file itself is read, whatever it claims to be (a
+                    // playlist would name other files or addresses).
+                    args.extend(os(&["-protocol_whitelist", "file", "-i"]));
                     args.push(sound.into());
                     args.extend(os(&[
                         "-vn",
@@ -577,6 +639,8 @@ pub fn language(setting: &str) -> String {
     let language = crate::text::sanitize_line(setting);
     match language.trim() {
         "" => DEFAULT_LANGUAGE.to_owned(),
+        // It becomes an argument of the command: it must not read as an option.
+        language if language.starts_with('-') => DEFAULT_LANGUAGE.to_owned(),
         language => language.to_owned(),
     }
 }
@@ -729,6 +793,8 @@ mod tests {
                 "-loglevel",
                 "error",
                 "-y",
+                "-protocol_whitelist",
+                "file",
                 "-i",
                 "/run/a/play-1.ogg",
                 "-vn",
@@ -935,13 +1001,22 @@ mod tests {
         std::fs::write(&file, json).unwrap();
         let mut back = Notes::default();
         back.load(&file);
-        assert!(back.map.len() <= MAX_NOTES);
+        // 204 of them are sound: the two that are not take nobody's place.
+        assert_eq!(back.map.len(), MAX_NOTES);
         assert_eq!(
             back.get("$esc", NoteKind::Transcript).unwrap().state,
             NoteState::Done("a[2Jb".into())
         );
         assert!(back.get("$blank", NoteKind::Transcript).is_none());
-        assert!(back.get("$0", NoteKind::Translation).is_none());
+        assert!(back.get("$3", NoteKind::Translation).is_none());
+        assert!(back.get("$4", NoteKind::Translation).is_some());
+
+        // A file of a version this one does not know: no notes.
+        let json = r#"{"version":2,"notes":[{"event":"$a","kind":"transcript","text":"t"}]}"#;
+        std::fs::write(&file, json).unwrap();
+        let mut back = Notes::default();
+        back.load(&file);
+        assert!(back.is_empty());
 
         // Not JSON, or not there: no notes, no error.
         std::fs::write(&file, b"not json").unwrap();
@@ -953,5 +1028,98 @@ mod tests {
         remove_file(&file).unwrap();
         assert!(!file.exists());
         remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn a_link_a_folder_or_a_huge_file_in_place_of_the_notes_is_not_read_or_written_through() {
+        let dir = Dir::new("notes-odd");
+        let file = dir.0.join("notes.json");
+        let good = r#"{"version":1,"notes":[{"event":"$a","kind":"transcript","text":"t"}]}"#;
+        let mut notes = Notes::default();
+        notes.set(
+            "$mine",
+            NoteKind::Transcript,
+            NoteState::Done("mine".into()),
+        );
+
+        // A link to a file elsewhere: not followed when reading; writing puts a file
+        // of our own in the link's place and leaves the other file as it was.
+        let elsewhere = dir.0.join("elsewhere.json");
+        std::fs::write(&elsewhere, good).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+        let mut back = Notes::default();
+        back.load(&file);
+        assert!(back.is_empty());
+        notes.save(&file).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_file()
+        );
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), good);
+        std::fs::remove_file(&file).unwrap();
+
+        // Larger than anything we write: not read into memory.
+        std::fs::write(&file, good).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_len(MAX_FILE + 1)
+            .unwrap();
+        let mut back = Notes::default();
+        back.load(&file);
+        assert!(back.is_empty());
+        std::fs::remove_file(&file).unwrap();
+
+        // A folder: no notes, and writing fails without touching what is in it.
+        std::fs::create_dir(&file).unwrap();
+        std::fs::write(file.join("inside"), b"kept").unwrap();
+        let mut back = Notes::default();
+        back.load(&file);
+        assert!(back.is_empty());
+        assert!(notes.save(&file).is_err());
+        assert_eq!(std::fs::read(file.join("inside")).unwrap(), b"kept");
+        assert!(!dir.0.join("notes.json.new").exists());
+        assert!(remove_file(&file).is_err());
+    }
+
+    #[test]
+    fn a_note_knows_what_it_was_made_from() {
+        // The same at every start, never 0, and the parts do not run into each other.
+        assert_eq!(source(&["a", "b"]), source(&["a", "b"]));
+        assert_ne!(source(&["ab", ""]), source(&["a", "b"]));
+        assert_ne!(source(&["hallo", "en"]), source(&["hallo", "fr"]));
+        assert_ne!(source(&[]), 0);
+        assert_eq!(source(&["mxc://example.org/v"]), 0x2391_d9c4_71a7_8a17);
+
+        let mut notes = Notes::default();
+        notes.set_from("$a", NoteKind::Translation, NoteState::Running, 7);
+        // The run's end is of what its start was of.
+        notes.set("$a", NoteKind::Translation, NoteState::Done("t".into()));
+        let note = notes.get("$a", NoteKind::Translation).unwrap();
+        assert!(note.is_of(7) && !note.is_of(8));
+        // Kept with the note.
+        let dir = Dir::new("notes-source");
+        let file = dir.0.join("notes.json");
+        notes.save(&file).unwrap();
+        let mut back = Notes::default();
+        back.load(&file);
+        assert_eq!(back.get("$a", NoteKind::Translation).unwrap().source, 7);
+        // One of which nothing is known is taken as it is.
+        notes.set_from("$b", NoteKind::Translation, NoteState::Done("t".into()), 0);
+        assert!(notes.get("$b", NoteKind::Translation).unwrap().is_of(9));
+        notes.clear();
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn a_language_that_reads_as_an_option_is_not_handed_on() {
+        assert_eq!(language(" fr "), "fr");
+        assert_eq!(language(""), DEFAULT_LANGUAGE);
+        assert_eq!(language("--engine=evil"), DEFAULT_LANGUAGE);
+        assert_eq!(language(" -x"), DEFAULT_LANGUAGE);
+        assert_eq!(language("pt-BR"), "pt-BR");
     }
 }

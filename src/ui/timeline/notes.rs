@@ -25,11 +25,14 @@ const BAR: &str = "┊ ";
 /// Columns kept free between what a row says and its buttons.
 const GAP: usize = 2;
 
-/// Adds the notes of `room`'s messages under them. A hidden note takes no row.
+/// Adds the notes of `room`'s messages under them. A hidden note takes no row, nor
+/// does one that `current` says is not of its message as it is now (the message was
+/// edited or deleted since).
 pub(super) fn add(
     rows: Vec<Row>,
     room: &Room,
     notes: &Notes,
+    current: &dyn Fn(&Message, NoteKind, &Note) -> bool,
     max_width: usize,
     theme: &Theme,
 ) -> Vec<Row> {
@@ -46,11 +49,16 @@ pub(super) fn add(
         if rows.peek().is_some_and(|next| next.source == source) || !selectable {
             continue;
         }
-        let Some(event) = room.messages.get(source).and_then(Message::event_id) else {
+        let Some(message) = room.messages.get(source) else {
             continue;
         };
-        for (kind, note) in notes.of(event).filter(|(_, note)| !note.hidden) {
-            out.extend(note_rows(kind, note, source, body_width, theme));
+        let Some(event) = message.event_id() else {
+            continue;
+        };
+        for (kind, note) in notes.of(event) {
+            if !note.hidden && current(message, kind, note) {
+                out.extend(note_rows(kind, note, source, body_width, theme));
+            }
         }
     }
     out
@@ -115,56 +123,116 @@ pub(super) struct NoteButton {
     label: &'static str,
 }
 
+/// The buttons of a message: those that are always there, and those only there while
+/// the message is selected or under the mouse.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Buttons {
+    /// At the right end, wherever the mouse is.
+    fixed: Vec<NoteButton>,
+    /// To the left of those, so that none of them moves when these come and go.
+    lit: Vec<NoteButton>,
+}
+
+impl Buttons {
+    pub fn clear(&mut self) {
+        self.fixed.clear();
+        self.lit.clear();
+    }
+}
+
 /// The buttons of `message`. The one that transcribes shows on every voice or audio
 /// message it can be used on; the one that translates only while the message is `lit`
 /// (selected, or under the mouse), or every text would carry one. Neither shows where
 /// its program is not set up.
-pub(super) fn buttons(app: &App, message: &Message, lit: bool) -> Vec<NoteButton> {
-    let mut buttons = Vec::new();
-    if message.is_sound() || lit {
-        let offer = app.note_offer(message, NoteKind::Transcript);
-        if offer.possible() {
-            buttons.push(NoteButton {
-                kind: NoteKind::Transcript,
-                label: offer.word(NoteKind::Transcript),
-            });
-        }
+pub(super) fn buttons(app: &App, message: &Message, lit: bool) -> Buttons {
+    let button = |kind: NoteKind| {
+        let offer = app.note_offer(message, kind);
+        offer.possible().then(|| NoteButton {
+            kind,
+            label: offer.word(kind),
+        })
+    };
+    let mut buttons = Buttons::default();
+    if message.is_sound() {
+        buttons.fixed.extend(button(NoteKind::Transcript));
     }
     if lit {
-        let offer = app.note_offer(message, NoteKind::Translation);
-        // A translation that is there can be put away from any message it is under.
-        if offer.possible() {
-            buttons.push(NoteButton {
-                kind: NoteKind::Translation,
-                label: offer.word(NoteKind::Translation),
-            });
-        }
+        buttons.lit.extend(button(NoteKind::Translation));
     }
     buttons
 }
 
-/// Where `buttons` go on a row that says `taken` columns of `row_width`: the column
-/// each starts at and its text, right-aligned. `None` if the row has no room for them.
+/// Where on a row its buttons go: after what the row says, and before the read marker
+/// at its right end if it has one (see `receipts`: blanks, then the marker). The
+/// columns the text takes, and the column the buttons must end before.
+pub(super) fn free_part(line: &Line<'_>, row_width: usize) -> (usize, usize) {
+    let blank = |span: &Span<'_>| {
+        !span.content.is_empty()
+            && span.style == Style::default()
+            && span.content.chars().all(|c| c == ' ')
+    };
+    // The blanks before a marker: the last blank span, with something after it and
+    // text before it (the indent in front of a row is blank too).
+    let pad = line.spans.iter().rposition(blank).filter(|at| {
+        *at + 1 < line.spans.len() && line.spans[..*at].iter().any(|span| !blank(span))
+    });
+    match pad {
+        Some(at) => {
+            let before: usize = line.spans[..at].iter().map(|s| width(&s.content)).sum();
+            let end = before + width(&line.spans[at].content);
+            (before, end.saturating_sub(GAP).min(row_width))
+        }
+        None => (line.width(), row_width),
+    }
+}
+
+/// Where `buttons` go on a row whose text takes `taken` columns and where they must
+/// end before column `end`: the column each starts at and its text. The fixed ones
+/// are right-aligned by themselves, so they are in the same place whether the others
+/// show or not; the others go to their left if there is room, and are left out if
+/// not. `None`: the row has no room for the fixed ones (or, without any, for the
+/// others): the next row of the message is tried.
 pub(super) fn place(
-    buttons: &[NoteButton],
+    buttons: &Buttons,
     taken: usize,
-    row_width: usize,
+    end: usize,
 ) -> Option<Vec<(u16, String, NoteKind)>> {
-    let labels: Vec<String> = buttons
-        .iter()
-        .map(|button| format!(" {} ", button.label))
-        .collect();
-    let total: usize =
-        labels.iter().map(|label| width(label)).sum::<usize>() + labels.len().saturating_sub(1);
-    if buttons.is_empty() || taken + GAP + total > row_width {
+    let label = |button: &NoteButton| format!(" {} ", button.label);
+    // One blank between two buttons.
+    let span = |group: &[NoteButton]| {
+        group
+            .iter()
+            .map(|b| width(&label(b)) + 1)
+            .sum::<usize>()
+            .saturating_sub(1)
+    };
+    let (anchored, optional): (&[NoteButton], &[NoteButton]) = if buttons.fixed.is_empty() {
+        (&buttons.lit, &[])
+    } else {
+        (&buttons.fixed, &buttons.lit)
+    };
+    let needed = span(anchored);
+    if anchored.is_empty() || taken + GAP + needed > end {
         return None;
     }
-    let mut col = row_width - total;
     let mut placed = Vec::new();
-    for (button, label) in buttons.iter().zip(labels) {
-        let label_width = width(&label);
-        placed.push((col as u16, label, button.kind));
-        col += label_width + 1;
+    let first = end - needed;
+    let extra = span(optional);
+    if !optional.is_empty() && taken + GAP + extra < first {
+        let mut col = first - 1 - extra;
+        for button in optional {
+            let text = label(button);
+            let text_width = width(&text);
+            placed.push((col as u16, text, button.kind));
+            col += text_width + 1;
+        }
+    }
+    let mut col = first;
+    for button in anchored {
+        let text = label(button);
+        let text_width = width(&text);
+        placed.push((col as u16, text, button.kind));
+        col += text_width + 1;
     }
     Some(placed)
 }
@@ -220,10 +288,11 @@ mod tests {
         let mut room = Room::new("!r", "room", RoomKind::Room);
         room.messages = vec![message("a", "Guten Morgen"), message("b", "second")];
         let mut notes = Notes::default();
+        let all = |_: &Message, _: NoteKind, _: &Note| true;
         let plain = build_rows(&room, 30, &theme, None, &images);
         // Without notes nothing changes.
         assert_eq!(
-            texts(&add(plain.clone(), &room, &notes, 30, &theme)),
+            texts(&add(plain.clone(), &room, &notes, &all, 30, &theme)),
             texts(&plain)
         );
 
@@ -239,7 +308,7 @@ mod tests {
             NoteKind::Translation,
             NoteState::Done("x".into()),
         );
-        let rows = add(plain.clone(), &room, &notes, 30, &theme);
+        let rows = add(plain.clone(), &room, &notes, &all, 30, &theme);
         let shown = texts(&rows);
         let at = shown.iter().position(|row| row.contains("Guten")).unwrap();
         assert_eq!(
@@ -263,10 +332,10 @@ mod tests {
         // Hidden: no rows; shown again: the same rows.
         notes.toggle_hidden("$a", NoteKind::Translation);
         notes.remove("$a", NoteKind::Transcript);
-        let hidden = texts(&add(plain.clone(), &room, &notes, 30, &theme));
+        let hidden = texts(&add(plain.clone(), &room, &notes, &all, 30, &theme));
         assert!(!hidden.iter().any(|row| row.contains("Good morning")));
         notes.toggle_hidden("$a", NoteKind::Translation);
-        let again = texts(&add(plain.clone(), &room, &notes, 30, &theme));
+        let again = texts(&add(plain.clone(), &room, &notes, &all, 30, &theme));
         assert!(again.iter().any(|row| row.contains("Good morning")));
 
         // A very narrow pane still gets rows that fit.
@@ -275,6 +344,7 @@ mod tests {
                 build_rows(&room, max, &theme, None, &images),
                 &room,
                 &notes,
+                &all,
                 max,
                 &theme,
             ) {
@@ -284,11 +354,35 @@ mod tests {
     }
 
     #[test]
+    fn a_note_that_is_not_of_its_message_any_more_is_not_drawn() {
+        let theme = Theme::builtin(crate::theme::DEFAULT_THEME).unwrap();
+        let images = crate::images::ImageStore::new(crate::images::Graphics::halfblocks());
+        let mut room = Room::new("!r", "room", RoomKind::Room);
+        room.messages = vec![message("a", "Guten Morgen"), message("b", "second")];
+        let mut notes = Notes::default();
+        notes.set("$a", NoteKind::Translation, NoteState::Done("first".into()));
+        notes.set("$b", NoteKind::Translation, NoteState::Done("other".into()));
+        let plain = build_rows(&room, 30, &theme, None, &images);
+        let only_b = |message: &Message, _: NoteKind, _: &Note| message.id == "b";
+        let shown = texts(&add(plain, &room, &notes, &only_b, 30, &theme)).join("\n");
+        assert!(
+            !shown.contains("first") && shown.contains("other"),
+            "{shown}"
+        );
+    }
+
+    fn button(kind: NoteKind, label: &'static str) -> NoteButton {
+        NoteButton { kind, label }
+    }
+
+    #[test]
     fn buttons_go_to_the_free_end_of_a_row_or_nowhere() {
-        let one = [NoteButton {
-            kind: NoteKind::Transcript,
-            label: "transcribe",
-        }];
+        let hear = button(NoteKind::Transcript, "transcribe");
+        let read = button(NoteKind::Translation, "translate");
+        let one = Buttons {
+            fixed: vec![hear],
+            lit: Vec::new(),
+        };
         // " transcribe " is twelve columns, and two are kept free before it.
         assert_eq!(
             place(&one, 20, 40),
@@ -296,22 +390,52 @@ mod tests {
         );
         assert_eq!(place(&one, 26, 40).unwrap()[0].0, 28);
         assert_eq!(place(&one, 27, 40), None);
-        assert_eq!(place(&[], 0, 40), None);
-        let two = [
-            one[0],
-            NoteButton {
-                kind: NoteKind::Translation,
-                label: "translate",
-            },
-        ];
-        let placed = place(&two, 5, 40).unwrap();
+        assert_eq!(place(&Buttons::default(), 0, 40), None);
+
+        // The one that only shows on a lit message goes to the left: the other stays
+        // where it was, to the column.
+        let two = Buttons {
+            fixed: vec![hear],
+            lit: vec![read],
+        };
         assert_eq!(
-            placed,
+            place(&two, 5, 40).unwrap(),
             [
-                (16, " transcribe ".to_owned(), NoteKind::Transcript),
-                (29, " translate ".to_owned(), NoteKind::Translation),
+                (16, " translate ".to_owned(), NoteKind::Translation),
+                (28, " transcribe ".to_owned(), NoteKind::Transcript),
             ]
         );
-        assert_eq!(place(&two, 15, 40), None);
+        // No room for both: the fixed one alone, still in its place, on the same row.
+        assert_eq!(place(&two, 14, 40).map(|placed| placed.len()), Some(2));
+        assert_eq!(place(&two, 15, 40), place(&one, 15, 40));
+        assert_eq!(place(&two, 27, 40), None);
+        // Alone, the lit one takes the right end.
+        let lit = Buttons {
+            fixed: Vec::new(),
+            lit: vec![read],
+        };
+        assert_eq!(
+            place(&lit, 5, 40),
+            Some(vec![(29, " translate ".to_owned(), NoteKind::Translation)])
+        );
+        assert_eq!(place(&lit, 28, 40), None);
+    }
+
+    #[test]
+    fn the_free_part_of_a_row_ends_before_its_read_marker() {
+        // No marker: all of the row after its text.
+        let line = Line::from(vec![Span::raw("  "), Span::raw("hello")]);
+        assert_eq!(free_part(&line, 40), (7, 40));
+        // Text, blanks, marker: the buttons end two columns before the marker.
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::raw("hello"),
+            Span::raw(" ".repeat(29)),
+            Span::raw("B ✓"),
+        ]);
+        assert_eq!(free_part(&line, 40), (7, 34));
+        // Only an indent and a word: the indent is not taken for the blanks.
+        let line = Line::from(vec![Span::raw("  "), Span::raw("✓")]);
+        assert_eq!(free_part(&line, 40), (3, 40));
     }
 }

@@ -246,6 +246,9 @@ impl NoteOffer {
 pub struct NoteCaps {
     pub transcribe: NoteOffer,
     pub translate: NoteOffer,
+    /// A finished transcript or translation is there and could be made anew.
+    pub transcribe_again: bool,
+    pub translate_again: bool,
 }
 
 /// Source message details when the palette is acting as a "Forward to room" picker.
@@ -1126,6 +1129,8 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::PlayAudio => ctx.audio.can_play || ctx.audio.active,
         Action::PauseAudio => ctx.audio.can_pause,
         Action::Transcribe => ctx.notes.transcribe.possible(),
+        Action::TranscribeAgain => ctx.notes.transcribe_again,
+        Action::TranslateAgain => ctx.notes.translate_again,
         Action::Translate => ctx.notes.translate.possible(),
         Action::Open => sel.can_open,
         Action::OpenThread => sel.can_open_thread,
@@ -1285,6 +1290,8 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::PauseAudio
                 | Action::Transcribe
                 | Action::Translate
+                | Action::TranscribeAgain
+                | Action::TranslateAgain
                 | Action::OpenThread
                 | Action::JumpToReply
                 | Action::PinMessage

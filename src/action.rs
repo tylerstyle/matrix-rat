@@ -178,6 +178,10 @@ pub enum Action {
     Transcribe,
     /// Translate the selected message with the user's command, in the same manner.
     Translate,
+    /// Make the transcript or the translation that is under the selected message
+    /// anew (the model, the command or the language may have changed).
+    TranscribeAgain,
+    TranslateAgain,
     /// Show what the app found where it runs (terminal, pictures, the desktop's
     /// helpers, keys, config), to be copied into a bug report.
     Doctor,
@@ -239,6 +243,8 @@ impl Action {
             | Action::PauseAudio
             | Action::SeekAudio(_)
             | Action::Transcribe
+            | Action::TranscribeAgain
+            | Action::TranslateAgain
             | Action::Translate
             // The room as the open one.
             | Action::AcceptInvite

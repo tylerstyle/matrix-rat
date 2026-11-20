@@ -215,6 +215,8 @@ action_table! {
     Action::SeekAudio(Dir::Left) => ("audio_back", Context::Timeline, "Audio back 5 s (mpv)"),
     Action::SeekAudio(Dir::Right) => ("audio_forward", Context::Timeline, "Audio forward 5 s (mpv)"),
     Action::Transcribe => ("transcribe", Context::Timeline, "Transcribe voice or audio"),
+    Action::TranscribeAgain => ("transcribe_again", Context::Timeline, "Transcribe again"),
+    Action::TranslateAgain => ("translate_again", Context::Timeline, "Translate again"),
     Action::Translate => ("translate", Context::Timeline, "Translate message"),
     Action::Send => ("send", Context::Composer, "Send"),
     Action::Newline => ("newline", Context::Composer, "Line break"),
