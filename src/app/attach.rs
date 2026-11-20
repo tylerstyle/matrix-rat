@@ -58,6 +58,9 @@ pub struct AttachState {
     /// Pictures pasted from the clipboard: files of ours, each removed (by being
     /// dropped) once no chip and no send needs it any more.
     pub(super) pasted: Vec<TempPicture>,
+    /// Voice messages recorded here: files of ours with their length and waveform,
+    /// kept and removed exactly as the pasted pictures are.
+    pub(super) voices: Vec<super::voice::VoiceNote>,
     /// The clipboard is being read for this conversation; the number tells the answer
     /// from that of a reading given up before.
     pub(super) reading: Option<(u64, Scope)>,
@@ -82,6 +85,7 @@ impl std::fmt::Debug for AttachState {
             .field("limit", &self.limit)
             .field("hidden", &self.hidden)
             .field("pasted", &self.pasted.len())
+            .field("voices", &self.voices.len())
             .field(
                 "reading",
                 &self.reading.as_ref().map(|(reading, _)| reading),
@@ -138,12 +142,30 @@ impl AttachState {
             return;
         }
         let pending = &self.pending;
-        self.pasted.retain(|picture| {
-            pending
-                .values()
-                .flatten()
-                .any(|file| file.path == picture.path())
+        let waits =
+            |path: &std::path::Path| pending.values().flatten().any(|file| file.path == path);
+        self.pasted.retain(|picture| waits(picture.path()));
+        self.voices.retain(|voice| waits(voice.path()));
+    }
+
+    /// A send was handed to the worker and not answered yet.
+    pub(super) fn sends_out(&self) -> bool {
+        !self.handed.is_empty()
+    }
+
+    /// The voice message recorded here that waits in the file `path`, if it is one.
+    pub fn voice(&self, path: &std::path::Path) -> Option<&super::voice::VoiceNote> {
+        self.voices.iter().find(|voice| voice.path() == path)
+    }
+
+    /// A recording joins the files waiting in `scope`.
+    pub(super) fn add_voice(&mut self, scope: Scope, voice: super::voice::VoiceNote, size: u64) {
+        self.pending.entry(scope).or_default().push(Chosen {
+            path: voice.path().to_owned(),
+            name: super::voice::VOICE_NAME.to_owned(),
+            size,
         });
+        self.voices.push(voice);
     }
 }
 
@@ -237,7 +259,8 @@ impl App {
             && let Some(waiting) = self.attach.pending.get_mut(&scope)
             && index < waiting.len()
         {
-            waiting.remove(index);
+            let removed = waiting.remove(index);
+            self.stop_draft_audio_for(&removed.path);
             self.attach.sweep();
         }
     }
@@ -254,6 +277,9 @@ impl App {
             .pending
             .remove(&scope)
             .is_some_and(|waiting| !waiting.is_empty());
+        if had_files {
+            self.stop_draft_audio();
+        }
         self.attach.sweep();
         had_draft || had_files
     }
@@ -421,8 +447,13 @@ impl App {
         // sent unless all of it can be; the file in question keeps its place, for the
         // user to take off.
         for file in &files {
+            let is_voice = self.attach.voice(&file.path).is_some();
             let problem = match upload::check(&file.path) {
-                Ok(now) => upload::too_large(&now.name, now.size, self.attach.limit),
+                Ok(now) => {
+                    let name = if is_voice { &file.name } else { &now.name };
+                    upload::too_large(name, now.size, self.attach.limit)
+                }
+                Err(_) if is_voice => Some("The voice message is no longer available".to_owned()),
                 Err(reason) => Some(reason),
             };
             if let Some(problem) = problem {
@@ -439,8 +470,15 @@ impl App {
             self.send_matrix(MatrixCmd::SendFiles {
                 send: self.attach.sends,
                 room_id: room_id.clone(),
-                // Nothing records yet: every file goes as what it is.
-                files: files.iter().map(|file| file.path.clone().into()).collect(),
+                // A recording of ours goes as a voice message, any other file as
+                // what it is.
+                files: files
+                    .iter()
+                    .map(|file| crate::matrix::OutgoingFile {
+                        path: file.path.clone(),
+                        voice: self.attach.voice(&file.path).map(|voice| voice.meta()),
+                    })
+                    .collect(),
                 caption,
                 reply_to,
             });
@@ -454,7 +492,12 @@ impl App {
                 _ => None,
             };
             for (n, file) in files.iter().enumerate() {
-                let mut body = format!("📎 {} · {}", file.name, human_size(file.size));
+                let mut body = match self.attach.voice(&file.path) {
+                    Some(voice) => {
+                        format!("🎤 {} · {}", file.name, crate::audio::clock(voice.duration))
+                    }
+                    None => format!("📎 {} · {}", file.name, human_size(file.size)),
+                };
                 if n == 0 && !text.is_empty() {
                     body.push('\n');
                     body.push_str(&text);
@@ -470,6 +513,7 @@ impl App {
                 });
             }
         }
+        self.stop_draft_audio();
         self.attach.pending.remove(&scope);
         if self.matrix.is_some() {
             let handed = Handed {
@@ -498,11 +542,18 @@ impl App {
     /// reply) belonged to, and so sent none: they wait again, and the text is back if
     /// nothing was written in the meantime.
     pub(super) fn on_files_not_sent(&mut self, send: u64, reason: String) {
+        // Stale answers (already answered, or from before a logout) are ignored quietly
+        // so they never flash an error toast over the login form.
+        let Some(handed) = self.attach.handed.remove(&send) else {
+            self.attach.sweep();
+            return;
+        };
+        if self.logged_out {
+            self.attach.sweep();
+            return;
+        }
         // A room that was left meanwhile has no composer for them to wait in.
-        if let Some(handed) = self.attach.handed.remove(&send)
-            && !self.logged_out
-            && self.rooms.iter().any(|room| room.id == handed.scope.0)
-        {
+        if self.rooms.iter().any(|room| room.id == handed.scope.0) {
             let here = self.attach_scope().as_ref() == Some(&handed.scope);
             let waiting = self.attach.pending.entry(handed.scope).or_default();
             for file in handed.files {

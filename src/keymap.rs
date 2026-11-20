@@ -231,6 +231,7 @@ action_table! {
     Action::CancelCompose => ("cancel_compose", Context::Composer, "Cancel reply or edit"),
     Action::ComposeInEditor => ("compose_in_editor", Context::Composer, "Write in $EDITOR"),
     Action::PastePicture => ("paste_picture", Context::Composer, "Paste picture from clipboard"),
+    Action::PlayVoiceNote => ("play_voice_note", Context::Composer, "Listen to waiting voice message"),
     Action::EditLast => ("edit_last", Context::Composer, "Edit your last message"),
 }
 
@@ -849,6 +850,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::PastePicture,
         "Alt-I",
         "Paste picture from clipboard",
+    ),
+    bind(
+        Composer,
+        Char('l'),
+        ALT,
+        Action::PlayVoiceNote,
+        "Alt-L",
+        "Listen to waiting voice message",
     ),
     // From the first line of the composer, up is into the messages: to look at a
     // picture, open a spoiler, answer. (Editing one's last message from here, as
@@ -2496,5 +2505,28 @@ mod tests {
             km.lookup(Timeline, key(Char('Q'), NONE)),
             Some(Action::Quit)
         );
+    }
+
+    #[test]
+    fn alt_l_plays_waiting_voice_note_in_every_preset_without_conflict() {
+        for preset in Preset::ALL {
+            let km = Keymap::from_preset(preset);
+            assert_eq!(
+                km.lookup(Composer, key(Char('l'), ALT)),
+                Some(Action::PlayVoiceNote),
+                "{preset:?}"
+            );
+            // Only one binding claims Alt-L in Composer (and none in Global).
+            assert_eq!(
+                km.bindings()
+                    .iter()
+                    .filter(|b| b.code == Char('l')
+                        && b.mods == ALT
+                        && matches!(b.context, Global | Composer))
+                    .count(),
+                1,
+                "{preset:?}"
+            );
+        }
     }
 }

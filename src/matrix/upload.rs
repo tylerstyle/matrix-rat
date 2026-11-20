@@ -26,6 +26,9 @@ use crate::upload::{self, Prepared};
 /// How long sending waits to learn the server's size limit before going without.
 const LIMIT_WAIT: Duration = Duration::from_secs(5);
 const LIMIT_RETRY: Duration = Duration::from_secs(60);
+/// How long quitting waits for files already handed to `Uploads::send` to reach the
+/// SDK's send queue before giving up on them.
+pub const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 /// What the room sees as the name of a voice message: the same for every one, so
 /// that nothing of where or when it was recorded goes along.
 const VOICE_NAME: &str = "voice-message.ogg";
@@ -111,19 +114,33 @@ impl PartialEq<PathBuf> for OutgoingFile {
 pub struct Uploads {
     client: Client,
     events: UnboundedSender<MatrixEvent>,
-    /// Files being prepared, and the question about the size limit. They end with the
-    /// session: dropping this stops them. What the send queue has taken stays queued.
-    tasks: JoinSet<()>,
+    /// The background loop that learns the server's size limit; stopped immediately on
+    /// exit so an offline retry sleep never delays shutdown.
+    limit_task: JoinSet<()>,
+    /// Files being prepared and handed to the send queue. On shutdown we wait briefly
+    /// for these to finish so voice notes sent right before quitting reach the store;
+    /// dropping this aborts any that are still left.
+    sends: JoinSet<()>,
+}
+
+/// Waits up to `wait` for every task in `tasks` to finish, then aborts and drains any
+/// that did not.
+async fn drain_set(tasks: &mut JoinSet<()>, wait: Duration) {
+    let drained = async { while tasks.join_next().await.is_some() {} };
+    if tokio::time::timeout(wait, drained).await.is_err() {
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
 }
 
 impl Uploads {
     pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
         client.send_queue().enable_upload_progress(true);
-        let mut tasks = JoinSet::new();
+        let mut limit_task = JoinSet::new();
         // The UI refuses files that are too large before they are attached; for that
         // it has to know the limit. Asked again until the server answers.
         let (asker, tell) = (client.clone(), events.clone());
-        tasks.spawn(async move {
+        limit_task.spawn(async move {
             loop {
                 match asker.load_or_fetch_max_upload_size().await {
                     Ok(limit) => {
@@ -140,8 +157,16 @@ impl Uploads {
         Self {
             client,
             events,
-            tasks,
+            limit_task,
+            sends: JoinSet::new(),
         }
+    }
+
+    /// Waits up to `wait` for files already handed to `send` to reach the send queue,
+    /// stopping the limit-fetch loop immediately.
+    pub async fn finish(&mut self, wait: Duration) {
+        self.limit_task.abort_all();
+        drain_set(&mut self.sends, wait).await;
     }
 
     /// Sends `files` in order. The caption and the reply belong to the first: if that
@@ -156,10 +181,10 @@ impl Uploads {
         caption: Option<Outgoing>,
         reply_to: Option<OwnedEventId>,
     ) {
-        while self.tasks.try_join_next().is_some() {}
+        while self.sends.try_join_next().is_some() {}
         let client = self.client.clone();
         let events = self.events.clone();
-        self.tasks.spawn(async move {
+        self.sends.spawn(async move {
             let limit = tokio::time::timeout(LIMIT_WAIT, client.load_or_fetch_max_upload_size())
                 .await
                 .ok()
@@ -692,6 +717,29 @@ mod tests {
                 .0
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn shutting_down_waits_for_quick_uploads_and_aborts_stuck_ones_within_the_bound() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let done = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&done);
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            mark.store(true, Ordering::SeqCst);
+        });
+        drain_set(&mut tasks, Duration::from_secs(1)).await;
+        assert!(done.load(Ordering::SeqCst));
+        assert!(tasks.is_empty());
+
+        // A stuck task is aborted once the bound expires instead of hanging exit.
+        let mut stuck = JoinSet::new();
+        stuck.spawn(std::future::pending());
+        let started = tokio::time::Instant::now();
+        drain_set(&mut stuck, Duration::from_millis(40)).await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(stuck.is_empty());
     }
 
     /// Sends a text file and a picture through the worker and waits until the server

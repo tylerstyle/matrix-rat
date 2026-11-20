@@ -70,6 +70,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(format!(" {dot} "), theme.style(dot_role)),
         Span::styled(format!("{text}  "), status),
     ];
+    // The microphone is open: said here too, whatever covers the composer.
+    if let Some(recording) = app.recording() {
+        spans.push(Span::styled(
+            format!("● {}  ", crate::audio::clock(recording.elapsed)),
+            theme.style(Role::Error),
+        ));
+    }
     if app.do_not_disturb {
         spans.push(Span::styled("do not disturb  ", theme.style(Role::Banner)));
     }
@@ -151,6 +158,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         match app.focus {
             Pane::Composer => {
+                if app.playing_voice_note_here() {
+                    push_action(
+                        &mut hints,
+                        Context::Composer,
+                        A::PlayVoiceNote,
+                        "stop voice",
+                    );
+                } else if app.can_play_voice_note() && app.recording().is_none() {
+                    push_action(&mut hints, Context::Composer, A::PlayVoiceNote, "listen");
+                }
                 push_action(&mut hints, Context::Composer, A::Send, "send");
                 push_action(&mut hints, Context::Composer, A::Newline, "line break");
                 push_action(
@@ -167,8 +184,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     "edit last message",
                 );
                 push_action(&mut hints, Context::Composer, A::Attach, "attach file");
-                // Only where the machine has something to record with.
-                if app.recording_refused().is_none() {
+                // Only where the machine has something to record with — or while one
+                // runs, when the key stops it.
+                if app.recording().is_some() {
+                    push_action(
+                        &mut hints,
+                        Context::Composer,
+                        A::RecordVoice,
+                        "stop recording",
+                    );
+                } else if app.recording_refused().is_none() {
                     push_action(
                         &mut hints,
                         Context::Composer,

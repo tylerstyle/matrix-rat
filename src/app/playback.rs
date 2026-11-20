@@ -11,12 +11,14 @@
 //! download that is on its way.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::App;
+use super::attach::Scope;
 use crate::action::Action;
 use crate::audio::recorder::{NoRecorder, Recorder};
 use crate::audio::{
@@ -39,8 +41,10 @@ pub struct AudioState {
     /// What records a voice message here, or why nothing does; looked up again when
     /// the setting changes (see `voice.rs`).
     pub(super) recorder: Result<Recorder, NoRecorder>,
-    /// A recording runs: the microphone button shows a stop sign. Nothing sets it yet.
-    pub(super) recording: bool,
+    /// The recording that runs, if one does (see `voice.rs`).
+    pub(super) take: Option<super::voice::Take>,
+    /// A recording to start; the event loop takes it (see [`App::take_record_start`]).
+    pub(super) record_start: Option<audio::record::RecordRequest>,
     /// Where tests look for the recorder: nothing of the machine they run on.
     #[cfg(test)]
     pub(super) recorder_env: audio::recorder::Env,
@@ -48,8 +52,9 @@ pub struct AudioState {
     /// record: neither is offered.
     pub(super) ssh: bool,
     /// The private folder for the copies and mpv's sockets; set by the event loop.
-    dir: Option<PathBuf>,
-    next_id: u64,
+    pub(super) dir: Option<PathBuf>,
+    /// Sounds and recordings are numbered from the same count.
+    pub(super) next_id: u64,
     current: Option<Sound>,
     /// A player to start; the event loop takes it (see [`App::take_audio_start`]).
     start: Option<audio::Request>,
@@ -65,7 +70,8 @@ impl Default for AudioState {
             player: Err(NoPlayer::NoneFound),
             recorder_setting: "auto".to_owned(),
             recorder: Err(NoRecorder::NoMicrophone),
-            recording: false,
+            take: None,
+            record_start: None,
             #[cfg(test)]
             recorder_env: audio::recorder::Env::default(),
             ssh: false,
@@ -87,7 +93,8 @@ impl fmt::Debug for AudioState {
             .field("player", &self.player)
             .field("recorder_auto", &audio::is_auto(&self.recorder_setting))
             .field("recorder", &self.recorder)
-            .field("recording", &self.recording)
+            .field("recording", &self.take)
+            .field("record_start", &self.record_start.is_some())
             .field("ssh", &self.ssh)
             .field("dir", &self.dir.is_some())
             .field("current", &self.current)
@@ -96,32 +103,61 @@ impl fmt::Debug for AudioState {
     }
 }
 
-/// The sound: for which message, and how far it got.
+/// What plays: a voice or audio message in the timeline, or a recorded voice note
+/// waiting in the composer.
+enum SoundSource {
+    Message {
+        message_id: String,
+        /// The message's event, where it has one. A thread shows its first message under
+        /// another id than the room does: the event says it is the same message.
+        event: Option<String>,
+        /// The file's address: with the message's id, which message this is.
+        key: String,
+    },
+    Draft {
+        scope: Scope,
+        path: PathBuf,
+        duration: Duration,
+    },
+}
+
+/// The sound: for which message or waiting voice note, and how far it got.
 struct Sound {
     /// Answers about another are dropped.
     id: u64,
     room_id: String,
-    message_id: String,
-    /// The message's event, where it has one. A thread shows its first message under
-    /// another id than the room does: the event says it is the same message.
-    event: Option<String>,
-    /// The file's address: with the message's id, which message this is.
-    key: String,
+    source: SoundSource,
     phase: Phase,
 }
 
 impl Sound {
     /// Whether `message` is the one this sound belongs to.
     fn belongs_to(&self, message: &Message) -> bool {
-        let same = self.message_id == message.id
-            || self
-                .event
+        let SoundSource::Message {
+            message_id,
+            event,
+            key,
+        } = &self.source
+        else {
+            return false;
+        };
+        let same = *message_id == message.id
+            || event
                 .as_deref()
                 .is_some_and(|event| message.event_id() == Some(event));
-        same && message
-            .file
-            .as_ref()
-            .is_some_and(|file| file.key == self.key)
+        same && message.file.as_ref().is_some_and(|file| file.key == *key)
+    }
+
+    /// Whether this sound is a preview of the waiting voice note at `path`.
+    fn is_draft(&self, path: &Path) -> bool {
+        matches!(&self.source, SoundSource::Draft { path: p, .. } if p == path)
+    }
+
+    fn draft_scope(&self) -> Option<&Scope> {
+        match &self.source {
+            SoundSource::Draft { scope, .. } => Some(scope),
+            SoundSource::Message { .. } => None,
+        }
     }
 }
 
@@ -191,8 +227,31 @@ impl AudioState {
     }
 
     /// Playing is possible here (an account aside).
-    fn offered(&self) -> bool {
+    pub(crate) fn offered(&self) -> bool {
         !self.ssh && self.player.is_ok()
+    }
+
+    /// What the composer chip shows for a waiting voice note that is playing.
+    pub(crate) fn playing_draft(&self, path: &Path) -> Option<AudioView> {
+        self.current
+            .as_ref()
+            .filter(|sound| sound.is_draft(path))
+            .map(|sound| sound.view(None))
+    }
+
+    pub(super) fn is_draft_playing(&self, path: &Path) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|sound| sound.is_draft(path))
+    }
+
+    pub(crate) fn is_draft_playing_in(&self, scope: Option<&Scope>) -> bool {
+        let Some(scope) = scope else {
+            return false;
+        };
+        self.current
+            .as_ref()
+            .is_some_and(|sound| sound.draft_scope() == Some(scope))
     }
 
     /// Whether `message` of the room `room_id` is the sound.
@@ -227,10 +286,11 @@ impl Sound {
         let Phase::Playing(playing) = &self.phase else {
             return AudioView::Loading;
         };
-        let length = playing
-            .reported
-            .length
-            .or(meta.and_then(|meta| meta.duration));
+        let fallback_len = match &self.source {
+            SoundSource::Message { .. } => meta.and_then(|meta| meta.duration),
+            SoundSource::Draft { duration, .. } => Some(*duration),
+        };
+        let length = playing.reported.length.or(fallback_len);
         let position = match playing.reported.position {
             Some(at) if playing.controllable => at,
             _ => playing.started.elapsed(),
@@ -327,6 +387,10 @@ impl App {
             self.show_toast("The demo has no account to play audio with");
             return;
         }
+        if self.audio.take.is_some() {
+            self.show_toast("Stop the recording before playing a sound");
+            return;
+        }
         let save = self
             .keymap
             .label_in(Context::Timeline, Action::Save)
@@ -362,13 +426,161 @@ impl App {
         self.audio.current = Some(Sound {
             id,
             room_id,
-            event,
-            message_id: message.id,
-            key: file.key.clone(),
+            source: SoundSource::Message {
+                event,
+                message_id: message.id,
+                key: file.key.clone(),
+            },
             phase: Phase::Loading,
         });
         self.send_matrix(MatrixCmd::FetchAudio { id, file, dir });
         self.dirty = true;
+    }
+
+    /// Whether the open conversation has a recorded voice message waiting in the composer.
+    pub(crate) fn has_waiting_voice_note(&self) -> bool {
+        self.attachments()
+            .iter()
+            .any(|file| self.attach.voice(&file.path).is_some())
+    }
+
+    /// Whether a waiting voice message in the open conversation can be played here.
+    pub(crate) fn can_play_voice_note(&self) -> bool {
+        self.has_waiting_voice_note() && self.audio.offered()
+    }
+
+    /// Whether a waiting voice message in the open conversation is currently playing.
+    pub(crate) fn playing_voice_note_here(&self) -> bool {
+        self.audio.is_draft_playing_in(self.attach_scope().as_ref())
+    }
+
+    /// `Alt-L` and the palette: plays the newest waiting voice message in the open
+    /// conversation, or stops the waiting voice message that plays here.
+    pub(super) fn play_voice_note(&mut self) {
+        let Some(scope) = self.attach_scope() else {
+            return;
+        };
+        if self.audio.is_draft_playing_in(Some(&scope)) {
+            self.stop_audio();
+            return;
+        }
+        let chosen = self
+            .attach
+            .files(Some(&scope))
+            .iter()
+            .rev()
+            .find_map(|file| {
+                self.attach
+                    .voice(&file.path)
+                    .map(|voice| (voice.file_arc(), voice.duration))
+            });
+        match chosen {
+            Some((file, duration)) => self.start_draft_audio(scope, file, duration),
+            None => self.show_toast("No voice message waiting in the composer"),
+        }
+    }
+
+    /// Click on `▶` / `■` on waiting attachment `index`: plays that waiting voice
+    /// message, or stops it if it is what plays.
+    pub(super) fn play_voice_note_at(&mut self, index: usize) {
+        if self.modal.is_some() || self.help_open || self.images.viewer_open() {
+            return;
+        }
+        let Some(scope) = self.attach_scope() else {
+            return;
+        };
+        let Some(path) = self
+            .attach
+            .files(Some(&scope))
+            .get(index)
+            .map(|file| file.path.clone())
+        else {
+            return;
+        };
+        if self.audio.is_draft_playing(&path) {
+            self.stop_audio();
+            return;
+        }
+        let Some((file, duration)) = self
+            .attach
+            .voice(&path)
+            .map(|voice| (voice.file_arc(), voice.duration))
+        else {
+            return;
+        };
+        self.start_draft_audio(scope, file, duration);
+    }
+
+    fn start_draft_audio(&mut self, scope: Scope, file: Arc<TempAudio>, duration: Duration) {
+        if self.audio.take.is_some() {
+            self.show_toast("Stop the recording before playing a sound");
+            return;
+        }
+        if self.audio.ssh {
+            self.show_toast("Audio plays on the machine matrix-rat runs on");
+            return;
+        }
+        let player = match self.audio.player.clone() {
+            Ok(player) => player,
+            Err(why) => {
+                self.show_toast(why.message());
+                return;
+            }
+        };
+        let socket = if player.controllable() {
+            self.audio.dir.as_deref().and_then(audio::socket_path)
+        } else {
+            None
+        };
+        // One sound at a time.
+        self.stop_audio();
+        self.audio.next_id += 1;
+        let id = self.audio.next_id;
+        let (control, receiver) = unbounded_channel();
+        let path = file.path().to_owned();
+        let room_id = scope.0.clone();
+        self.audio.current = Some(Sound {
+            id,
+            room_id,
+            source: SoundSource::Draft {
+                scope,
+                path,
+                duration,
+            },
+            phase: Phase::Playing(Playing {
+                control,
+                started: Instant::now(),
+                controllable: false,
+                reported: Reported::default(),
+            }),
+        });
+        self.audio.start = Some(audio::Request {
+            id,
+            player,
+            file,
+            socket,
+            control: receiver,
+        });
+        self.dirty = true;
+    }
+
+    /// Stops playback if a waiting voice note (not a timeline message) is playing.
+    pub(super) fn stop_draft_audio(&mut self) {
+        if self
+            .audio
+            .current
+            .as_ref()
+            .is_some_and(|sound| matches!(sound.source, SoundSource::Draft { .. }))
+        {
+            self.stop_audio();
+        }
+    }
+
+    /// Stops playback if the waiting voice note at `path` is what plays.
+    pub(super) fn stop_draft_audio_for(&mut self, path: &Path) {
+        if self.audio.is_draft_playing(path) {
+            self.stop_audio();
+        }
     }
 
     /// Stops what plays, or gives up its download; nothing if nothing plays.
@@ -457,7 +669,7 @@ impl App {
         self.audio.start = Some(audio::Request {
             id,
             player,
-            file,
+            file: Arc::new(file),
             socket,
             control: receiver,
         });
@@ -504,13 +716,26 @@ impl App {
         }
     }
 
-    /// On every tick: a sound whose room is not the open one any more (left, closed,
-    /// another opened) stops; one that plays is redrawn when its second changes.
+    /// On every tick: a sound whose room (or waiting voice note) is not open any more
+    /// stops; one that plays is redrawn when its second changes.
     pub(super) fn audio_tick(&mut self) {
         let Some(sound) = &self.audio.current else {
             return;
         };
-        if self.room_id().as_deref() != Some(sound.room_id.as_str()) {
+        let still_here = match &sound.source {
+            SoundSource::Message { .. } => {
+                self.room_id().as_deref() == Some(sound.room_id.as_str())
+            }
+            SoundSource::Draft { scope, path, .. } => {
+                self.attach_scope().as_ref() == Some(scope)
+                    && self
+                        .attach
+                        .files(Some(scope))
+                        .iter()
+                        .any(|file| file.path == *path)
+            }
+        };
+        if !still_here {
             self.stop_audio();
             return;
         }

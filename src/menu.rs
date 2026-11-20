@@ -838,10 +838,11 @@ pub fn space_items(selected: Option<bool>, keys: &Keymap) -> Vec<Item> {
 
 /// The entries for the composer. Pasting is the terminal's business.
 /// `can_record`: a voice message can be recorded on this machine (and a file could
-/// be attached).
+/// be attached). `recording`: a recording runs now (always offered to stop it).
 pub fn composer_items(
     can_attach: bool,
     can_record: bool,
+    recording: bool,
     has_draft: bool,
     keys: &Keymap,
 ) -> Vec<Item> {
@@ -850,7 +851,14 @@ pub fn composer_items(
     if can_attach {
         items.push(Item::action(keys, "Attach file…", Composer, Action::Attach));
     }
-    if can_attach && can_record {
+    if recording {
+        items.push(Item::action(
+            keys,
+            "Stop recording",
+            Composer,
+            Action::RecordVoice,
+        ));
+    } else if can_attach && can_record {
         items.push(Item::action(
             keys,
             "Record voice message",
@@ -980,7 +988,7 @@ mod tests {
                     room_id: "!secret-room:example.org".into(),
                 },
                 "",
-                composer_items(true, false, true, &keys()),
+                composer_items(true, false, false, true, &keys()),
                 Anchor::at(0, 0),
             ),
             Menu::new(
@@ -1345,21 +1353,27 @@ mod tests {
         assert_eq!(labels(&link_items()), ["Open link", "Copy link"]);
 
         assert_eq!(
-            labels(&composer_items(true, false, true, &keys())),
+            labels(&composer_items(true, false, false, true, &keys())),
             ["Attach file…", "Emoji…", "Clear draft"]
         );
         assert_eq!(
-            labels(&composer_items(false, true, false, &keys())),
+            labels(&composer_items(false, true, false, false, &keys())),
             ["Emoji…"]
         );
         // Recording has its entry where the machine can record.
         assert_eq!(
-            labels(&composer_items(true, true, false, &keys())),
+            labels(&composer_items(true, true, false, false, &keys())),
             ["Attach file…", "Record voice message", "Emoji…"]
+        );
+        // While a recording runs, the entry says "Stop recording" even if attaching
+        // or the recorder is unavailable.
+        assert_eq!(
+            labels(&composer_items(false, false, true, false, &keys())),
+            ["Stop recording", "Emoji…"]
         );
         // No word about pasting: that is the terminal's.
         assert!(
-            composer_items(true, false, true, &keys())
+            composer_items(true, false, false, true, &keys())
                 .iter()
                 .all(|item| !item.label.contains("Paste"))
         );

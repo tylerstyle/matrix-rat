@@ -103,6 +103,7 @@ impl App {
                     // As everywhere: the player is its own process group and would
                     // play on while the app is stopped.
                     self.stop_audio();
+                    self.stop_recording();
                     self.suspend_requested = true;
                 }
                 _ => {}

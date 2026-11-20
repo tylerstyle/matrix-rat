@@ -185,6 +185,11 @@ impl Timelines {
         // and files the answer under its room.
     }
 
+    /// Waits briefly on shutdown for in-flight file sends to reach the SDK's send queue.
+    pub async fn finish_uploads(&mut self, wait: std::time::Duration) {
+        self.uploads.finish(wait).await;
+    }
+
     /// At the end of the session: closes the timelines, and stops a request for the
     /// threads popup too (which, unlike them, is not bound to the open room).
     pub fn stop(&mut self) {

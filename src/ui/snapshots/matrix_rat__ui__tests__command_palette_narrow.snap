@@ -4,7 +4,7 @@ expression: "render(&mut app, 46, 16)"
 ---
 " ╭ Command palette ─────────────────────────╮ "
 "╭│ ⌕ type a command, room, or theme…        │╮"
-"││ ──────────────────────────────── 120/120 ││"
+"││ ──────────────────────────────── 121/121 ││"
 "││ › Action   Emoji picker            Alt-E ││"
 "││   Action   Attach a file           Alt-A ││"
 "││   Action   Find a room            Ctrl-K ││"

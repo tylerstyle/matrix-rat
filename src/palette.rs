@@ -446,6 +446,12 @@ pub struct PaletteContext {
     /// Why catching up is not on offer (no summary command, or one that is not
     /// found), in a few words; `None` when it is.
     pub no_summary: Option<&'static str>,
+    /// A voice message recording is running (or saving) right now.
+    pub recording: bool,
+    /// A recorded voice message waits in the composer and can be played here.
+    pub can_play_voice_note: bool,
+    /// A waiting voice message in the open composer is playing right now.
+    pub playing_voice_note: bool,
     pub audio: AudioCaps,
     pub notes: NoteCaps,
     /// What the settings show for the commands that transcribe and translate, the
@@ -505,6 +511,9 @@ impl std::fmt::Debug for PaletteContext {
             .field("room_previews", &self.room_previews)
             .field("link_previews", &self.link_previews)
             .field("notifications", &self.notifications)
+            .field("recording", &self.recording)
+            .field("can_play_voice_note", &self.can_play_voice_note)
+            .field("playing_voice_note", &self.playing_voice_note)
             .field("audio", &self.audio)
             .field("no_summary", &self.no_summary)
             .field("verify_status", &self.verify_status)
@@ -1277,13 +1286,16 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Attach | Action::PastePicture | Action::CreatePoll | Action::OpenStickers => {
             ctx.has_room && !in_pending && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
-        // As attaching a file, and only where something records.
+        // As attaching a file, and only where something records — except while one
+        // runs, when it stops it whatever became of the recorder since.
         Action::RecordVoice => {
-            ctx.record_refused.is_none()
-                && ctx.has_room
-                && !in_pending
-                && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
+            ctx.recording
+                || (ctx.record_refused.is_none()
+                    && ctx.has_room
+                    && !in_pending
+                    && !matches!(ctx.compose_mode, ComposeMode::Edit(_)))
         }
+        Action::PlayVoiceNote => ctx.playing_voice_note || ctx.can_play_voice_note,
         Action::ComposeInEditor => ctx.has_room && !in_pending,
         Action::JumpToNewest | Action::JumpToOldest | Action::JumpToUnread => {
             ctx.has_room && ctx.has_messages
@@ -1373,13 +1385,38 @@ fn action_meta<'a>(
             Cow::Borrowed(description),
             &["upload", "send file", "attach"],
         ),
-        // Greyed with the reason where the machine has nothing to record with.
+        // Stopping while one runs; otherwise greyed with the reason where the machine
+        // has nothing to record with.
         Action::RecordVoice => (
-            match ctx.record_refused {
-                Some(why) => Cow::Owned(format!("{description} ({why})")),
-                None => Cow::Borrowed(description),
+            if ctx.recording {
+                Cow::Borrowed("Stop recording")
+            } else {
+                match ctx.record_refused {
+                    Some(why) => Cow::Owned(format!("{description} ({why})")),
+                    None => Cow::Borrowed(description),
+                }
             },
-            &["voice note", "microphone", "audio message", "record"],
+            &[
+                "voice note",
+                "microphone",
+                "audio message",
+                "record",
+                "stop recording",
+            ],
+        ),
+        Action::PlayVoiceNote => (
+            Cow::Borrowed(if ctx.playing_voice_note {
+                "Stop waiting voice message"
+            } else {
+                description
+            }),
+            &[
+                "voice note",
+                "listen",
+                "play voice",
+                "preview",
+                "stop voice",
+            ],
         ),
         Action::PastePicture => (
             Cow::Borrowed(description),
@@ -1472,6 +1509,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
             Action::OpenEmoji
                 | Action::Attach
                 | Action::RecordVoice
+                | Action::PlayVoiceNote
                 | Action::PastePicture
                 | Action::CreatePoll
                 | Action::OpenStickers
@@ -2125,6 +2163,9 @@ mod tests {
             record_refused: None,
             summary_command: "not set".to_owned(),
             no_summary: Some("set summary_command first"),
+            recording: false,
+            can_play_voice_note: false,
+            playing_voice_note: false,
             audio: AudioCaps::default(),
             notes: NoteCaps::default(),
             transcribe_command: "auto: whisper-cli".to_owned(),
@@ -2378,6 +2419,39 @@ mod tests {
         assert!(!enabled(&p, Action::RecordVoice));
         assert_eq!(title(&p), "Record a voice message (no microphone found)");
         ctx.record_refused = None;
+
+        // While a recording runs, the entry says "Stop recording" and stays enabled
+        // even if the recorder became unavailable or Edit mode is set.
+        ctx.recording = true;
+        ctx.record_refused = Some("no microphone found");
+        ctx.compose_mode = ComposeMode::Edit(0);
+        let p = Palette::open(ctx.clone());
+        assert!(enabled(&p, Action::RecordVoice));
+        assert_eq!(title(&p), "Stop recording");
+        ctx.recording = false;
+        ctx.record_refused = None;
+        ctx.compose_mode = ComposeMode::Normal;
+
+        // Waiting voice note playback follows context and flips label while playing.
+        assert!(!enabled(&p, Action::PlayVoiceNote));
+        ctx.can_play_voice_note = true;
+        let p = Palette::open(ctx.clone());
+        assert!(enabled(&p, Action::PlayVoiceNote));
+        let voice_play_title = |p: &Palette| -> String {
+            p.entries
+                .iter()
+                .find(|e| e.target == Target::Action(Action::PlayVoiceNote))
+                .expect("entry present")
+                .title
+                .clone()
+        };
+        assert_eq!(voice_play_title(&p), "Listen to waiting voice message");
+        ctx.can_play_voice_note = false;
+        ctx.playing_voice_note = true;
+        let p = Palette::open(ctx.clone());
+        assert!(enabled(&p, Action::PlayVoiceNote));
+        assert_eq!(voice_play_title(&p), "Stop waiting voice message");
+        ctx.playing_voice_note = false;
 
         // Editing disables Attach; invite rooms also disable Attach.
         ctx.thread_open = false;

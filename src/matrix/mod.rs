@@ -63,13 +63,6 @@ pub use spaces::{SpaceChild, SpaceDetails, SpaceEdit, SpaceSummary};
 pub use threads::ThreadPage;
 pub use upload::OutgoingFile;
 // For the app, which does not record yet: so far only tests make one.
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "the composer will pass these once it records"
-    )
-)]
 pub use upload::VoiceMeta;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
@@ -2189,6 +2182,11 @@ impl Worker {
         user_searcher.stop();
         dir_searcher.stop();
         ignore_tracker.stop();
+        if matches!(end, SessionEnd::Shutdown) {
+            // Give files sent right before quitting a moment to reach the send queue's
+            // persistent store before tearing timelines down.
+            timelines.finish_uploads(upload::SHUTDOWN_WAIT).await;
+        }
         timelines.stop();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;

@@ -178,6 +178,8 @@ pub enum Action {
     /// Play the selected voice or audio message in here, or stop it (also: stop what
     /// plays, with no such message selected).
     PlayAudio,
+    /// Listen to the waiting voice message in the composer, or stop listening to it.
+    PlayVoiceNote,
     /// Pause or resume what plays (mpv only).
     PauseAudio,
     /// Jump back (`Left`) or forward (`Right`) in what plays (mpv only).
@@ -260,6 +262,7 @@ impl Action {
             | Action::OpenEmoji
             | Action::Attach
             | Action::RecordVoice
+            | Action::PlayVoiceNote
             | Action::PastePicture
             | Action::CreatePoll
             | Action::OpenStickers

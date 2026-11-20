@@ -236,7 +236,9 @@ impl App {
         let has_draft = !self.composer.is_empty() || !self.attachments().is_empty();
         self.set_focus(Pane::Composer);
         let can_record = self.recording_refused().is_none();
-        let items = menu::composer_items(can_attach, can_record, has_draft, &self.keymap);
+        let recording = self.recording().is_some();
+        let items =
+            menu::composer_items(can_attach, can_record, recording, has_draft, &self.keymap);
         self.show_menu(target, "", items, at);
     }
 
@@ -302,7 +304,12 @@ impl App {
             ) => self.open_message_menu(index, at),
             Some(HitId::Room(index) | HitId::BarRoom(index)) => self.open_room_menu(index, at),
             Some(HitId::Do(Action::SpaceNext | Action::SpacePrev)) => self.open_space_menu(at),
-            Some(HitId::ComposerText | HitId::Attachment(_) | HitId::Pane(Pane::Composer)) => {
+            Some(
+                HitId::ComposerText
+                | HitId::Attachment(_)
+                | HitId::AttachmentPlay(_)
+                | HitId::Pane(Pane::Composer),
+            ) => {
                 self.open_composer_menu(at);
             }
             _ => {}
