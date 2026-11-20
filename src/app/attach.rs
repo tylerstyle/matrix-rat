@@ -440,6 +440,8 @@ impl App {
                 send: self.attach.sends,
                 room_id: room_id.clone(),
                 files: files.iter().map(|file| file.path.clone()).collect(),
+                // Nothing records yet: every file goes as what it is.
+                voice: Vec::new(),
                 caption,
                 reply_to,
             });

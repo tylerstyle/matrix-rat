@@ -26,6 +26,51 @@ use crate::upload::{self, Prepared};
 /// How long sending waits to learn the server's size limit before going without.
 const LIMIT_WAIT: Duration = Duration::from_secs(5);
 const LIMIT_RETRY: Duration = Duration::from_secs(60);
+/// What the room sees as the name of a voice message: the same for every one, so
+/// that nothing of where or when it was recorded goes along.
+const VOICE_NAME: &str = "voice-message.ogg";
+/// A voice message is Ogg/Opus, whatever the name of its file suggests.
+const VOICE_MIME: &str = "audio/ogg";
+/// How many values stand in for a waveform that was not given.
+const FLAT_WAVEFORM: usize = 16;
+
+/// What makes a file a voice message (MSC3245): how long the recording is and how
+/// loud it is along the way.
+#[derive(Clone, PartialEq, Eq)]
+pub struct VoiceMeta {
+    pub duration: Duration,
+    /// Loudness along the sound, each value from 0 to 1024. Louder values are cut to
+    /// that, and of more than [`crate::audio::MAX_WAVEFORM`] the loudest of each
+    /// stretch is sent.
+    pub waveform: Vec<u16>,
+}
+
+/// Hand-written: only the shape, as for a received one (`AudioMeta`).
+impl std::fmt::Debug for VoiceMeta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoiceMeta")
+            .field("duration", &self.duration)
+            .field("waveform", &self.waveform.len())
+            .finish()
+    }
+}
+
+impl VoiceMeta {
+    /// The waveform as the SDK takes it: values from 0 to 1, bounded in number, and
+    /// never empty. The SDK leaves the whole block about the sound out of the event
+    /// when there is no waveform, and other clients then show no voice message.
+    fn levels(&self) -> Vec<f32> {
+        let values: Vec<u64> = self.waveform.iter().copied().map(u64::from).collect();
+        let bounded = crate::audio::bounded_waveform(&values);
+        if bounded.is_empty() {
+            return vec![0.0; FLAT_WAVEFORM];
+        }
+        bounded
+            .into_iter()
+            .map(|value| f32::from(value) / f32::from(crate::audio::MAX_AMPLITUDE))
+            .collect()
+    }
+}
 
 pub struct Uploads {
     client: Client,
@@ -67,11 +112,15 @@ impl Uploads {
     /// one cannot be sent, none is ([`MatrixEvent::FilesNotSent`]). A later file that
     /// cannot be read is reported and the rest still goes, and then
     /// [`MatrixEvent::FilesSent`] says that the files are not needed any more.
+    ///
+    /// `voice` goes by position: the file at a place where it holds something is sent
+    /// as a voice message. It may be shorter than `files`.
     pub fn send(
         &mut self,
         send: u64,
         timeline: Arc<Timeline>,
         files: Vec<PathBuf>,
+        mut voice: Vec<Option<VoiceMeta>>,
         caption: Option<Outgoing>,
         reply_to: Option<OwnedEventId>,
     ) {
@@ -92,8 +141,14 @@ impl Uploads {
                     tokio::task::spawn_blocking(move || upload::prepare(&path, limit)).await;
                 let outcome = match prepared {
                     Ok(Ok(prepared)) => {
-                        let name = prepared.name.clone();
-                        match attachment(prepared) {
+                        let voice = voice.get_mut(n).and_then(Option::take);
+                        // The name the room sees, which for a voice message is not
+                        // the file's.
+                        let name = match voice {
+                            Some(_) => VOICE_NAME.to_owned(),
+                            None => prepared.name.clone(),
+                        };
+                        match attachment(prepared, voice) {
                             Some((source, mime, mut config)) => {
                                 // Only ever with the first file.
                                 config.caption = caption.take();
@@ -164,10 +219,32 @@ fn caption_content(
 }
 
 /// What the SDK needs to send a prepared file. `None` if its type cannot be expressed
-/// (never the case for the types this app assigns).
-fn attachment(prepared: Prepared) -> Option<(AttachmentSource, mime::Mime, AttachmentConfig)> {
-    let mime: mime::Mime = prepared.mime.parse().ok()?;
+/// (never the case for the types this app assigns). With `voice` it is a voice
+/// message, whatever the file looked like.
+fn attachment(
+    prepared: Prepared,
+    voice: Option<VoiceMeta>,
+) -> Option<(AttachmentSource, mime::Mime, AttachmentConfig)> {
     let size = UInt::new(prepared.bytes.len() as u64);
+    if let Some(voice) = voice {
+        // The SDK writes the block about the sound only for an audio type, and only
+        // with both a length and a waveform.
+        let info = AttachmentInfo::Voice(BaseAudioInfo {
+            duration: Some(voice.duration),
+            size,
+            waveform: Some(voice.levels()),
+        });
+        let config = AttachmentConfig {
+            info: Some(info),
+            ..Default::default()
+        };
+        let source = AttachmentSource::Data {
+            bytes: prepared.bytes,
+            filename: VOICE_NAME.to_owned(),
+        };
+        return Some((source, VOICE_MIME.parse().ok()?, config));
+    }
+    let mime: mime::Mime = prepared.mime.parse().ok()?;
     // The kind of message follows the type, and so must the details given with it.
     let info = match mime.type_() {
         mime::IMAGE => AttachmentInfo::Image(BaseImageInfo {
@@ -250,20 +327,23 @@ mod tests {
             mime: mime.to_owned(),
             picture,
         };
-        let (source, mime, config) = attachment(prepared(
-            "cat.png",
-            "image/png",
-            Some(upload::Picture {
-                width: 1600,
-                height: 900,
-                thumbnail: Some(upload::Thumbnail {
-                    bytes: vec![9; 10],
-                    mime: "image/jpeg",
-                    width: 800,
-                    height: 450,
+        let (source, mime, config) = attachment(
+            prepared(
+                "cat.png",
+                "image/png",
+                Some(upload::Picture {
+                    width: 1600,
+                    height: 900,
+                    thumbnail: Some(upload::Thumbnail {
+                        bytes: vec![9; 10],
+                        mime: "image/jpeg",
+                        width: 800,
+                        height: 450,
+                    }),
                 }),
-            }),
-        ))
+            ),
+            None,
+        )
         .unwrap();
         assert_eq!(mime, mime::IMAGE_PNG);
         assert!(matches!(
@@ -282,7 +362,8 @@ mod tests {
         assert_eq!(u64::from(thumbnail.size), 10);
 
         // A picture this app cannot read still goes out as one, without a size in pixels.
-        let (_, _, config) = attachment(prepared("drawing.svg", "image/svg+xml", None)).unwrap();
+        let (_, _, config) =
+            attachment(prepared("drawing.svg", "image/svg+xml", None), None).unwrap();
         assert!(matches!(
             config.info,
             Some(AttachmentInfo::Image(BaseImageInfo {
@@ -296,15 +377,114 @@ mod tests {
                 "video/mp4",
                 (|info| matches!(info, AttachmentInfo::Video(_))) as fn(&AttachmentInfo) -> bool,
             ),
-            ("audio/ogg", |info| matches!(info, AttachmentInfo::Audio(_))),
+            // A sound that was only attached is no voice message, and says nothing
+            // about its length.
+            ("audio/ogg", |info| {
+                matches!(
+                    info,
+                    AttachmentInfo::Audio(BaseAudioInfo {
+                        duration: None,
+                        waveform: None,
+                        size: Some(_),
+                    })
+                )
+            }),
             ("application/pdf", |info| {
                 matches!(info, AttachmentInfo::File(BaseFileInfo { size: Some(_) }))
             }),
             ("text/plain", |info| matches!(info, AttachmentInfo::File(_))),
         ] {
-            let (_, _, config) = attachment(prepared("x", mime, None)).unwrap();
+            let (_, _, config) = attachment(prepared("x", mime, None), None).unwrap();
             assert!(check(config.info.as_ref().unwrap()), "{mime}");
         }
+    }
+
+    #[test]
+    fn a_file_with_voice_details_goes_out_as_a_voice_message() {
+        // As the recorder leaves it: a name of its own, and a type guessed from that.
+        let recorded = |mime: &str| Prepared {
+            name: "voice-0123456789abcdef.bin".to_owned(),
+            bytes: vec![7; 40],
+            mime: mime.to_owned(),
+            picture: None,
+        };
+        let voice = VoiceMeta {
+            duration: Duration::from_millis(12_340),
+            waveform: vec![0, 256, 512, 1024],
+        };
+        for guessed in ["audio/ogg", "application/octet-stream", "video/ogg", "?"] {
+            let (source, mime, config) =
+                attachment(recorded(guessed), Some(voice.clone())).unwrap();
+            // An audio type, or the SDK sends a file or a video without the details.
+            assert_eq!(mime.essence_str(), "audio/ogg", "{guessed}");
+            assert!(matches!(
+                source,
+                AttachmentSource::Data { ref filename, ref bytes }
+                    if filename == "voice-message.ogg" && bytes.len() == 40
+            ));
+            let Some(AttachmentInfo::Voice(info)) = config.info else {
+                panic!("not a voice message: {guessed}");
+            };
+            assert_eq!(info.duration, Some(Duration::from_millis(12_340)));
+            assert_eq!(info.size, UInt::new(40));
+            assert_eq!(info.waveform, Some(vec![0.0, 0.25, 0.5, 1.0]));
+            assert!(config.thumbnail.is_none());
+        }
+    }
+
+    #[test]
+    fn the_waveform_of_a_voice_message_is_bounded_and_never_missing() {
+        let levels = |waveform: Vec<u16>| {
+            let voice = VoiceMeta {
+                duration: Duration::from_secs(3),
+                waveform,
+            };
+            let prepared = Prepared {
+                name: "x.ogg".to_owned(),
+                bytes: vec![1],
+                mime: "audio/ogg".to_owned(),
+                picture: None,
+            };
+            let (_, _, config) = attachment(prepared, Some(voice)).unwrap();
+            let Some(AttachmentInfo::Voice(info)) = config.info else {
+                panic!("not a voice message");
+            };
+            assert_eq!(info.duration, Some(Duration::from_secs(3)));
+            info.waveform
+                .expect("without one the SDK leaves the details out")
+        };
+        // Too loud is cut to the loudest.
+        assert_eq!(levels(vec![1024, 1025, u16::MAX]), [1.0, 1.0, 1.0]);
+        // Too many: the loudest of each stretch, so every kept value is the loud one.
+        let long: Vec<u16> = (0..10_000)
+            .map(|n| if n % 10 == 0 { 768 } else { 3 })
+            .collect();
+        let kept = levels(long);
+        assert_eq!(kept.len(), crate::audio::MAX_WAVEFORM);
+        assert!(kept.iter().all(|level| *level == 0.75));
+        // None at all: a short flat one stands in.
+        let flat = levels(Vec::new());
+        assert!(!flat.is_empty() && flat.len() <= crate::audio::WAVE_BARS);
+        assert!(flat.iter().all(|level| *level == 0.0));
+        // What the SDK makes of the values is what was given (it multiplies by 1024).
+        let odd = vec![1, 333, 1023];
+        let back: Vec<u16> = levels(odd.clone())
+            .into_iter()
+            .map(|level| (level.clamp(0.0, 1.0) * 1024.0) as u16)
+            .collect();
+        assert_eq!(back, odd);
+    }
+
+    #[test]
+    fn voice_details_print_only_their_shape() {
+        let voice = VoiceMeta {
+            duration: Duration::from_secs(12),
+            waveform: vec![4, 4, 4],
+        };
+        assert_eq!(
+            format!("{voice:?}"),
+            "VoiceMeta { duration: 12s, waveform: 3 }"
+        );
     }
 
     #[test]
@@ -399,6 +579,7 @@ mod tests {
                                 send: 0,
                                 room_id: room.id.clone(),
                                 files: vec![root.join("gone.txt"), text_path.clone()],
+                                voice: Vec::new(),
                                 caption: Some(crate::format::parse("for the file that is gone")),
                                 reply_to: None,
                             });
@@ -406,6 +587,7 @@ mod tests {
                                 send: 0,
                                 room_id: room.id.clone(),
                                 files: vec![text_path.clone(), picture_path.clone()],
+                                voice: Vec::new(),
                                 caption: Some(crate::format::parse(&format!("**{caption}**"))),
                                 reply_to: None,
                             };

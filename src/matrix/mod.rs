@@ -57,6 +57,7 @@ pub use session::{ReauthKind, ReauthTarget};
 pub use source::{EventSource, SOURCE_MAX, SourceKind};
 pub use spaces::{SpaceChild, SpaceDetails, SpaceEdit, SpaceSummary};
 pub use threads::ThreadPage;
+pub use upload::VoiceMeta;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
     VerifyStage, VerifyUpdate,
@@ -318,6 +319,9 @@ pub enum MatrixCmd {
         send: u64,
         room_id: String,
         files: Vec<std::path::PathBuf>,
+        /// By position in `files`: what makes that file a voice message. May be
+        /// shorter than `files`; a file without an entry is sent as what it is.
+        voice: Vec<Option<VoiceMeta>>,
         /// Text that goes with the first file.
         caption: Option<Outgoing>,
         /// Event id of the message being replied to (by the first file).
@@ -549,10 +553,22 @@ impl MatrixCmd {
                 ("InThread", vec![id(root), Some(command.shown(ids))])
             }
             // Paths can say a lot about the user; the caption is message text.
-            Self::SendFiles { room_id, files, .. } => (
-                "SendFiles",
-                vec![id(room_id), Some(format!("{} files", files.len()))],
-            ),
+            Self::SendFiles {
+                room_id,
+                files,
+                voice,
+                ..
+            } => {
+                let voices = voice.iter().flatten().count();
+                (
+                    "SendFiles",
+                    vec![
+                        id(room_id),
+                        Some(format!("{} files", files.len())),
+                        (voices > 0).then(|| format!("{voices} voice")),
+                    ],
+                )
+            }
             Self::FetchMembers { room_id } => ("FetchMembers", vec![id(room_id)]),
             Self::Manage(command) => ("Manage", vec![Some(command.shown(ids))]),
             Self::ReauthPassword { .. } => ("ReauthPassword", vec![]),
@@ -2433,6 +2449,35 @@ mod tests {
             room_id: "!room:example.org".into(),
         });
         assert_eq!(format!("{command:?}"), "Manage(Leave)");
+        // Files: how many, and how many of them are voice messages. No path, no
+        // caption, and nothing of the sound.
+        let mut command = MatrixCmd::SendFiles {
+            send: 7,
+            room_id: "!room:example.org".into(),
+            files: vec![
+                "/home/someone/secret-plan.pdf".into(),
+                "/run/user/1000/default-audio/voice-0123456789abcdef.ogg".into(),
+            ],
+            voice: Vec::new(),
+            caption: Some(crate::format::parse("the secret plan for example.org")),
+            reply_to: Some("$event:example.org".into()),
+        };
+        assert_eq!(format!("{command:?}"), "SendFiles(2 files)");
+        assert_eq!(command.describe(), "SendFiles(!room:example.org, 2 files)");
+        if let MatrixCmd::SendFiles { voice, .. } = &mut command {
+            *voice = vec![
+                None,
+                Some(VoiceMeta {
+                    duration: Duration::from_millis(12_345),
+                    waveform: vec![77; 5],
+                }),
+            ];
+        }
+        assert_eq!(format!("{command:?}"), "SendFiles(2 files, 1 voice)");
+        assert_eq!(
+            command.describe(),
+            "SendFiles(!room:example.org, 2 files, 1 voice)"
+        );
         // What `serve` asks for and is told: no room, no text, no event, no reason.
         let command = MatrixCmd::Agent(AgentCmd::Send {
             request: 4,

@@ -1181,6 +1181,7 @@ impl Timelines {
                 send,
                 room_id,
                 files,
+                voice,
                 caption,
                 reply_to,
             } => {
@@ -1189,7 +1190,9 @@ impl Timelines {
                     Err(_) => return self.files_not_sent(send, "invalid event id"),
                 };
                 match self.timeline(&room_id).await {
-                    Ok(timeline) => self.uploads.send(send, timeline, files, caption, reply_to),
+                    Ok(timeline) => self
+                        .uploads
+                        .send(send, timeline, files, voice, caption, reply_to),
                     Err(err) => self.files_not_sent(send, format!("{err:#}")),
                 }
             }
