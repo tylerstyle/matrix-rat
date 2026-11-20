@@ -61,10 +61,10 @@ impl fmt::Debug for Tool {
 /// command the user named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capture {
-    PwRecord,
     Parec,
     /// The same program as `parec` under the name some systems only have.
     Parecord,
+    PwRecord,
     /// ffmpeg reading from a PulseAudio server.
     FfmpegPulse,
     Arecord,
@@ -82,10 +82,14 @@ enum Server {
 }
 
 impl Capture {
+    /// The PulseAudio programs come first: their options are old and the same
+    /// everywhere, and PipeWire answers on PulseAudio's socket on practically every
+    /// desktop that runs it, while `pw-record` writes raw sound to its output only
+    /// since PipeWire 1.4 or so and ends with a usage error before that.
     pub const KNOWN: [Capture; 6] = [
-        Capture::PwRecord,
         Capture::Parec,
         Capture::Parecord,
+        Capture::PwRecord,
         Capture::FfmpegPulse,
         Capture::Arecord,
         Capture::FfmpegAlsa,
@@ -299,10 +303,13 @@ impl Seen {
         self.alsa_capture || self.pulse_named
     }
 
-    fn has(&self, server: Server) -> bool {
+    /// Whether a program that records from `server` would record what the user
+    /// means. With a server named in `PULSE_SERVER` that is this server alone.
+    fn offers(&self, server: Server) -> bool {
         match server {
-            Server::PipeWire => self.pipewire,
             Server::Pulse => self.pulse,
+            _ if self.pulse_named => false,
+            Server::PipeWire => self.pipewire,
             Server::Alsa => self.alsa_capture,
         }
     }
@@ -362,9 +369,47 @@ impl Recorder {
     }
 }
 
+/// Where the programs and the sound are looked for: plain values, so that tests name
+/// their own. The default is a machine with nothing on it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Env {
+    /// The `PATH` variable.
+    pub path: Option<OsString>,
+    /// The `HOME` variable, for a `~/` in a command of the user's.
+    pub home: Option<OsString>,
+    pub seen: Seen,
+    /// A session over SSH: the microphone would be the far machine's.
+    pub ssh: bool,
+}
+
+/// Hand-written: the two variables name the user's folders.
+impl fmt::Debug for Env {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Env")
+            .field("seen", &self.seen)
+            .field("ssh", &self.ssh)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Env {
+    /// This process's environment and this machine.
+    pub fn here() -> Self {
+        Self {
+            path: std::env::var_os("PATH"),
+            home: std::env::var_os("HOME"),
+            seen: Seen::here(),
+            ssh: crate::portal::in_ssh_session(),
+        }
+    }
+}
+
 /// Why there is no recorder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoRecorder {
+    /// `"auto"` in a session over SSH: what would record is the far machine's
+    /// microphone, not the one in front of the user.
+    OverSsh,
     /// `"auto"` saw no microphone: no ALSA device that records, and no sound server
     /// named in `PULSE_SERVER`.
     NoMicrophone,
@@ -383,9 +428,14 @@ impl NoRecorder {
     /// For a toast.
     pub fn message(self) -> &'static str {
         match self {
-            NoRecorder::NoMicrophone => "No microphone was found on this machine",
+            NoRecorder::OverSsh => {
+                "Over SSH the far machine's microphone would record: not offered (audio_recorder can name a recorder)"
+            }
+            NoRecorder::NoMicrophone => {
+                "No microphone was found; if there is one, name a recorder in the audio_recorder setting"
+            }
             NoRecorder::NoCapture => {
-                "No recorder found (pw-record, parec, parecord, ffmpeg or arecord)"
+                "No recorder found (parec, parecord, pw-record, ffmpeg or arecord)"
             }
             NoRecorder::NoEncoder => "No Opus encoder found (opusenc or ffmpeg)",
             NoRecorder::BadCommand => {
@@ -398,36 +448,39 @@ impl NoRecorder {
     /// In a few words, for a list: why recording is greyed there.
     pub fn short(self) -> &'static str {
         match self {
+            NoRecorder::OverSsh => "not over SSH",
             NoRecorder::NoMicrophone => "no microphone found",
             NoRecorder::NoCapture => "no recorder found",
             NoRecorder::NoEncoder => "no Opus encoder found",
-            NoRecorder::BadCommand | NoRecorder::Missing => "audio_recorder not found",
+            NoRecorder::BadCommand => "audio_recorder could not be read",
+            NoRecorder::Missing => "audio_recorder not found",
         }
     }
 }
 
 /// The recorder for an `audio_recorder` setting.
 ///
-/// `"auto"` takes the first known capture program that is on `path` (the `PATH`
-/// variable) and whose sound server was `seen`, and wants a microphone to be
-/// plausible. Anything else is a capture command of the user's own, split into words
+/// `"auto"` takes the first known capture program that is on `PATH` and whose sound
+/// server was seen, and wants a microphone to be plausible; over SSH it takes none,
+/// as nothing is played there either. Where `PULSE_SERVER` names a server, only the
+/// programs that speak to it are taken: the sound is that server's, not this
+/// machine's. Anything else is a capture command of the user's own, split into words
 /// as a shell would and started as it is: it must write raw signed 16-bit
 /// little-endian mono sound at 48 kHz to its standard output and end on SIGTERM. Its
-/// program is looked up as the player's is; whether a microphone is there is then the
-/// user's business. Either way an encoder must be on `path`.
-pub fn choose(
-    setting: &str,
-    path: Option<&OsStr>,
-    home: Option<&OsStr>,
-    seen: &Seen,
-) -> Result<Recorder, NoRecorder> {
+/// program is looked up as the player's is; whether a microphone is there, and
+/// whose it is, is then the user's business. Either way an encoder must be on `PATH`.
+pub fn choose(setting: &str, env: &Env) -> Result<Recorder, NoRecorder> {
+    let (path, seen) = (env.path.as_deref(), &env.seen);
     let (capture_kind, capture) = if is_auto(setting) {
+        if env.ssh {
+            return Err(NoRecorder::OverSsh);
+        }
         if !seen.microphone() {
             return Err(NoRecorder::NoMicrophone);
         }
         Capture::KNOWN
             .into_iter()
-            .filter(|kind| kind.server().is_some_and(|server| seen.has(server)))
+            .filter(|kind| kind.server().is_some_and(|server| seen.offers(server)))
             .find_map(|kind| {
                 find_on_path(kind.program(), path)
                     .map(|program| (kind, Tool::known(program, kind.args())))
@@ -436,7 +489,7 @@ pub fn choose(
     } else {
         let words = shlex::split(setting.trim()).ok_or(NoRecorder::BadCommand)?;
         let (first, args) = words.split_first().ok_or(NoRecorder::BadCommand)?;
-        let program = named_program(first, path, home).ok_or(NoRecorder::Missing)?;
+        let program = named_program(first, path, env.home.as_deref()).ok_or(NoRecorder::Missing)?;
         let args = args.iter().map(OsString::from).collect();
         (Capture::Own, Tool::new(program, args))
     };
@@ -455,15 +508,9 @@ pub fn choose(
     })
 }
 
-/// [`choose`] with this process's `PATH` and `HOME`, and what is seen of this
-/// machine's sound.
+/// [`choose`] with this process's environment and what is seen of this machine.
 pub fn choose_here(setting: &str) -> Result<Recorder, NoRecorder> {
-    choose(
-        setting,
-        std::env::var_os("PATH").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-        &Seen::here(),
-    )
+    choose(setting, &Env::here())
 }
 
 #[cfg(test)]
@@ -487,6 +534,16 @@ mod tests {
             pulse: true,
             pulse_named: false,
             alsa_capture: true,
+        }
+    }
+
+    /// A machine with the programs of `bin` and what was `seen`.
+    fn env(bin: &Dir, seen: Seen) -> Env {
+        Env {
+            path: Some(bin.0.clone().into_os_string()),
+            home: None,
+            seen,
+            ssh: false,
         }
     }
 
@@ -542,23 +599,25 @@ mod tests {
         ] {
             bin.file(name, &script, 0o755);
         }
-        let path = bin.0.display().to_string();
-        let kind = |seen: Seen| {
-            choose("auto", os(&path), None, &seen)
-                .unwrap()
-                .capture_kind()
-        };
+        let kind = |seen: Seen| choose("auto", &env(&bin, seen)).unwrap().capture_kind();
 
+        // PulseAudio's programs before PipeWire's own, which older systems have in a
+        // form that cannot write to its output.
+        assert_eq!(kind(all()), Capture::Parec);
+        // Without PulseAudio's socket its programs do not count, though they are there.
+        let no_pulse = Seen {
+            pulse: false,
+            ..all()
+        };
+        assert_eq!(kind(no_pulse), Capture::PwRecord);
+        std::fs::remove_file(bin.0.join("parec")).unwrap();
+        assert_eq!(kind(all()), Capture::Parecord);
+        std::fs::remove_file(bin.0.join("parecord")).unwrap();
         assert_eq!(kind(all()), Capture::PwRecord);
-        // Without PipeWire's socket its program does not count, though it is there.
         let no_pipewire = Seen {
             pipewire: false,
             ..all()
         };
-        assert_eq!(kind(no_pipewire), Capture::Parec);
-        std::fs::remove_file(bin.0.join("parec")).unwrap();
-        assert_eq!(kind(no_pipewire), Capture::Parecord);
-        std::fs::remove_file(bin.0.join("parecord")).unwrap();
         assert_eq!(kind(no_pipewire), Capture::FfmpegPulse);
         let alsa_only = Seen {
             alsa_capture: true,
@@ -568,22 +627,68 @@ mod tests {
         std::fs::remove_file(bin.0.join("arecord")).unwrap();
         assert_eq!(kind(alsa_only), Capture::FfmpegAlsa);
         // The encoder: opusenc before ffmpeg.
-        let recorder = choose("", os(&path), None, &all()).unwrap();
+        let recorder = choose("", &env(&bin, all())).unwrap();
         assert_eq!(recorder.encoder_kind(), Encoder::Opusenc);
         assert_eq!(recorder.names(), "pw-record + opusenc");
         assert_eq!(recorder.capture.program(), bin.0.join("pw-record"));
         std::fs::remove_file(bin.0.join("opusenc")).unwrap();
-        let recorder = choose(" AUTO ", os(&path), None, &all()).unwrap();
+        let recorder = choose(" AUTO ", &env(&bin, all())).unwrap();
         assert_eq!(recorder.encoder_kind(), Encoder::Ffmpeg);
         assert_eq!(recorder.encoder.program(), bin.0.join("ffmpeg"));
         assert!(!mark.exists(), "nothing was run");
     }
 
     #[test]
+    fn a_server_named_in_pulse_server_is_the_only_one_recorded_from() {
+        let runtime = Dir::new("rec-named-runtime");
+        let bin = Dir::new("rec-named-bin");
+        runtime.file("pipewire-0", "", 0o600);
+        for name in ["pw-record", "arecord", "opusenc"] {
+            bin.file(name, "", 0o755);
+        }
+        // PipeWire's socket and a device that records are here, but the user's sound
+        // is the named server's.
+        let seen = Seen::look(
+            Some(runtime.0.as_os_str()),
+            os("tcp:desk.example:4713"),
+            Some(PCM),
+        );
+        assert!(seen.pipewire && seen.pulse_named && seen.alsa_capture);
+        assert_eq!(choose("auto", &env(&bin, seen)), Err(NoRecorder::NoCapture));
+        bin.file("ffmpeg", "", 0o755);
+        let recorder = choose("auto", &env(&bin, seen)).unwrap();
+        assert_eq!(recorder.capture_kind(), Capture::FfmpegPulse);
+        bin.file("parecord", "", 0o755);
+        let recorder = choose("auto", &env(&bin, seen)).unwrap();
+        assert_eq!(recorder.capture_kind(), Capture::Parecord);
+        // Without the variable the same machine records with its own PipeWire.
+        let seen = Seen::look(Some(runtime.0.as_os_str()), None, Some(PCM));
+        let recorder = choose("auto", &env(&bin, seen)).unwrap();
+        assert_eq!(recorder.capture_kind(), Capture::PwRecord);
+    }
+
+    #[test]
+    fn over_ssh_auto_records_nothing_and_a_command_of_the_users_still_does() {
+        let bin = Dir::new("rec-ssh");
+        for name in ["parec", "arecord", "opusenc"] {
+            bin.file(name, "", 0o755);
+        }
+        let mut far = env(&bin, all());
+        assert!(choose("auto", &far).is_ok());
+        // The far machine has everything, a microphone among it: all the more reason.
+        far.ssh = true;
+        assert_eq!(choose("auto", &far), Err(NoRecorder::OverSsh));
+        assert_eq!(choose("", &far), Err(NoRecorder::OverSsh));
+        let recorder = choose("arecord -q -t raw -f S16_LE -r 48000 -c 1", &far).unwrap();
+        assert_eq!(recorder.capture_kind(), Capture::Own);
+        assert!(NoRecorder::OverSsh.message().contains("audio_recorder"));
+        assert_eq!(NoRecorder::OverSsh.short(), "not over SSH");
+    }
+
+    #[test]
     fn what_is_missing_is_told_apart() {
         let bin = Dir::new("rec-missing");
-        let path = bin.0.display().to_string();
-        let why = |setting: &str, seen: Seen| choose(setting, os(&path), None, &seen).unwrap_err();
+        let why = |setting: &str, seen: Seen| choose(setting, &env(&bin, seen)).unwrap_err();
 
         // No microphone comes first: on a machine without one nothing else matters.
         assert_eq!(why("auto", Seen::default()), NoRecorder::NoMicrophone);
@@ -608,9 +713,14 @@ mod tests {
         assert_eq!(why("auto", alsa_only), NoRecorder::NoCapture);
         std::fs::remove_file(bin.0.join("opusenc")).unwrap();
         assert_eq!(why("auto", all()), NoRecorder::NoEncoder);
+        let nowhere = Env {
+            seen: all(),
+            ..Env::default()
+        };
+        assert_eq!(choose("auto", &nowhere), Err(NoRecorder::NoCapture));
         assert_eq!(
-            choose("auto", None, None, &all()),
-            Err(NoRecorder::NoCapture)
+            choose("auto", &Env::default()),
+            Err(NoRecorder::NoMicrophone)
         );
 
         assert_eq!(why("'unclosed", all()), NoRecorder::BadCommand);
@@ -619,17 +729,112 @@ mod tests {
         assert_eq!(why("/no/such/recorder", all()), NoRecorder::Missing);
         // A command of the user's still needs an encoder.
         assert_eq!(why("pw-record --raw -", all()), NoRecorder::NoEncoder);
-        for why in [
+
+        // What is said tells them apart too, and says what the user can do.
+        assert!(
+            NoRecorder::NoMicrophone
+                .message()
+                .contains("audio_recorder")
+        );
+        assert!(NoRecorder::NoCapture.message().contains("parec"));
+        assert!(NoRecorder::NoEncoder.message().contains("opusenc"));
+        assert!(NoRecorder::BadCommand.message().contains("quote"));
+        assert!(NoRecorder::Missing.message().contains("not found"));
+        // A command that cannot be read is not said to be missing.
+        assert_eq!(
+            NoRecorder::BadCommand.short(),
+            "audio_recorder could not be read"
+        );
+        assert_eq!(NoRecorder::Missing.short(), "audio_recorder not found");
+        let all_reasons = [
+            NoRecorder::OverSsh,
             NoRecorder::NoMicrophone,
             NoRecorder::NoCapture,
             NoRecorder::NoEncoder,
             NoRecorder::BadCommand,
             NoRecorder::Missing,
-        ] {
-            assert!(!why.message().is_empty() && !why.short().is_empty());
+        ];
+        for (n, one) in all_reasons.iter().enumerate() {
+            for other in &all_reasons[n + 1..] {
+                assert_ne!(one.message(), other.message());
+                assert_ne!(one.short(), other.short());
+            }
         }
     }
 
+    #[test]
+    fn every_capture_line_asks_for_the_sound_the_encoder_is_told_to_expect() {
+        for kind in Capture::KNOWN {
+            let args = kind.args();
+            let line = args.join(" ");
+            let has = |word: &str| args.contains(&word);
+            // 48 kHz.
+            assert!(
+                has("--rate=48000") || line.contains("-r 48000") || line.contains("-ar 48000"),
+                "{kind:?}: {line}"
+            );
+            // One channel.
+            assert!(
+                has("--channels=1") || line.contains("-c 1") || line.contains("-ac 1"),
+                "{kind:?}: {line}"
+            );
+            // Signed 16-bit little-endian, raw: no header before the sound. Only
+            // pw-record has no name for the byte order (it is the machine's).
+            let format = has("--format=s16le")
+                || line.contains("-f S16_LE")
+                || line.contains("-f s16le pipe:1")
+                || (kind == Capture::PwRecord && has("--format=s16"));
+            assert!(format, "{kind:?}: {line}");
+            let raw = has("--raw") || line.contains("-t raw") || line.contains("-f s16le pipe:1");
+            assert!(raw, "{kind:?}: {line}");
+            // To its standard output: no file is named. The one name there is, is
+            // the default device ffmpeg wants.
+            assert!(!line.contains('/') && !line.contains(".wav"), "{line}");
+            // The server it is offered for is the one it records from.
+            match kind.server().unwrap() {
+                Server::Pulse if kind.program() == "ffmpeg" => assert!(line.contains("-f pulse")),
+                Server::Alsa if kind.program() == "ffmpeg" => assert!(line.contains("-f alsa")),
+                Server::Pulse => assert!(kind.program().starts_with("parec")),
+                Server::PipeWire => assert_eq!(kind.program(), "pw-record"),
+                Server::Alsa => assert_eq!(kind.program(), "arecord"),
+            }
+        }
+        for kind in Encoder::KNOWN {
+            let line = kind.args().join(" ");
+            assert!(line.contains("48000"), "{kind:?}: {line}");
+            assert!(
+                line.contains("--raw-chan 1") || line.contains("-ac 1"),
+                "{line}"
+            );
+            assert!(
+                line.contains("--raw-bits 16") || line.contains("-f s16le"),
+                "{line}"
+            );
+            // Speech at 24 kbit/s, read from the input and written to the output.
+            assert!(
+                line.contains("--bitrate 24") || line.contains("-b:a 24k"),
+                "{line}"
+            );
+            assert!(
+                line.ends_with(" - -") || (line.contains("pipe:0") && line.ends_with("pipe:1")),
+                "{line}"
+            );
+        }
+        // No shell is involved, and nothing in our own words would need one.
+        let ours = Capture::KNOWN
+            .into_iter()
+            .flat_map(|kind| kind.args())
+            .chain(Encoder::KNOWN.into_iter().flat_map(|kind| kind.args()));
+        for word in ours {
+            assert!(
+                !word.is_empty()
+                    && !word.contains(|c: char| " \t\n;|&$`<>(){}*?~'\"\\".contains(c)),
+                "{word:?}"
+            );
+        }
+    }
+
+    /// A pin: the lines as they were checked against the programs' documentation.
     #[test]
     fn known_programs_get_fixed_arguments() {
         let args = |kind: Capture| kind.args().join(" ");
@@ -676,7 +881,7 @@ mod tests {
             alsa_capture: true,
             ..Seen::default()
         };
-        let recorder = choose("auto", Some(bin.0.as_os_str()), None, &seen).unwrap();
+        let recorder = choose("auto", &env(&bin, seen)).unwrap();
         assert_eq!(words(&recorder.capture), Capture::Arecord.args());
         assert_eq!(words(&recorder.encoder), Encoder::Ffmpeg.args());
     }
@@ -689,14 +894,13 @@ mod tests {
         bin.file("ffmpeg", "", 0o755);
         std::fs::create_dir(home.0.join("bin")).unwrap();
         home.file("bin/my recorder", "", 0o755);
-        let path = bin.0.display().to_string();
-
         // Nothing was seen: with a command of their own that is the user's business.
+        let mut nothing = env(&bin, Seen::default());
+        nothing.home = Some(home.0.clone().into_os_string());
+
         let recorder = choose(
             "pw-record --target='USB Mic' --raw --rate=48000 --channels=1 -",
-            os(&path),
-            None,
-            &Seen::default(),
+            &nothing,
         )
         .unwrap();
         // Their words only, none of ours, also for a program "auto" knows.
@@ -715,22 +919,16 @@ mod tests {
         assert_eq!(recorder.encoder_kind(), Encoder::Ffmpeg);
 
         // A path, with `~` for the home folder.
-        let recorder = choose(
-            "'~/bin/my recorder' -q",
-            os(&path),
-            Some(home.0.as_os_str()),
-            &Seen::default(),
-        )
-        .unwrap();
+        let recorder = choose("'~/bin/my recorder' -q", &nothing).unwrap();
         assert_eq!(recorder.names(), "my recorder + ffmpeg");
         assert_eq!(words(&recorder.capture), ["-q"]);
         // A shell is never what runs it: what looks like shell syntax is a word.
-        let recorder = choose("pw-record ; rm -rf ~", os(&path), None, &all()).unwrap();
+        let recorder = choose("pw-record ; rm -rf ~", &nothing).unwrap();
         assert_eq!(words(&recorder.capture), [";", "rm", "-rf", "~"]);
     }
 
     #[test]
-    fn debug_output_shows_no_program_and_no_argument() {
+    fn debug_output_shows_no_program_no_argument_and_no_folder() {
         let tool = Tool::new(
             PathBuf::from("/home/alice/bin/secret-recorder"),
             vec![OsString::from("--out=/home/alice/voice")],
@@ -742,5 +940,11 @@ mod tests {
             shown,
             "Recorder { capture: Tool, encoder: Tool, capture_kind: Own, encoder_kind: Opusenc }"
         );
+        let env = Env {
+            path: Some(OsString::from("/home/alice/bin")),
+            home: Some(OsString::from("/home/alice")),
+            ..Env::default()
+        };
+        assert!(!format!("{env:?}").contains("alice"));
     }
 }

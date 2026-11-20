@@ -157,6 +157,9 @@ pub enum Recording {
     ),
     /// A capture command of the user's own that is there to be run, and the encoder.
     Own(crate::audio::recorder::Encoder),
+    /// A session over SSH (and the user named no recorder of their own): the far
+    /// machine's microphone is not recorded from.
+    OverSsh,
     /// No microphone was seen (and the user named no recorder of their own).
     NoMicrophone,
     /// None of the capture programs the app knows is there with its sound server.
@@ -182,6 +185,7 @@ impl Recording {
                 Recording::Own(recorder.encoder_kind())
             }
             Ok(recorder) => Recording::Known(recorder.capture_kind(), recorder.encoder_kind()),
+            Err(NoRecorder::OverSsh) => Recording::OverSsh,
             Err(NoRecorder::NoMicrophone) => Recording::NoMicrophone,
             Err(NoRecorder::NoCapture) => Recording::NoRecorder,
             Err(NoRecorder::NoEncoder) => Recording::NoEncoder,
@@ -558,6 +562,12 @@ fn desktop(facts: &Facts) -> Section {
             "Recording voice messages",
             format!("a command of your own and {}", encoder.program()),
         ),
+        Recording::OverSsh => with(
+            "Recording voice messages",
+            "not offered",
+            Level::Note,
+            "over SSH the far machine's microphone would record; audio_recorder can name a recorder all the same",
+        ),
         Recording::NoMicrophone => with(
             "Recording voice messages",
             "not offered",
@@ -568,7 +578,7 @@ fn desktop(facts: &Facts) -> Section {
             "Recording voice messages",
             "not possible",
             Level::Missing,
-            "none of pw-record, parec, parecord, ffmpeg, arecord was found with its sound server",
+            "none of parec, parecord, pw-record, ffmpeg, arecord was found with its sound server",
         ),
         Recording::NoEncoder => with(
             "Recording voice messages",
@@ -910,7 +920,7 @@ mod tests {
 
     #[test]
     fn the_recording_line_says_what_was_found_or_is_missing_and_never_the_users_command() {
-        use crate::audio::recorder::{Capture, Encoder, Seen, choose};
+        use crate::audio::recorder::{Capture, Encoder, Env, Seen, choose};
         let line = |facts: &Facts| {
             Report::new(facts)
                 .sections
@@ -950,13 +960,29 @@ mod tests {
             std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
-        let path = Some(bin.as_os_str());
         let microphone = Seen {
             alsa_capture: true,
             ..Seen::default()
         };
-        let found =
-            |setting: &str, seen: &Seen| Recording::from_choice(&choose(setting, path, None, seen));
+        let env = |seen: &Seen, ssh: bool| Env {
+            path: Some(bin.clone().into_os_string()),
+            home: None,
+            seen: *seen,
+            ssh,
+        };
+        let found = |setting: &str, seen: &Seen| {
+            Recording::from_choice(&choose(setting, &env(seen, false)))
+        };
+        // Over SSH nothing is recorded by itself; a command of the user's own is.
+        facts.recording = Recording::from_choice(&choose("auto", &env(&microphone, true)));
+        assert_eq!(facts.recording, Recording::OverSsh);
+        assert_eq!(line(&facts).value, "not offered");
+        assert_eq!(line(&facts).level, Level::Note);
+        assert!(line(&facts).hint.unwrap().contains("SSH"));
+        assert_eq!(
+            Recording::from_choice(&choose("secret-recorder", &env(&microphone, true))),
+            Recording::Own(Encoder::Ffmpeg)
+        );
         let own = found("secret-recorder --device /home/alice/mic", &Seen::default());
         assert_eq!(own, Recording::Own(Encoder::Ffmpeg));
         facts.recording = own;

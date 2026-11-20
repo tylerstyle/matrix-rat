@@ -41,8 +41,12 @@ pub struct AudioState {
     pub(super) recorder: Result<Recorder, NoRecorder>,
     /// A recording runs: the microphone button shows a stop sign. Nothing sets it yet.
     pub(super) recording: bool,
-    /// Over SSH a sound would play on the far machine: playing is not offered.
-    ssh: bool,
+    /// Where tests look for the recorder: nothing of the machine they run on.
+    #[cfg(test)]
+    pub(super) recorder_env: audio::recorder::Env,
+    /// Over SSH a sound would play on the far machine, and its microphone would
+    /// record: neither is offered.
+    pub(super) ssh: bool,
     /// The private folder for the copies and mpv's sockets; set by the event loop.
     dir: Option<PathBuf>,
     next_id: u64,
@@ -62,6 +66,8 @@ impl Default for AudioState {
             recorder_setting: "auto".to_owned(),
             recorder: Err(NoRecorder::NoMicrophone),
             recording: false,
+            #[cfg(test)]
+            recorder_env: audio::recorder::Env::default(),
             ssh: false,
             dir: None,
             next_id: 0,
