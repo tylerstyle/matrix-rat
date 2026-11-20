@@ -147,11 +147,11 @@ See §6a for the plan that came out of looking at faro (0.8, done) and §6b for 
 be done, by demand:
 
 - Playing audio and voice messages inside the app (asked for by the user).
-- QR login.
+- QR login; later.
 - macOS: notifications and their click, the secret store and following dark/light are
   Linux-only today (D-Bus); a medium piece of work, with nobody to test it.
 - More Linux packaging (AUR, a `.deb`): small now that release archives exist; later.
-- A gallery of a room's files.
+- A gallery of a room's files; later.
 - Reading the shortcode a received custom-emoji reaction carries (the SDK does not expose it).
 
 Dropped by the user on 2026-11-20: popping out a chat, several accounts in one window (the
@@ -184,9 +184,9 @@ always; the passes over the code (next heading) come last, over the code as it w
    sent to a service.
 4. **Saved messages and reminders.** A list of messages the user marked; a click goes to the
    message. A reminder is a saved message with a time; it fires only while the app runs.
-5. **Translating a message.** The translation is shown under the original and stays there.
-   Open: what does the translating (a local program or a service the user names), and
-   whether a room can be set to translate what arrives without asking.
+5. **Translating a message.** On a button, into the language set in the settings; the
+   translation is shown under the original and stays there. What does the translating (a
+   local program or a service) is a setting too. Nothing is translated without the button.
 6. **Catching up.** A summary of what is unread in a room, shown to the user only; it shares
    the question of the provider with 5. A bot posting a daily summary is the smaller cousin:
    a script against `serve` with an account of its own, for rooms that account is in (the
@@ -194,12 +194,19 @@ always; the passes over the code (next heading) come last, over the code as it w
 7. **Archiving a room as Markdown.** Text only; the flow says so before it writes.
 8. **Small things.** Check that the sticker picker and received stickers, animated ones
    included, work as they are. A README section on several accounts as several profiles.
-   Right-to-left scripts: research first, then a decision.
+   `matrix-rat mcp` takes the agent's name from an environment variable when `--name` is
+   not given, so that two agents sharing one MCP entry sign with their own names.
 
 Link previews are there since 0.5.0 (`link_previews`); nothing to do.
 
-Open with the user: the look of the composer symbols; QR login, macOS, an update notice, the
-file gallery and the smaller leftovers of §6a; the unmerged branches.
+Decided on 2026-11-20 as well: QR login, macOS and the file gallery stay for later; no
+update notice; a line saying that a call is running goes with calls, after 1.0.0; stricter
+lints and the weekly dependency update go with the review at the end. Right-to-left scripts
+were looked into (ratatui has no support, terminals disagree, other terminal chat clients
+do nothing) and are not pursued. The four old branches are deleted; all were superseded on
+`main` or throwaway.
+
+Open with the user: the look of the composer symbols.
 
 ### Before 1.0.0 (asked for by the user on 2026-11-17)
 
@@ -258,8 +265,7 @@ are cheap and stand alone.
   whole picture while a popup is open. To check how ours behaves in kitty first.
 - **Transcribing voice messages** with a local `whisper` program, off by default. Small once B
   exists; remote services are not wanted without a clear consent step.
-- **An update notice**, opt-in, asking GitHub at most twice a day, never installing; a build
-  switch so the Nix package leaves it out.
+- **An update notice**: not wanted (2026-11-20).
 - **Lints that enforce our rules**, the rest: forbid wildcard match arms on our own enums
   through clippy's configuration; a weekly grouped dependency update. (Blocking calls and
   `cargo deny` are done, see §6b.)
