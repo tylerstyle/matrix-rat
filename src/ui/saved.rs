@@ -153,6 +153,8 @@ fn draw_entry(
     if marks {
         let remove = Rect::new(at.right() - remove_w, at.y, remove_w, 1);
         let remind = Rect::new(remove.x - 1 - remind_w, at.y, remind_w, 1);
+        app.hits
+            .add(Rect::new(remind.right(), at.y, 1, 1), HitId::SavedGap);
         for (rect, label, hit, role) in [
             (remind, REMIND, HitId::SavedRemind(index), Role::StatusKey),
             (remove, REMOVE, HitId::SavedRemove(index), Role::Error),
@@ -231,7 +233,8 @@ fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, state: &mut SavedPopu
     if inner.width < 10 || inner.height < 3 {
         return;
     }
-    let now = app.bookmarks.clock.now_local();
+    let clock = app.bookmarks.clock;
+    let now = clock.now_local();
     frame.render_widget(
         Line::from(Span::styled(
             "Remind me of this message:",
@@ -260,7 +263,9 @@ fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, state: &mut SavedPopu
         let selected = form.selected == index;
         let hovered = app.hover == Some(HitId::ReminderChoice(index));
         let when = preset
-            .at(now)
+            .when(now)
+            .and_then(|when| clock.resolve(when).ok())
+            .and_then(|secs| clock.local_of(secs))
             .map(|when| format!("  {}", when_label(when, now)))
             .unwrap_or_default();
         frame.render_widget(

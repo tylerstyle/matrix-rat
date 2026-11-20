@@ -184,6 +184,9 @@ pub enum HitId {
     SavedRemind(usize),
     /// The "remove" mark on an entry of the saved messages popup.
     SavedRemove(usize),
+    /// The space between the marks of an entry: a click that missed a mark must not
+    /// go to the message instead.
+    SavedGap,
     /// A row of the reminder form: a fixed choice, the typed time, or "no reminder".
     ReminderChoice(usize),
     /// "n reminders due" in the status line.

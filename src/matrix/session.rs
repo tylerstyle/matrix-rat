@@ -316,6 +316,9 @@ pub async fn clear_with<K: KeyringBackend>(
     keyring: &K,
 ) {
     forget_with(paths, target, keyring).await;
+    // What the account saved for later names its rooms and messages: it goes with
+    // the account. (A session the server merely ended keeps it: see `forget`.)
+    crate::saved::remove_files(&paths.saved_file());
     let _ = std::fs::remove_dir_all(paths.store_dir());
     let _ = std::fs::remove_dir_all(paths.data_dir.join("store.previous"));
     let _ = std::fs::remove_dir_all(paths.search_dir());
@@ -1024,8 +1027,18 @@ mod tests {
 
         std::fs::create_dir_all(paths.store_dir()).unwrap();
         std::fs::create_dir_all(paths.search_dir()).unwrap();
+        // The list of saved messages stays when the session is only forgotten (it
+        // ended on the server and the same account logs in again), and goes with
+        // an explicit logout, with everything put aside next to it.
+        let saved = paths.saved_file();
+        let aside = saved.with_file_name("saved.json.damaged");
+        std::fs::write(&saved, b"{}").unwrap();
+        std::fs::write(&aside, b"{}").unwrap();
         let keyring = TestKeyring::default();
+        forget_with(&paths, None, &keyring).await;
+        assert!(saved.exists() && aside.exists());
         clear_with(&paths, None, &keyring).await;
+        assert!(!saved.exists() && !aside.exists());
         assert!(!paths.store_dir().exists());
         assert!(!paths.data_dir.join("store.previous").exists());
         assert!(!paths.search_dir().exists());

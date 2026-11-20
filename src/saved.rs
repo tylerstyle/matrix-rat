@@ -102,6 +102,9 @@ impl SavedItem {
 #[derive(Serialize)]
 struct FileOut<'a> {
     version: u64,
+    /// The account whose list this is: another account of the same profile must
+    /// not see it.
+    owner: &'a str,
     items: &'a [SavedItem],
 }
 
@@ -111,6 +114,12 @@ pub enum LoadProblem {
     /// The file could not be read at all, or is not a list of ours. It was put aside
     /// (if `kept`), and the list starts empty.
     Damaged { kept: bool },
+    /// The file is the list of another account (or names none). It was put aside
+    /// (if `kept`), and the list starts empty.
+    OtherAccount { kept: bool },
+    /// A later version of the app wrote the file. It stays as it is; the list is
+    /// empty and takes nothing.
+    Newer,
     /// This many entries made no sense and were left out.
     Skipped(usize),
 }
@@ -123,7 +132,17 @@ impl LoadProblem {
                 "The saved messages file was damaged: the list starts empty (the old file is kept as {DAMAGED_NAME})"
             ),
             Self::Damaged { kept: false } => {
-                "The saved messages file could not be read: the list starts empty".to_owned()
+                "The saved messages file could not be read: nothing can be saved".to_owned()
+            }
+            Self::OtherAccount { kept: true } => format!(
+                "The saved messages file is another account's: the list starts empty (the old file is kept as {OTHER_NAME})"
+            ),
+            Self::OtherAccount { kept: false } => {
+                "The saved messages file is another account's: nothing can be saved".to_owned()
+            }
+            Self::Newer => {
+                "The saved messages were written by a newer matrix-rat: they are not shown, and nothing can be saved"
+                    .to_owned()
             }
             Self::Skipped(1) => "One saved message could not be read and was left out".to_owned(),
             Self::Skipped(count) => {
@@ -134,14 +153,33 @@ impl LoadProblem {
 }
 
 const DAMAGED_NAME: &str = "saved.json.damaged";
+/// The list of another account, put aside.
+const OTHER_NAME: &str = "saved.json.other-account";
+/// The file as it was before a write that drops entries which could not be read.
+const BEFORE_NAME: &str = "saved.json.before-repair";
+/// Files put aside under one name; beyond that the file stays where it is.
+const ASIDE_MOST: usize = 20;
 
-/// The list is full.
+/// Why a message was not saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Full;
+pub enum Refused {
+    /// The list is full.
+    Full,
+    /// The file is not ours to change (see [`LoadProblem`]).
+    Locked,
+}
 
-impl Full {
+impl Refused {
     pub fn message(self) -> String {
-        format!("The saved list is full ({MAX_SAVED} messages): remove some first")
+        match self {
+            Self::Full => {
+                format!("The saved list is full ({MAX_SAVED} messages): remove some first")
+            }
+            Self::Locked => {
+                "Nothing can be saved: the saved messages file is not this matrix-rat's to change"
+                    .to_owned()
+            }
+        }
     }
 }
 
@@ -151,6 +189,13 @@ pub struct SavedStore {
     items: Vec<SavedItem>,
     /// Where the list is kept; `None` for the demo and in tests, which keep it in memory.
     file: Option<PathBuf>,
+    /// The account the list belongs to, written into the file.
+    owner: String,
+    /// The file is there and not ours to replace: nothing is taken, nothing written.
+    locked: bool,
+    /// Entries of the file were left out: before the first write, which drops them
+    /// for good, the file is copied.
+    copy_first: bool,
     /// Due reminders the user was told about in this run (or that were due already
     /// when it started): `(room, event)`.
     announced: HashSet<(String, String)>,
@@ -167,29 +212,51 @@ impl std::fmt::Debug for SavedStore {
         f.debug_struct("SavedStore")
             .field("items", &self.items.len())
             .field("file", &self.file.is_some())
+            .field("locked", &self.locked)
             .field("announced", &self.announced.len())
             .finish_non_exhaustive()
     }
 }
 
 impl SavedStore {
-    /// Reads the list from `file`. A missing file is an empty list; a damaged one is
-    /// put aside and the list starts empty; entries that make no sense are left out.
-    /// Reminders that are due at `now` count as told: they came due while the app was
-    /// not running, and are shown as due without a notification each.
-    pub fn load(file: PathBuf, now: i64) -> (Self, Option<LoadProblem>) {
+    /// Reads the list of the account `owner` from `file`. A missing file is an empty
+    /// list; a damaged one, and the list of another account, is put aside and the
+    /// list starts empty; one of a newer version stays untouched; entries that make
+    /// no sense are left out. Reminders that are due at `now` count as told: they
+    /// came due while the app was not running, and are shown as due without a
+    /// notification each.
+    pub fn load(file: PathBuf, owner: &str, now: i64) -> (Self, Option<LoadProblem>) {
+        let damaged = |file: &Path| LoadProblem::Damaged {
+            kept: put_aside(file, DAMAGED_NAME),
+        };
         let (items, problem) = match read_file(&file) {
             Ok(None) => (Vec::new(), None),
-            Ok(Some(text)) => match parse(&text) {
-                Some((items, 0)) => (items, None),
-                Some((items, skipped)) => (items, Some(LoadProblem::Skipped(skipped))),
-                None => (Vec::new(), Some(put_aside(&file))),
+            Ok(Some(text)) => match parse(&text, owner) {
+                Parsed::Items(items, 0) => (items, None),
+                Parsed::Items(items, skipped) => (items, Some(LoadProblem::Skipped(skipped))),
+                Parsed::NotOurs => (Vec::new(), Some(damaged(&file))),
+                Parsed::OtherAccount => {
+                    let kept = put_aside(&file, OTHER_NAME);
+                    (Vec::new(), Some(LoadProblem::OtherAccount { kept }))
+                }
+                Parsed::Newer => (Vec::new(), Some(LoadProblem::Newer)),
             },
-            Err(_) => (Vec::new(), Some(put_aside(&file))),
+            Err(_) => (Vec::new(), Some(damaged(&file))),
         };
         let mut store = Self {
             items,
             file: Some(file),
+            owner: owner.to_owned(),
+            // What could not be moved out of the way is not written over.
+            locked: matches!(
+                problem,
+                Some(
+                    LoadProblem::Newer
+                        | LoadProblem::Damaged { kept: false }
+                        | LoadProblem::OtherAccount { kept: false }
+                )
+            ),
+            copy_first: matches!(problem, Some(LoadProblem::Skipped(_))),
             ..Self::default()
         };
         store.announced = store
@@ -226,13 +293,24 @@ impl SavedStore {
             .map(|item| item.event_id.as_str())
     }
 
+    /// Why nothing more can be saved, if so.
+    pub fn refuses(&self) -> Option<Refused> {
+        if self.locked {
+            Some(Refused::Locked)
+        } else if self.items.len() >= MAX_SAVED {
+            Some(Refused::Full)
+        } else {
+            None
+        }
+    }
+
     /// Saves a message, at the top. One that is saved already stays as it is.
-    pub fn add(&mut self, item: SavedItem) -> Result<(), Full> {
+    pub fn add(&mut self, item: SavedItem) -> Result<(), Refused> {
         if self.contains(&item.room_id, &item.event_id) {
             return Ok(());
         }
-        if self.items.len() >= MAX_SAVED {
-            return Err(Full);
+        if let Some(why) = self.refuses() {
+            return Err(why);
         }
         self.items.insert(0, item);
         self.changed();
@@ -337,13 +415,26 @@ impl SavedStore {
     }
 
     /// Writes the list to its file, which is replaced in one step and readable by
-    /// the user only. Without a file (the demo) there is nothing to do.
-    pub fn write(&self) -> std::io::Result<()> {
+    /// the user only. Without a file (the demo) there is nothing to do, and a file
+    /// that is not ours to change is left alone.
+    pub fn write(&mut self) -> std::io::Result<()> {
         let Some(file) = &self.file else {
             return Ok(());
         };
+        if self.locked {
+            return Ok(());
+        }
+        if self.copy_first {
+            // Once: what a person might still repair by hand is kept. Without the
+            // copy the entries are not dropped either.
+            let copy = free_name(file, BEFORE_NAME)
+                .ok_or_else(|| std::io::Error::other("no name left for the copy"))?;
+            std::fs::copy(file, copy)?;
+            self.copy_first = false;
+        }
         let out = FileOut {
             version: VERSION,
+            owner: &self.owner,
             items: &self.items,
         };
         let text = serde_json::to_string_pretty(&out).map_err(std::io::Error::other)?;
@@ -367,12 +458,37 @@ fn read_file(file: &Path) -> std::io::Result<Option<String>> {
     Ok(Some(text))
 }
 
-/// The entries of the file's text and how many were left out; `None` if the text is
-/// not a list of ours at all. Each entry is read on its own, so that one bad entry
-/// costs only itself.
-fn parse(text: &str) -> Option<(Vec<SavedItem>, usize)> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    let entries = value.get("items")?.as_array()?;
+/// What the file's text is.
+enum Parsed {
+    /// The entries, and how many were left out.
+    Items(Vec<SavedItem>, usize),
+    /// Not a list of ours at all.
+    NotOurs,
+    /// A list, of another account or of none.
+    OtherAccount,
+    /// A list in a form this version does not know.
+    Newer,
+}
+
+/// Reads the file's text as the list of `owner`. Each entry is read on its own, so
+/// that one bad entry costs only itself.
+fn parse(text: &str, owner: &str) -> Parsed {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Parsed::NotOurs;
+    };
+    let Some(version) = value.get("version").and_then(serde_json::Value::as_u64) else {
+        return Parsed::NotOurs;
+    };
+    // Before anything else of it is believed: its fields may mean something else.
+    if version > VERSION {
+        return Parsed::Newer;
+    }
+    let Some(entries) = value.get("items").and_then(serde_json::Value::as_array) else {
+        return Parsed::NotOurs;
+    };
+    if value.get("owner").and_then(serde_json::Value::as_str) != Some(owner) {
+        return Parsed::OtherAccount;
+    }
     let mut items: Vec<SavedItem> = Vec::new();
     let mut skipped = 0;
     for entry in entries {
@@ -389,14 +505,44 @@ fn parse(text: &str) -> Option<(Vec<SavedItem>, usize)> {
             _ => skipped += 1,
         }
     }
-    Some((items, skipped))
+    Parsed::Items(items, skipped)
 }
 
-/// Moves a file that cannot be used out of the way, so that the next write does not
-/// destroy what a person might still repair.
-fn put_aside(file: &Path) -> LoadProblem {
-    let kept = std::fs::rename(file, file.with_file_name(DAMAGED_NAME)).is_ok();
-    LoadProblem::Damaged { kept }
+/// Moves a file that cannot be used out of the way under `name`, so that the next
+/// write does not destroy what a person might still repair. True if it was moved.
+fn put_aside(file: &Path, name: &str) -> bool {
+    free_name(file, name).is_some_and(|aside| std::fs::rename(file, aside).is_ok())
+}
+
+/// `name` next to `file`, or `name.1`, `name.2`…: the first that is not taken, so
+/// that what was put aside earlier is not written over.
+fn free_name(file: &Path, name: &str) -> Option<PathBuf> {
+    (0..ASIDE_MOST)
+        .map(|n| match n {
+            0 => file.with_file_name(name),
+            n => file.with_file_name(format!("{name}.{n}")),
+        })
+        .find(|candidate| !candidate.exists())
+}
+
+/// Removes the list and everything put aside next to it: for a logout, after which
+/// nothing of the account's may stay. `file` is where the list is kept.
+pub fn remove_files(file: &Path) {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let ours = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|found| found == name || found.starts_with(&format!("{name}.")));
+        if ours {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Writes `bytes` to a new file next to `path`, for the user only, and puts it in
@@ -414,6 +560,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .open(&temporary)?;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.write_all(bytes)?;
+        // On the disk before it takes the old file's place: a crash leaves one of
+        // the two whole.
+        file.sync_all()?;
         std::fs::rename(&temporary, path)
     })();
     if written.is_err() {
@@ -454,14 +603,12 @@ impl Clock {
         self.now().naive_local()
     }
 
-    /// The moment the wall clock shows `local`. `None` for a time that does not exist
-    /// (the hour skipped when the clocks go forward); of a time that comes twice, the
-    /// first.
-    pub fn secs_of(self, local: NaiveDateTime) -> Option<i64> {
+    /// The moment `when` means, seen from now (see [`resolve`]).
+    pub fn resolve(self, when: When) -> Result<i64, WhenError> {
         match self {
-            Self::System => moment(&Local, local),
+            Self::System => resolve(when, self.now_secs(), &Local),
             #[cfg(test)]
-            Self::Fixed(now) => moment(&now.timezone(), local),
+            Self::Fixed(now) => resolve(when, now.timestamp(), &now.timezone()),
         }
     }
 
@@ -482,10 +629,43 @@ impl Clock {
     }
 }
 
+/// The moment the wall clock of `zone` shows `local`. `None` for a time that does not
+/// exist (the hour skipped when the clocks go forward); of a time that comes twice,
+/// the first.
 fn moment<Tz: TimeZone>(zone: &Tz, local: NaiveDateTime) -> Option<i64> {
     zone.from_local_datetime(&local)
         .earliest()
         .map(|at| at.timestamp())
+}
+
+/// A time for a reminder, as chosen or typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum When {
+    /// This many seconds from now: "in 20 minutes" is twenty minutes of waiting,
+    /// whatever the clocks do meanwhile.
+    After(i64),
+    /// When the wall clock shows this: "tomorrow at 9:00", "in a week" (the same
+    /// time of day), a date.
+    Wall(NaiveDateTime),
+}
+
+/// The moment `when` means, in seconds since 1970, seen from `now_secs` in `zone`.
+/// Refused: a wall time the zone skips, and what does not lie after now.
+pub fn resolve<Tz: TimeZone>(when: When, now_secs: i64, zone: &Tz) -> Result<i64, WhenError> {
+    let secs = match when {
+        When::After(span) => now_secs.checked_add(span).ok_or(WhenError::TooFar)?,
+        When::Wall(local) => moment(zone, local).ok_or(WhenError::Skipped)?,
+    };
+    // Also for a wall time: where the clocks went back, "later today" on the wall
+    // can be a moment that has passed.
+    if secs <= now_secs {
+        return Err(WhenError::Past);
+    }
+    // A day of slack for what the clocks do in five years.
+    if secs - now_secs > (MAX_AHEAD_DAYS + 1) * 24 * 3600 {
+        return Err(WhenError::TooFar);
+    }
+    Ok(secs)
 }
 
 /// The fixed choices of the reminder form.
@@ -517,15 +697,15 @@ impl Preset {
         }
     }
 
-    /// The time on the wall clock it means, seen from `now`.
-    pub fn at(self, now: NaiveDateTime) -> Option<NaiveDateTime> {
-        match self {
-            Preset::Minutes20 => now.checked_add_signed(Duration::minutes(20)),
-            Preset::Hour1 => now.checked_add_signed(Duration::hours(1)),
-            Preset::Hours3 => now.checked_add_signed(Duration::hours(3)),
-            Preset::Tomorrow => morning(now.date().succ_opt()?),
-            Preset::Week1 => now.checked_add_signed(Duration::days(7)),
-        }
+    /// The time it means, where the wall clock shows `now`.
+    pub fn when(self, now: NaiveDateTime) -> Option<When> {
+        Some(match self {
+            Preset::Minutes20 => When::After(20 * 60),
+            Preset::Hour1 => When::After(3600),
+            Preset::Hours3 => When::After(3 * 3600),
+            Preset::Tomorrow => When::Wall(morning(now.date().succ_opt()?)?),
+            Preset::Week1 => When::Wall(now.checked_add_signed(Duration::days(7))?),
+        })
     }
 }
 
@@ -541,6 +721,8 @@ pub enum WhenError {
     Unknown,
     /// A date or a time of day that does not exist (the 31st of June, 25:00).
     NoSuchTime,
+    /// A time the wall clock skips on that day (the clocks go forward).
+    Skipped,
     /// Not after now.
     Past,
     TooFar,
@@ -555,18 +737,21 @@ impl WhenError {
             Self::Empty => format!("Type a time: {WHEN_FORMS}"),
             Self::Unknown => format!("Not understood. Try: {WHEN_FORMS}"),
             Self::NoSuchTime => "There is no such date or time".to_owned(),
+            Self::Skipped => "That time does not exist on that day (the clocks change)".to_owned(),
             Self::Past => "That time has passed".to_owned(),
             Self::TooFar => "That is more than five years from now".to_owned(),
         }
     }
 }
 
-/// The time on the wall clock that `text` means, seen from `now`. Understood are:
+/// The time that `text` means, where the wall clock shows `now`. Understood are:
 /// a span (`45m`, `2h`, `3d`, `1w`, also with `in` before and the unit written out),
 /// a time of day (`18:30`: today, or tomorrow if that has passed), `tomorrow` with or
 /// without a time of day, and a date `2027-01-31` with or without a time of day
-/// (without: at 9:00). The result lies after `now` and at most five years ahead.
-pub fn parse_when(text: &str, now: NaiveDateTime) -> Result<NaiveDateTime, WhenError> {
+/// (without: at 9:00). Minutes and hours are a wait of that length; days and weeks
+/// keep the time of day. The result lies after `now` and at most five years ahead
+/// (for a wall time [`resolve`] has the last word on both).
+pub fn parse_when(text: &str, now: NaiveDateTime) -> Result<When, WhenError> {
     let text = text.trim().to_lowercase();
     let text = text.strip_prefix("in ").unwrap_or(&text).trim();
     let text = text.strip_prefix("at ").unwrap_or(text).trim();
@@ -574,7 +759,12 @@ pub fn parse_when(text: &str, now: NaiveDateTime) -> Result<NaiveDateTime, WhenE
         return Err(WhenError::Empty);
     }
     let at = if let Some(span) = parse_span(text) {
-        now.checked_add_signed(span?).ok_or(WhenError::TooFar)?
+        match span? {
+            Span::Seconds(seconds) => return Ok(When::After(seconds)),
+            Span::Days(days) => now
+                .checked_add_signed(Duration::days(days))
+                .ok_or(WhenError::TooFar)?,
+        }
     } else if let Some(rest) = text.strip_prefix("tomorrow") {
         let day = now.date().succ_opt().ok_or(WhenError::TooFar)?;
         on_day(day, rest)?
@@ -600,7 +790,13 @@ pub fn parse_when(text: &str, now: NaiveDateTime) -> Result<NaiveDateTime, WhenE
     if at - now > Duration::days(MAX_AHEAD_DAYS) {
         return Err(WhenError::TooFar);
     }
-    Ok(at)
+    Ok(When::Wall(at))
+}
+
+/// A typed span: a wait, or days on the calendar.
+enum Span {
+    Seconds(i64),
+    Days(i64),
 }
 
 /// `day` at the time of day `rest` names, or in the morning if it names none.
@@ -614,17 +810,18 @@ fn on_day(day: NaiveDate, rest: &str) -> Result<NaiveDateTime, WhenError> {
 }
 
 /// `None` if `text` is not a number and a unit.
-fn parse_span(text: &str) -> Option<Result<Duration, WhenError>> {
+fn parse_span(text: &str) -> Option<Result<Span, WhenError>> {
     let digits = text.chars().take_while(char::is_ascii_digit).count();
     if digits == 0 {
         return None;
     }
     let unit = text[digits..].trim();
-    let minutes_each: i64 = match unit {
-        "m" | "min" | "mins" | "minute" | "minutes" => 1,
-        "h" | "hr" | "hrs" | "hour" | "hours" => 60,
-        "d" | "day" | "days" => 24 * 60,
-        "w" | "week" | "weeks" => 7 * 24 * 60,
+    // Minutes each, and whether the unit counts days on the calendar.
+    let (minutes_each, days): (i64, bool) = match unit {
+        "m" | "min" | "mins" | "minute" | "minutes" => (1, false),
+        "h" | "hr" | "hrs" | "hour" | "hours" => (60, false),
+        "d" | "day" | "days" => (24 * 60, true),
+        "w" | "week" | "weeks" => (7 * 24 * 60, true),
         _ => return None,
     };
     // A number too long to be read is a span too long to be wanted.
@@ -635,7 +832,11 @@ fn parse_span(text: &str) -> Option<Result<Duration, WhenError>> {
         return Some(Err(WhenError::Past));
     }
     Some(match count.checked_mul(minutes_each) {
-        Some(minutes) if minutes <= MAX_AHEAD_DAYS * 24 * 60 => Ok(Duration::minutes(minutes)),
+        Some(minutes) if minutes <= MAX_AHEAD_DAYS * 24 * 60 => Ok(if days {
+            Span::Days(minutes / (24 * 60))
+        } else {
+            Span::Seconds(minutes * 60)
+        }),
         _ => Err(WhenError::TooFar),
     })
 }
@@ -803,6 +1004,9 @@ pub struct SavedPopup {
     pub details: Vec<SavedDetails>,
     /// Entries the worker was asked about and has not answered for: `(room, event)`.
     pub asked: HashSet<(String, String)>,
+    /// Entries that could not be loaded while their room was not listed: asked
+    /// again once it is.
+    pub retry: HashSet<(String, String)>,
 }
 
 /// Hand-written: rooms, messages, their text and what is typed stay out of logs.
@@ -828,6 +1032,7 @@ impl SavedPopup {
             form_only: false,
             details: Vec::new(),
             asked: HashSet::new(),
+            retry: HashSet::new(),
         }
     }
 
@@ -894,21 +1099,31 @@ impl SavedPopup {
     }
 }
 
+/// Reminders that came due together and wait for what the worker says about their
+/// messages, to show it in their notifications.
+pub struct Waiting {
+    pub request: u64,
+    /// Those the worker has not answered for yet.
+    pub items: Vec<SavedItem>,
+    pub since: std::time::Instant,
+}
+
 /// What the app keeps about saved messages.
 #[derive(Default)]
 pub struct SavedState {
     pub store: SavedStore,
     pub clock: Clock,
+    /// Where the profile keeps the list. Read when a session is up and its account
+    /// known; `None` for the demo and in tests, which keep the list in memory.
+    pub file: Option<PathBuf>,
     /// Numbers the questions to the worker.
     pub next_request: u64,
-    /// Due reminders whose text was asked for, to be shown in their notification:
-    /// the request, the message and when it was asked.
-    pub waiting: Vec<(u64, SavedItem, std::time::Instant)>,
+    pub waiting: Vec<Waiting>,
     /// Reminder notifications on their way out; the event loop shows them.
-    pub notices: Vec<crate::matrix::Notice>,
-    /// The room's latest notification was a reminder for this message: a click on it
-    /// goes there.
-    pub clicks: std::collections::HashMap<String, SavedItem>,
+    pub notices: Vec<crate::notify::DueReminder>,
+    /// The message whose removal was asked about (its reminder still waits), and
+    /// when: `(room, event)`.
+    pub confirm: Option<((String, String), std::time::Instant)>,
 }
 
 /// Hand-written: only counts.
@@ -916,9 +1131,10 @@ impl std::fmt::Debug for SavedState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SavedState")
             .field("store", &self.store)
+            .field("file", &self.file.is_some())
             .field("waiting", &self.waiting.len())
             .field("notices", &self.notices.len())
-            .field("clicks", &self.clicks.len())
+            .field("confirm", &self.confirm.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -957,6 +1173,178 @@ pub mod tests {
         }
     }
 
+    const ME: &str = "@me:example.org";
+
+    /// What the wall clock shows at `when`, where it shows `now` and never jumps.
+    fn on_wall(when: When, now: NaiveDateTime) -> NaiveDateTime {
+        match when {
+            When::After(seconds) => now + Duration::seconds(seconds),
+            When::Wall(local) => local,
+        }
+    }
+
+    /// A zone whose clocks jump: one hour east of Greenwich, two in summer. On
+    /// 2026-03-29 the wall clock goes from 02:00 to 03:00 (01:00 UTC), on 2026-10-25
+    /// from 03:00 back to 02:00 (01:00 UTC).
+    #[derive(Debug, Clone, Copy)]
+    struct Jumpy;
+
+    impl Jumpy {
+        fn summer(utc: &NaiveDateTime) -> bool {
+            *utc >= at(2026, 3, 29, 1, 0) && *utc < at(2026, 10, 25, 1, 0)
+        }
+
+        fn offset(summer: bool) -> FixedOffset {
+            FixedOffset::east_opt(if summer { 7200 } else { 3600 }).unwrap()
+        }
+    }
+
+    impl TimeZone for Jumpy {
+        type Offset = FixedOffset;
+
+        fn from_offset(_: &FixedOffset) -> Self {
+            Jumpy
+        }
+
+        fn offset_from_local_date(&self, local: &NaiveDate) -> chrono::LocalResult<FixedOffset> {
+            self.offset_from_local_datetime(&local.and_hms_opt(12, 0, 0).unwrap())
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &NaiveDateTime,
+        ) -> chrono::LocalResult<FixedOffset> {
+            // An offset fits where the moment it gives has that offset.
+            let fits = |summer: bool| {
+                let offset = Self::offset(summer);
+                let utc = *local - Duration::seconds(i64::from(offset.local_minus_utc()));
+                (Self::summer(&utc) == summer).then_some(offset)
+            };
+            match (fits(true), fits(false)) {
+                // The larger offset is the earlier moment.
+                (Some(first), Some(second)) => chrono::LocalResult::Ambiguous(first, second),
+                (Some(only), None) | (None, Some(only)) => chrono::LocalResult::Single(only),
+                (None, None) => chrono::LocalResult::None,
+            }
+        }
+
+        fn offset_from_utc_date(&self, utc: &NaiveDate) -> FixedOffset {
+            self.offset_from_utc_datetime(&utc.and_hms_opt(12, 0, 0).unwrap())
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
+            Self::offset(Self::summer(utc))
+        }
+    }
+
+    /// The moment the jumpy zone's wall clock shows that time (the first, if twice).
+    fn jumpy(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+        moment(&Jumpy, at(y, mo, d, h, mi)).unwrap()
+    }
+
+    #[test]
+    fn minutes_and_hours_are_a_wait_and_days_keep_the_time_of_day() {
+        assert_eq!(Preset::Minutes20.when(now()), Some(When::After(1200)));
+        assert_eq!(Preset::Hour1.when(now()), Some(When::After(3600)));
+        assert_eq!(Preset::Hours3.when(now()), Some(When::After(10_800)));
+        assert_eq!(
+            Preset::Tomorrow.when(now()),
+            Some(When::Wall(at(2026, 11, 21, 9, 0)))
+        );
+        assert_eq!(
+            Preset::Week1.when(now()),
+            Some(When::Wall(at(2026, 11, 27, 14, 30)))
+        );
+        assert_eq!(parse_when("45m", now()), Ok(When::After(2700)));
+        assert_eq!(parse_when("in 2 hours", now()), Ok(When::After(7200)));
+        assert_eq!(
+            parse_when("3d", now()),
+            Ok(When::Wall(at(2026, 11, 23, 14, 30)))
+        );
+        assert_eq!(
+            parse_when("1w", now()),
+            Ok(When::Wall(at(2026, 11, 27, 14, 30)))
+        );
+        assert_eq!(
+            parse_when("18:30", now()),
+            Ok(When::Wall(at(2026, 11, 20, 18, 30)))
+        );
+    }
+
+    #[test]
+    fn a_wait_is_that_long_across_a_change_of_the_clocks() {
+        // 01:30 on the night the clocks go forward: in an hour the wall shows 03:30.
+        let start = jumpy(2026, 3, 29, 1, 30);
+        let hour = resolve(When::After(3600), start, &Jumpy).unwrap();
+        assert_eq!(hour, start + 3600);
+        assert_eq!(
+            Jumpy.timestamp_opt(hour, 0).unwrap().naive_local(),
+            at(2026, 3, 29, 3, 30)
+        );
+        // 02:30 for the first time on the night they go back: in an hour it is
+        // 02:30 again, and twenty minutes are twenty minutes.
+        let start = jumpy(2026, 10, 25, 2, 30);
+        let hour = resolve(When::After(3600), start, &Jumpy).unwrap();
+        assert_eq!(hour, start + 3600);
+        assert_eq!(
+            Jumpy.timestamp_opt(hour, 0).unwrap().naive_local(),
+            at(2026, 10, 25, 2, 30)
+        );
+        assert_eq!(resolve(When::After(1200), start, &Jumpy), Ok(start + 1200));
+    }
+
+    #[test]
+    fn a_wall_time_the_clocks_skip_is_refused_and_one_that_comes_twice_is_the_first() {
+        let evening = jumpy(2026, 3, 28, 20, 0);
+        let skipped = When::Wall(at(2026, 3, 29, 2, 30));
+        assert_eq!(resolve(skipped, evening, &Jumpy), Err(WhenError::Skipped));
+        assert!(!WhenError::Skipped.message().is_empty());
+        // Either side of the gap is there, an hour of the wall clock apart and one
+        // second of time.
+        let before = resolve(When::Wall(at(2026, 3, 29, 1, 59)), evening, &Jumpy).unwrap();
+        let after = resolve(When::Wall(at(2026, 3, 29, 3, 0)), evening, &Jumpy).unwrap();
+        assert_eq!(after - before, 60);
+        // "Tomorrow at 9:00" over the change is 9:00 on the wall, an hour sooner.
+        let morning = resolve(When::Wall(at(2026, 3, 29, 9, 0)), evening, &Jumpy).unwrap();
+        assert_eq!(morning - evening, 12 * 3600);
+
+        let evening = jumpy(2026, 10, 24, 20, 0);
+        let twice = resolve(When::Wall(at(2026, 10, 25, 2, 30)), evening, &Jumpy).unwrap();
+        // The first 02:30, in summer time: six and a half hours on.
+        assert_eq!(twice - evening, 6 * 3600 + 1800);
+    }
+
+    #[test]
+    fn a_wall_time_that_has_passed_as_a_moment_is_refused() {
+        // 02:50 for the second time. 02:40 "today" lies ahead on no clock; 02:55 is
+        // ahead on the wall, but its first coming (the one that is meant) has passed.
+        let second = jumpy(2026, 10, 25, 2, 50) + 3600;
+        assert_eq!(
+            resolve(When::Wall(at(2026, 10, 25, 2, 55)), second, &Jumpy),
+            Err(WhenError::Past)
+        );
+        assert_eq!(
+            resolve(When::After(0), second, &Jumpy),
+            Err(WhenError::Past)
+        );
+        assert_eq!(
+            resolve(When::After(-5), second, &Jumpy),
+            Err(WhenError::Past)
+        );
+        assert_eq!(
+            resolve(When::After(i64::MAX), second, &Jumpy),
+            Err(WhenError::TooFar)
+        );
+        assert_eq!(
+            resolve(When::After(6 * 366 * 86_400), second, &Jumpy),
+            Err(WhenError::TooFar)
+        );
+        assert_eq!(
+            resolve(When::Wall(at(2040, 1, 1, 9, 0)), second, &Jumpy),
+            Err(WhenError::TooFar)
+        );
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("matrix-rat-saved-{name}-{}", std::process::id()));
@@ -967,15 +1355,40 @@ pub mod tests {
 
     #[test]
     fn the_fixed_choices_mean_what_they_say() {
-        assert_eq!(Preset::Minutes20.at(now()), Some(at(2026, 11, 20, 14, 50)));
-        assert_eq!(Preset::Hour1.at(now()), Some(at(2026, 11, 20, 15, 30)));
-        assert_eq!(Preset::Hours3.at(now()), Some(at(2026, 11, 20, 17, 30)));
-        assert_eq!(Preset::Tomorrow.at(now()), Some(at(2026, 11, 21, 9, 0)));
-        assert_eq!(Preset::Week1.at(now()), Some(at(2026, 11, 27, 14, 30)));
+        assert_eq!(
+            Preset::Minutes20
+                .when(now())
+                .map(|when| on_wall(when, now())),
+            Some(at(2026, 11, 20, 14, 50))
+        );
+        assert_eq!(
+            Preset::Hour1.when(now()).map(|when| on_wall(when, now())),
+            Some(at(2026, 11, 20, 15, 30))
+        );
+        assert_eq!(
+            Preset::Hours3.when(now()).map(|when| on_wall(when, now())),
+            Some(at(2026, 11, 20, 17, 30))
+        );
+        assert_eq!(
+            Preset::Tomorrow
+                .when(now())
+                .map(|when| on_wall(when, now())),
+            Some(at(2026, 11, 21, 9, 0))
+        );
+        assert_eq!(
+            Preset::Week1.when(now()).map(|when| on_wall(when, now())),
+            Some(at(2026, 11, 27, 14, 30))
+        );
         // Late in the evening "tomorrow" is still the next day, and "in 3 hours" too.
         let late = at(2026, 12, 31, 23, 0);
-        assert_eq!(Preset::Tomorrow.at(late), Some(at(2027, 1, 1, 9, 0)));
-        assert_eq!(Preset::Hours3.at(late), Some(at(2027, 1, 1, 2, 0)));
+        assert_eq!(
+            Preset::Tomorrow.when(late).map(|when| on_wall(when, late)),
+            Some(at(2027, 1, 1, 9, 0))
+        );
+        assert_eq!(
+            Preset::Hours3.when(late).map(|when| on_wall(when, late)),
+            Some(at(2027, 1, 1, 2, 0))
+        );
     }
 
     #[test]
@@ -991,44 +1404,72 @@ pub mod tests {
             ("1w", at(2026, 11, 27, 14, 30)),
             ("in 2 weeks", at(2026, 12, 4, 14, 30)),
         ] {
-            assert_eq!(parse_when(text, now()), Ok(wanted), "{text}");
+            assert_eq!(
+                parse_when(text, now()).map(|when| on_wall(when, now())),
+                Ok(wanted),
+                "{text}"
+            );
         }
     }
 
     #[test]
     fn a_time_of_day_is_today_or_if_it_has_passed_tomorrow() {
-        assert_eq!(parse_when("18:30", now()), Ok(at(2026, 11, 20, 18, 30)));
-        assert_eq!(parse_when("at 18:30", now()), Ok(at(2026, 11, 20, 18, 30)));
-        assert_eq!(parse_when("8:05", now()), Ok(at(2026, 11, 21, 8, 5)));
+        assert_eq!(
+            parse_when("18:30", now()).map(|when| on_wall(when, now())),
+            Ok(at(2026, 11, 20, 18, 30))
+        );
+        assert_eq!(
+            parse_when("at 18:30", now()).map(|when| on_wall(when, now())),
+            Ok(at(2026, 11, 20, 18, 30))
+        );
+        assert_eq!(
+            parse_when("8:05", now()).map(|when| on_wall(when, now())),
+            Ok(at(2026, 11, 21, 8, 5))
+        );
         // Exactly now has passed.
-        assert_eq!(parse_when("14:30", now()), Ok(at(2026, 11, 21, 14, 30)));
-        assert_eq!(parse_when("14:31", now()), Ok(at(2026, 11, 20, 14, 31)));
-        assert_eq!(parse_when("0:00", now()), Ok(at(2026, 11, 21, 0, 0)));
+        assert_eq!(
+            parse_when("14:30", now()).map(|when| on_wall(when, now())),
+            Ok(at(2026, 11, 21, 14, 30))
+        );
+        assert_eq!(
+            parse_when("14:31", now()).map(|when| on_wall(when, now())),
+            Ok(at(2026, 11, 20, 14, 31))
+        );
+        assert_eq!(
+            parse_when("0:00", now()).map(|when| on_wall(when, now())),
+            Ok(at(2026, 11, 21, 0, 0))
+        );
     }
 
     #[test]
     fn tomorrow_and_a_date_take_a_time_of_day_or_mean_the_morning() {
-        assert_eq!(parse_when("tomorrow", now()), Ok(at(2026, 11, 21, 9, 0)));
         assert_eq!(
-            parse_when("Tomorrow 8:00", now()),
+            parse_when("tomorrow", now()).map(|when| on_wall(when, now())),
+            Ok(at(2026, 11, 21, 9, 0))
+        );
+        assert_eq!(
+            parse_when("Tomorrow 8:00", now()).map(|when| on_wall(when, now())),
             Ok(at(2026, 11, 21, 8, 0))
         );
         assert_eq!(
-            parse_when("tomorrow at 17:45", now()),
+            parse_when("tomorrow at 17:45", now()).map(|when| on_wall(when, now())),
             Ok(at(2026, 11, 21, 17, 45))
         );
-        assert_eq!(parse_when("2026-12-24", now()), Ok(at(2026, 12, 24, 9, 0)));
         assert_eq!(
-            parse_when("2026-12-24 10:00", now()),
+            parse_when("2026-12-24", now()).map(|when| on_wall(when, now())),
+            Ok(at(2026, 12, 24, 9, 0))
+        );
+        assert_eq!(
+            parse_when("2026-12-24 10:00", now()).map(|when| on_wall(when, now())),
             Ok(at(2026, 12, 24, 10, 0))
         );
         assert_eq!(
-            parse_when("2027-1-5 7:30", now()),
+            parse_when("2027-1-5 7:30", now()).map(|when| on_wall(when, now())),
             Ok(at(2027, 1, 5, 7, 30))
         );
         // Today, later.
         assert_eq!(
-            parse_when("2026-11-20 23:00", now()),
+            parse_when("2026-11-20 23:00", now()).map(|when| on_wall(when, now())),
             Ok(at(2026, 11, 20, 23, 0))
         );
     }
@@ -1064,7 +1505,11 @@ pub mod tests {
             ("99999999999999999999999d", WhenError::TooFar),
             ("2040-01-01", WhenError::TooFar),
         ] {
-            assert_eq!(parse_when(text, now()), Err(why), "{text:?}");
+            assert_eq!(
+                parse_when(text, now()).map(|when| on_wall(when, now())),
+                Err(why),
+                "{text:?}"
+            );
             assert!(!why.message().is_empty());
         }
     }
@@ -1089,8 +1534,15 @@ pub mod tests {
         let clock = Clock::Fixed(friday());
         assert_eq!(clock.now_local(), at(2026, 11, 20, 14, 30));
         let secs = clock.now_secs();
-        assert_eq!(clock.secs_of(at(2026, 11, 20, 14, 30)), Some(secs));
-        assert_eq!(clock.secs_of(at(2026, 11, 20, 15, 30)), Some(secs + 3600));
+        assert_eq!(
+            clock.resolve(When::Wall(at(2026, 11, 20, 14, 30))),
+            Err(WhenError::Past)
+        );
+        assert_eq!(
+            clock.resolve(When::Wall(at(2026, 11, 20, 15, 30))),
+            Ok(secs + 3600)
+        );
+        assert_eq!(clock.resolve(When::After(60)), Ok(secs + 60));
         assert_eq!(clock.local_of(secs + 60), Some(at(2026, 11, 20, 14, 31)));
     }
 
@@ -1126,9 +1578,10 @@ pub mod tests {
         for n in 0..MAX_SAVED {
             store.add(item(&format!("${n}"), n as i64)).unwrap();
         }
-        assert_eq!(store.add(item("$more", 9999)), Err(Full));
+        assert_eq!(store.add(item("$more", 9999)), Err(Refused::Full));
+        assert_eq!(store.refuses(), Some(Refused::Full));
         assert_eq!(store.len(), MAX_SAVED);
-        assert!(Full.message().contains("500"), "{}", Full.message());
+        assert!(Refused::Full.message().contains("500"));
         // One that is saved already is not "more".
         assert_eq!(store.add(item("$3", 9999)), Ok(()));
         assert!(store.remove("!room:example.org", "$3"));
@@ -1185,7 +1638,7 @@ pub mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch("roundtrip");
         let file = dir.join("saved.json");
-        let (mut store, problem) = SavedStore::load(file.clone(), 1000);
+        let (mut store, problem) = SavedStore::load(file.clone(), ME, 1000);
         assert_eq!(problem, None);
         assert_eq!(store.len(), 0);
         let mut first = item("$a", 1);
@@ -1202,7 +1655,7 @@ pub mod tests {
         let mode = std::fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
 
-        let (back, problem) = SavedStore::load(file, 1000);
+        let (back, problem) = SavedStore::load(file, ME, 1000);
         assert_eq!(problem, None);
         assert_eq!(back.items(), store.items());
         assert_eq!(back.items()[1], first);
@@ -1213,7 +1666,7 @@ pub mod tests {
     fn the_file_holds_ids_and_times_and_nothing_else() {
         let dir = scratch("content");
         let file = dir.join("saved.json");
-        let (mut store, _) = SavedStore::load(file.clone(), 0);
+        let (mut store, _) = SavedStore::load(file.clone(), ME, 0);
         let mut saved = item("$a", 7);
         saved.remind_at = Some(9);
         saved.done = true;
@@ -1225,6 +1678,7 @@ pub mod tests {
             value,
             serde_json::json!({
                 "version": 1,
+                "owner": ME,
                 "items": [{
                     "room": "!room:example.org",
                     "event": "$a",
@@ -1242,10 +1696,10 @@ pub mod tests {
         let dir = scratch("leftover");
         let file = dir.join("saved.json");
         std::fs::write(dir.join("saved.json.new"), "half").unwrap();
-        let (mut store, _) = SavedStore::load(file.clone(), 0);
+        let (mut store, _) = SavedStore::load(file.clone(), ME, 0);
         store.add(item("$a", 1)).unwrap();
         store.write().unwrap();
-        let (back, problem) = SavedStore::load(file, 0);
+        let (back, problem) = SavedStore::load(file, ME, 0);
         assert_eq!((back.len(), problem), (1, None));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1257,13 +1711,20 @@ pub mod tests {
             ("empty", String::new()),
             ("shape", "[1, 2, 3]".to_owned()),
             ("no-items", r#"{"version": 1}"#.to_owned()),
-            ("items-not-a-list", r#"{"items": "many"}"#.to_owned()),
+            (
+                "no-version",
+                r#"{"owner": "@me:example.org", "items": []}"#.to_owned(),
+            ),
+            (
+                "items-not-a-list",
+                r#"{"version": 1, "items": "many"}"#.to_owned(),
+            ),
             ("too-large", " ".repeat(MAX_FILE_BYTES as usize + 1)),
         ] {
             let dir = scratch(name);
             let file = dir.join("saved.json");
             std::fs::write(&file, &content).unwrap();
-            let (mut store, problem) = SavedStore::load(file.clone(), 0);
+            let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
             assert_eq!(problem, Some(LoadProblem::Damaged { kept: true }), "{name}");
             assert_eq!(store.len(), 0);
             assert!(!file.exists(), "{name}");
@@ -1274,7 +1735,7 @@ pub mod tests {
             // The list works from here on.
             store.add(item("$a", 1)).unwrap();
             store.write().unwrap();
-            assert_eq!(SavedStore::load(file, 0).0.len(), 1);
+            assert_eq!(SavedStore::load(file, ME, 0).0.len(), 1);
             let _ = std::fs::remove_dir_all(dir);
         }
         assert!(
@@ -1290,9 +1751,13 @@ pub mod tests {
         // A folder where the file should be.
         let file = dir.join("saved.json");
         std::fs::create_dir_all(&file).unwrap();
-        let (store, problem) = SavedStore::load(file, 0);
+        let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
         assert!(matches!(problem, Some(LoadProblem::Damaged { .. })));
         assert_eq!(store.len(), 0);
+        // It was moved out of the way like any other, and the list works.
+        store.add(item("$a", 1)).unwrap();
+        store.write().unwrap();
+        assert!(file.is_file());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1303,6 +1768,7 @@ pub mod tests {
         let long = "x".repeat(MAX_ID_BYTES + 1);
         let text = serde_json::json!({
             "version": 1,
+            "owner": ME,
             "something_new": true,
             "items": [
                 {"room": "!r:example.org", "event": "$good", "saved_at": 5, "later": "field"},
@@ -1319,7 +1785,7 @@ pub mod tests {
         })
         .to_string();
         std::fs::write(&file, text).unwrap();
-        let (store, problem) = SavedStore::load(file.clone(), 0);
+        let (store, problem) = SavedStore::load(file.clone(), ME, 0);
         assert_eq!(problem, Some(LoadProblem::Skipped(8)));
         let ids: Vec<&str> = store.items().iter().map(|i| i.event_id.as_str()).collect();
         assert_eq!(ids, ["$good", "$also-good"]);
@@ -1330,14 +1796,152 @@ pub mod tests {
     }
 
     #[test]
+    fn the_file_is_copied_before_the_write_that_drops_what_could_not_be_read() {
+        let dir = scratch("repair");
+        let file = dir.join("saved.json");
+        let text = serde_json::json!({
+            "version": 1,
+            "owner": ME,
+            "items": [
+                {"room": "!r:example.org", "event": "$good", "saved_at": 5},
+                {"room": "!r:example.org", "event": "$odd", "saved_at": "noon"},
+            ],
+        })
+        .to_string();
+        std::fs::write(&file, &text).unwrap();
+        let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
+        assert_eq!(problem, Some(LoadProblem::Skipped(1)));
+        assert!(!dir.join(BEFORE_NAME).exists());
+        store.add(item("$a", 1)).unwrap();
+        store.write().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(BEFORE_NAME)).unwrap(),
+            text
+        );
+        // Once: the next write copies nothing.
+        store.add(item("$b", 2)).unwrap();
+        store.write().unwrap();
+        assert!(!dir.join(format!("{BEFORE_NAME}.1")).exists());
+        assert_eq!(SavedStore::load(file, ME, 0).0.len(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_list_of_another_account_is_put_aside_and_never_shown() {
+        for (name, owner) in [
+            ("other", serde_json::json!("@other:example.org")),
+            ("nobody", serde_json::Value::Null),
+        ] {
+            let dir = scratch(name);
+            let file = dir.join("saved.json");
+            let text = serde_json::json!({
+                "version": 1,
+                "owner": owner,
+                "items": [{"room": "!r:example.org", "event": "$theirs", "saved_at": 5, "remind_at": 6}],
+            })
+            .to_string();
+            std::fs::write(&file, &text).unwrap();
+            let (mut store, problem) = SavedStore::load(file.clone(), ME, 1000);
+            assert_eq!(problem, Some(LoadProblem::OtherAccount { kept: true }));
+            assert_eq!(store.len(), 0);
+            assert_eq!(store.due(1000).count(), 0);
+            assert_eq!(std::fs::read_to_string(dir.join(OTHER_NAME)).unwrap(), text);
+            // The list is this account's from here on.
+            store.add(item("$mine", 1)).unwrap();
+            store.write().unwrap();
+            let (back, problem) = SavedStore::load(file, ME, 0);
+            assert_eq!((back.len(), problem), (1, None));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        assert!(
+            LoadProblem::OtherAccount { kept: true }
+                .message()
+                .contains(OTHER_NAME)
+        );
+    }
+
+    #[test]
+    fn a_file_of_a_newer_version_stays_untouched_and_the_list_takes_nothing() {
+        let dir = scratch("newer");
+        let file = dir.join("saved.json");
+        // Whatever else it holds, and whoever it names.
+        let text = r#"{"version": 2, "owner": "@me:example.org", "entries": {"new": "form"}}"#;
+        std::fs::write(&file, text).unwrap();
+        let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
+        assert_eq!(problem, Some(LoadProblem::Newer));
+        assert_eq!(store.len(), 0);
+        assert_eq!(store.add(item("$a", 1)), Err(Refused::Locked));
+        assert_eq!(store.refuses(), Some(Refused::Locked));
+        store.write().unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert!(!LoadProblem::Newer.message().is_empty());
+        assert!(!Refused::Locked.message().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn what_was_put_aside_earlier_is_not_written_over() {
+        let dir = scratch("aside-twice");
+        let file = dir.join("saved.json");
+        for (n, content) in ["first {", "second {", "third {"].iter().enumerate() {
+            std::fs::write(&file, content).unwrap();
+            let (_, problem) = SavedStore::load(file.clone(), ME, 0);
+            assert_eq!(problem, Some(LoadProblem::Damaged { kept: true }), "{n}");
+        }
+        let read = |name: String| std::fs::read_to_string(dir.join(name)).unwrap();
+        assert_eq!(read(DAMAGED_NAME.to_owned()), "first {");
+        assert_eq!(read(format!("{DAMAGED_NAME}.1")), "second {");
+        assert_eq!(read(format!("{DAMAGED_NAME}.2")), "third {");
+        // With no name left the file stays, and is not written over.
+        for n in 3..ASIDE_MOST {
+            std::fs::write(dir.join(format!("{DAMAGED_NAME}.{n}")), "x").unwrap();
+        }
+        std::fs::write(&file, "last {").unwrap();
+        let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
+        assert_eq!(problem, Some(LoadProblem::Damaged { kept: false }));
+        assert_eq!(store.add(item("$a", 1)), Err(Refused::Locked));
+        store.write().unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "last {");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_logout_removes_the_list_and_all_that_was_put_aside() {
+        let dir = scratch("logout");
+        let file = dir.join("saved.json");
+        for name in [
+            "saved.json",
+            "saved.json.new",
+            DAMAGED_NAME,
+            "saved.json.damaged.1",
+            OTHER_NAME,
+            BEFORE_NAME,
+        ] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        std::fs::write(dir.join("session.json"), "x").unwrap();
+        std::fs::write(dir.join("saved.jsonl"), "x").unwrap();
+        remove_files(&file);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["saved.jsonl", "session.json"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_file_with_more_entries_than_the_list_holds_is_cut() {
         let dir = scratch("many");
         let file = dir.join("saved.json");
         let items: Vec<serde_json::Value> = (0..MAX_SAVED + 3)
             .map(|n| serde_json::json!({"room": "!r:example.org", "event": format!("${n}"), "saved_at": n}))
             .collect();
-        std::fs::write(&file, serde_json::json!({ "items": items }).to_string()).unwrap();
-        let (store, problem) = SavedStore::load(file, 0);
+        let text = serde_json::json!({ "version": 1, "owner": ME, "items": items }).to_string();
+        std::fs::write(&file, text).unwrap();
+        let (store, problem) = SavedStore::load(file, ME, 0);
         assert_eq!(store.len(), MAX_SAVED);
         assert_eq!(problem, Some(LoadProblem::Skipped(3)));
         let _ = std::fs::remove_dir_all(dir);
@@ -1347,7 +1951,7 @@ pub mod tests {
     fn reminders_that_came_due_while_the_app_was_away_are_due_and_not_announced_again() {
         let dir = scratch("missed");
         let file = dir.join("saved.json");
-        let (mut store, _) = SavedStore::load(file.clone(), 0);
+        let (mut store, _) = SavedStore::load(file.clone(), ME, 0);
         store.add(item("$missed", 1)).unwrap();
         store.add(item("$later", 2)).unwrap();
         store.add(item("$done", 3)).unwrap();
@@ -1358,7 +1962,7 @@ pub mod tests {
         assert!(store.visited("!room:example.org", "$done", 100));
         store.write().unwrap();
 
-        let (mut back, _) = SavedStore::load(file, 1000);
+        let (mut back, _) = SavedStore::load(file, ME, 1000);
         let due: Vec<&str> = back.due(1000).map(|i| i.event_id.as_str()).collect();
         assert_eq!(due, ["$missed"]);
         assert!(back.take_newly_due(1000).is_empty());
@@ -1398,7 +2002,28 @@ pub mod tests {
         popup.put_details(details.clone());
         let state = SavedState {
             store,
-            waiting: vec![(1, saved.clone(), std::time::Instant::now())],
+            file: Some(PathBuf::from("/home/secret/saved.json")),
+            waiting: vec![Waiting {
+                request: 1,
+                items: vec![saved.clone()],
+                since: std::time::Instant::now(),
+            }],
+            notices: vec![crate::notify::DueReminder {
+                notice: crate::matrix::Notice {
+                    room_id: "!secret-room:example.org".into(),
+                    room: "Secret room".into(),
+                    sender: "Alice Secret".into(),
+                    body: "a secret text".into(),
+                    highlight: false,
+                    thread: None,
+                },
+                event: Some(("$secret-event".into(), Some("$secret-root".into()))),
+                count: 1,
+            }],
+            confirm: Some((
+                ("!secret-room:example.org".into(), "$secret-event".into()),
+                std::time::Instant::now(),
+            )),
             ..SavedState::default()
         };
         let shown = format!("{saved:?} {popup:?} {details:?} {state:?}");

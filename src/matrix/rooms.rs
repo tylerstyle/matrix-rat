@@ -103,6 +103,8 @@ pub struct Timelines {
     own_room_names: super::people::OwnRoomNames,
     unread_flags: UnreadFlags,
     pinned_cache: Arc<std::sync::Mutex<super::moderation::PinnedCache>>,
+    /// Lookups of saved messages at a time, over all requests.
+    saved_limit: Arc<tokio::sync::Semaphore>,
     /// The running request for a page of a room's threads, if any.
     thread_lister: Option<JoinHandle<()>>,
     /// Rooms left in this session (see [`super::left`]).
@@ -142,6 +144,7 @@ impl Timelines {
             own_room_names,
             unread_flags: UnreadFlags::start(events.clone()),
             pinned_cache: Arc::default(),
+            saved_limit: Arc::new(tokio::sync::Semaphore::new(super::saved::CONCURRENCY)),
             thread_lister: None,
             left,
             events,
@@ -906,27 +909,33 @@ impl Timelines {
                 });
             }
             MatrixCmd::Saved(super::SavedCmd::Fetch { request, items }) => {
-                // A room the account has left is known still, but not for reading.
+                use super::saved::Place;
                 let wanted = items
                     .into_iter()
                     .take(super::saved::MAX_FETCH)
                     .map(|(room_id, event_id)| {
-                        let room = self
-                            .room(&room_id)
-                            .ok()
-                            .filter(|room| room.state() == matrix_sdk::RoomState::Joined);
-                        (room_id, event_id, room)
+                        // A room the account has left is known still, but not for
+                        // reading. One that is not known at all may yet come.
+                        let place = match self.room(&room_id) {
+                            Ok(room) => match room.state() {
+                                matrix_sdk::RoomState::Joined => Place::Joined(room),
+                                matrix_sdk::RoomState::Left | matrix_sdk::RoomState::Banned => {
+                                    Place::Left
+                                }
+                                _ => Place::Unknown,
+                            },
+                            Err(_) => Place::Unknown,
+                        };
+                        (room_id, event_id, place)
                     })
                     .collect();
-                let events = self.events.clone();
-                let cache = self.pinned_cache.clone();
-                tokio::spawn(async move {
-                    let items = super::saved::fetch(wanted, cache).await;
-                    let _ = events.send(MatrixEvent::Saved(super::SavedEvent::Details {
-                        request,
-                        items,
-                    }));
-                });
+                tokio::spawn(super::saved::fetch(
+                    request,
+                    wanted,
+                    self.pinned_cache.clone(),
+                    self.saved_limit.clone(),
+                    self.events.clone(),
+                ));
             }
             MatrixCmd::Forward {
                 from_room_id,

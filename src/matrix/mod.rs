@@ -887,6 +887,8 @@ pub enum MatrixEvent {
     /// notification service, not from the worker.
     NoticeClicked {
         room_id: String,
+        /// For a reminder's notification: the message it was for, and its thread.
+        event: Option<(String, Option<String>)>,
     },
     /// Outcome of [`MatrixCmd::SaveFile`]: where the file is now, or what went wrong.
     FileSaved {
@@ -1165,7 +1167,7 @@ impl MatrixEvent {
             Self::Spaces(spaces) => ("Spaces", vec![Some(spaces.len().to_string())]),
             Self::Notice(notice) => return format!("{notice:?}"),
             Self::SuppressedNotice { room_id } => ("SuppressedNotice", vec![id(room_id)]),
-            Self::NoticeClicked { room_id } => ("NoticeClicked", vec![id(room_id)]),
+            Self::NoticeClicked { room_id, .. } => ("NoticeClicked", vec![id(room_id)]),
             Self::FileSaved { result, .. } => ("FileSaved", vec![ok(result.is_ok())]),
             Self::AudioFetched { id, result } => (
                 "AudioFetched",

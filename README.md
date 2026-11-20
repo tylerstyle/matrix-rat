@@ -231,17 +231,28 @@ command palette) saves it for later and marks it `(saved)`; `b` again takes it o
 `B` opens **Saved messages**: what you saved in all rooms, newest first, with the room, the
 sender, the start of the text, when it was saved and its reminder. `Enter` or a click goes to
 the message, `Del` (or `remove`) takes it off the list, `r` (or `remind`) sets or removes a
-reminder. **Remind me…** in a message's menu sets one directly (and saves the message): in 20
-minutes, in 1 hour, in 3 hours, tomorrow at 9:00, in a week, or a time you type: `45m`, `2h`,
-`3d`, `1w`, `17:30`, `tomorrow 8:00`, `2026-12-24 18:00`. When a reminder comes due, the status
+reminder. Removing a message whose reminder has not come due yet asks once: do it again to
+remove both. **Remind me…** in a message's menu sets a reminder directly (and saves the
+message): in 20 minutes, in 1 hour, in 3 hours, tomorrow at 9:00, in a week, or a time you
+type: `45m`, `2h`, `3d`, `1w`, `17:30`, `tomorrow 8:00`, `2026-12-24 18:00`. Minutes and hours
+are a wait of that length; days, weeks, times of day and dates go by the clock on the wall
+(a time the clocks skip when they change is refused). When a reminder comes due, the status
 line shows `1 reminder due` (click it to go to the message) and a desktop notification is
-shown, unless notifications are off or *do not disturb* is on; with notification previews off
-it says only that a reminder is due. A reminder that came due while matrix-rat was not running
-is shown as due at the next start. After you went to the message, the reminder stays in the
-list as done until you remove it. The list is kept on this machine only, in `saved.json` in
-the profile's data folder (readable by you alone); it holds which messages and when, never
-their text, which is read from the encrypted session store when shown. At most 500 messages
-can be saved.
+shown, unless notifications are off or *do not disturb* is on; a click on it goes to the
+message. With notification previews off it says only that a reminder is due. More than three
+reminders that come due together (after the machine slept, say) get one notification with
+their number. A reminder that came due while matrix-rat was not running is shown as due at
+the next start. After you went to the message, the reminder stays in the list as done until
+you remove it.
+
+The list belongs to the account and is kept on this machine only, in `saved.json` in the
+profile's data folder (readable by you alone). It holds which messages and when, never their
+text, which is read from the encrypted session store when shown. It is read once you are
+logged in, and **logging out removes it** (a session the server ended, after which you log in
+again, keeps it). A file that is damaged, or that another account left there, is put aside
+next to it (`saved.json.damaged`, `saved.json.other-account`) and the list starts empty; one
+written by a newer matrix-rat is left untouched and nothing can be saved until it is gone. At
+most 500 messages can be saved.
 
 `i` on a message (or **Message details** in its menu) shows who sent it, when to the
 second (and when it was last edited), its event ID, whether it was encrypted and any doubt

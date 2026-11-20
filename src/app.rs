@@ -215,7 +215,7 @@ pub struct ReadyNotices {
     pub preview: bool,
     pub icon_cache: Option<(Arc<crate::notify::IconCache>, u64)>,
     /// Reminders that came due: shown under a title and text of their own.
-    pub reminders: Vec<(crate::matrix::Notice, crate::notify::NotifyIcon)>,
+    pub reminders: Vec<(crate::notify::DueReminder, crate::notify::NotifyIcon)>,
 }
 
 pub struct App {
@@ -1313,9 +1313,6 @@ impl App {
             return;
         }
         self.shown_notices.push((now, notice.room_id.clone()));
-        // The room's notification is this message's now, not a reminder's: a click
-        // on it opens the room.
-        self.bookmarks.clicks.remove(&notice.room_id);
         self.pending_notices.push(notice);
     }
 
@@ -1324,7 +1321,11 @@ impl App {
     /// answered first (logging in, the recovery key, a device verification), and not
     /// for a room that is gone; what was merely being looked at (a menu, the command
     /// palette, the settings, a picture) makes way.
-    fn on_notice_click(&mut self, room_id: &str) {
+    ///
+    /// A reminder's notification carries its message (`event`): that is where to go,
+    /// if it is saved still. The notification that stood for several reminders
+    /// names no room, and opens the list of saved messages.
+    fn on_notice_click(&mut self, room_id: &str, event: Option<(String, Option<String>)>) {
         if self.logged_out
             || matches!(
                 self.modal,
@@ -1333,9 +1334,11 @@ impl App {
         {
             return;
         }
-        let Some(index) = self.rooms.iter().position(|room| room.id == room_id) else {
+        let several_reminders = room_id.is_empty();
+        let index = self.rooms.iter().position(|room| room.id == room_id);
+        if index.is_none() && !several_reminders {
             return;
-        };
+        }
         // The click was on the desktop, maybe with another window in front: ask for
         // ours to be shown.
         if let Some(command) = &self.notification_click_command {
@@ -1352,10 +1355,15 @@ impl App {
         }
         self.help_open = false;
         self.images.close_viewer();
-        // The room's last notification was a reminder: its message is where to go.
-        if self.reminder_clicked(room_id) {
+        if let Some((event_id, _)) = &event
+            && self.reminder_clicked(room_id, event_id)
+        {
             return;
         }
+        let Some(index) = index else {
+            self.open_saved_list();
+            return;
+        };
         // Already there: nothing moves, a thread stays open, the place in the
         // messages is kept. Only a view of some older part of the room (after a
         // jump to a message) goes back to the newest messages, where the news is.
@@ -1453,9 +1461,14 @@ impl App {
         }
         let due = std::mem::take(&mut self.bookmarks.notices);
         let mut reminders = Vec::with_capacity(due.len());
-        for notice in due {
-            let icon = self.resolve_notice_icon(&notice);
-            reminders.push((notice, icon));
+        for reminder in due {
+            // The one that stands for several is of no room.
+            let icon = if reminder.count > 1 {
+                crate::notify::NotifyIcon::Generic
+            } else {
+                self.resolve_notice_icon(&reminder.notice)
+            };
+            reminders.push((reminder, icon));
         }
         self.send_avatar_requests();
         let icon_cache = self
@@ -1526,9 +1539,12 @@ impl App {
         self.keywords.watch = None;
         // Nobody answers what was asked, and no notification of the session is left
         // to click on. The list itself is the profile's and stays.
+        // No reminder comes due over the login form, and what is saved there belongs
+        // to the account that left: the list is read again when a session is up.
+        self.bookmarks.store = Default::default();
         self.bookmarks.waiting.clear();
         self.bookmarks.notices.clear();
-        self.bookmarks.clicks.clear();
+        self.bookmarks.confirm = None;
         self.reset_emotes();
         if let Some(Modal::New(popup)) = &mut self.modal {
             popup.clear_user_search();
@@ -3449,6 +3465,9 @@ impl App {
                 if matches!(self.modal, Some(Modal::Login(_))) {
                     self.modal = None;
                 }
+                if let Some(file) = self.bookmarks.file.clone() {
+                    self.load_saved(file, &user_id);
+                }
                 self.user_id = Some(user_id);
                 self.send_matrix(MatrixCmd::Previews(self.room_previews));
                 self.logged_out = false;
@@ -3468,6 +3487,7 @@ impl App {
             MatrixEvent::Rooms(rooms) => {
                 self.rooms_received = true;
                 self.apply_rooms(rooms);
+                self.saved_rooms_arrived();
                 // A room that was just joined or created is opened when it is listed.
                 self.open_pending_room();
                 self.search_check_room();
@@ -3610,7 +3630,9 @@ impl App {
                 self.count_notices
                     .retain(|(_, waiting)| waiting.room_id != room_id);
             }
-            MatrixEvent::NoticeClicked { room_id } => self.on_notice_click(&room_id),
+            MatrixEvent::NoticeClicked { room_id, event } => {
+                self.on_notice_click(&room_id, event);
+            }
             MatrixEvent::FileSaved { key, open, result } => self.on_file_saved(key, open, result),
             MatrixEvent::AudioFetched { id, result } => self.on_audio_fetched(id, result),
             MatrixEvent::Security(security) => self.on_security(security),
@@ -4483,6 +4505,8 @@ impl App {
                     Some(HitId::SavedRemove(index)) => self.remove_saved(Some(index)),
                     Some(HitId::ReminderChoice(row)) => self.click_reminder_choice(row),
                     Some(HitId::ReminderDue) => self.click_due_reminder(),
+                    // Between two marks: neither of them, and not the row.
+                    Some(HitId::SavedGap) => {}
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -4980,8 +5004,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // real configuration.
     if !demo {
         app.config_file = Some(paths.config_file());
-        // A small file of the profile, read once before the first frame.
-        app.load_saved(paths.saved_file());
+        // Read when a session is up: whose list it is must be known first.
+        app.bookmarks.file = Some(paths.saved_file());
     }
     app.startup_target = target;
     // Copies of sounds and mpv's sockets; what an earlier run left there goes now.
@@ -5002,7 +5026,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let mut encoded_images = app.start_images(graphics);
     let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
     // Clicks on desktop notifications come back here, as the room to open.
-    let (notice_clicks, mut clicked) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (notice_clicks, mut clicked) =
+        tokio::sync::mpsc::unbounded_channel::<crate::notify::Click>();
     // Pictures read from the clipboard come back here.
     let (pasted, mut pasted_back) = tokio::sync::mpsc::unbounded_channel();
     // What the audio players say comes back here; their tasks end with them.
@@ -5129,7 +5154,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                     None => std::future::pending().await,
                 }
             } => app.on_matrix(event),
-            Some(room_id) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked { room_id }),
+            Some(click) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked {
+                room_id: click.room_id,
+                event: click.event,
+            }),
             Some(done) = pasted_back.recv() => app.finish_paste(done),
             Some(update) = player_back.recv() => app.on_audio(update),
             _ = theme_watch.changed() => app.reload_theme(),
@@ -6169,6 +6197,7 @@ mod tests {
             let (mut app, _terminal, mut commands) = closed();
             app.on_matrix(MatrixEvent::NoticeClicked {
                 room_id: room.into(),
+                event: None,
             });
             assert_eq!(open_id(&app), Some(room));
             assert_eq!(app.focus, Pane::Composer);
@@ -8480,6 +8509,7 @@ mod tests {
     fn clicked(room_id: &str) -> MatrixEvent {
         MatrixEvent::NoticeClicked {
             room_id: room_id.into(),
+            event: None,
         }
     }
 
@@ -9642,6 +9672,39 @@ mod tests {
         let mut app = App::demo();
         let (handle, _commands) = MatrixHandle::for_test();
         app.matrix = Some(handle);
+        // A list of saved messages with all that goes with it: an entry in a thread
+        // with a reminder, its file, a notification on its way, a question asked.
+        let kept = crate::saved::SavedItem {
+            room_id: "!hidden-room:private.example".into(),
+            event_id: "$launch".into(),
+            thread: Some("$launch-root".into()),
+            saved_at: 1,
+            remind_at: Some(2),
+            done: false,
+        };
+        app.bookmarks.store.add(kept.clone()).unwrap();
+        app.bookmarks.file = Some("/home/alice/saved.json".into());
+        app.bookmarks.waiting.push(crate::saved::Waiting {
+            request: 1,
+            items: vec![kept],
+            since: Instant::now(),
+        });
+        app.bookmarks.notices.push(crate::notify::DueReminder {
+            notice: crate::matrix::Notice {
+                room_id: "!hidden-room:private.example".into(),
+                room: "Secret Garden".into(),
+                sender: "Alice Hidden".into(),
+                body: "launch codes".into(),
+                highlight: false,
+                thread: None,
+            },
+            event: Some(("$launch".into(), None)),
+            count: 1,
+        });
+        app.bookmarks.confirm = Some((
+            ("!hidden-room:private.example".into(), "$launch".into()),
+            Instant::now(),
+        ));
         app.user_id = Some("@self-secret:example.org".into());
         app.own_profile = Some(crate::matrix::OwnProfile {
             display_name: Some("Hush Self".into()),
@@ -9793,6 +9856,7 @@ mod tests {
         // and our own setting names.
         assert!(all.contains("title_written: Some(\"matrix-rat"), "{all}");
         assert!(all.contains("found: Found {"), "{all}");
+        assert!(all.contains("bookmarks: SavedState {"), "{all}");
         for text in &shown {
             for private in PRIVATE {
                 assert!(!text.contains(private), "{private} in {text}");

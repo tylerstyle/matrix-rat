@@ -19,7 +19,7 @@ use crate::modal::Modal;
 use crate::model::{Message, MsgKind, SendState};
 use crate::saved::{
     Preset, RemindForm, Reminder, RoomLabel, SavedDetails, SavedItem, SavedPopup, SavedStore,
-    SavedText, Stage, parse_when, when_label,
+    SavedText, Stage, WhenError, parse_when, when_label,
 };
 use crate::text::{sanitize_line, truncate};
 
@@ -31,6 +31,10 @@ pub(super) const TEXT_WAIT: Duration = Duration::from_secs(8);
 const FETCH_AHEAD: usize = 4;
 /// Rows asked for before the popup was drawn once.
 const FETCH_FIRST: usize = 12;
+/// Up to this many reminders that come due together are each notified of.
+const NOTIFY_EACH_MOST: usize = 3;
+/// How long the question about removing a message whose reminder waits stands.
+const CONFIRM_WAIT: Duration = Duration::from_secs(10);
 /// The demo's excerpts are as long as the worker's.
 const SNIPPET_MAX: usize = 120;
 
@@ -74,11 +78,15 @@ fn hide_ignored(
 impl App {
     // ----- the list and its file -----------------------------------------------------
 
-    /// Reads the saved messages of the profile. Called once at start; the demo keeps
+    /// Reads the saved messages of the account `owner` from the profile's file.
+    /// Called when a session is up, not before: whose list the file holds is not
+    /// known until then, and nothing of it is shown or comes due. The demo keeps
     /// its list in memory.
-    pub fn load_saved(&mut self, file: std::path::PathBuf) {
+    pub fn load_saved(&mut self, file: std::path::PathBuf, owner: &str) {
         let now = self.bookmarks.clock.now_secs();
-        let (store, problem) = SavedStore::load(file, now);
+        // A small file of the profile, read on the interface thread once per login:
+        // a few kilobytes, at most `MAX_FILE_BYTES`.
+        let (store, problem) = SavedStore::load(file, owner, now);
         self.bookmarks.store = store;
         let missed = self.bookmarks.store.due(now).count();
         if let Some(problem) = problem {
@@ -93,6 +101,10 @@ impl App {
         }
     }
 
+    /// Writes the list after a change. On the interface thread, and waited for: the
+    /// file is small and bounded (at most 500 short entries), it is written only on
+    /// an action of the user's (never on a timer or per message), and the user is
+    /// told at once if the change did not reach the disk.
     fn persist_saved(&mut self) {
         if let Err(err) = self.bookmarks.store.write() {
             tracing::warn!(why = %crate::logsafe::kind(&err), "could not write the saved messages");
@@ -168,10 +180,14 @@ impl App {
             return;
         };
         let room_id = item.room_id.clone();
-        if self.bookmarks.store.remove(&room_id, &item.event_id) {
+        if self.bookmarks.store.contains(&room_id, &item.event_id) {
+            if !self.may_remove_saved(&room_id, &item.event_id) {
+                return;
+            }
+            self.bookmarks.store.remove(&room_id, &item.event_id);
             self.show_toast("Removed from the saved messages");
-        } else if let Err(full) = self.bookmarks.store.add(item) {
-            self.show_toast(full.message());
+        } else if let Err(why) = self.bookmarks.store.add(item) {
+            self.show_toast(why.message());
             return;
         } else {
             let hint = match self.keymap.label_for(Action::OpenSaved) {
@@ -182,6 +198,28 @@ impl App {
         }
         self.persist_saved();
         self.sync_saved_flags(&room_id);
+    }
+
+    /// Whether the message may be taken off the list now. One whose reminder still
+    /// waits is asked about once: the reminder goes with it. The second try within a
+    /// few seconds is the answer.
+    fn may_remove_saved(&mut self, room_id: &str, event_id: &str) -> bool {
+        let now = self.bookmarks.clock.now_secs();
+        let waits = self
+            .bookmarks
+            .store
+            .get(room_id, event_id)
+            .is_some_and(|item| matches!(item.reminder(now), Reminder::Waiting(_)));
+        let asked = self.bookmarks.confirm.take().is_some_and(|(key, since)| {
+            key.0 == room_id && key.1 == event_id && since.elapsed() < CONFIRM_WAIT
+        });
+        if waits && !asked {
+            self.bookmarks.confirm =
+                Some(((room_id.to_owned(), event_id.to_owned()), Instant::now()));
+            self.show_toast("This message has a reminder set: once more removes both");
+            return false;
+        }
+        true
     }
 
     /// Marks the saved messages among those loaded of a room, and among those put
@@ -237,8 +275,8 @@ impl App {
         let known = self.bookmarks.store.get(&item.room_id, &item.event_id);
         let has_reminder = known.is_some_and(|known| known.remind_at.is_some());
         let unsaved = known.is_none();
-        if unsaved && self.bookmarks.store.len() >= crate::saved::MAX_SAVED {
-            self.show_toast(crate::saved::Full.message());
+        if unsaved && let Some(why) = self.bookmarks.store.refuses() {
+            self.show_toast(why.message());
             return;
         }
         let mut form = RemindForm::new(item.room_id.clone(), item.event_id.clone(), has_reminder);
@@ -291,8 +329,10 @@ impl App {
             }
             return;
         }
-        // Before the session is up there is nobody to ask; the tick asks again.
-        if self.user_id.is_none() || self.logged_out {
+        // Before the session is up there is nobody to ask, and before the rooms are
+        // known the worker could not tell a room that was left from one that has not
+        // come yet; the tick asks again.
+        if self.user_id.is_none() || self.logged_out || !self.rooms_received {
             return;
         }
         let keys: Vec<(String, String)> = wanted
@@ -338,27 +378,70 @@ impl App {
         hide_ignored(details, &self.ignored_users)
     }
 
+    /// What the worker found about some of the messages of a request; the rest
+    /// follows in answers of its own.
     pub(super) fn on_saved_event(&mut self, event: SavedEvent) {
         let SavedEvent::Details { request, items } = event;
-        // For a reminder that waited for its message's text.
+        // For reminders that waited for their messages' text.
         if let Some(at) = self
             .bookmarks
             .waiting
             .iter()
-            .position(|(asked, ..)| *asked == request)
+            .position(|waiting| waiting.request == request)
         {
-            let (_, item, _) = self.bookmarks.waiting.remove(at);
-            let details = items
-                .into_iter()
-                .find(|found| item.is(&found.room_id, &found.event_id))
-                .map(|found| hide_ignored(found, &self.ignored_users));
-            self.notify_reminder(&item, details.as_ref());
+            for found in items {
+                let waiting = &mut self.bookmarks.waiting[at];
+                let Some(index) = waiting
+                    .items
+                    .iter()
+                    .position(|item| item.is(&found.room_id, &found.event_id))
+                else {
+                    continue;
+                };
+                let item = waiting.items.remove(index);
+                let found = hide_ignored(found, &self.ignored_users);
+                self.notify_reminder(&item, Some(&found));
+            }
+            if self.bookmarks.waiting[at].items.is_empty() {
+                self.bookmarks.waiting.remove(at);
+            }
             return;
         }
         let ignored = &self.ignored_users;
+        let rooms = &self.rooms;
         if let Some(Modal::Saved(popup)) = &mut self.modal {
             for details in items {
+                // Of a room that is not listed (yet) the worker may know more later.
+                if details.text == SavedText::Unavailable
+                    && !rooms.iter().any(|room| room.id == details.room_id)
+                {
+                    popup
+                        .retry
+                        .insert((details.room_id.clone(), details.event_id.clone()));
+                }
                 popup.put_details(hide_ignored(details, ignored));
+            }
+        }
+    }
+
+    /// The room list arrived: what could not be loaded because its room was not
+    /// known then is asked again (by the next tick) where the room is there now.
+    pub(super) fn saved_rooms_arrived(&mut self) {
+        let rooms = &self.rooms;
+        if let Some(Modal::Saved(popup)) = &mut self.modal
+            && !popup.retry.is_empty()
+        {
+            let here: Vec<(String, String)> = popup
+                .retry
+                .iter()
+                .filter(|(room_id, _)| rooms.iter().any(|room| room.id == *room_id))
+                .cloned()
+                .collect();
+            for key in here {
+                popup.retry.remove(&key);
+                popup
+                    .details
+                    .retain(|known| !(known.room_id == key.0 && known.event_id == key.1));
             }
         }
     }
@@ -474,6 +557,9 @@ impl App {
         let Some(item) = self.saved_at(index) else {
             return;
         };
+        if !self.may_remove_saved(&item.room_id, &item.event_id) {
+            return;
+        }
         if self.bookmarks.store.remove(&item.room_id, &item.event_id) {
             self.persist_saved();
             self.sync_saved_flags(&item.room_id);
@@ -529,57 +615,61 @@ impl App {
         let at = if form.selected == RemindForm::CLEAR {
             None
         } else {
-            let local = match Preset::ALL.get(form.selected) {
-                Some(preset) => preset.at(now).ok_or(crate::saved::WhenError::TooFar),
+            let when = match Preset::ALL.get(form.selected) {
+                Some(preset) => preset.when(now).ok_or(WhenError::TooFar),
                 None => parse_when(form.input.as_str(), now),
             };
-            let local = match local {
-                Ok(local) => local,
+            // The clock has the last word: the moment must exist and lie ahead.
+            match when.and_then(|when| clock.resolve(when)) {
+                Ok(secs) => Some(secs),
                 Err(why) => {
                     form.error = Some(why.message());
                     return;
                 }
-            };
-            let Some(secs) = clock.secs_of(local) else {
-                form.error =
-                    Some("That time does not exist on that day (the clocks change)".to_owned());
-                return;
-            };
-            Some((secs, local))
+            }
         };
         let (room_id, event_id) = (form.room_id.clone(), form.event_id.clone());
         if let Some(item) = form.unsaved.take()
-            && let Err(full) = self.bookmarks.store.add(item)
+            && let Err(why) = self.bookmarks.store.add(item.clone())
         {
-            form.error = Some(full.message());
+            // Still to be saved, should the form be tried again.
+            form.unsaved = Some(item);
+            form.error = Some(why.message());
             return;
         }
-        self.bookmarks
-            .store
-            .set_reminder(&room_id, &event_id, at.map(|(secs, _)| secs));
+        if !self.bookmarks.store.set_reminder(&room_id, &event_id, at) {
+            form.error = Some("This message is not saved any more".to_owned());
+            return;
+        }
         self.saved_escape();
         self.persist_saved();
         self.sync_saved_flags(&room_id);
-        self.show_toast(match at {
-            Some((_, local)) => format!("Reminder set for {}", when_label(local, now)),
-            None => "Reminder removed".to_owned(),
+        let label = at
+            .and_then(|secs| clock.local_of(secs))
+            .map(|local| when_label(local, now));
+        self.show_toast(match (at, label) {
+            (Some(_), Some(label)) => format!("Reminder set for {label}"),
+            (Some(_), None) => "Reminder set".to_owned(),
+            (None, _) => "Reminder removed".to_owned(),
         });
     }
 
     // ----- going to a saved message --------------------------------------------------
 
     /// Goes to the message, in its room (and thread). A reminder that was due is done
-    /// with that.
+    /// with that, if there is a room to go to: of a room that is gone the jump says
+    /// so, and the reminder stays due until the entry is removed.
     fn go_to_saved(&mut self, item: &SavedItem) {
         let now = self.bookmarks.clock.now_secs();
-        if self
-            .bookmarks
-            .store
-            .visited(&item.room_id, &item.event_id, now)
+        let room_there = self.rooms.iter().any(|room| room.id == item.room_id);
+        if room_there
+            && self
+                .bookmarks
+                .store
+                .visited(&item.room_id, &item.event_id, now)
         {
             self.persist_saved();
         }
-        self.bookmarks.clicks.remove(&item.room_id);
         self.jump_to_event(
             item.room_id.clone(),
             item.event_id.clone(),
@@ -605,15 +695,12 @@ impl App {
         }
     }
 
-    /// A click on the desktop notification of `room_id`: true if that was a reminder,
-    /// and its message is where we went.
-    pub(super) fn reminder_clicked(&mut self, room_id: &str) -> bool {
-        let Some(item) = self.bookmarks.clicks.remove(room_id) else {
+    /// A click on the desktop notification of a reminder for that message: true if
+    /// the message is saved still, and is where we went.
+    pub(super) fn reminder_clicked(&mut self, room_id: &str, event_id: &str) -> bool {
+        let Some(item) = self.bookmarks.store.get(room_id, event_id).cloned() else {
             return false;
         };
-        if !self.bookmarks.store.contains(&item.room_id, &item.event_id) {
-            return false;
-        }
         self.go_to_saved(&item);
         true
     }
@@ -625,48 +712,81 @@ impl App {
     /// rows of the open list.
     pub(super) fn saved_tick(&mut self, wait: Duration) {
         let now = self.bookmarks.clock.now_secs();
-        for item in self.bookmarks.store.take_newly_due(now) {
-            self.reminder_due(item);
+        let due = self.bookmarks.store.take_newly_due(now);
+        if !due.is_empty() {
+            self.reminders_came_due(due);
         }
         if !self.bookmarks.waiting.is_empty() {
             let (late, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.bookmarks.waiting)
                 .into_iter()
-                .partition(|(_, _, since)| since.elapsed() >= wait);
+                .partition(|waiting| waiting.since.elapsed() >= wait);
             self.bookmarks.waiting = waiting;
-            for (_, item, _) in late {
+            for item in late.into_iter().flat_map(|waiting| waiting.items) {
                 self.notify_reminder(&item, None);
             }
         }
         self.saved_fetch_visible();
     }
 
-    /// A reminder came due: said in the app at once, and on the desktop unless
-    /// notifications are off or held back.
-    fn reminder_due(&mut self, item: SavedItem) {
+    /// Reminders came due in the same moment (several: after the machine slept, say).
+    /// Said in the app at once, and on the desktop unless notifications are off or
+    /// held back: each with its own notification up to a few, beyond that one for
+    /// all, which names none of them.
+    fn reminders_came_due(&mut self, due: Vec<SavedItem>) {
         self.dirty = true;
-        self.show_toast("A reminder is due");
+        self.show_toast(match due.len() {
+            1 => "A reminder is due".to_owned(),
+            count => format!("{count} reminders are due"),
+        });
         if !self.reminders_notify() {
             return;
         }
-        // With previews off nothing of the message is shown, so nothing is asked.
+        if due.len() > NOTIFY_EACH_MOST {
+            self.bookmarks.notices.push(crate::notify::DueReminder {
+                notice: Notice {
+                    room_id: String::new(),
+                    room: String::new(),
+                    sender: String::new(),
+                    body: String::new(),
+                    highlight: false,
+                    thread: None,
+                },
+                event: None,
+                count: due.len(),
+            });
+            return;
+        }
+        // With previews off nothing of the messages is shown, so nothing is asked.
         if self.notification_preview {
             if self.matrix.is_none() {
-                let details = self.demo_saved_details(&item);
-                self.notify_reminder(&item, Some(&details));
+                for item in &due {
+                    let details = self.demo_saved_details(item);
+                    self.notify_reminder(item, Some(&details));
+                }
                 return;
             }
             if self.user_id.is_some() {
+                // One question for all of them.
                 self.bookmarks.next_request += 1;
                 let request = self.bookmarks.next_request;
                 self.send_matrix(MatrixCmd::Saved(SavedCmd::Fetch {
                     request,
-                    items: vec![(item.room_id.clone(), item.event_id.clone())],
+                    items: due
+                        .iter()
+                        .map(|item| (item.room_id.clone(), item.event_id.clone()))
+                        .collect(),
                 }));
-                self.bookmarks.waiting.push((request, item, Instant::now()));
+                self.bookmarks.waiting.push(crate::saved::Waiting {
+                    request,
+                    items: due,
+                    since: Instant::now(),
+                });
                 return;
             }
         }
-        self.notify_reminder(&item, None);
+        for item in &due {
+            self.notify_reminder(item, None);
+        }
     }
 
     fn reminders_notify(&self) -> bool {
@@ -676,33 +796,36 @@ impl App {
     }
 
     /// Hands the reminder's notification to the event loop, with the message's text
-    /// where it is known and may be shown.
+    /// where it is known and may be shown. The notification knows its message: a
+    /// click on it goes there.
     fn notify_reminder(&mut self, item: &SavedItem, details: Option<&SavedDetails>) {
         // Do not disturb may have been turned on while the text was waited for.
         if !self.reminders_notify() {
             return;
         }
         let room = match self.saved_room_label(&item.room_id) {
-            RoomLabel::Name(name) => name,
+            // A room's name is what somebody in the room made it.
+            RoomLabel::Name(name) => sanitize_line(&name),
             RoomLabel::Unknown | RoomLabel::Gone => String::new(),
         };
         let (sender, body) = match details {
             Some(found) if found.text == SavedText::Text && self.notification_preview => {
-                (found.sender.clone(), found.snippet.clone())
+                (sanitize_line(&found.sender), sanitize_line(&found.snippet))
             }
             _ => (String::new(), String::new()),
         };
-        self.bookmarks.notices.push(Notice {
-            room_id: item.room_id.clone(),
-            room,
-            sender,
-            body,
-            highlight: false,
-            thread: item.thread.clone(),
+        self.bookmarks.notices.push(crate::notify::DueReminder {
+            notice: Notice {
+                room_id: item.room_id.clone(),
+                room,
+                sender,
+                body,
+                highlight: false,
+                thread: item.thread.clone(),
+            },
+            event: Some((item.event_id.clone(), item.thread.clone())),
+            count: 1,
         });
-        self.bookmarks
-            .clicks
-            .insert(item.room_id.clone(), item.clone());
     }
 }
 
@@ -1346,7 +1469,7 @@ mod tests {
         // Not even asked for.
         assert!(fetches(&mut commands).is_empty());
         assert_eq!(app.bookmarks.notices.len(), 1);
-        let notice = &app.bookmarks.notices[0];
+        let notice = &app.bookmarks.notices[0].notice;
         assert!(notice.body.is_empty() && notice.sender.is_empty());
         let ready = app.take_notices_with_icons();
         assert!(!ready.preview);
@@ -1406,7 +1529,7 @@ mod tests {
         // The wait is over.
         app.saved_tick(Duration::ZERO);
         assert_eq!(app.bookmarks.notices.len(), 1);
-        assert!(app.bookmarks.notices[0].body.is_empty());
+        assert!(app.bookmarks.notices[0].notice.body.is_empty());
         let (title, text) = crate::notify::reminder_title_and_text(&app.bookmarks.notices[0], true);
         assert_eq!(title, "Reminder: Garden");
         assert_eq!(text, "A saved message is due");
@@ -1424,8 +1547,8 @@ mod tests {
         let mut deleted = text_of("$e1", "Bob", "[message deleted]");
         deleted.text = SavedText::Redacted;
         answer(&mut app, asked[0].0, vec![deleted]);
-        assert!(app.bookmarks.notices[0].body.is_empty());
-        assert!(app.bookmarks.notices[0].sender.is_empty());
+        assert!(app.bookmarks.notices[0].notice.body.is_empty());
+        assert!(app.bookmarks.notices[0].notice.sender.is_empty());
     }
 
     #[test]
@@ -1471,36 +1594,14 @@ mod tests {
         assert_eq!(popup(&app).selected, 1);
     }
 
-    #[test]
-    fn a_click_on_the_reminders_notification_goes_to_its_message() {
-        let (mut app, _terminal, mut commands) = with_reminder();
-        app.notification_preview = false;
-        app.timeline.selected = Some(2);
-        later(&mut app, 3600);
-        app.saved_tick(TEXT_WAIT);
-        assert_eq!(app.bookmarks.notices.len(), 1);
-        while commands.try_recv().is_ok() {}
+    fn clicked(app: &mut App, room_id: &str, event: Option<&str>) {
         app.on_matrix(MatrixEvent::NoticeClicked {
-            room_id: ROOM.into(),
+            room_id: room_id.into(),
+            event: event.map(|event_id| (event_id.to_owned(), None)),
         });
-        assert_eq!(app.timeline.selected, Some(1));
-        assert!(app.bookmarks.store.items()[0].done);
-        // The next click on a notification of the room is an ordinary one.
-        app.timeline.selected = Some(2);
-        app.on_matrix(MatrixEvent::NoticeClicked {
-            room_id: ROOM.into(),
-        });
-        assert_eq!(app.timeline.selected, Some(2));
     }
 
-    #[test]
-    fn a_message_notification_after_the_reminder_takes_the_click_for_itself() {
-        let (mut app, _terminal, _commands) = with_reminder();
-        app.notification_preview = false;
-        app.window_focused = false;
-        app.timeline.selected = Some(2);
-        later(&mut app, 3600);
-        app.saved_tick(TEXT_WAIT);
+    fn news(app: &mut App) {
         app.on_matrix(MatrixEvent::Notice(Notice {
             room_id: ROOM.into(),
             room: "Garden".into(),
@@ -1509,32 +1610,140 @@ mod tests {
             highlight: false,
             thread: None,
         }));
-        app.on_matrix(MatrixEvent::NoticeClicked {
-            room_id: ROOM.into(),
-        });
-        assert_eq!(app.timeline.selected, Some(2));
-        assert!(!app.bookmarks.store.items()[0].done);
     }
 
     #[test]
-    fn reminders_missed_while_the_app_was_away_are_due_at_the_next_start_without_a_notification() {
+    fn a_click_goes_where_its_own_notification_pointed_whatever_came_after_it() {
+        // A message's notification and a reminder's for the same room, shown in
+        // either order and clicked in either order, with and without previews.
+        for case in 0..8 {
+            let (preview, reminder_first, click_reminder_first) =
+                (case & 1 == 0, case & 2 == 0, case & 4 == 0);
+            let (mut app, _terminal, mut commands) = with_reminder();
+            app.notification_preview = preview;
+            app.window_focused = false;
+            app.timeline.selected = Some(2);
+            if !reminder_first {
+                news(&mut app);
+            }
+            later(&mut app, 3600);
+            app.saved_tick(TEXT_WAIT);
+            if preview {
+                let asked = fetches(&mut commands);
+                answer(&mut app, asked[0].0, vec![text_of("$e1", "Bob", "text")]);
+            }
+            if reminder_first {
+                news(&mut app);
+            }
+            let ready = app.take_notices_with_icons();
+            assert_eq!(ready.items.len(), 1, "case {case}");
+            assert_eq!(ready.reminders.len(), 1, "case {case}");
+            // What each notification is given to carry.
+            let due = &ready.reminders[0].0;
+            assert_eq!(due.notice.room_id, ROOM);
+            assert_eq!(due.event, Some(("$e1".to_owned(), None)));
+
+            let done = |app: &App| app.bookmarks.store.items()[0].done;
+            if click_reminder_first {
+                clicked(&mut app, ROOM, Some("$e1"));
+                assert_eq!(app.timeline.selected, Some(1), "case {case}");
+                assert!(done(&app), "case {case}");
+                app.timeline.selected = Some(2);
+                clicked(&mut app, ROOM, None);
+                assert_eq!(app.timeline.selected, Some(2), "case {case}");
+            } else {
+                clicked(&mut app, ROOM, None);
+                assert_eq!(app.timeline.selected, Some(2), "case {case}");
+                assert!(!done(&app), "case {case}");
+                clicked(&mut app, ROOM, Some("$e1"));
+                assert_eq!(app.timeline.selected, Some(1), "case {case}");
+                assert!(done(&app), "case {case}");
+            }
+        }
+    }
+
+    #[test]
+    fn two_reminders_in_one_room_each_go_to_their_own_message() {
+        for preview in [true, false] {
+            let (mut app, _terminal, mut commands) = with_reminder();
+            app.notification_preview = preview;
+            app.timeline.selected = Some(0);
+            app.perform(Action::SaveForLater);
+            app.bookmarks
+                .store
+                .set_reminder(ROOM, "$e0", Some(friday().timestamp() + 100));
+            app.timeline.selected = Some(2);
+            later(&mut app, 3600);
+            app.saved_tick(TEXT_WAIT);
+            if preview {
+                // One question for both.
+                let asked = fetches(&mut commands);
+                assert_eq!(asked.len(), 1);
+                answer(
+                    &mut app,
+                    asked[0].0,
+                    vec![text_of("$e0", "Ann", "a"), text_of("$e1", "Bob", "b")],
+                );
+            }
+            let ready = app.take_notices_with_icons();
+            let mut events: Vec<String> = ready
+                .reminders
+                .iter()
+                .filter_map(|(due, _)| due.event.clone())
+                .map(|(event_id, _)| event_id)
+                .collect();
+            events.sort();
+            assert_eq!(events, ["$e0", "$e1"]);
+            let done = |app: &App, event: &str| app.bookmarks.store.get(ROOM, event).unwrap().done;
+            // The later one first.
+            clicked(&mut app, ROOM, Some("$e1"));
+            assert_eq!(app.timeline.selected, Some(1));
+            assert!(done(&app, "$e1") && !done(&app, "$e0"));
+            clicked(&mut app, ROOM, Some("$e0"));
+            assert_eq!(app.timeline.selected, Some(0));
+            assert!(done(&app, "$e0"));
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_notification_of_a_message_that_is_saved_no_more_opens_its_room() {
+        let (mut app, _terminal, _commands) = with_reminder();
+        app.notification_preview = false;
+        app.timeline.selected = Some(2);
+        later(&mut app, 3600);
+        app.saved_tick(TEXT_WAIT);
+        app.bookmarks.store.remove(ROOM, "$e1");
+        clicked(&mut app, ROOM, Some("$e1"));
+        assert_eq!(app.timeline.selected, Some(2));
+        assert!(app.modal.is_none());
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "matrix-rat-app-saved-missed-{}",
+            "matrix-rat-app-saved-{name}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const ME: &str = "@me:example.org";
+
+    #[test]
+    fn reminders_missed_while_the_app_was_away_are_due_at_the_next_start_without_a_notification() {
+        let dir = scratch("missed");
         let file = dir.join("saved.json");
         {
             let (mut app, _terminal, _commands) = connected();
-            app.load_saved(file.clone());
+            app.load_saved(file.clone(), ME);
             app.perform(Action::RemindMe);
             app.on_event(key(KeyCode::Enter));
             assert_eq!(saved_ids(&app), ["$e1"]);
         }
         let (mut app, mut terminal, mut commands) = connected();
         later(&mut app, 86_400);
-        app.load_saved(file);
+        app.load_saved(file, ME);
         assert!(toast(&app).contains("came due while"), "{}", toast(&app));
         app.sync_saved_flags(ROOM);
         assert!(app.rooms[0].messages[1].saved);
@@ -1549,21 +1758,347 @@ mod tests {
 
     #[test]
     fn a_damaged_file_does_not_stop_the_app_and_is_told() {
-        let dir = std::env::temp_dir().join(format!(
-            "matrix-rat-app-saved-damaged-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("damaged");
         let file = dir.join("saved.json");
         std::fs::write(&file, "{{{").unwrap();
         let (mut app, _terminal, _commands) = connected();
-        app.load_saved(file.clone());
+        app.load_saved(file.clone(), ME);
         assert!(toast(&app).contains("damaged"), "{}", toast(&app));
         app.perform(Action::SaveForLater);
         assert_eq!(saved_ids(&app), ["$e1"]);
         assert!(file.exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_list_is_read_once_the_session_is_up_and_goes_from_memory_when_it_ends() {
+        let dir = scratch("session");
+        let file = dir.join("saved.json");
+        {
+            let (mut app, _terminal, _commands) = connected();
+            app.load_saved(file.clone(), ME);
+            app.perform(Action::RemindMe);
+            app.on_event(key(KeyCode::Enter));
+            assert_eq!(saved_ids(&app), ["$e1"]);
+        }
+        // The next start, a day on. Before the session is up nobody knows whose list
+        // the file holds: nothing is shown, nothing is due.
+        let (handle, _commands) = MatrixHandle::for_test();
+        let mut app = App::new(&Config::default(), std::path::PathBuf::new(), Some(handle));
+        app.bookmarks.clock = Clock::Fixed(friday() + chrono::Duration::days(1));
+        app.notify_mode = NotifyMode::Desktop;
+        app.bookmarks.file = Some(file.clone());
+        app.saved_tick(TEXT_WAIT);
+        assert!(saved_ids(&app).is_empty());
+        assert_eq!(app.reminders_due(), 0);
+        app.on_matrix(MatrixEvent::LoggedIn { user_id: ME.into() });
+        assert_eq!(saved_ids(&app), ["$e1"]);
+        assert_eq!(app.reminders_due(), 1);
+
+        // The session ends: over the login form nothing is listed and nothing fires.
+        app.bookmarks.store.set_reminder(
+            "!garden:example.org",
+            "$e1",
+            Some(friday().timestamp() + 90_000),
+        );
+        app.bookmarks.store.write().unwrap();
+        app.reset_session();
+        assert!(saved_ids(&app).is_empty());
+        app.bookmarks.clock = Clock::Fixed(friday() + chrono::Duration::days(2));
+        app.saved_tick(TEXT_WAIT);
+        assert_eq!(app.reminders_due(), 0);
+        assert!(app.bookmarks.notices.is_empty());
+        assert!(app.bookmarks.waiting.is_empty());
+        // Nothing can be written from there either.
+        app.bookmarks.store.write().unwrap();
+        assert!(file.exists());
+
+        // The same account logs in again (its session had only ended on the
+        // server): the list is there, and what came due meanwhile is due.
+        app.on_matrix(MatrixEvent::LoggedIn { user_id: ME.into() });
+        assert_eq!(saved_ids(&app), ["$e1"]);
+        assert_eq!(app.reminders_due(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn another_account_never_sees_the_list_which_is_put_aside() {
+        let dir = scratch("other-account");
+        let file = dir.join("saved.json");
+        {
+            let (mut app, _terminal, _commands) = connected();
+            app.load_saved(file.clone(), ME);
+            app.perform(Action::RemindMe);
+            app.on_event(key(KeyCode::Enter));
+        }
+        let (handle, _commands) = MatrixHandle::for_test();
+        let mut app = App::new(&Config::default(), std::path::PathBuf::new(), Some(handle));
+        app.bookmarks.clock = Clock::Fixed(friday() + chrono::Duration::days(1));
+        app.bookmarks.file = Some(file.clone());
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@other:example.org".into(),
+        });
+        assert!(saved_ids(&app).is_empty());
+        assert_eq!(app.reminders_due(), 0);
+        assert!(toast(&app).contains("another account"), "{}", toast(&app));
+        assert!(!file.exists());
+        assert!(dir.join("saved.json.other-account").exists());
+        // What this account saves is its own, and the first account's stays aside.
+        app.bookmarks
+            .store
+            .add(SavedItem {
+                room_id: ROOM.into(),
+                event_id: "$theirs".into(),
+                thread: None,
+                saved_at: 1,
+                remind_at: None,
+                done: false,
+            })
+            .unwrap();
+        app.bookmarks.store.write().unwrap();
+        app.reset_session();
+        app.on_matrix(MatrixEvent::LoggedIn { user_id: ME.into() });
+        assert!(saved_ids(&app).is_empty());
+        assert!(dir.join("saved.json.other-account.1").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_list_of_a_newer_version_is_left_alone_and_nothing_can_be_saved() {
+        let dir = scratch("newer");
+        let file = dir.join("saved.json");
+        let text = r#"{"version": 99, "owner": "@me:example.org", "items": []}"#;
+        std::fs::write(&file, text).unwrap();
+        let (mut app, _terminal, _commands) = connected();
+        app.load_saved(file.clone(), ME);
+        assert!(toast(&app).contains("newer"), "{}", toast(&app));
+        app.perform(Action::SaveForLater);
+        assert!(
+            toast(&app).contains("Nothing can be saved"),
+            "{}",
+            toast(&app)
+        );
+        assert!(saved_ids(&app).is_empty());
+        assert!(!app.rooms[0].messages[1].saved);
+        app.perform(Action::RemindMe);
+        assert!(app.modal.is_none());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn save_with_reminder(app: &mut App, event: &str, room: &str, after: i64) {
+        app.bookmarks
+            .store
+            .add(SavedItem {
+                room_id: room.into(),
+                event_id: event.into(),
+                thread: None,
+                saved_at: 1,
+                remind_at: Some(friday().timestamp() + after),
+                done: false,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn many_reminders_due_together_give_one_toast_and_one_notification_that_names_none() {
+        let (mut app, _terminal, mut commands) = connected();
+        for n in 0..5 {
+            save_with_reminder(&mut app, &format!("$x{n}"), ROOM, 10);
+        }
+        later(&mut app, 60);
+        app.saved_tick(TEXT_WAIT);
+        assert_eq!(toast(&app), "5 reminders are due");
+        // Nothing is asked: nothing of the messages is shown.
+        assert!(fetches(&mut commands).is_empty());
+        assert_eq!(app.bookmarks.notices.len(), 1);
+        let due = &app.bookmarks.notices[0];
+        assert_eq!((due.count, due.event.clone()), (5, None));
+        assert!(due.notice.room_id.is_empty() && due.notice.room.is_empty());
+        let (title, text) = crate::notify::reminder_title_and_text(due, true);
+        assert_eq!(
+            (title.as_str(), text.as_str()),
+            ("matrix-rat", "5 reminders are due")
+        );
+        app.saved_tick(TEXT_WAIT);
+        assert_eq!(app.bookmarks.notices.len(), 1);
+        // A click on it opens the list, at a due one.
+        clicked(&mut app, "", None);
+        assert!(matches!(popup(&app).stage, Stage::List));
+    }
+
+    #[test]
+    fn a_few_reminders_due_together_are_asked_about_in_one_question() {
+        let (mut app, _terminal, mut commands) = connected();
+        for n in 0..3 {
+            save_with_reminder(&mut app, &format!("$x{n}"), ROOM, 10);
+        }
+        later(&mut app, 60);
+        app.saved_tick(TEXT_WAIT);
+        assert_eq!(toast(&app), "3 reminders are due");
+        let asked = fetches(&mut commands);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].1.len(), 3);
+        // The worker answers message by message.
+        answer(&mut app, asked[0].0, vec![text_of("$x1", "Ann", "one")]);
+        assert_eq!(app.bookmarks.notices.len(), 1);
+        assert_eq!(app.bookmarks.notices[0].notice.body, "one");
+        assert_eq!(app.bookmarks.waiting.len(), 1);
+        answer(
+            &mut app,
+            asked[0].0,
+            vec![text_of("$x0", "Ann", "zero"), text_of("$x2", "Ann", "two")],
+        );
+        assert_eq!(app.bookmarks.notices.len(), 3);
+        assert!(app.bookmarks.waiting.is_empty());
+        // An answer said twice notifies once.
+        answer(&mut app, asked[0].0, vec![text_of("$x1", "Ann", "one")]);
+        assert_eq!(app.bookmarks.notices.len(), 3);
+        // Those the worker never answers for go out without text when the wait is over.
+        let (mut app, _terminal, mut commands) = connected();
+        for n in 0..2 {
+            save_with_reminder(&mut app, &format!("$x{n}"), ROOM, 10);
+        }
+        later(&mut app, 60);
+        app.saved_tick(TEXT_WAIT);
+        let asked = fetches(&mut commands);
+        answer(&mut app, asked[0].0, vec![text_of("$x1", "Ann", "one")]);
+        app.saved_tick(Duration::ZERO);
+        assert_eq!(app.bookmarks.notices.len(), 2);
+        assert!(app.bookmarks.notices[1].notice.body.is_empty());
+        assert_eq!(
+            app.bookmarks.notices[1].event,
+            Some(("$x0".to_owned(), None))
+        );
+    }
+
+    #[test]
+    fn nothing_is_asked_before_the_rooms_are_known_and_a_room_that_comes_later_is_asked_again() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.rooms_received = false;
+        save_with_reminder(&mut app, "$late", "!late:example.org", 99_999);
+        app.perform(Action::OpenSaved);
+        screen(&mut app, &mut terminal);
+        app.saved_tick(TEXT_WAIT);
+        assert!(fetches(&mut commands).is_empty());
+        app.rooms_received = true;
+        app.saved_tick(TEXT_WAIT);
+        let asked = fetches(&mut commands);
+        assert_eq!(asked.len(), 1);
+        // The worker does not know the room (yet): not "left", and not for good.
+        let mut unknown = text_of("$late", "", "");
+        unknown.room_id = "!late:example.org".into();
+        unknown.sender_id = None;
+        unknown.text = SavedText::Unavailable;
+        answer(&mut app, asked[0].0, vec![unknown.clone()]);
+        let text = screen(&mut app, &mut terminal);
+        assert!(text.contains("could not be loaded"), "{text}");
+        app.saved_tick(TEXT_WAIT);
+        assert!(fetches(&mut commands).is_empty());
+        // The room is listed now: asked again, once.
+        app.rooms
+            .push(Room::new("!late:example.org", "Late", RoomKind::Room));
+        app.saved_rooms_arrived();
+        app.saved_tick(TEXT_WAIT);
+        let again = fetches(&mut commands);
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            again[0].1,
+            [("!late:example.org".to_owned(), "$late".to_owned())]
+        );
+        // Not to be had from a room that is there: that stands.
+        answer(&mut app, again[0].0, vec![unknown]);
+        app.saved_rooms_arrived();
+        app.saved_tick(TEXT_WAIT);
+        assert!(fetches(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn a_reminder_of_a_room_that_is_gone_stays_due_when_going_there_fails() {
+        let (mut app, _terminal, _commands) = connected();
+        save_with_reminder(&mut app, "$gone", "!left:example.org", 10);
+        later(&mut app, 60);
+        app.saved_tick(TEXT_WAIT);
+        app.click_due_reminder();
+        assert!(
+            toast(&app).contains("no longer available"),
+            "{}",
+            toast(&app)
+        );
+        assert_eq!(app.reminders_due(), 1);
+        assert!(!app.bookmarks.store.items()[0].done);
+    }
+
+    #[test]
+    fn a_reminder_for_an_unsaved_message_keeps_it_when_the_list_filled_meanwhile() {
+        let (mut app, _terminal, _commands) = connected();
+        app.perform(Action::RemindMe);
+        assert!(form(&app).unsaved.is_some());
+        for n in 0..crate::saved::MAX_SAVED {
+            save_with_reminder(&mut app, &format!("$x{n}"), ROOM, 99_999);
+        }
+        app.on_event(key(KeyCode::Enter));
+        assert!(form(&app).error.as_deref().unwrap().contains("full"));
+        assert!(form(&app).unsaved.is_some());
+        assert!(!app.bookmarks.store.contains(ROOM, "$e1"));
+        // Room is made: the same form saves it now.
+        app.bookmarks.store.remove(ROOM, "$x0");
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.bookmarks.store.get(ROOM, "$e1").unwrap().remind_at,
+            Some(friday().timestamp() + 1200)
+        );
+    }
+
+    #[test]
+    fn a_reminder_for_a_message_that_was_removed_meanwhile_says_so() {
+        let (mut app, _terminal, _commands) = with_reminder();
+        app.perform(Action::RemindMe);
+        app.bookmarks.store.remove(ROOM, "$e1");
+        app.on_event(key(KeyCode::Enter));
+        assert!(form(&app).error.as_deref().unwrap().contains("not saved"));
+    }
+
+    #[test]
+    fn removing_a_message_whose_reminder_waits_asks_once() {
+        let (mut app, mut terminal, _commands) = with_reminder();
+        app.on_event(key(KeyCode::Char('b')));
+        assert_eq!(saved_ids(&app), ["$e1"]);
+        assert!(toast(&app).contains("once more"), "{}", toast(&app));
+        app.on_event(key(KeyCode::Char('b')));
+        assert!(saved_ids(&app).is_empty());
+
+        // The same from the list. The question is for one message only.
+        save_with_reminder(&mut app, "$e0", ROOM, 3600);
+        save_with_reminder(&mut app, "$e2", ROOM, 3600);
+        app.perform(Action::OpenSaved);
+        screen(&mut app, &mut terminal);
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(saved_ids(&app), ["$e2", "$e0"]);
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(saved_ids(&app), ["$e2", "$e0"]);
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(saved_ids(&app), ["$e2"]);
+        // One that is due is not asked about.
+        later(&mut app, 4000);
+        app.on_event(key(KeyCode::Delete));
+        assert!(saved_ids(&app).is_empty());
+    }
+
+    #[test]
+    fn a_click_between_the_marks_of_an_entry_does_nothing() {
+        let (mut app, mut terminal, _commands) = connected();
+        app.perform(Action::SaveForLater);
+        app.timeline.selected = Some(2);
+        app.perform(Action::OpenSaved);
+        let text = screen(&mut app, &mut terminal);
+        let (col, row) = find(&text, " remove ");
+        app.on_event(click(col - 1, row));
+        assert!(matches!(popup(&app).stage, Stage::List));
+        assert_eq!(saved_ids(&app), ["$e1"]);
+        assert_eq!(app.timeline.selected, Some(2));
     }
 
     #[test]
