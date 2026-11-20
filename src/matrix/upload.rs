@@ -687,4 +687,176 @@ mod tests {
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// Sends a small file as a voice message through the worker and waits until the
+    /// server has it: the event says it is a voice message, how long it is and how
+    /// loud along the way, under the fixed name; and this app reads it back as one.
+    /// Setup as for [`files_are_sent_and_arrive`].
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn a_voice_message_is_sent_and_read_back_as_one() {
+        use crate::model::{AudioMeta, MediaKind};
+
+        let homeserver = std::env::var("MATRIX_RAT_TEST_HOMESERVER")
+            .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
+        let username = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let root = std::env::temp_dir().join(format!("matrix-rat-voice-{}", std::process::id()));
+        let paths = Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+
+        // Not a real sound: nothing plays it here. Named as a recording would be.
+        let recorded_name = format!("voice-{:016x}.ogg", std::process::id());
+        let sound: Vec<u8> = b"OggS"
+            .iter()
+            .copied()
+            .chain((0..3000u32).map(|n| (n % 251) as u8))
+            .collect();
+        let path = root.join(&recorded_name);
+        std::fs::write(&path, &sound).unwrap();
+        // Earlier runs may have left voice messages in the room: this one is known by
+        // its caption.
+        let caption = format!("the voice caption {}", std::process::id());
+        let duration = Duration::from_millis(2_500);
+        let waveform: Vec<u16> = vec![0, 128, 512, 1000, 1024, 300];
+
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password: password.into(),
+        });
+
+        let wait = async {
+            let mut room_id: Option<String> = None;
+            let mut arrived: Option<crate::model::Message> = None;
+            let mut asked = 0u64;
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err)
+                    | MatrixEvent::Error(err)
+                    | MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                    MatrixEvent::FilesNotSent { reason, .. } => panic!("{reason}"),
+                    MatrixEvent::Rooms(rooms) if room_id.is_none() => {
+                        let joined = rooms.iter().find(|r| !r.is_pending());
+                        if let Some(room) = joined {
+                            room_id = Some(room.id.clone());
+                            handle.send(MatrixCmd::OpenRoom {
+                                room_id: room.id.clone(),
+                                generation: 1,
+                            });
+                            let command = MatrixCmd::SendFiles {
+                                send: 1,
+                                room_id: room.id.clone(),
+                                files: vec![path.clone()],
+                                voice: vec![Some(VoiceMeta {
+                                    duration,
+                                    waveform: waveform.clone(),
+                                })],
+                                caption: Some(crate::format::parse(&caption)),
+                                reply_to: None,
+                            };
+                            assert_eq!(format!("{command:?}"), "SendFiles(1 files, 1 voice)");
+                            handle.send(command);
+                        }
+                    }
+                    MatrixEvent::Timeline {
+                        generation: 1,
+                        messages,
+                        ..
+                    } if arrived.is_none() => {
+                        let found = messages.iter().find(|m| {
+                            m.body.contains(&caption)
+                                && m.state == SendState::Sent
+                                && m.own
+                                && matches!(m.item, Some(ItemRef::Event(_)))
+                        });
+                        if let (Some(message), Some(room_id)) = (found, &room_id) {
+                            arrived = Some(message.clone());
+                            asked += 1;
+                            handle.send(MatrixCmd::FetchSource {
+                                request: asked,
+                                room_id: room_id.clone(),
+                                item: message.item.clone().unwrap(),
+                            });
+                        }
+                    }
+                    MatrixEvent::Source { request, result } if request == asked => match result {
+                        Ok(source) => return (arrived.unwrap(), *source),
+                        // Sent, but the event itself has not come back from the
+                        // server yet: asked again shortly.
+                        Err(_) => {
+                            let (Some(message), Some(room_id)) = (&arrived, &room_id) else {
+                                panic!("a source nobody asked for");
+                            };
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            asked += 1;
+                            handle.send(MatrixCmd::FetchSource {
+                                request: asked,
+                                room_id: room_id.clone(),
+                                item: message.item.clone().unwrap(),
+                            });
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        };
+        let (message, source) = tokio::time::timeout(Duration::from_secs(60), wait)
+            .await
+            .expect("timed out waiting for the voice message");
+
+        // The event as the server has it (in an encrypted room: as it was decrypted).
+        assert_ne!(source.kind, crate::matrix::SourceKind::Encrypted);
+        assert!(!source.cut);
+        assert!(
+            !source.json.contains(&recorded_name),
+            "the name of the recording went along"
+        );
+        let event: serde_json::Value = serde_json::from_str(&source.json).unwrap();
+        let content = &event["content"];
+        assert_eq!(content["msgtype"], "m.audio");
+        assert!(
+            content["org.matrix.msc3245.voice"].is_object(),
+            "not marked as a voice message"
+        );
+        let details = &content["org.matrix.msc1767.audio"];
+        assert_eq!(details["duration"], 2_500);
+        assert_eq!(
+            details["waveform"],
+            serde_json::json!([0, 128, 512, 1000, 1024, 300])
+        );
+        assert_eq!(content["info"]["duration"], 2_500);
+        assert_eq!(content["info"]["mimetype"], "audio/ogg");
+        assert_eq!(content["info"]["size"], sound.len());
+        assert_eq!(content["filename"], "voice-message.ogg");
+        assert_eq!(content["body"], caption.as_str());
+
+        // And as this app shows it.
+        let attached = message.file.as_ref().expect("no attachment");
+        assert_eq!(attached.kind, MediaKind::Voice);
+        assert_eq!(attached.name, "voice-message.ogg");
+        assert_eq!(attached.size, Some(sound.len() as u64));
+        assert!(attached.key.starts_with("mxc://"));
+        assert_eq!(
+            attached.audio.as_deref(),
+            Some(&AudioMeta {
+                duration: Some(duration),
+                waveform: waveform.clone(),
+                mime: Some("audio/ogg".to_owned()),
+            })
+        );
+        assert!(message.is_playable());
+        assert!(message.body.contains("🎤"), "{}", message.body);
+
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
