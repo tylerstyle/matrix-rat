@@ -1558,4 +1558,347 @@ mod tests {
             "{shown}"
         );
     }
+
+    #[test]
+    fn a_logout_stops_everything_forgets_the_notes_and_removes_their_file() {
+        let dir = Dir::new("notes-logout");
+        let file = dir.0.join("notes.json");
+        let (mut app, mut commands) = app_with(
+            vec![voice("v1"), text("t", "hallo"), text("u", "zwei")],
+            &dir,
+            true,
+        );
+        app.notes.keep = true;
+        app.set_note_paths(dir.0.clone(), file.clone());
+        // One finished and kept, one whose sound is on its way, one whose program runs.
+        select(&mut app, 2);
+        app.perform(Action::Translate);
+        let request = app.take_note_starts().remove(0);
+        wrote(&mut app, request.id, "two");
+        assert!(file.exists());
+        select(&mut app, 0);
+        app.perform(Action::Transcribe);
+        select(&mut app, 1);
+        app.perform(Action::Translate);
+        let mut running = app.take_note_starts().remove(0);
+        assert_eq!(app.notes.runs.len(), 2);
+
+        app.reset_session();
+        assert!(app.notes().is_empty());
+        assert!(
+            app.notes.runs.is_empty(),
+            "nothing counts against the limit"
+        );
+        assert!(app.take_note_starts().is_empty());
+        assert_eq!(running.cancel.try_recv(), Ok(()));
+        assert!(asked(&mut commands).contains(&"CancelSpeech(run 2)".to_owned()));
+        assert!(!file.exists());
+        // Answers that come after all are for nobody.
+        let late = TempAudio::create(dir.0.as_path(), None, b"x").unwrap();
+        app.on_matrix(MatrixEvent::SpeechFetched {
+            id: 2,
+            result: Ok(late),
+        });
+        wrote(&mut app, 3, "too late");
+        assert!(app.notes().is_empty());
+        assert!(app.take_note_starts().is_empty());
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_deleted_message_loses_its_notes_here_and_in_the_file() {
+        let dir = Dir::new("notes-deleted");
+        let file = dir.0.join("notes.json");
+        let mut captioned = voice("v1");
+        captioned.body.push_str("\nhör mal");
+        let (mut app, _commands) = app_with(vec![captioned, text("t", "bleibt")], &dir, true);
+        app.notes.keep = true;
+        app.set_note_paths(dir.0.clone(), file.clone());
+        select(&mut app, 0);
+        app.perform(Action::Transcribe);
+        fetched(&mut app, 1, &dir);
+        wrote(&mut app, 1, "geheime Worte");
+        select(&mut app, 1);
+        app.perform(Action::Translate);
+        let request = app.take_note_starts().remove(0);
+        wrote(&mut app, request.id, "stays");
+        // A translation of the first is being made when it is deleted.
+        select(&mut app, 0);
+        app.perform(Action::Translate);
+        let mut running = app.take_note_starts().remove(0);
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("geheime Worte")
+        );
+
+        let mut messages = app.rooms[0].messages.clone();
+        messages[0] = Message {
+            kind: MsgKind::Redacted,
+            ..text("v1", "Message deleted")
+        };
+        // Until the app has heard of it, nothing of the note is drawn already.
+        app.rooms[0].messages = messages.clone();
+        app.timeline_rev += 1;
+        assert!(!screen(&mut app, 100, 30).contains("geheime Worte"));
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!alpha".into(),
+            generation: app.generation,
+            messages,
+            reached_start: true,
+            detached: None,
+        });
+        assert_eq!(note(&app, "$v1", NoteKind::Transcript), None);
+        assert_eq!(note(&app, "$v1", NoteKind::Translation), None);
+        assert_eq!(running.cancel.try_recv(), Ok(()));
+        assert!(app.notes.runs.is_empty());
+        let kept = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !kept.contains("geheime Worte") && kept.contains("stays"),
+            "{kept}"
+        );
+        let shown = screen(&mut app, 100, 30);
+        assert!(
+            !shown.contains("geheime Worte") && shown.contains("stays"),
+            "{shown}"
+        );
+        // And nothing is offered on it.
+        let deleted = app.rooms[0].messages[0].clone();
+        assert_eq!(
+            app.note_offer(&deleted, NoteKind::Transcript),
+            NoteOffer::NotThis
+        );
+        assert_eq!(
+            app.note_offer(&deleted, NoteKind::Translation),
+            NoteOffer::NotThis
+        );
+    }
+
+    #[test]
+    fn a_note_of_an_edited_message_or_another_language_is_stale_and_made_anew() {
+        let dir = Dir::new("notes-stale");
+        let (mut app, _commands) = app_with(vec![text("t", "Guten Morgen")], &dir, true);
+        select(&mut app, 0);
+        app.perform(Action::Translate);
+        let request = app.take_note_starts().remove(0);
+        wrote(&mut app, request.id, "Good morning");
+        assert_eq!(app.note_caps().translate, NoteOffer::Hide);
+        assert!(app.note_caps().translate_again);
+        assert!(screen(&mut app, 100, 30).contains("Good morning"));
+
+        // Edited: the translation is of a text that is no more. It is not shown, and
+        // the key translates the new text instead of hiding the old translation.
+        app.rooms[0].messages[0].body = "Guten Abend".into();
+        app.rooms[0].messages[0].edited = true;
+        app.timeline_rev += 1;
+        assert_eq!(app.note_caps().translate, NoteOffer::Run);
+        assert!(!app.note_caps().translate_again);
+        assert!(!screen(&mut app, 100, 30).contains("Good morning"));
+        app.on_event(key(KeyCode::Char('L')));
+        let request = app.take_note_starts().remove(0);
+        assert_eq!(
+            request.steps[0].command.stdin.as_deref(),
+            Some("Guten Abend".as_bytes())
+        );
+        wrote(&mut app, request.id, "Good evening");
+        let shown = screen(&mut app, 100, 30);
+        assert!(
+            shown.contains("Good evening") && !shown.contains("Good morning"),
+            "{shown}"
+        );
+
+        // Another language set: the same.
+        app.set_translate_language("fr");
+        assert_eq!(app.note_caps().translate, NoteOffer::Run);
+        assert!(!screen(&mut app, 100, 30).contains("Good evening"));
+        // Back to the language it is in: it is current again, nothing was run.
+        app.set_translate_language("en");
+        assert_eq!(app.note_caps().translate, NoteOffer::Hide);
+        assert!(screen(&mut app, 100, 30).contains("Good evening"));
+        assert!(app.take_note_starts().is_empty());
+    }
+
+    #[test]
+    fn a_finished_note_is_made_again_from_the_menu() {
+        let dir = Dir::new("notes-again");
+        let (mut app, mut commands) = app_with(vec![voice("v1"), text("t", "hallo")], &dir, true);
+        // Nothing there yet: nothing to make again.
+        select(&mut app, 1);
+        assert!(!app.note_caps().translate_again);
+        app.perform(Action::ContextMenu);
+        assert!(!screen(&mut app, 100, 40).contains("again"));
+        app.modal = None;
+        app.perform(Action::TranslateAgain);
+        assert!(toast(&app).contains("no translation here"));
+        assert!(app.take_note_starts().is_empty());
+
+        app.perform(Action::Translate);
+        let request = app.take_note_starts().remove(0);
+        wrote(&mut app, request.id, "first try");
+        app.perform(Action::ContextMenu);
+        let shown = screen(&mut app, 100, 40);
+        assert!(shown.contains("Translate again"), "{shown}");
+        assert!(!shown.contains("Transcribe again"), "{shown}");
+        app.modal = None;
+        app.perform(Action::TranslateAgain);
+        assert_eq!(
+            note(&app, "$t", NoteKind::Translation),
+            Some(NoteState::Running)
+        );
+        let request = app.take_note_starts().remove(0);
+        wrote(&mut app, request.id, "second try");
+        let shown = screen(&mut app, 100, 30);
+        assert!(
+            shown.contains("second try") && !shown.contains("first try"),
+            "{shown}"
+        );
+
+        // The same for a transcript, hidden or not.
+        select(&mut app, 0);
+        app.perform(Action::Transcribe);
+        fetched(&mut app, 3, &dir);
+        wrote(&mut app, 3, "heard once");
+        app.perform(Action::Transcribe);
+        assert_eq!(app.note_caps().transcribe, NoteOffer::Show);
+        assert!(app.note_caps().transcribe_again);
+        app.perform(Action::TranscribeAgain);
+        assert_eq!(
+            asked(&mut commands),
+            ["FetchSpeech(run 3)", "FetchSpeech(run 4)"]
+        );
+        fetched(&mut app, 4, &dir);
+        wrote(&mut app, 4, "heard twice");
+        assert!(screen(&mut app, 100, 30).contains("heard twice"));
+    }
+
+    #[test]
+    fn a_button_stays_where_it_is_when_the_mouse_comes_onto_it() {
+        let dir = Dir::new("notes-hover");
+        let mut captioned = voice("v1");
+        captioned.body.push_str("\nhör mal");
+        let (mut app, mut commands) = app_with(vec![text("t", "eins"), captioned], &dir, true);
+        app.timeline.selected = None;
+        app.focus = Pane::Composer;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let spots = |app: &App, kind: NoteKind| -> Vec<(u16, u16)> {
+            (0..30u16)
+                .flat_map(|row| (0..100u16).map(move |column| (column, row)))
+                .filter(|(column, row)| {
+                    matches!(app.hits.at(*column, *row), Some(HitId::NoteButton(_, k)) if k == kind)
+                })
+                .collect()
+        };
+        let mouse = |app: &mut App, kind: MouseEventKind, (column, row): (u16, u16)| {
+            app.on_event(Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }));
+        };
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        // Far from the mouse: the button that transcribes, and no other.
+        let before = spots(&app, NoteKind::Transcript);
+        assert_eq!(before.len(), " transcribe ".len());
+        assert!(spots(&app, NoteKind::Translation).is_empty());
+
+        // The mouse comes onto it: the message is lit and gets the button that
+        // translates, to the left; the one under the mouse has not moved.
+        mouse(&mut app, MouseEventKind::Moved, before[0]);
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert_eq!(spots(&app, NoteKind::Transcript), before);
+        let other = spots(&app, NoteKind::Translation);
+        assert!(!other.is_empty(), "the caption can be translated");
+        assert!(
+            other
+                .iter()
+                .all(|(column, row)| *row == before[0].1 && *column < before[0].0)
+        );
+
+        // The click does what the button under it said: nothing is translated.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), before[0]);
+        assert_eq!(asked(&mut commands), ["FetchSpeech(run 1)"]);
+        assert!(app.take_note_starts().is_empty());
+        assert_eq!(note(&app, "$v1", NoteKind::Translation), None);
+    }
+
+    #[test]
+    fn a_message_with_a_read_marker_on_its_only_row_has_its_button_too() {
+        let dir = Dir::new("notes-marker");
+        let mut read = text("t", "Guten Morgen");
+        read.read_by = crate::model::ReadBy {
+            readers: vec![crate::model::Reader {
+                name: "Carol".into(),
+                time: String::new(),
+            }],
+            total: 1,
+        };
+        let (mut app, _commands) = app_with(vec![read], &dir, true);
+        app.read_markers = true;
+        select(&mut app, 0);
+        let shown = screen(&mut app, 100, 30);
+        let row = shown
+            .lines()
+            .find(|line| line.contains("Guten Morgen"))
+            .expect("the message's row");
+        assert!(row.contains(" translate "), "{shown}");
+        // The marker is still at the end of the row, after the button.
+        let after = row.split(" translate ").nth(1).unwrap_or_default();
+        assert!(after.contains('✓'), "{shown}");
+    }
+
+    #[test]
+    fn a_language_that_reads_as_an_option_is_refused_in_the_settings_and_the_config() {
+        let (mut app, _commands) = bare_app(Vec::new());
+        app.set_translate_language("--engine=other");
+        assert_eq!(app.notes.translate_language, "en");
+        assert!(toast(&app).contains("cannot start with"));
+        let config = crate::config::Config {
+            translate_language: "-x".into(),
+            ..Default::default()
+        };
+        assert_eq!(NotesState::new(&config).translate_language, "en");
+    }
+
+    #[tokio::test]
+    async fn a_key_press_runs_the_users_program_and_its_text_is_drawn_under_the_message() {
+        let dir = Dir::new("notes-join");
+        let (mut app, mut commands) = app_with(vec![text("t", "guten morgen")], &dir, true);
+        // The user's translator: a shell script that shouts what it reads and says
+        // where it was told to translate to, both ways.
+        let script = dir.file(
+            "shout.sh",
+            "tr a-z A-Z\necho\necho \"to $1 and $MATRIX_RAT_TRANSLATE_TO\"\n",
+            0o644,
+        );
+        app.set_translate_command(&format!("/bin/sh {} {{lang}}", script.display()));
+        app.set_translate_language("fr");
+        select(&mut app, 0);
+        app.on_event(key(KeyCode::Char('L')));
+        let mut starts = app.take_note_starts();
+        assert_eq!(starts.len(), 1);
+        assert!(screen(&mut app, 100, 30).contains("translating…"));
+
+        // As the event loop does: the program runs as a task and its last word comes
+        // back to the app.
+        let (news, mut back) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(textcmd::run(starts.remove(0), news));
+        let done = tokio::time::timeout(std::time::Duration::from_secs(30), back.recv())
+            .await
+            .expect("the program ends in time")
+            .expect("the run answers");
+        app.on_note_done(done);
+
+        let shown = screen(&mut app, 100, 30);
+        assert!(shown.contains("┊ translation: GUTEN MORGEN"), "{shown}");
+        assert!(shown.contains("┊ to fr and fr"), "{shown}");
+        assert!(!shown.contains("translating…"), "{shown}");
+        assert!(app.notes.runs.is_empty());
+        // Nothing went to the worker.
+        assert!(commands.try_recv().is_err());
+    }
 }

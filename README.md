@@ -369,7 +369,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`, `transcribe`, `translate`.
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`, `transcribe`, `translate`, `transcribe_again`, `translate_again` (these two unbound by default).
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 **The `vim` preset**
@@ -563,7 +563,14 @@ Setting `preset = "vim"` keeps the default keys and adds:
     when you ask for that message. It works on text messages (an edited one: its text
     as it is now), on the caption of a picture or file, and on a voice message once it
     has a transcript; not on deleted messages or ones that could not be decrypted. At
-    most 16 000 characters are handed over. Two examples (examples only: neither is
+    most 16 000 characters are handed over. When a message is edited, or you set
+    another language, its translation is no longer shown and `L` makes a new one;
+    "Translate again" and "Transcribe again" in the message's menu (actions
+    `translate_again` and `transcribe_again`, without a key by default) make a
+    finished one anew. A language must not start with `-`. The command line is shown
+    in the settings, so **keep a service's key out of it**: put it into the
+    environment matrix-rat is started in, or into a small script of your own that you
+    name as the command. Two examples (examples only: neither is
     tested with matrix-rat, and each is another project's program with its own terms):
     - on your machine, [Argos Translate](https://github.com/argosopentech/argos-translate),
       which must be told the language of the message too:
@@ -577,7 +584,8 @@ Setting `preset = "vim"` keeps the default keys and adds:
     newest) are written to `notes.json` in the profile's data folder, readable by you
     only (mode 0600), and read again at the next start. **That file holds the text of
     messages, also of encrypted rooms, in plain form outside the encrypted store.**
-    Switching the setting off removes the file.
+    Switching the setting off removes the file, and so does logging out. A message
+    that is deleted loses its transcript and translation, in the file too.
 - **Custom emoji and stickers** come from image packs: your own, the open room's, and
   those of other rooms you switched on for everywhere (packs are made in another client,
   such as Cinny or FluffyChat). They are loaded the first time something needs them
