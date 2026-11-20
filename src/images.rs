@@ -1744,6 +1744,15 @@ mod tests {
     const SECOND: Rgba<u8> = Rgba([30, 30, 220, 255]);
     const ANIMATED: (u32, u32) = (8, 6);
 
+    /// Whether `pixel` is `colour`, give or take a shade: a GIF keeps its colours in a
+    /// table, and an animated WebP rounds them when a frame is laid on its canvas.
+    fn same_colour(pixel: [u8; 4], colour: Rgba<u8>) -> bool {
+        pixel
+            .iter()
+            .zip(colour.0)
+            .all(|(got, want)| got.abs_diff(want) <= 12)
+    }
+
     /// A GIF of two frames: the first all `FIRST`, the second all `SECOND`.
     fn animated_gif() -> Vec<u8> {
         let mut gif = Vec::new();
@@ -1893,7 +1902,9 @@ mod tests {
             .into_frames()
             .map(|frame| frame.unwrap().into_buffer().get_pixel(0, 0).0)
             .collect::<Vec<_>>();
-        assert_eq!(frames, [FIRST.0, SECOND.0]);
+        // Laying a frame on the canvas rounds its colours: a shade off is the same.
+        assert_eq!(frames.len(), 2);
+        assert!(same_colour(frames[0], FIRST) && same_colour(frames[1], SECOND));
 
         for (kind, file) in [("gif", &gif), ("png", &png), ("webp", &webp)] {
             let decoded =
@@ -1902,11 +1913,7 @@ mod tests {
             let shown = decoded.pixels.to_rgba8();
             for (x, y) in [(0, 0), (ANIMATED.0 - 1, ANIMATED.1 - 1)] {
                 let pixel = shown.get_pixel(x, y).0;
-                // A GIF keeps its colours in a table and may be a shade off.
-                let close = pixel
-                    .iter()
-                    .zip(FIRST.0)
-                    .all(|(got, want)| got.abs_diff(want) <= 12);
+                let close = same_colour(pixel, FIRST);
                 assert!(close, "{kind} at {x},{y}: {pixel:?}");
             }
         }
