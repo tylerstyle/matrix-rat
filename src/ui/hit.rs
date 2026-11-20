@@ -66,6 +66,8 @@ pub enum HitId {
     Pane(Pane),
     /// Index into `App::rooms`.
     Room(usize),
+    /// A room in the rooms bar above the chat (index into `App::rooms`).
+    BarRoom(usize),
     RoomFilter,
     /// Index into the active room's messages.
     Message(usize),

@@ -32,6 +32,10 @@ pub enum Action {
     ToggleSidebar,
     /// Esc: close, cancel or step back, whichever applies.
     Back,
+    /// Close the chat: no room is open afterwards and the room list is shown, with
+    /// the focus (what `Back` does at its last step; the "Rooms" label of the rooms
+    /// bar).
+    CloseChat,
     PageUp,
     PageDown,
     JumpToNewest,
@@ -83,6 +87,9 @@ pub enum Action {
     /// Open the room above or below the open one in the list, from anywhere.
     RoomPrev,
     RoomNext,
+    /// Open the room whose notifications are the newest (the leftmost one of the
+    /// rooms bar); pressed again, the next one.
+    RoomActive,
     /// Find text in the open room.
     Search,
     /// Search messages across all joined rooms (local index).
@@ -239,7 +246,8 @@ impl Action {
             | Action::WithdrawKnock
             | Action::Search
             | Action::ToggleUnread
-            | Action::OpenPinned => true,
+            | Action::OpenPinned
+            | Action::CloseChat => true,
 
             Action::Quit
             | Action::Suspend
@@ -263,6 +271,7 @@ impl Action {
             | Action::StartVerification
             | Action::RoomPrev
             | Action::RoomNext
+            | Action::RoomActive
             | Action::SearchEverywhere
             | Action::SpaceNext
             | Action::SpacePrev

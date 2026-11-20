@@ -20,6 +20,7 @@ mod palette;
 mod people;
 mod poll;
 mod roominfo;
+mod rooms_bar;
 mod search;
 mod sidebar;
 mod status;
@@ -92,6 +93,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     {
         nochat::draw(frame, app, area);
     } else if let Some(area) = chat_area {
+        // With the room list out of sight, the first line is the way back to it.
+        let bar = rooms_bar::height(app, narrow, area);
+        let [bar_area, area] =
+            Layout::vertical([Constraint::Length(bar), Constraint::Fill(1)]).areas(area);
+        if bar > 0 {
+            rooms_bar::draw(frame, app, bar_area);
+        }
         let composer_height = composer::height(app, area.width);
         let [timeline_area, composer_area] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(composer_height)])

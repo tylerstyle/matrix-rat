@@ -24,6 +24,7 @@ mod playback;
 mod poll;
 mod previews;
 mod rooms;
+mod rooms_bar;
 mod safety;
 pub mod search;
 mod spaces;
@@ -249,6 +250,9 @@ pub struct App {
     /// The `esc_closes_chat` setting: `Esc` in the composer, with nothing left to
     /// cancel, closes the chat.
     pub esc_closes_chat: bool,
+    /// The `rooms_bar` setting: with the room list out of sight, a line above the
+    /// chat that leads back to it and shows the rooms with new notifications.
+    pub rooms_bar: bool,
     /// False while the terminal window is in the background.
     window_focused: bool,
     /// The draft that was in the composer when an edit started.
@@ -435,6 +439,7 @@ impl std::fmt::Debug for App {
             .field("edit_stash", &self.edit_stash.is_some())
             .field("pending_copy", &self.pending_copy.is_some())
             .field("window_title", &self.window_title)
+            .field("rooms_bar", &self.rooms_bar)
             .field("title_written", &self.title_written)
             .field("found", &self.found)
             .field("notify_mode", &self.notify_mode)
@@ -544,6 +549,7 @@ impl App {
         app.window_title = config.window_title;
         app.read_markers = config.read_markers;
         app.esc_closes_chat = config.esc_closes_chat;
+        app.rooms_bar = config.rooms_bar;
         app.mouse = config.mouse;
         app.found.image_mode = config.images;
         app.found.secret_store = config.secret_store;
@@ -628,6 +634,7 @@ impl App {
             auto_opened: true,
             chat_closed: false,
             esc_closes_chat: true,
+            rooms_bar: true,
             window_focused: true,
             edit_stash: None,
             typing_sent: None,
@@ -1066,6 +1073,7 @@ impl App {
             Setting::LinkPreviews => self.link_previews.label().to_owned(),
             Setting::Mouse => switch(self.mouse),
             Setting::EscClosesChat => switch(self.esc_closes_chat),
+            Setting::RoomsBar => switch(self.rooms_bar),
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
             Setting::ReadMarkers => switch(self.read_markers),
@@ -1133,6 +1141,12 @@ impl App {
                         self.chat_closed = false;
                     }
                 }
+            }
+            Setting::RoomsBar => {
+                self.rooms_bar = !self.rooms_bar;
+                self.save_setting("rooms_bar", self.rooms_bar);
+                // Pictures are placed by row: the chat moves up or down a line.
+                self.repaint = true;
             }
             Setting::TypingNotices => {
                 self.typing_notices = !self.typing_notices;
@@ -2746,6 +2760,7 @@ impl App {
                 self.step_theme(1);
             }
             Action::Back => self.back(),
+            Action::CloseChat => self.close_chat(),
             Action::PageUp => {
                 self.timeline.scroll += self.timeline.page.saturating_sub(1).max(1);
                 self.timeline.older_armed = true;
@@ -3014,6 +3029,7 @@ impl App {
             Action::FilterPeople => self.toggle_sidebar_filter(false),
             Action::RoomPrev => self.step_room(-1),
             Action::RoomNext => self.step_room(1),
+            Action::RoomActive => self.open_active_room(),
             Action::Save => {
                 if !self.save_attachment(false) {
                     self.show_toast("Nothing to save in this message");
@@ -4299,6 +4315,9 @@ impl App {
                     }
                     Some(HitId::Splitter) => self.dragging_splitter = true,
                     Some(HitId::Room(index)) => self.open_room(index),
+                    // The room list is out of sight: it follows to the room, out of
+                    // a space the room is not in.
+                    Some(HitId::BarRoom(index)) => self.show_room(index),
                     Some(HitId::RoomFilter) => {
                         self.cancel_pending_jump();
                         self.set_focus(Pane::Sidebar);

@@ -355,6 +355,8 @@ pub struct PaletteContext {
     pub own_display_name: Option<String>,
     pub mouse: bool,
     pub esc_closes_chat: bool,
+    /// The `rooms_bar` setting: the line above the chat while the room list is hidden.
+    pub rooms_bar: bool,
     pub typing_notices: bool,
     pub read_receipts: bool,
     pub do_not_disturb: bool,
@@ -410,6 +412,7 @@ impl std::fmt::Debug for PaletteContext {
             .field("connected", &self.connected)
             .field("mouse", &self.mouse)
             .field("esc_closes_chat", &self.esc_closes_chat)
+            .field("rooms_bar", &self.rooms_bar)
             .field("typing_notices", &self.typing_notices)
             .field("read_receipts", &self.read_receipts)
             .field("do_not_disturb", &self.do_not_disturb)
@@ -1157,6 +1160,14 @@ fn action_meta<'a>(
             Cow::Borrowed(description),
             &["new messages", "unread line", "first new message"],
         ),
+        Action::RoomActive => (
+            Cow::Borrowed(description),
+            &["next unread room", "active room", "go to notification"],
+        ),
+        Action::CloseChat => (
+            Cow::Borrowed(description),
+            &["rooms", "room list", "back to the rooms", "no chat open"],
+        ),
         Action::OpenPinned => (
             Cow::Borrowed(description),
             &["pinned messages", "pins", "bookmarks"],
@@ -1479,6 +1490,13 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::RoomsBar)),
+            title: Setting::RoomsBar.label(),
+            hint: Some(switch(ctx.rooms_bar)),
+            aliases: &["rooms bar", "active rooms", "room list hidden", "setting"],
+            enabled: true,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::TypingNotices)),
             title: Setting::TypingNotices.label(),
             hint: Some(switch(ctx.typing_notices)),
@@ -1797,6 +1815,7 @@ mod tests {
             own_display_name: None,
             mouse: true,
             esc_closes_chat: true,
+            rooms_bar: true,
             typing_notices: true,
             read_receipts: true,
             do_not_disturb: false,

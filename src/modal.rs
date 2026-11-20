@@ -548,6 +548,8 @@ pub enum Setting {
     Mouse,
     /// Whether `Esc` in the composer, with nothing left to cancel, closes the chat.
     EscClosesChat,
+    /// The line above the chat while the room list is out of sight (`rooms_bar`).
+    RoomsBar,
     TypingNotices,
     ReadReceipts,
     /// No notifications for now.
@@ -583,13 +585,14 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 26] = [
+    pub const ALL: [Setting; 27] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
         Setting::ThemeLight,
         Setting::SidebarWidth,
         Setting::RoomPreviews,
+        Setting::RoomsBar,
         Setting::LinkPreviews,
         Setting::Mouse,
         Setting::EscClosesChat,
@@ -634,6 +637,7 @@ impl Setting {
             Setting::LinkPreviews => "Link previews",
             Setting::Mouse => "Mouse",
             Setting::EscClosesChat => "Esc closes the chat",
+            Setting::RoomsBar => "Rooms bar",
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
             Setting::ReadMarkers => "Read markers",
@@ -672,6 +676,9 @@ impl Setting {
             Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
             Setting::EscClosesChat => {
                 "Esc in the composer, with nothing left to cancel, closes the chat and goes to the room list. Off: Esc stops at the composer."
+            }
+            Setting::RoomsBar => {
+                "While the room list is hidden: a line above the chat. Rooms goes to the list; rooms with new notifications show there, a click opens one."
             }
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",

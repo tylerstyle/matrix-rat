@@ -90,6 +90,7 @@ impl App {
             own_display_name: self.own_profile_hint(),
             mouse: self.mouse,
             esc_closes_chat: self.esc_closes_chat,
+            rooms_bar: self.rooms_bar,
             typing_notices: self.typing_notices,
             read_receipts: self.read_receipts,
             do_not_disturb: self.do_not_disturb,
@@ -274,6 +275,7 @@ impl App {
         match setting {
             Setting::Mouse
             | Setting::EscClosesChat
+            | Setting::RoomsBar
             | Setting::TypingNotices
             | Setting::ReadReceipts
             | Setting::DoNotDisturb
