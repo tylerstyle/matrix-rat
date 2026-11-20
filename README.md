@@ -431,19 +431,23 @@ the very first start.
   `matrix-rat is already running with profile "work"; use --profile <name> to start a
   second account`. `matrix-rat serve` holds its profile exactly like a window does, and
   so does `--demo`: to look at the demo beside a running matrix-rat, give it a profile
-  of its own (`matrix-rat --profile demo --demo`). `doctor`, `rooms`, `send`, `read`,
-  `listen` and `mcp` hold nothing and run beside whatever has the profile open.
+  of its own (`matrix-rat --profile demo --demo`). `rooms`, `send`, `read`, `listen` and `mcp`
+  hold nothing themselves, but they only work while a `matrix-rat serve` runs on that
+  profile: they talk to it. `matrix-rat doctor` holds nothing and runs anywhere, also
+  beside a running matrix-rat.
 
 There is no command that lists or removes profiles; a profile is its two folders.
 
 - **To list them:** `ls ~/.local/share/matrix-rat/`. Every folder there is a profile
   that was started at least once.
-- **To remove one:** start it and choose **Log out** in the settings (`F2`). That tells
-  the server to end the session and deletes the login, the message store and the search
+- **To remove one:** have your recovery key first. Either way below, the encryption
+  keys in the profile's store are gone, and they may exist nowhere else. Then start the
+  profile and choose **Log out** in the settings (`F2`). That tells the server to end
+  the session and deletes the login, the message store with its keys and the search
   index. Quit, then delete what is left (the lock file and the logs):
   `rm -r ~/.local/share/matrix-rat/work ~/.local/state/matrix-rat/work`. Deleting the
-  folders without logging out leaves the session listed on your account, and takes with
-  it encryption keys that may exist nowhere else: have your recovery key before you do.
+  folders without logging out removes the same, but leaves the session listed on your
+  account and, with `secret_store = "keyring"`, the profile's entry in the keyring.
 
 ## Good to know
 
