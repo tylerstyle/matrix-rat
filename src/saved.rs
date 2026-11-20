@@ -218,10 +218,6 @@ impl SavedStore {
         self.get(room_id, event_id).is_some()
     }
 
-    pub fn position(&self, room_id: &str, event_id: &str) -> Option<usize> {
-        self.items.iter().position(|item| item.is(room_id, event_id))
-    }
-
     /// The event ids saved in that room.
     pub fn in_room<'a>(&'a self, room_id: &'a str) -> impl Iterator<Item = &'a str> {
         self.items
@@ -259,7 +255,11 @@ impl SavedStore {
     /// Sets the reminder of a saved message, or takes it away. A new time starts
     /// afresh: it will be announced, and is not done.
     pub fn set_reminder(&mut self, room_id: &str, event_id: &str, at: Option<i64>) -> bool {
-        let Some(item) = self.items.iter_mut().find(|item| item.is(room_id, event_id)) else {
+        let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|item| item.is(room_id, event_id))
+        else {
             return false;
         };
         item.remind_at = at;
@@ -272,7 +272,11 @@ impl SavedStore {
 
     /// The user went to the message: a reminder that was due is done.
     pub fn visited(&mut self, room_id: &str, event_id: &str, now: i64) -> bool {
-        let Some(item) = self.items.iter_mut().find(|item| item.is(room_id, event_id)) else {
+        let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|item| item.is(room_id, event_id))
+        else {
             return false;
         };
         if !matches!(item.reminder(now), Reminder::Due(_)) {
@@ -356,9 +360,7 @@ fn read_file(file: &Path) -> std::io::Result<Option<String>> {
     };
     let mut text = String::new();
     // One byte more than allowed tells a file that is too large from one that fits.
-    opened
-        .take(MAX_FILE_BYTES + 1)
-        .read_to_string(&mut text)?;
+    opened.take(MAX_FILE_BYTES + 1).read_to_string(&mut text)?;
     if text.len() as u64 > MAX_FILE_BYTES {
         return Err(std::io::Error::other("too large"));
     }
@@ -378,7 +380,9 @@ fn parse(text: &str) -> Option<(Vec<SavedItem>, usize)> {
             Ok(item)
                 if item.plausible()
                     && items.len() < MAX_SAVED
-                    && !items.iter().any(|known| known.is(&item.room_id, &item.event_id)) =>
+                    && !items
+                        .iter()
+                        .any(|known| known.is(&item.room_id, &item.event_id)) =>
             {
                 items.push(item);
             }
@@ -779,7 +783,8 @@ impl RemindForm {
 #[derive(Clone)]
 pub enum Stage {
     List,
-    Remind(RemindForm),
+    /// Boxed: the form with its text field is much larger than nothing.
+    Remind(Box<RemindForm>),
 }
 
 /// The "Saved messages" popup. Its rows are the store's entries; what the worker
@@ -828,7 +833,7 @@ impl SavedPopup {
 
     pub fn form(form: RemindForm) -> Self {
         Self {
-            stage: Stage::Remind(form),
+            stage: Stage::Remind(Box::new(form)),
             form_only: true,
             ..Self::list()
         }
@@ -844,8 +849,9 @@ impl SavedPopup {
     pub fn put_details(&mut self, details: SavedDetails) {
         self.asked
             .remove(&(details.room_id.clone(), details.event_id.clone()));
-        self.details
-            .retain(|known| !(known.room_id == details.room_id && known.event_id == details.event_id));
+        self.details.retain(|known| {
+            !(known.room_id == details.room_id && known.event_id == details.event_id)
+        });
         // No more than the list can hold.
         if self.details.len() < MAX_SAVED {
             self.details.push(details);
@@ -952,10 +958,8 @@ pub mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "matrix-rat-saved-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("matrix-rat-saved-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1005,7 +1009,10 @@ pub mod tests {
     #[test]
     fn tomorrow_and_a_date_take_a_time_of_day_or_mean_the_morning() {
         assert_eq!(parse_when("tomorrow", now()), Ok(at(2026, 11, 21, 9, 0)));
-        assert_eq!(parse_when("Tomorrow 8:00", now()), Ok(at(2026, 11, 21, 8, 0)));
+        assert_eq!(
+            parse_when("Tomorrow 8:00", now()),
+            Ok(at(2026, 11, 21, 8, 0))
+        );
         assert_eq!(
             parse_when("tomorrow at 17:45", now()),
             Ok(at(2026, 11, 21, 17, 45))
@@ -1015,7 +1022,10 @@ pub mod tests {
             parse_when("2026-12-24 10:00", now()),
             Ok(at(2026, 12, 24, 10, 0))
         );
-        assert_eq!(parse_when("2027-1-5 7:30", now()), Ok(at(2027, 1, 5, 7, 30)));
+        assert_eq!(
+            parse_when("2027-1-5 7:30", now()),
+            Ok(at(2027, 1, 5, 7, 30))
+        );
         // Today, later.
         assert_eq!(
             parse_when("2026-11-20 23:00", now()),
@@ -1063,8 +1073,14 @@ pub mod tests {
     fn a_time_is_shown_by_its_day_seen_from_now() {
         assert_eq!(when_label(at(2026, 11, 20, 9, 5), now()), "today 09:05");
         assert_eq!(when_label(at(2026, 11, 21, 9, 0), now()), "tomorrow 09:00");
-        assert_eq!(when_label(at(2026, 11, 19, 23, 59), now()), "yesterday 23:59");
-        assert_eq!(when_label(at(2026, 11, 27, 14, 30), now()), "2026-11-27 14:30");
+        assert_eq!(
+            when_label(at(2026, 11, 19, 23, 59), now()),
+            "yesterday 23:59"
+        );
+        assert_eq!(
+            when_label(at(2026, 11, 27, 14, 30), now()),
+            "2026-11-27 14:30"
+        );
         assert_eq!(when_label(at(2025, 1, 2, 3, 4), now()), "2025-01-02 03:04");
     }
 
@@ -1368,7 +1384,9 @@ pub mod tests {
         if let Stage::Remind(form) = &mut popup.stage {
             form.input.set("secret typing");
         }
-        popup.asked.insert(("!secret-room:example.org".into(), "$secret-event".into()));
+        popup
+            .asked
+            .insert(("!secret-room:example.org".into(), "$secret-event".into()));
         let details = SavedDetails {
             room_id: "!secret-room:example.org".into(),
             event_id: "$secret-event".into(),

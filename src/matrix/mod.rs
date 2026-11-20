@@ -43,7 +43,6 @@ pub use keyring::SecretStoreMode;
 // For `crate::logsafe`, which turns it into a word for the log.
 pub(crate) use keyring::KeyringError;
 pub use keywords::{KeywordsCmd, KeywordsEvent, MAX_KEYWORDS, shown_keywords};
-pub use saved::{MAX_FETCH as SAVED_MAX_FETCH, SavedCmd, SavedEvent};
 #[cfg(test)]
 pub use manage::RoomSettingsPower;
 pub use manage::{
@@ -54,6 +53,7 @@ pub use notify::Notice;
 pub use people::{
     OwnProfile, OwnProfileAction, UserProfile, UserSharedRoom, UserVerifyStatus, fallback_localpart,
 };
+pub use saved::{MAX_FETCH as SAVED_MAX_FETCH, SavedCmd, SavedEvent};
 pub use search::SearchHit;
 pub use session::{ReauthKind, ReauthTarget};
 pub use source::{EventSource, SOURCE_MAX, SourceKind};

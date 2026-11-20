@@ -794,6 +794,8 @@ mod tests {
                 "React…",
                 "Copy text",
                 "Forward…",
+                "Save for later",
+                "Remind me…",
                 "Message details"
             ]
         );
@@ -830,6 +832,8 @@ mod tests {
                 "Edit",
                 "Copy text",
                 "Forward…",
+                "Save for later",
+                "Remind me…",
                 "Message details",
                 "Delete"
             ]
@@ -876,7 +880,7 @@ mod tests {
         let count = app.messages().len();
         right_click(&mut app, &mut terminal, "Good to know, thanks.");
         app.on_event(key(KeyCode::Char('d')));
-        assert_eq!(open_menu(&app).selected, 7);
+        assert_eq!(open_menu(&app).selected, 9);
         assert_eq!(app.messages().len(), count);
         // Enter asks, moving away takes the question back, Enter twice deletes.
         app.on_event(key(KeyCode::Enter));

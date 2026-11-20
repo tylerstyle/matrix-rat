@@ -75,14 +75,17 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     // A reminder that came due stays here until its message was gone to.
     let due = app.reminders_due();
     if due > 0 {
-        let label = if due == 1 {
+        let long = if due == 1 {
             "1 reminder due".to_owned()
         } else {
             format!("{due} reminders due")
         };
         let x = area.x + spans.iter().map(|s| width(&s.content) as u16).sum::<u16>();
-        let w = width(&label) as u16;
-        if x + w + 2 <= right {
+        // On a narrow screen the short form still says it.
+        let fits = |label: &String| x + width(label) as u16 + 2 <= right;
+        let label = [long, format!("{due} due")].into_iter().find(fits);
+        if let Some(label) = label {
+            let w = width(&label) as u16;
             let style = if app.hover == Some(HitId::ReminderDue) {
                 theme.style(Role::Hover)
             } else {
@@ -90,8 +93,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             };
             spans.push(Span::styled(label, style));
             spans.push(Span::styled("  ", status));
-            app.hits
-                .add(Rect::new(x, area.y, w, 1), HitId::ReminderDue);
+            app.hits.add(Rect::new(x, area.y, w, 1), HitId::ReminderDue);
         }
     }
     super::verify::status_hint(

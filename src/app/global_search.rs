@@ -578,6 +578,7 @@ impl App {
         // The room is the open one now, whatever was open (or not) before.
         self.rooms[room_index].messages = messages;
         self.sync_pinned_flags(&room_id);
+        self.sync_saved_flags(&room_id);
         self.timeline = timeline;
         self.timeline_rev += 1;
         self.repaint = true;

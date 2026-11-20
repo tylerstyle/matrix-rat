@@ -48,7 +48,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, state: &mut SavedPopu
     if inner.width < 10 || inner.height < 2 {
         return;
     }
-    let len = app.saved.store.len();
+    let len = app.bookmarks.store.len();
     if len == 0 {
         state.page = 0;
         let key = app
@@ -72,7 +72,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, state: &mut SavedPopu
     state.clamp(len, visible);
     let end = (state.scroll + visible).min(len);
     // Only what is on screen is copied out of the app.
-    let shown: Vec<SavedItem> = app.saved.store.items()[state.scroll..end].to_vec();
+    let shown: Vec<SavedItem> = app.bookmarks.store.items()[state.scroll..end].to_vec();
     for (offset, item) in shown.iter().enumerate() {
         let index = state.scroll + offset;
         let y = inner.y + (offset * ENTRY_ROWS) as u16;
@@ -94,7 +94,7 @@ fn draw_entry(
     state: &SavedPopup,
     (index, item): (usize, &SavedItem),
 ) {
-    let clock = app.saved.clock;
+    let clock = app.bookmarks.clock;
     let (now, now_local) = (clock.now_secs(), clock.now_local());
     let selected = index == state.selected;
     let hovered = matches!(
@@ -231,7 +231,7 @@ fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, state: &mut SavedPopu
     if inner.width < 10 || inner.height < 3 {
         return;
     }
-    let now = app.saved.clock.now_local();
+    let now = app.bookmarks.clock.now_local();
     frame.render_widget(
         Line::from(Span::styled(
             "Remind me of this message:",

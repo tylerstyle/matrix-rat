@@ -992,7 +992,13 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         "Saved messages and reminders",
         key_of(Action::OpenSaved),
         "Saved messages and reminders",
-        &["saved", "bookmarks", "reminders", "later", "marked messages"],
+        &[
+            "saved",
+            "bookmarks",
+            "reminders",
+            "later",
+            "marked messages",
+        ],
         true,
         0,
     );

@@ -1186,7 +1186,10 @@ mod tests {
         let reminder = notice("Rust", "ann", "the secret plan", false);
         assert_eq!(
             reminder_title_and_text(&reminder, true),
-            ("Reminder: Rust".to_owned(), "ann: the secret plan".to_owned())
+            (
+                "Reminder: Rust".to_owned(),
+                "ann: the secret plan".to_owned()
+            )
         );
         // Without preview: no text, no sender, no room.
         assert_eq!(

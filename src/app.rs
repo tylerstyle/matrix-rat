@@ -25,6 +25,7 @@ mod poll;
 mod previews;
 mod rooms;
 mod safety;
+mod saved;
 pub mod search;
 mod spaces;
 mod thread;
@@ -213,6 +214,8 @@ pub struct ReadyNotices {
     pub mode: crate::notify::NotifyMode,
     pub preview: bool,
     pub icon_cache: Option<(Arc<crate::notify::IconCache>, u64)>,
+    /// Reminders that came due: shown under a title and text of their own.
+    pub reminders: Vec<(crate::matrix::Notice, crate::notify::NotifyIcon)>,
 }
 
 pub struct App {
@@ -404,6 +407,8 @@ pub struct App {
     pub devices: crate::devices::DevicesState,
     /// The notification keywords popup's watch and requests (and the demo's list).
     pub keywords: crate::keywords::KeywordsState,
+    /// The messages saved for later and their reminders.
+    pub bookmarks: crate::saved::SavedState,
     /// Custom emoji and stickers from image packs.
     pub emotes: emotes::EmoteState,
     /// Voice and audio played in here: the player, and the sound there is.
@@ -466,6 +471,7 @@ impl std::fmt::Debug for App {
             .field("ignored_users", &self.ignored_users.len())
             .field("devices", &self.devices)
             .field("keywords", &self.keywords)
+            .field("bookmarks", &self.bookmarks)
             .field("emotes", &self.emotes)
             .field("audio", &self.audio)
             .finish_non_exhaustive()
@@ -716,6 +722,7 @@ impl App {
             dir_search_debounce: None,
             devices: Default::default(),
             keywords: Default::default(),
+            bookmarks: Default::default(),
             emotes: Default::default(),
             audio: Default::default(),
         }
@@ -1306,6 +1313,9 @@ impl App {
             return;
         }
         self.shown_notices.push((now, notice.room_id.clone()));
+        // The room's notification is this message's now, not a reminder's: a click
+        // on it opens the room.
+        self.bookmarks.clicks.remove(&notice.room_id);
         self.pending_notices.push(notice);
     }
 
@@ -1342,6 +1352,10 @@ impl App {
         }
         self.help_open = false;
         self.images.close_viewer();
+        // The room's last notification was a reminder: its message is where to go.
+        if self.reminder_clicked(room_id) {
+            return;
+        }
         // Already there: nothing moves, a thread stays open, the place in the
         // messages is kept. Only a view of some older part of the room (after a
         // jump to a message) goes back to the newest messages, where the news is.
@@ -1437,6 +1451,12 @@ impl App {
             let icon = self.resolve_notice_icon(&notice);
             items.push((notice, icon));
         }
+        let due = std::mem::take(&mut self.bookmarks.notices);
+        let mut reminders = Vec::with_capacity(due.len());
+        for notice in due {
+            let icon = self.resolve_notice_icon(&notice);
+            reminders.push((notice, icon));
+        }
         self.send_avatar_requests();
         let icon_cache = self
             .notify_icons
@@ -1447,6 +1467,7 @@ impl App {
             mode: self.notify_mode,
             preview: self.notification_preview,
             icon_cache,
+            reminders,
         }
     }
 
@@ -1503,6 +1524,11 @@ impl App {
         self.devices = Default::default();
         // The worker's watch ended with the session.
         self.keywords.watch = None;
+        // Nobody answers what was asked, and no notification of the session is left
+        // to click on. The list itself is the profile's and stays.
+        self.bookmarks.waiting.clear();
+        self.bookmarks.notices.clear();
+        self.bookmarks.clicks.clear();
         self.reset_emotes();
         if let Some(Modal::New(popup)) = &mut self.modal {
             popup.clear_user_search();
@@ -1527,6 +1553,7 @@ impl App {
                     | Modal::Details(_)
                     | Modal::Threads(_)
                     | Modal::Keywords(_)
+                    | Modal::Saved(_)
             )
         ) {
             self.modal = None;
@@ -3062,6 +3089,9 @@ impl App {
             Action::MarkAllRead => self.mark_all_read(),
             Action::PinMessage => self.toggle_pin_message(None),
             Action::OpenPinned => self.open_pinned(),
+            Action::SaveForLater => self.toggle_saved(),
+            Action::RemindMe => self.open_reminder_for_selected(),
+            Action::OpenSaved => self.open_saved_list(),
             Action::OpenThreads => self.open_threads(),
             Action::ForwardMessage => self.open_forward_picker(None),
             Action::RetryDecryption => self.retry_decryption(),
@@ -3202,6 +3232,7 @@ impl App {
                 self.devices_click(crate::devices::Click::Cancel);
             }
             Some(Modal::Keywords(_)) => self.keywords_escape(),
+            Some(Modal::Saved(_)) => self.saved_escape(),
             None => {}
         }
     }
@@ -3382,6 +3413,7 @@ impl App {
             Some(Modal::Details(_)) => self.on_details_key(code, mods),
             Some(Modal::Threads(_)) => self.on_threads_key(code, mods),
             Some(Modal::Keywords(_)) => self.on_keywords_key(code, mods),
+            Some(Modal::Saved(_)) => self.on_saved_key(code, mods),
             Some(Modal::Doctor(_)) => self.on_doctor_key(code, mods),
             None => {}
         }
@@ -3482,6 +3514,7 @@ impl App {
                     let messages = self.thread_snapshot(messages);
                     self.apply_timeline(messages);
                     self.sync_pinned_flags(&room_id);
+                    self.sync_saved_flags(&room_id);
                     self.search_sync();
                     if empty_reset {
                         self.timeline.reached_start = false;
@@ -3659,6 +3692,7 @@ impl App {
             }
             MatrixEvent::Devices(event) => self.on_devices_event(event),
             MatrixEvent::Keywords(event) => self.on_keywords_event(event),
+            MatrixEvent::Saved(event) => self.on_saved_event(event),
             // Answers for `matrix-rat serve`; the app never asks for them.
             MatrixEvent::Agent(_) => {}
             MatrixEvent::DecryptionRetried {
@@ -4161,6 +4195,7 @@ impl App {
             Some(Modal::Stickers(_)) => return self.on_stickers_paste(first_line),
             Some(Modal::Threads(_)) => return self.on_threads_paste(first_line),
             Some(Modal::Keywords(_)) => return self.on_keywords_paste(first_line),
+            Some(Modal::Saved(_)) => return self.on_saved_paste(first_line),
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
@@ -4247,6 +4282,10 @@ impl App {
                         if matches!(self.modal, Some(Modal::Keywords(_))) {
                             // Like Esc: away from the question, else closed.
                             self.keywords_escape();
+                        }
+                        if matches!(self.modal, Some(Modal::Saved(_))) {
+                            // Like Esc: from the form back to the list, else closed.
+                            self.saved_escape();
                         }
                         if matches!(self.modal, Some(Modal::Search(_))) {
                             self.close_search();
@@ -4439,6 +4478,11 @@ impl App {
                     Some(HitId::ThreadsMine) => self.toggle_threads_mine(),
                     Some(HitId::KeywordRow(index)) => self.click_keyword_row(index),
                     Some(HitId::KeywordRemove(index)) => self.remove_keyword(Some(index)),
+                    Some(HitId::SavedRow(index)) => self.activate_saved(Some(index)),
+                    Some(HitId::SavedRemind(index)) => self.open_saved_form(Some(index)),
+                    Some(HitId::SavedRemove(index)) => self.remove_saved(Some(index)),
+                    Some(HitId::ReminderChoice(row)) => self.click_reminder_choice(row),
+                    Some(HitId::ReminderDue) => self.click_due_reminder(),
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_splitter => {
@@ -4477,6 +4521,7 @@ impl App {
                             | Modal::Details(_)
                             | Modal::Threads(_)
                             | Modal::Keywords(_)
+                            | Modal::Saved(_)
                             | Modal::Doctor(_)
                     )
                 ) =>
@@ -4507,6 +4552,7 @@ impl App {
                     Some(Modal::Details(_)) => self.scroll_details(delta),
                     Some(Modal::Threads(_)) => self.scroll_threads(delta),
                     Some(Modal::Keywords(_)) => self.scroll_keywords(delta),
+                    Some(Modal::Saved(_)) => self.scroll_saved(delta),
                     Some(Modal::Doctor(_)) => self.scroll_doctor(delta),
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.
@@ -4587,6 +4633,7 @@ impl App {
         match target {
             InputTarget::Devices(slot) => self.click_devices_field(slot, rel_col),
             InputTarget::Keyword => self.click_keywords_input(rel_col),
+            InputTarget::Reminder => self.click_saved_input(rel_col),
             InputTarget::Login(slot) => {
                 if let Some(Modal::Login(form)) = &mut self.modal
                     && form.busy.is_none()
@@ -4778,6 +4825,7 @@ impl App {
         self.maybe_open_startup_target();
         self.devices_watch();
         self.keywords_watch();
+        self.saved_tick(saved::TEXT_WAIT);
         self.tick_global_search();
         self.release_count_notices(COUNT_NOTICE_WAIT);
         self.save_idle_draft(drafts::IDLE);
@@ -4932,6 +4980,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // real configuration.
     if !demo {
         app.config_file = Some(paths.config_file());
+        // A small file of the profile, read once before the first frame.
+        app.load_saved(paths.saved_file());
     }
     app.startup_target = target;
     // Copies of sounds and mpv's sockets; what an earlier run left there goes now.
@@ -5039,6 +5089,16 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         let ready = app.take_notices_with_icons();
         for (notice, icon) in &ready.items {
             crate::notify::show(
+                ready.mode,
+                notice,
+                ready.preview,
+                icon,
+                ready.icon_cache.clone(),
+                Some(&notice_clicks),
+            );
+        }
+        for (notice, icon) in &ready.reminders {
+            crate::notify::show_reminder(
                 ready.mode,
                 notice,
                 ready.preview,
@@ -9665,6 +9725,9 @@ mod tests {
             (Action::UserInfo, false),
             (Action::MessageDetails, false),
             (Action::OpenPinned, false),
+            (Action::SaveForLater, false),
+            (Action::OpenSaved, false),
+            (Action::RemindMe, true),
             (Action::OpenThreads, true),
             (Action::NewRoom, false),
             (Action::React, true),
@@ -9716,6 +9779,7 @@ mod tests {
             "UserInfo(",
             "Details(",
             "Pinned(",
+            "Saved(",
             "Threads(",
             "New(",
             "Emoji(",
