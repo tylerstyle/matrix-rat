@@ -30,8 +30,6 @@ impl Tool {
         &self.program
     }
 
-    // Read by the recording task, which is not written yet.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn args(&self) -> &[OsString] {
         &self.args
     }

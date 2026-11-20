@@ -39,8 +39,10 @@ pub struct AudioState {
     /// What records a voice message here, or why nothing does; looked up again when
     /// the setting changes (see `voice.rs`).
     pub(super) recorder: Result<Recorder, NoRecorder>,
-    /// A recording runs: the microphone button shows a stop sign. Nothing sets it yet.
-    pub(super) recording: bool,
+    /// The recording that runs, if one does (see `voice.rs`).
+    pub(super) take: Option<super::voice::Take>,
+    /// A recording to start; the event loop takes it (see [`App::take_record_start`]).
+    pub(super) record_start: Option<audio::record::RecordRequest>,
     /// Where tests look for the recorder: nothing of the machine they run on.
     #[cfg(test)]
     pub(super) recorder_env: audio::recorder::Env,
@@ -48,8 +50,9 @@ pub struct AudioState {
     /// record: neither is offered.
     pub(super) ssh: bool,
     /// The private folder for the copies and mpv's sockets; set by the event loop.
-    dir: Option<PathBuf>,
-    next_id: u64,
+    pub(super) dir: Option<PathBuf>,
+    /// Sounds and recordings are numbered from the same count.
+    pub(super) next_id: u64,
     current: Option<Sound>,
     /// A player to start; the event loop takes it (see [`App::take_audio_start`]).
     start: Option<audio::Request>,
@@ -65,7 +68,8 @@ impl Default for AudioState {
             player: Err(NoPlayer::NoneFound),
             recorder_setting: "auto".to_owned(),
             recorder: Err(NoRecorder::NoMicrophone),
-            recording: false,
+            take: None,
+            record_start: None,
             #[cfg(test)]
             recorder_env: audio::recorder::Env::default(),
             ssh: false,
@@ -87,7 +91,8 @@ impl fmt::Debug for AudioState {
             .field("player", &self.player)
             .field("recorder_auto", &audio::is_auto(&self.recorder_setting))
             .field("recorder", &self.recorder)
-            .field("recording", &self.recording)
+            .field("recording", &self.take)
+            .field("record_start", &self.record_start.is_some())
             .field("ssh", &self.ssh)
             .field("dir", &self.dir.is_some())
             .field("current", &self.current)
@@ -325,6 +330,10 @@ impl App {
         };
         if self.matrix.is_none() {
             self.show_toast("The demo has no account to play audio with");
+            return;
+        }
+        if self.audio.take.is_some() {
+            self.show_toast("Stop the recording before playing a sound");
             return;
         }
         let save = self

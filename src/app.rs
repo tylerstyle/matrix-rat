@@ -34,7 +34,9 @@ mod unread;
 mod verify;
 mod voice;
 
+pub use attach::AttachState;
 pub use playback::AudioView;
+pub use voice::{RecordingView, TakePhase};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1462,8 +1464,9 @@ impl App {
 
     /// Nothing of a previous session may linger behind the login form.
     pub(crate) fn reset_session(&mut self) {
-        // The sound belongs to a room of the session.
+        // The sound belongs to a room of the session, and so does a recording.
         self.stop_audio();
+        self.cancel_recording();
         self.rooms.clear();
         self.active = 0;
         // The next session starts as every one does: its first room opens by itself.
@@ -1618,8 +1621,10 @@ impl App {
     /// for another room or for none: the typing notice is taken back, the unsent text
     /// goes to the store and waits with the room, an edit is given up.
     fn leave_open_room(&mut self) {
-        // What plays belongs to the room.
+        // What plays belongs to the room. A recording ends here and waits in the
+        // conversation it was begun in.
         self.stop_audio();
+        self.stop_recording();
         if self.typing_sent.take().is_some()
             && let Some(room_id) = self.room_id()
         {
@@ -1898,6 +1903,10 @@ impl App {
     }
 
     fn send(&mut self) {
+        // Nothing is sent from under a recording: it is ended first, on purpose.
+        if self.recording_refuses_send() {
+            return;
+        }
         // A room command does what it says (and waits while a message is edited).
         if self.room_command() {
             return;
@@ -2710,8 +2719,10 @@ impl App {
         match action {
             Action::Quit => self.should_quit = true,
             Action::Suspend => {
-                // Nothing could stop it while the app is away.
+                // Nothing could stop it while the app is away, and no microphone
+                // stays open behind a stopped app.
                 self.stop_audio();
+                self.stop_recording();
                 self.suspend_requested = true;
             }
             Action::FocusNext => self.set_focus(match self.focus {
@@ -3934,6 +3945,8 @@ impl App {
                 self.dirty = true;
             }
             Event::FocusLost => {
+                // Nobody watches the microphone from another window.
+                self.stop_recording();
                 self.window_focused = false;
                 self.found.focus_reports = true;
             }
@@ -3948,6 +3961,12 @@ impl App {
 
         if self.is_keybinds_capturing() {
             self.on_keybinds_key(key, code, mods);
+            return;
+        }
+        // Esc throws a running recording away before it does anything else, wherever
+        // the keys go just now: it is what is under way.
+        if code == KeyCode::Esc && mods == KeyModifiers::NONE && self.cancel_recording() {
+            self.show_toast("The recording was discarded");
             return;
         }
 
@@ -4368,6 +4387,8 @@ impl App {
                         Button::Palette => Action::OpenPalette,
                         Button::OwnProfile => unreachable!(),
                     }),
+                    // The microphone is held, not clicked: its own way in.
+                    Some(HitId::Do(Action::RecordVoice)) => self.press_mic(),
                     Some(HitId::Do(action)) => self.perform(action),
                     Some(HitId::Pane(pane)) => {
                         self.cancel_pending_jump();
@@ -4462,6 +4483,7 @@ impl App {
                 self.dirty = true;
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                self.release_mic();
                 if std::mem::take(&mut self.dragging_splitter) {
                     self.save_setting("sidebar_width", self.sidebar.width as i64);
                 }
@@ -4810,6 +4832,7 @@ impl App {
             self.dirty = true;
         }
         self.audio_tick();
+        self.recording_tick();
     }
 }
 
@@ -4972,6 +4995,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let (pasted, mut pasted_back) = tokio::sync::mpsc::unbounded_channel();
     // What the audio players say comes back here; their tasks end with them.
     let (player_news, mut player_back) = tokio::sync::mpsc::unbounded_channel();
+    // And what a recording says; its task is one of the same set.
+    let (record_news, mut record_back) = tokio::sync::mpsc::unbounded_channel();
     let mut players = tokio::task::JoinSet::new();
 
     while !app.should_quit {
@@ -5039,6 +5064,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             // started from there (see `audio::play`).
             players.spawn(crate::audio::run(request, player_news.clone()));
         }
+        if let Some(request) = app.take_record_start() {
+            // As the players: the programs are tied to the thread that starts them.
+            players.spawn(crate::audio::record::run(request, record_news.clone()));
+        }
         while players.try_join_next().is_some() {}
         terminal::set_mouse(app.mouse)?;
         terminal::set_window_title(app.window_title)?;
@@ -5087,6 +5116,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             Some(room_id) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked { room_id }),
             Some(done) = pasted_back.recv() => app.finish_paste(done),
             Some(update) = player_back.recv() => app.on_audio(update),
+            Some(update) = record_back.recv() => app.on_recording(update),
             _ = theme_watch.changed() => app.reload_theme(),
             scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),
@@ -5103,10 +5133,15 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // What plays stops with the app, and its file goes; a player that does not end in
     // time is killed as its task is dropped.
     app.stop_audio();
+    app.cancel_recording();
     let stopped = async { while players.join_next().await.is_some() {} };
     let _ = tokio::time::timeout(Duration::from_secs(2), stopped).await;
     drop(players);
-    crate::audio::remove_leftovers(&paths.audio_dir());
+    // Unless the worker is still to read a file it was handed (a voice message sent
+    // just before quitting): then the files go with the app, a moment later.
+    if !app.attach.sends_out() {
+        crate::audio::remove_leftovers(&paths.audio_dir());
+    }
     // Let the worker stop syncing cleanly, but never hang on the way out.
     if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
         // The worker takes commands in order: the draft is written before it stops.

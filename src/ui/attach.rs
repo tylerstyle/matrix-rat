@@ -23,6 +23,7 @@ pub fn rows(count: usize) -> u16 {
 pub fn draw(
     frame: &mut Frame,
     files: &[Chosen],
+    state: &crate::app::AttachState,
     theme: &Theme,
     hover: Option<HitId>,
     hits: &mut HitMap,
@@ -43,7 +44,20 @@ pub fn draw(
             &file.name,
             (row.width as usize).saturating_sub(fixed).max(1),
         );
-        let label = format!("📎 {name}{size}");
+        // A voice message recorded here: by its length, as it will be shown.
+        let label = match state.voice(&file.path) {
+            Some(voice) => {
+                let length = format!(" · {}", crate::audio::clock(voice.duration));
+                let name = truncate(
+                    &file.name,
+                    (row.width as usize)
+                        .saturating_sub(fixed + width(&length))
+                        .max(1),
+                );
+                format!("🎤 {name}{length}{size}")
+            }
+            None => format!("📎 {name}{size}"),
+        };
         let label_width = (width(&label) as u16).min(row.width);
         frame.render_widget(
             Line::from(Span::styled(label, theme.style(Role::Banner))),

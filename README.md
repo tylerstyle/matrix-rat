@@ -176,7 +176,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`); right-click the header for the space's info and its rooms (see Spaces below) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
-| `Alt-M` | record a voice message (also the 🎤 in the composer, shown where the machine can record: see `audio_recorder`). Not in this build yet: for now it only says so |
+| `Alt-M` | record a voice message; `Alt-M` again ends it and the recording waits in the composer to be sent (`Esc` throws it away). Also the 🎤 in the composer: hold it to record, let go to stop, or click it once to start and once more to stop. Shown where the machine can record: see `audio_recorder` |
 | `Alt-I` | attach the picture in the clipboard (a screenshot, a picture copied in the browser); needs `wl-clipboard` on Wayland or `xclip` on X11 |
 | `Alt-V` | write the message in your editor (`$VISUAL`, else `$EDITOR`); what you save comes back into the composer, unsent |
 | `Ctrl-B` | hide the room list, or show it again (while hidden, going to it with `Alt-1` or `Ctrl-K` shows it in place of the chat, and so does closing the chat with `Esc`) |
@@ -570,6 +570,23 @@ There is no command that lists or removes profiles; a profile is its two folders
   system's player, `s` only saves it. A video shows its preview picture where the sender
   gave one. A shared place shows its description and opens in your map program with
   `o`.
+- **Recording a voice message**: `Alt-M` or the 🎤 at the end of the composer's first
+  row starts it; while it runs the composer shows `● 0:07 ▅ · Alt-M stops · Esc
+  discards` and the 🎤 is a red `■`. With the mouse, hold the 🎤 while you speak and let
+  go to stop; a short click instead starts it and leaves it running until the next click.
+  However it ends, **nothing is sent by itself**: the recording waits above the text as
+  `🎤 Voice message · 0:12 · 28 kB` like an attached file, can get a caption, and goes
+  with `Enter` (or `✕` / `Backspace` in an empty composer takes it off again). `Enter`
+  while it still records sends nothing. It ends and is kept when you open another room or
+  thread, close the chat, switch to another window or press `Ctrl-Z`; the recording then
+  waits in the chat it was begun in. `Esc`, logging out and quitting throw it away. At
+  5 minutes it stops by itself and is kept. One plays nothing while recording: a sound
+  that plays is stopped first. The sound passes from the recorder program through
+  matrix-rat to the encoder in memory, and is written once at the end to a file readable
+  by you only, in the same temporary folder as played sounds; that file is removed when
+  the voice message is sent or taken off. The room gets an Ogg/Opus file with its length
+  and waveform, shown as a voice message by other clients. What records is a program you
+  have: see `audio_recorder` and `matrix-rat doctor`.
 - **Custom emoji and stickers** come from image packs: your own, the open room's, and
   those of other rooms you switched on for everywhere (packs are made in another client,
   such as Cinny or FluffyChat). They are loaded the first time something needs them
