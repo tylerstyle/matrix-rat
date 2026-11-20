@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 /// How the names of our own files start: nothing else in the folder is touched.
 const SOUND: &str = "play-";
 const SOCKET: &str = "ipc-";
+const VOICE: &str = "voice-";
 /// A unix socket's address holds 108 bytes, the closing zero included; some room is
 /// kept.
 const MAX_SOCKET_PATH: usize = 100;
@@ -32,10 +33,20 @@ impl TempAudio {
     /// `play-<random>.<ending>`, the ending from the sender's stated type (`mime`),
     /// never from the sender's file name.
     pub fn create(dir: &Path, mime: Option<&str>, bytes: &[u8]) -> io::Result<Self> {
+        Self::create_named(dir, SOUND, extension(mime), bytes)
+    }
+
+    /// Writes a voice message recorded here (Ogg/Opus `bytes`) to a new file in `dir`,
+    /// named `voice-<random>.ogg`: it waits there until it is sent or thrown away.
+    pub fn voice(dir: &Path, bytes: &[u8]) -> io::Result<Self> {
+        Self::create_named(dir, VOICE, "ogg", bytes)
+    }
+
+    fn create_named(dir: &Path, start: &str, ending: &str, bytes: &[u8]) -> io::Result<Self> {
         private_dir(dir)?;
         let mut last = io::Error::from(io::ErrorKind::AlreadyExists);
         for _ in 0..8 {
-            let path = dir.join(format!("{SOUND}{}.{}", random_hex(), extension(mime)));
+            let path = dir.join(format!("{start}{}.{ending}", random_hex()));
             // `create_new` never follows a link someone else put there.
             match OpenOptions::new()
                 .write(true)
@@ -140,8 +151,9 @@ pub fn socket_path(dir: &Path) -> Option<PathBuf> {
     (path.is_absolute() && path.as_os_str().len() <= MAX_SOCKET_PATH).then_some(path)
 }
 
-/// Removes what an earlier run left in `dir` (killed, or ended while a sound played):
-/// sound files and sockets by our own names only. A folder that is not there is fine.
+/// Removes what an earlier run left in `dir` (killed, or ended while a sound played or
+/// a recording waited to be sent): sound files and sockets by our own names only. A
+/// folder that is not there is fine.
 pub fn remove_leftovers(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -149,7 +161,7 @@ pub fn remove_leftovers(dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let ours = name.starts_with(SOUND) || name.starts_with(SOCKET);
+        let ours = name.starts_with(SOUND) || name.starts_with(SOCKET) || name.starts_with(VOICE);
         if ours && entry.file_type().is_ok_and(|kind| !kind.is_dir()) {
             let _ = fs::remove_file(entry.path());
         }
@@ -238,6 +250,7 @@ mod tests {
         let root = Dir::new("leftovers");
         let dir = &root.0;
         fs::write(dir.join("play-00aa.ogg"), b"x").unwrap();
+        fs::write(dir.join("voice-00aa.ogg"), b"x").unwrap();
         fs::write(dir.join("ipc-00aa.sock"), b"").unwrap();
         fs::write(dir.join("notes.txt"), b"keep").unwrap();
         fs::create_dir(dir.join("play-dir")).unwrap();
