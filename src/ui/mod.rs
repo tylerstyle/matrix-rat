@@ -28,6 +28,9 @@ mod threads;
 mod timeline;
 mod verify;
 
+pub use composer::Mic;
+#[cfg(test)]
+pub use composer::SYMBOLS;
 pub use timeline::RowCache;
 
 use ratatui::Frame;

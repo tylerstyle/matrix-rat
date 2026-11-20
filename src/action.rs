@@ -106,6 +106,8 @@ pub enum Action {
     CloseThread,
     /// Start attaching a file: puts `/upload ` into the composer.
     Attach,
+    /// Record a voice message with the microphone (or stop the recording).
+    RecordVoice,
     /// Attach the picture the desktop's clipboard holds (a terminal pastes only text).
     PastePicture,
     /// Open the command palette.
@@ -226,6 +228,7 @@ impl Action {
             | Action::ComposeInEditor
             | Action::OpenEmoji
             | Action::Attach
+            | Action::RecordVoice
             | Action::PastePicture
             | Action::CreatePoll
             | Action::OpenStickers

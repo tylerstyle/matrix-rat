@@ -57,6 +57,9 @@ pub struct Config {
     /// What plays voice and audio messages: "auto" (the first of mpv, ffplay, pw-play,
     /// paplay and aplay on `PATH`), or a command line to which the file is added.
     pub audio_player: String,
+    /// What records voice messages: "auto" (the first capture program whose sound
+    /// server is there), or a command line that writes raw sound to its output.
+    pub audio_recorder: String,
     /// How pictures are shown: "auto", "halfblocks" or "off".
     pub images: ImageMode,
     /// Where the local store passphrase is kept: "auto", "keyring" or "file".
@@ -104,6 +107,10 @@ impl std::fmt::Debug for Config {
             .field(
                 "audio_player_auto",
                 &crate::audio::is_auto(&self.audio_player),
+            )
+            .field(
+                "audio_recorder_auto",
+                &crate::audio::is_auto(&self.audio_recorder),
             )
             .field("images", &self.images)
             .field("secret_store", &self.secret_store)
@@ -228,6 +235,7 @@ impl Default for Config {
             link_previews: LinkPreviews::Off,
             download_dir: String::new(),
             audio_player: "auto".to_owned(),
+            audio_recorder: "auto".to_owned(),
             images: ImageMode::Auto,
             secret_store: crate::matrix::SecretStoreMode::File,
             preset: None,
@@ -725,15 +733,27 @@ mod tests {
              theme_light = \"alice-light\"\n\
              download_dir = \"/home/alice/secret-downloads\"\n\
              notification_click_command = \"raise-window --title alice\"\n\
-             audio_player = \"/home/alice/bin/play-quietly\"\n",
+             audio_player = \"/home/alice/bin/play-quietly\"\n\
+             audio_recorder = \"/home/alice/bin/record-softly --device alice\"\n",
         )
         .unwrap();
         let shown = format!("{config:?}");
-        for private in ["alice", "/home", "raise-window", "play-quietly"] {
+        for private in [
+            "alice",
+            "/home",
+            "raise-window",
+            "play-quietly",
+            "record-softly",
+        ] {
             assert!(!shown.contains(private), "{private} in {shown}");
         }
         // Whether they are set still shows.
         assert!(shown.contains("download_dir: true"), "{shown}");
+        assert!(shown.contains("audio_recorder_auto: false"), "{shown}");
+        assert_eq!(
+            config.audio_recorder,
+            "/home/alice/bin/record-softly --device alice"
+        );
     }
 
     #[test]
@@ -741,6 +761,7 @@ mod tests {
         let config: Config = toml::from_str("theme = \"terminal\"").unwrap();
         assert_eq!(config.theme, "terminal");
         assert_eq!(config.audio_player, "auto");
+        assert_eq!(config.audio_recorder, "auto");
         assert_eq!(config.sidebar_width, 24);
         assert!(config.mouse);
         assert!(config.read_receipts);

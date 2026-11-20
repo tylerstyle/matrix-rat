@@ -156,6 +156,7 @@ action_table! {
     Action::PageDown => ("page_down", Context::Global, "Scroll messages down"),
     Action::OpenEmoji => ("emoji", Context::Global, "Emoji picker"),
     Action::Attach => ("attach", Context::Global, "Attach a file"),
+    Action::RecordVoice => ("record_voice", Context::Global, "Record a voice message"),
     Action::Search => ("search", Context::Global, "Find in this room"),
     Action::SearchEverywhere => ("search_all", Context::Global, "Search all rooms"),
     Action::SpaceNext => ("space_next", Context::Global, "Next space (then all rooms)"),
@@ -384,6 +385,14 @@ pub const DEFAULT: &[Binding] = &[
         Action::Attach,
         "Alt-A",
         "Attach a file",
+    ),
+    bind(
+        Global,
+        Char('m'),
+        ALT,
+        Action::RecordVoice,
+        "Alt-M",
+        "Record a voice message",
     ),
     bind(
         Global,

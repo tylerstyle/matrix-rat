@@ -142,6 +142,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     "edit last message",
                 );
                 push_action(&mut hints, Context::Composer, A::Attach, "attach file");
+                // Only where the machine has something to record with.
+                if app.recording_refused().is_none() {
+                    push_action(
+                        &mut hints,
+                        Context::Composer,
+                        A::RecordVoice,
+                        "record voice",
+                    );
+                }
             }
             Pane::Timeline if app.selected_failed() => {
                 push_action(&mut hints, Context::Timeline, A::Reply, "try again");

@@ -54,6 +54,7 @@ impl App {
             ignored_settings: self.found.ignored_settings.clone(),
             config_broken: self.found.config_broken,
             audio: self.audio_found(),
+            recording: self.recording_found(),
             ..Facts::from_environment()
         }
     }

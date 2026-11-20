@@ -367,6 +367,11 @@ pub struct PaletteContext {
     pub download_dir: String,
     /// What the settings show for the audio player.
     pub audio_player: String,
+    /// What the settings show for the voice recorder.
+    pub audio_recorder: String,
+    /// Why recording a voice message is not offered here, in a few words; `None`
+    /// where it is.
+    pub record_refused: Option<&'static str>,
     pub audio: AudioCaps,
     pub verify_status: &'static str,
     pub backup_status: &'static str,
@@ -1065,6 +1070,13 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Attach | Action::PastePicture | Action::CreatePoll | Action::OpenStickers => {
             ctx.has_room && !in_pending && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
+        // As attaching a file, and only where something records.
+        Action::RecordVoice => {
+            ctx.record_refused.is_none()
+                && ctx.has_room
+                && !in_pending
+                && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
+        }
         Action::ComposeInEditor => ctx.has_room && !in_pending,
         Action::JumpToNewest | Action::JumpToOldest | Action::JumpToUnread => {
             ctx.has_room && ctx.has_messages
@@ -1145,6 +1157,14 @@ fn action_meta<'a>(
             Cow::Borrowed(description),
             &["upload", "send file", "attach"],
         ),
+        // Greyed with the reason where the machine has nothing to record with.
+        Action::RecordVoice => (
+            match ctx.record_refused {
+                Some(why) => Cow::Owned(format!("{description} ({why})")),
+                None => Cow::Borrowed(description),
+            },
+            &["voice note", "microphone", "audio message", "record"],
+        ),
         Action::PastePicture => (
             Cow::Borrowed(description),
             &["paste image", "screenshot", "clipboard", "attach picture"],
@@ -1215,6 +1235,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
             action,
             Action::OpenEmoji
                 | Action::Attach
+                | Action::RecordVoice
                 | Action::PastePicture
                 | Action::CreatePoll
                 | Action::OpenStickers
@@ -1567,6 +1588,13 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::AudioRecorder)),
+            title: Setting::AudioRecorder.label(),
+            hint: Some(ctx.audio_recorder.clone()),
+            aliases: &["voice messages", "microphone", "record", "setting"],
+            enabled: true,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::Keys)),
             title: Setting::Keys.label(),
             hint: Some(ctx.keymap.preset_summary()),
@@ -1807,6 +1835,8 @@ mod tests {
             notifications: true,
             download_dir: "~/Downloads".to_owned(),
             audio_player: "auto: mpv".to_owned(),
+            audio_recorder: "auto: pw-record + opusenc".to_owned(),
+            record_refused: None,
             audio: AudioCaps::default(),
             verify_status: "unknown",
             backup_status: "unknown",
@@ -2038,11 +2068,30 @@ mod tests {
             Some(&Target::Action(Action::CloseThread))
         );
 
+        // Recording is offered as attaching is, where the machine can record; where it
+        // cannot, the entry is greyed and says why.
+        assert!(enabled(&p, Action::RecordVoice));
+        let title = |p: &Palette| -> String {
+            p.entries
+                .iter()
+                .find(|e| e.target == Target::Action(Action::RecordVoice))
+                .expect("entry present")
+                .title
+                .clone()
+        };
+        assert_eq!(title(&p), "Record a voice message");
+        ctx.record_refused = Some("no microphone found");
+        let p = Palette::open(ctx.clone());
+        assert!(!enabled(&p, Action::RecordVoice));
+        assert_eq!(title(&p), "Record a voice message (no microphone found)");
+        ctx.record_refused = None;
+
         // Editing disables Attach; invite rooms also disable Attach.
         ctx.thread_open = false;
         ctx.compose_mode = ComposeMode::Edit(0);
         let p = Palette::open(ctx.clone());
         assert!(!enabled(&p, Action::Attach));
+        assert!(!enabled(&p, Action::RecordVoice));
 
         ctx.compose_mode = ComposeMode::Normal;
         ctx.in_invite = true;

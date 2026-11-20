@@ -777,11 +777,26 @@ pub fn space_items(selected: Option<bool>, keys: &Keymap) -> Vec<Item> {
 }
 
 /// The entries for the composer. Pasting is the terminal's business.
-pub fn composer_items(can_attach: bool, has_draft: bool, keys: &Keymap) -> Vec<Item> {
+/// `can_record`: a voice message can be recorded on this machine (and a file could
+/// be attached).
+pub fn composer_items(
+    can_attach: bool,
+    can_record: bool,
+    has_draft: bool,
+    keys: &Keymap,
+) -> Vec<Item> {
     use Context::Composer;
     let mut items = Vec::new();
     if can_attach {
         items.push(Item::action(keys, "Attach file…", Composer, Action::Attach));
+    }
+    if can_attach && can_record {
+        items.push(Item::action(
+            keys,
+            "Record voice message",
+            Composer,
+            Action::RecordVoice,
+        ));
     }
     items.push(Item::action(keys, "Emoji…", Composer, Action::OpenEmoji));
     if has_draft {
@@ -898,7 +913,7 @@ mod tests {
                     room_id: "!secret-room:example.org".into(),
                 },
                 "",
-                composer_items(true, true, &keys()),
+                composer_items(true, false, true, &keys()),
                 Anchor::at(0, 0),
             ),
             Menu::new(
@@ -1246,13 +1261,21 @@ mod tests {
         assert_eq!(labels(&link_items()), ["Open link", "Copy link"]);
 
         assert_eq!(
-            labels(&composer_items(true, true, &keys())),
+            labels(&composer_items(true, false, true, &keys())),
             ["Attach file…", "Emoji…", "Clear draft"]
         );
-        assert_eq!(labels(&composer_items(false, false, &keys())), ["Emoji…"]);
+        assert_eq!(
+            labels(&composer_items(false, true, false, &keys())),
+            ["Emoji…"]
+        );
+        // Recording has its entry where the machine can record.
+        assert_eq!(
+            labels(&composer_items(true, true, false, &keys())),
+            ["Attach file…", "Record voice message", "Emoji…"]
+        );
         // No word about pasting: that is the terminal's.
         assert!(
-            composer_items(true, true, &keys())
+            composer_items(true, false, true, &keys())
                 .iter()
                 .all(|item| !item.label.contains("Paste"))
         );

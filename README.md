@@ -176,6 +176,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Alt-S` | step through your spaces (header shows unread counts; or pick a space in `Ctrl-P`); right-click the header for the space's info and its rooms (see Spaces below) |
 | `Alt-O` · `Alt-D` | filter the room list to unread rooms · direct chats (`Esc` clears filters) |
 | `Alt-E` / `Alt-A` | emoji picker / attach a file |
+| `Alt-M` | record a voice message (also the 🎤 in the composer, shown where the machine can record: see `audio_recorder`). Not in this build yet: for now it only says so |
 | `Alt-I` | attach the picture in the clipboard (a screenshot, a picture copied in the browser); needs `wl-clipboard` on Wayland or `xclip` on X11 |
 | `Alt-V` | write the message in your editor (`$VISUAL`, else `$EDITOR`); what you save comes back into the composer, unsent |
 | `Ctrl-B` | hide the room list, or show it again (while hidden, going to it with `Alt-1` or `Ctrl-K` shows it in place of the chat, and so does closing the chat with `Esc`) |
@@ -367,7 +368,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `record_voice`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
@@ -398,6 +399,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
 | `download_dir` | where `s` saves attachments |
 | `audio_player` | what plays voice and audio messages in the app (`x`): `"auto"` (default) takes the first of `mpv`, `ffplay`, `pw-play`, `paplay` and `aplay` found on `PATH`; or a command line of your own, such as `"mpv --volume=70"`, to which the file is added at the end (split into words like `$EDITOR`, no shell). It must play the file and end when the sound does. Also **Audio player** in the settings, which says what was found. See Good to know |
+| `audio_recorder` | what records voice messages: `"auto"` (default) takes the first of `pw-record`, `parec` (or `parecord`), `ffmpeg` and `arecord` that is on `PATH` and whose sound server is there (PipeWire's or PulseAudio's socket, or an ALSA device that records), and offers recording only where a microphone is plausible (ALSA lists a device that records, or `PULSE_SERVER` names a server); or a capture command of your own, such as `"pw-record --target=<your microphone> --raw --format=s16 --rate=48000 --channels=1 -"`, to pick a device (split into words like `$EDITOR`, no shell). It must write raw sound (signed 16-bit little-endian, mono, 48 kHz) to its standard output and end on `SIGTERM`. The sound is encoded to Opus by `opusenc` (the package `opus-tools`), else `ffmpeg`. Nothing is run to find all this out. Also **Voice recorder** in the settings, which says what was found |
 | `mouse` | turn off to use the terminal's own text selection |
 | `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
 | `notification_preview` (file only) | `false` hides message text, names and pictures in notifications |
@@ -567,7 +569,8 @@ Setting `preset = "vim"` keeps the default keys and adds:
   pasting a picture fails, a key does nothing): "What the app found here" in the command
   palette (`Ctrl-P`, type `doctor`) or in the settings (`F2`) shows what matrix-rat
   found: the terminal and its colours, keyboard and mouse, how pictures are shown and
-  why, the notification service, the clipboard tool, `xdg-open` and the editor, where
+  why, the notification service, the clipboard tool, `xdg-open` and the editor, what plays
+  and what would record voice messages (or what is missing for that), where
   the store's key is kept, and key bindings or settings in the config that were not
   understood or took a key away. Lines marked `!` need seeing to, `~` are limits worth
   knowing. `c` (or "Copy as text") copies it for a bug report. Nothing private is in

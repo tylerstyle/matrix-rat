@@ -97,6 +97,8 @@ pub struct Facts {
     pub opener: bool,
     /// What would play a voice message in the app.
     pub audio: Audio,
+    /// What would record a voice message.
+    pub recording: Recording,
     /// `VISUAL` or `EDITOR` names an editor (never what it names).
     pub editor_set: bool,
     pub secret_store: SecretStoreMode,
@@ -140,6 +142,50 @@ impl Audio {
             Ok(player) => Audio::Known(player.kind()),
             Err(crate::audio::NoPlayer::NoneFound) => Audio::NoneFound,
             Err(_) => Audio::OwnMissing,
+        }
+    }
+}
+
+/// What the `audio_recorder` setting comes to here: the kinds of the two programs, or
+/// what is missing. Never the command itself, as with [`Audio`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recording {
+    /// A capture program the app knows, found by itself, and the encoder.
+    Known(
+        crate::audio::recorder::Capture,
+        crate::audio::recorder::Encoder,
+    ),
+    /// A capture command of the user's own that is there to be run, and the encoder.
+    Own(crate::audio::recorder::Encoder),
+    /// No microphone was seen (and the user named no recorder of their own).
+    NoMicrophone,
+    /// None of the capture programs the app knows is there with its sound server.
+    NoRecorder,
+    /// There is a recorder, but nothing that encodes Opus.
+    NoEncoder,
+    /// The setting names a command that is not there or cannot be read as one.
+    OwnMissing,
+}
+
+impl Recording {
+    /// From the setting, with this process's `PATH` and what is seen of the sound here.
+    pub fn found(setting: &str) -> Self {
+        Self::from_choice(&crate::audio::recorder::choose_here(setting))
+    }
+
+    pub fn from_choice(
+        choice: &Result<crate::audio::recorder::Recorder, crate::audio::recorder::NoRecorder>,
+    ) -> Self {
+        use crate::audio::recorder::{Capture, NoRecorder};
+        match choice {
+            Ok(recorder) if recorder.capture_kind() == Capture::Own => {
+                Recording::Own(recorder.encoder_kind())
+            }
+            Ok(recorder) => Recording::Known(recorder.capture_kind(), recorder.encoder_kind()),
+            Err(NoRecorder::NoMicrophone) => Recording::NoMicrophone,
+            Err(NoRecorder::NoCapture) => Recording::NoRecorder,
+            Err(NoRecorder::NoEncoder) => Recording::NoEncoder,
+            Err(NoRecorder::BadCommand | NoRecorder::Missing) => Recording::OwnMissing,
         }
     }
 }
@@ -503,6 +549,40 @@ fn desktop(facts: &Facts) -> Section {
             "the command named by audio_player was not found",
         ),
     });
+    lines.push(match facts.recording {
+        Recording::Known(capture, encoder) => fine(
+            "Recording voice messages",
+            format!("{} and {}", capture.program(), encoder.program()),
+        ),
+        Recording::Own(encoder) => fine(
+            "Recording voice messages",
+            format!("a command of your own and {}", encoder.program()),
+        ),
+        Recording::NoMicrophone => with(
+            "Recording voice messages",
+            "not offered",
+            Level::Note,
+            "no microphone was seen; if there is one, name a recorder in audio_recorder",
+        ),
+        Recording::NoRecorder => with(
+            "Recording voice messages",
+            "not possible",
+            Level::Missing,
+            "none of pw-record, parec, parecord, ffmpeg, arecord was found with its sound server",
+        ),
+        Recording::NoEncoder => with(
+            "Recording voice messages",
+            "not possible",
+            Level::Missing,
+            "no encoder: neither opusenc (the package opus-tools) nor ffmpeg was found",
+        ),
+        Recording::OwnMissing => with(
+            "Recording voice messages",
+            "not possible",
+            Level::Missing,
+            "the command named by audio_recorder was not found",
+        ),
+    });
     lines.push(if facts.editor_set {
         fine("Writing in an editor", "VISUAL or EDITOR names one")
     } else {
@@ -693,6 +773,7 @@ fn command_line_facts(
         ignored_settings: config.ignored.clone(),
         config_broken,
         audio: Audio::found(&config.audio_player),
+        recording: Recording::found(&config.audio_recorder),
         ..Facts::from_environment()
     }
 }
@@ -728,6 +809,7 @@ impl Facts {
             xclip: on_path("xclip", path.as_deref()),
             opener: on_path("xdg-open", path.as_deref()),
             audio: Audio::NoneFound,
+            recording: Recording::NoMicrophone,
             editor_set: crate::editor::command_from_env().is_ok(),
             secret_store: SecretStoreMode::File,
             own_theme: false,
@@ -770,6 +852,10 @@ pub(crate) fn sample() -> Facts {
         xclip: false,
         opener: true,
         audio: Audio::Known(crate::audio::Kind::Mpv),
+        recording: Recording::Known(
+            crate::audio::recorder::Capture::PwRecord,
+            crate::audio::recorder::Encoder::Opusenc,
+        ),
         editor_set: true,
         secret_store: SecretStoreMode::File,
         own_theme: false,
@@ -820,6 +906,85 @@ mod tests {
             Audio::from_choice(&crate::audio::choose("auto", None, None)),
             Audio::NoneFound
         );
+    }
+
+    #[test]
+    fn the_recording_line_says_what_was_found_or_is_missing_and_never_the_users_command() {
+        use crate::audio::recorder::{Capture, Encoder, Seen, choose};
+        let line = |facts: &Facts| {
+            Report::new(facts)
+                .sections
+                .iter()
+                .flat_map(|section| section.lines.clone())
+                .find(|line| line.label == "Recording voice messages")
+                .unwrap()
+        };
+        let mut facts = sample();
+        assert_eq!(line(&facts).value, "pw-record and opusenc");
+        assert_eq!(line(&facts).level, Level::Fine);
+        facts.recording = Recording::Known(Capture::FfmpegAlsa, Encoder::Ffmpeg);
+        assert_eq!(line(&facts).value, "ffmpeg and ffmpeg");
+        facts.recording = Recording::Own(Encoder::Ffmpeg);
+        assert_eq!(line(&facts).value, "a command of your own and ffmpeg");
+        facts.recording = Recording::NoMicrophone;
+        assert_eq!(line(&facts).value, "not offered");
+        assert_eq!(line(&facts).level, Level::Note);
+        assert!(line(&facts).hint.unwrap().contains("microphone"));
+        facts.recording = Recording::NoRecorder;
+        assert_eq!(line(&facts).level, Level::Missing);
+        assert!(line(&facts).hint.unwrap().contains("pw-record"));
+        facts.recording = Recording::NoEncoder;
+        assert!(line(&facts).hint.unwrap().contains("opusenc"));
+        facts.recording = Recording::OwnMissing;
+        assert!(line(&facts).hint.unwrap().contains("audio_recorder"));
+
+        // The choice is told apart without the command being kept.
+        let bin = std::env::temp_dir().join(format!(
+            "matrix-rat-doctor-recording-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["secret-recorder", "ffmpeg", "arecord"] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(bin.join(name), "").unwrap();
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let path = Some(bin.as_os_str());
+        let microphone = Seen {
+            alsa_capture: true,
+            ..Seen::default()
+        };
+        let found =
+            |setting: &str, seen: &Seen| Recording::from_choice(&choose(setting, path, None, seen));
+        let own = found("secret-recorder --device /home/alice/mic", &Seen::default());
+        assert_eq!(own, Recording::Own(Encoder::Ffmpeg));
+        facts.recording = own;
+        let shown = format!("{:?} {:?}", line(&facts), facts.recording);
+        assert!(
+            !shown.contains("secret") && !shown.contains("alice"),
+            "{shown}"
+        );
+        assert_eq!(
+            found("auto", &microphone),
+            Recording::Known(Capture::Arecord, Encoder::Ffmpeg)
+        );
+        assert_eq!(found("auto", &Seen::default()), Recording::NoMicrophone);
+        assert_eq!(
+            found("no-such-recorder-x", &microphone),
+            Recording::OwnMissing
+        );
+        assert_eq!(found("'open", &microphone), Recording::OwnMissing);
+        // Without arecord, ffmpeg records from ALSA; without both, nothing does.
+        std::fs::remove_file(bin.join("arecord")).unwrap();
+        assert_eq!(
+            found("auto", &microphone),
+            Recording::Known(Capture::FfmpegAlsa, Encoder::Ffmpeg)
+        );
+        std::fs::remove_file(bin.join("ffmpeg")).unwrap();
+        assert_eq!(found("auto", &microphone), Recording::NoRecorder);
+        assert_eq!(found("secret-recorder", &microphone), Recording::NoEncoder);
+        std::fs::remove_dir_all(&bin).unwrap();
     }
 
     fn kitty_desktop() -> Facts {

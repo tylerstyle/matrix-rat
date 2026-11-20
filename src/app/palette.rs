@@ -100,6 +100,8 @@ impl App {
             notifications: self.notify_mode != crate::notify::NotifyMode::Off,
             download_dir: crate::files::display(&self.download_dir()),
             audio_player: self.audio.setting_text(),
+            audio_recorder: self.audio.recorder_setting_text(),
+            record_refused: self.recording_refused().map(|why| why.short()),
             audio: self.audio_caps(),
             verify_status: crate::verify::setting_text(self.verify.security),
             backup_status: crate::devices::backup_setting_text(self.verify.security),
@@ -289,12 +291,12 @@ impl App {
                     self.setting_value(setting)
                 ));
             }
-            Setting::DownloadDir | Setting::AudioPlayer => {
+            Setting::DownloadDir | Setting::AudioPlayer | Setting::AudioRecorder => {
                 let mut menu = SettingsMenu::select(setting, self.has_theme_pair());
-                let text = if setting == Setting::AudioPlayer {
-                    self.audio.setting.as_str()
-                } else {
-                    self.download_dir.as_str()
+                let text = match setting {
+                    Setting::AudioPlayer => self.audio.setting.as_str(),
+                    Setting::AudioRecorder => self.audio.recorder_setting.as_str(),
+                    _ => self.download_dir.as_str(),
                 };
                 menu.editing = Some(LineEdit::from(text));
                 self.open_modal(Modal::Settings(menu));
