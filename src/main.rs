@@ -7,8 +7,11 @@
 mod action;
 mod agent;
 mod app;
+mod archive;
 mod audio;
+mod catchup;
 mod clipboard;
+mod collect;
 mod complete;
 mod composer;
 mod config;

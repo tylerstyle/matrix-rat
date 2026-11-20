@@ -172,6 +172,9 @@ pub enum HitId {
     ThreadsMore,
     /// The "only mine" switch of the threads popup.
     ThreadsMine,
+    /// A row of the "how far back" list or a button in the popup of an archive or of
+    /// catching up (see `app::collect`).
+    Collect(u8),
     /// A row of the notification keywords popup.
     KeywordRow(usize),
     /// The remove mark on a row of the notification keywords popup.

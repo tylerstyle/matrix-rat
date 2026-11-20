@@ -302,6 +302,11 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/dm", "Open a direct chat with someone"),
     ("/msg", "Open a direct chat with someone"),
     ("/whois", "Show someone's profile"),
+    ("/archive", "Write this room's messages to a Markdown file"),
+    (
+        "/catchup",
+        "Summarise what is unread here (needs summary_command)",
+    ),
     ("/help", "Show the keys and what they do"),
 ];
 

@@ -321,6 +321,23 @@ impl App {
         self.timeline_rev += 1;
     }
 
+    /// The first message under the "new" line of the open room, by its event id.
+    pub(super) fn first_unread_event(&self) -> Option<&str> {
+        match &self.unread.line {
+            Line::At(targets) => targets.first().map(|target| target.id.as_str()),
+            Line::Off | Line::Waiting { .. } => None,
+        }
+    }
+
+    /// For tests elsewhere: the "new" line stands above the message with this event id.
+    #[cfg(test)]
+    pub(super) fn set_unread_line_for_test(&mut self, event_id: &str) {
+        self.unread.line = Line::At(vec![UnreadTarget {
+            id: event_id.to_owned(),
+            sender: None,
+        }]);
+    }
+
     /// The chat was closed: there is no open room whose line could be placed, and
     /// none that waits to be marked as read on its first view.
     pub(super) fn no_unread_line(&mut self) {

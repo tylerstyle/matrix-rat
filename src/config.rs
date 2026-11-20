@@ -57,6 +57,10 @@ pub struct Config {
     /// What plays voice and audio messages: "auto" (the first of mpv, ffplay, pw-play,
     /// paplay and aplay on `PATH`), or a command line to which the file is added.
     pub audio_player: String,
+    /// A command line of the user's own that summarises the unread messages of a room
+    /// ("Catch up"): the text on its standard input, the summary on its standard
+    /// output. Empty: there is none, and catching up is not offered.
+    pub summary_command: String,
     /// How pictures are shown: "auto", "halfblocks" or "off".
     pub images: ImageMode,
     /// Where the local store passphrase is kept: "auto", "keyring" or "file".
@@ -74,7 +78,8 @@ pub struct Config {
     pub ignored: Vec<String>,
 }
 
-/// Hand-written: the download folder is a path, the click command can hold one, and
+/// Hand-written: the download folder is a path, the click command and the summary
+/// command can hold one (or a key), and
 /// theme names can be the names of the user's own files; for those only whether they
 /// are set is shown.
 impl std::fmt::Debug for Config {
@@ -105,6 +110,7 @@ impl std::fmt::Debug for Config {
                 "audio_player_auto",
                 &crate::audio::is_auto(&self.audio_player),
             )
+            .field("summary_command", &!self.summary_command.trim().is_empty())
             .field("images", &self.images)
             .field("secret_store", &self.secret_store)
             .field("preset", &self.preset.is_some())
@@ -228,6 +234,7 @@ impl Default for Config {
             link_previews: LinkPreviews::Off,
             download_dir: String::new(),
             audio_player: "auto".to_owned(),
+            summary_command: String::new(),
             images: ImageMode::Auto,
             secret_store: crate::matrix::SecretStoreMode::File,
             preset: None,

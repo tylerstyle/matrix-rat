@@ -2,6 +2,7 @@
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
 mod agent;
+mod collect;
 mod convert;
 mod devices;
 mod directory;
@@ -28,6 +29,7 @@ mod upload;
 mod verify;
 
 pub use agent::{AgentCmd, AgentEvent, MAX_WATCHED as AGENT_MAX_WATCHED};
+pub use collect::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, UnreadText};
 pub use devices::{
     BackupUpload, DevicesCmd, DevicesEvent, ServerBackup, Session, SessionList, SessionTrust,
     SignOutOutcome,
@@ -438,6 +440,9 @@ pub enum MatrixCmd {
     /// What `matrix-rat serve` asks for: send a text, read a room, watch a room.
     /// Never sent by the app.
     Agent(AgentCmd),
+    /// A stretch of a room's messages as text: an archive of the room written to a
+    /// file, or what is unread for a summary.
+    Collect(CollectCmd),
 }
 
 /// Never prints the password or the recovery key, nor a message, a path or an id of a
@@ -636,6 +641,7 @@ impl MatrixCmd {
             ),
             // The inner command prints no room and no text.
             Self::Agent(command) => ("Agent", vec![Some(command.shown(ids))]),
+            Self::Collect(command) => ("Collect", vec![Some(command.shown(ids))]),
         };
         crate::logsafe::shape(name, parts)
     }
@@ -1041,6 +1047,8 @@ pub enum MatrixEvent {
     },
     /// An answer to a [`MatrixCmd::Agent`], or news of a room that is watched.
     Agent(AgentEvent),
+    /// An answer to a [`MatrixCmd::Collect`], or how far it is.
+    Collect(CollectEvent),
 }
 
 /// Hand-written so that no message text, no error text (it can name rooms, people
@@ -1289,6 +1297,7 @@ impl MatrixEvent {
             Self::ThreadsFailed { generation: g, .. } => ("ThreadsFailed", vec![generation(g)]),
             // The inner event prints no room, no message and no reason.
             Self::Agent(event) => ("Agent", vec![Some(event.shown(full))]),
+            Self::Collect(event) => ("Collect", vec![Some(event.shown(full))]),
         };
         crate::logsafe::shape(name, parts)
     }
@@ -1822,6 +1831,12 @@ impl Worker {
             ignored.clone(),
             left.clone(),
         );
+        let mut collector = collect::Collector::new(
+            client.clone(),
+            self.events.clone(),
+            ignored.clone(),
+            left.clone(),
+        );
         let mut emote_mgr = emotes::EmoteManager::new(client.clone(), self.events.clone());
         let emote_handlers = emote_mgr.register_handlers(client);
         let power_events = self.events.clone();
@@ -2045,6 +2060,7 @@ impl Worker {
                     Some(MatrixCmd::Devices(command)) => devices.handle(command),
                     Some(MatrixCmd::Keywords(command)) => keywords.handle(command),
                     Some(MatrixCmd::Agent(command)) => agent.handle(command),
+                    Some(MatrixCmd::Collect(command)) => collector.handle(command),
                     Some(MatrixCmd::SearchMessages { generation, query }) => {
                         searcher.start(generation, query);
                     }
@@ -2112,6 +2128,7 @@ impl Worker {
         devices.stop();
         keywords.stop();
         agent.stop();
+        collector.stop();
         emote_mgr.stop();
         searcher.stop();
         user_searcher.stop();
@@ -2448,6 +2465,71 @@ mod tests {
             room_id: "!room:example.org".into(),
         });
         assert_eq!(format!("{command:?}"), "Agent(Watch)");
+        // Collecting a room's text: no room, no event, no name, no folder.
+        let command = MatrixCmd::Collect(CollectCmd::Archive {
+            request: 6,
+            room_id: "!room:example.org".into(),
+            span: crate::collect::Span::Days(7),
+            dir: "/home/alice/secret-folder".into(),
+            room_name: "Plans of example.org".into(),
+        });
+        assert_eq!(
+            format!("{command:?}"),
+            "Collect(Archive(request 6, Days(7)))"
+        );
+        assert_eq!(
+            command.describe(),
+            "Collect(Archive(request 6, !room:example.org, Days(7)))"
+        );
+        let command = MatrixCmd::Collect(CollectCmd::Unread {
+            request: 7,
+            room_id: "!room:example.org".into(),
+            from: Some("$event:example.org".into()),
+        });
+        assert_eq!(
+            format!("{command:?}"),
+            "Collect(Unread(request 7, from: true))"
+        );
+        for (event, shown) in [
+            (
+                CollectEvent::Progress {
+                    request: 6,
+                    loaded: 200,
+                },
+                "Collect(Progress(request 6, 200 loaded))",
+            ),
+            (
+                CollectEvent::Unread {
+                    request: 7,
+                    result: Ok(UnreadText {
+                        text: "the secret plan for example.org".into(),
+                        messages: 1,
+                        cut: false,
+                    }),
+                },
+                "Collect(Unread(request 7, 1 messages))",
+            ),
+            (
+                CollectEvent::Archived {
+                    request: 6,
+                    result: Ok(Archived {
+                        path: "/home/alice/secret-folder/Plans.md".into(),
+                        messages: 3,
+                        cut: None,
+                    }),
+                },
+                "Collect(Archived(request 6, 3 messages))",
+            ),
+            (
+                CollectEvent::Archived {
+                    request: 6,
+                    result: Err("could not write /home/alice/secret-folder".into()),
+                },
+                "Collect(Archived(request 6, ok: false))",
+            ),
+        ] {
+            assert_eq!(format!("{:?}", MatrixEvent::Collect(event)), shown);
+        }
         let told = crate::agent::proto::Msg {
             event_id: "$event:example.org".into(),
             sender: "@alice:example.org".into(),

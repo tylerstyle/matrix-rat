@@ -251,7 +251,7 @@ pub fn choose_here(setting: &str) -> Result<Player, NoPlayer> {
 
 /// The first executable file called `name` in a folder of `path`. Relative folders
 /// (and the empty entry, which means the current folder) are skipped.
-fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+pub(crate) fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
     if name.is_empty() || name.contains('/') {
         return None;
     }
@@ -261,7 +261,7 @@ fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
         .find(|candidate| is_executable(candidate))
 }
 
-fn is_executable(path: &Path) -> bool {
+pub(crate) fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)

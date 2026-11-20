@@ -54,6 +54,7 @@ impl App {
             ignored_settings: self.found.ignored_settings.clone(),
             config_broken: self.found.config_broken,
             audio: self.audio_found(),
+            summary: crate::doctor::Summary::from_choice(&self.summary_command()),
             ..Facts::from_environment()
         }
     }

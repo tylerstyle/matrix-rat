@@ -670,6 +670,8 @@ pub struct RoomSpaces {
     /// The space the room list is narrowed to, by name, if the room is directly in it
     /// and we may take rooms out of it.
     pub remove_from: Option<String>,
+    /// Not about spaces: a summary command is set, so catching up can be offered.
+    pub catch_up: bool,
 }
 
 /// The entries for a room in the room list.
@@ -702,6 +704,20 @@ pub fn room_items(room: &Room, spaces: &RoomSpaces, keys: &Keymap) -> Vec<Item> 
         return items;
     }
     items.push(Item::action(keys, "Threads", Sidebar, Action::OpenThreads));
+    items.push(Item::action(
+        keys,
+        "Archive as Markdown…",
+        Sidebar,
+        Action::ArchiveRoom,
+    ));
+    if spaces.catch_up && room.shows_unread() {
+        items.push(Item::action(
+            keys,
+            "Catch up (summary)",
+            Sidebar,
+            Action::CatchUp,
+        ));
+    }
     if room.shows_unread() {
         items.push(Item::new("Mark as read", "", Run::MarkRead));
     } else {
@@ -1210,6 +1226,7 @@ mod tests {
                 "Open",
                 "Room info",
                 "Threads",
+                "Archive as Markdown…",
                 "Mark as unread",
                 "Add to favourites",
                 "Move to low priority",
@@ -1226,6 +1243,7 @@ mod tests {
                 "Open",
                 "Room info",
                 "Threads",
+                "Archive as Markdown…",
                 "Mark as read",
                 "Remove from favourites",
                 "Move to low priority",
@@ -1234,7 +1252,22 @@ mod tests {
             ]
         );
         // Leaving goes through the question in the room info.
-        assert_eq!(items[7].run, Some(Run::Do(Action::LeaveRoom)));
+        assert_eq!(items[8].run, Some(Run::Do(Action::LeaveRoom)));
+        assert_eq!(items[3].run, Some(Run::Do(Action::ArchiveRoom)));
+        // Catching up: only with a summary command, and only where something is unread.
+        let with_command = RoomSpaces {
+            catch_up: true,
+            ..RoomSpaces::default()
+        };
+        let items = room_items(&room, &with_command, &keys());
+        assert_eq!(items[4].label, "Catch up (summary)");
+        assert_eq!(items[4].run, Some(Run::Do(Action::CatchUp)));
+        room.bold = false;
+        assert!(
+            !labels(&room_items(&room, &with_command, &keys())).contains(&"Catch up (summary)")
+        );
+        room.bold = true;
+        let items = room_items(&room, &RoomSpaces::default(), &keys());
         assert_eq!(items[2].run, Some(Run::Do(Action::OpenThreads)));
         assert_eq!(items[1].hint, "F4");
         room.kind = RoomKind::Invite;

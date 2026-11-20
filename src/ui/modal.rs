@@ -56,6 +56,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Threads(list) => super::threads::draw(frame, app, area, list),
         Modal::Keywords(popup) => super::keywords::draw(frame, app, area, popup),
         Modal::Doctor(popup) => super::doctor::draw(frame, app, area, popup),
+        Modal::Collect(popup) => super::collect::draw(frame, app, area, popup),
     }
     app.modal = Some(modal);
 }
@@ -306,26 +307,28 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
                 let dot = if on { "● " } else { "○ " };
                 spans.push(Span::styled(format!("{dot}{value}"), theme.style(role)));
             }
-            Setting::DownloadDir | Setting::AudioPlayer => match (&mut menu.editing, selected) {
-                (Some(typed), true) => {
-                    let view = typed.view(room.saturating_sub(1), false);
-                    frame.set_cursor_position(Position::new(
-                        (value_x + view.cursor_col as u16).min(rect.right().saturating_sub(1)),
-                        rect.y,
-                    ));
-                    let rest = "_".repeat(room.saturating_sub(width(&view.text)));
-                    spans.push(Span::styled(view.text, theme.style(Role::Text)));
-                    spans.push(Span::styled(rest, theme.style(Role::Border)));
-                    app.hits.add(
-                        Rect::new(value_x, rect.y, room as u16, 1),
-                        HitId::Input(InputTarget::DownloadDir),
-                    );
+            Setting::DownloadDir | Setting::AudioPlayer | Setting::SummaryCommand => {
+                match (&mut menu.editing, selected) {
+                    (Some(typed), true) => {
+                        let view = typed.view(room.saturating_sub(1), false);
+                        frame.set_cursor_position(Position::new(
+                            (value_x + view.cursor_col as u16).min(rect.right().saturating_sub(1)),
+                            rect.y,
+                        ));
+                        let rest = "_".repeat(room.saturating_sub(width(&view.text)));
+                        spans.push(Span::styled(view.text, theme.style(Role::Text)));
+                        spans.push(Span::styled(rest, theme.style(Role::Border)));
+                        app.hits.add(
+                            Rect::new(value_x, rect.y, room as u16, 1),
+                            HitId::Input(InputTarget::DownloadDir),
+                        );
+                    }
+                    _ => spans.push(Span::styled(
+                        truncate(&value, room),
+                        theme.style(Role::Text),
+                    )),
                 }
-                _ => spans.push(Span::styled(
-                    truncate(&value, room),
-                    theme.style(Role::Text),
-                )),
-            },
+            }
             Setting::Keys => spans.push(Span::styled(
                 truncate(&value, room),
                 theme.style(Role::StatusKey),

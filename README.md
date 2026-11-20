@@ -212,6 +212,8 @@ before anything changes:
 | `/roomnick <name>` | changes your name in the open room only |
 | `/topic <text>` | changes the open room's topic, where you may |
 | `/roomname <name>` | renames the open room, where you may |
+| `/archive` | asks how far back, then writes the open room's messages to a Markdown file (text only) |
+| `/catchup` | summarises what is unread in the open room with your `summary_command`, for you alone |
 | `/help` | shows the keys |
 
 A `<user>` is a full ID (`@name:server`), a link to them, or the display name or the part
@@ -367,7 +369,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `doctor`, `archive_room`, `catch_up` (these three unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`.
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
@@ -398,6 +400,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
 | `download_dir` | where `s` saves attachments |
 | `audio_player` | what plays voice and audio messages in the app (`x`): `"auto"` (default) takes the first of `mpv`, `ffplay`, `pw-play`, `paplay` and `aplay` found on `PATH`; or a command line of your own, such as `"mpv --volume=70"`, to which the file is added at the end (split into words like `$EDITOR`, no shell). It must play the file and end when the sound does. Also **Audio player** in the settings, which says what was found. See Good to know |
+| `summary_command` | the program that summarises unread messages for **Catch up**: a command line of your own (split into words like `$EDITOR`, no shell). It gets the unread text on its standard input, one message a line, and must print the summary and end with exit code 0. Empty (default): catching up is not offered. Also **Summary command** in the settings. With an online service the text of encrypted rooms leaves your machine: see Good to know |
 | `mouse` | turn off to use the terminal's own text selection |
 | `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
 | `notification_preview` (file only) | `false` hides message text, names and pictures in notifications |
@@ -501,6 +504,42 @@ Setting `preset = "vim"` keeps the default keys and adds:
   the poll and press `o` (also "Vote in poll…" in the message menu); voting again changes
   your vote. Your own poll can be ended from the message menu, and edited (`e`) as long as
   nobody voted. Votes of people you ignore are not counted.
+- **Archive a room**: "Archive this room as Markdown…" in the command palette,
+  "Archive as Markdown…" in a room's menu, or `/archive` asks how far back (what is
+  loaded now, the last 7 days, the last 30 days, everything) and writes one Markdown
+  file into your download folder (`download_dir`): the room's name and the dates it
+  covers on top, then the messages by day with time, sender and text. **Text only**:
+  pictures, files and voice messages appear as a line with their kind and file name,
+  they are not in the archive; the popup says so before anything is written. Replies
+  name what they answer, edited messages show their current text, deleted and
+  undecryptable ones a marker, reactions a count. The file is readable by you only, is
+  written in one go, and never replaces one that is there (the new one gets a number).
+  "Everything" loads the room's history from the server, which can take long; the popup
+  counts along and `Esc` gives it up (no file is left then). One archive takes at most
+  the newest 50,000 events and says so when the room has more. Messages of people you
+  ignore are left out. It is of the room under the cursor while the room list has the
+  focus, otherwise of the open room.
+- **Catch up**: "Catch up on unread messages" in the command palette, "Catch up
+  (summary)" in the menu of an unread room, or `/catchup` collects what is unread in
+  the room (at most the newest 300 messages or 24,000 characters; it says when there
+  were more), gives that text to the program you named in `summary_command`, and shows
+  what it prints in a popup that **only you see**: nothing is posted, and nothing is
+  marked as read. `c` copies the summary, `Esc` closes it and stops the program if it
+  still runs (it is given 3 minutes). matrix-rat has no service of its own for this and
+  starts nothing until you set a command and ask for a summary. **With a command that
+  sends its input to an online service, the text of the room leaves your machine, also
+  that of an encrypted room**: decide for yourself whom you trust with it. A program
+  that runs on your machine keeps it there. An example (not a recommendation, and not
+  tested by us with every version) with [Ollama](https://ollama.com), which runs a
+  model locally and reads the text from its standard input:
+
+  ```toml
+  summary_command = 'ollama run llama3.2 "Summarise this chat in a few sentences:"'
+  ```
+
+  The command gets one message a line, `[2026-11-20 14:03] Ann: text`, and what it
+  prints is treated as plain text: control characters are dropped and it is cut at
+  8,000 characters.
 - **Voice messages, audio, video and places**: a voice message shows its length and
   waveform, audio and video their length and size. `x` on a voice or audio message (or
   a click on its `▶`, or "Play audio" in its menu) plays it **in the app**: its first

@@ -97,6 +97,7 @@ pub struct Facts {
     pub opener: bool,
     /// What would play a voice message in the app.
     pub audio: Audio,
+    pub summary: Summary,
     /// `VISUAL` or `EDITOR` names an editor (never what it names).
     pub editor_set: bool,
     pub secret_store: SecretStoreMode,
@@ -112,6 +113,30 @@ pub struct Facts {
     pub ignored_settings: Vec<String>,
     /// The config file is not valid TOML at all.
     pub config_broken: bool,
+}
+
+/// What the `summary_command` setting comes to here. Never the command itself, for
+/// the same reason as with the audio player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Summary {
+    /// No command is set: catching up is not offered.
+    NotSet,
+    /// A command of the user's own that is there to be run.
+    Own,
+    /// The setting names a command that is not there or cannot be read as one.
+    Missing,
+}
+
+impl Summary {
+    pub fn from_choice(
+        choice: &Result<crate::catchup::Command, crate::catchup::NoCommand>,
+    ) -> Self {
+        match choice {
+            Ok(_) => Summary::Own,
+            Err(crate::catchup::NoCommand::NotSet) => Summary::NotSet,
+            Err(_) => Summary::Missing,
+        }
+    }
 }
 
 /// What the `audio_player` setting comes to here. Never the command itself: it is the
@@ -503,6 +528,21 @@ fn desktop(facts: &Facts) -> Section {
             "the command named by audio_player was not found",
         ),
     });
+    lines.push(match facts.summary {
+        Summary::Own => fine("Catching up on a room", "a command of your own"),
+        Summary::NotSet => with(
+            "Catching up on a room",
+            "not offered",
+            Level::Note,
+            "summary_command names no program to summarise with",
+        ),
+        Summary::Missing => with(
+            "Catching up on a room",
+            "not possible",
+            Level::Missing,
+            "the command named by summary_command was not found",
+        ),
+    });
     lines.push(if facts.editor_set {
         fine("Writing in an editor", "VISUAL or EDITOR names one")
     } else {
@@ -693,6 +733,7 @@ fn command_line_facts(
         ignored_settings: config.ignored.clone(),
         config_broken,
         audio: Audio::found(&config.audio_player),
+        summary: Summary::from_choice(&crate::catchup::choose_here(&config.summary_command)),
         ..Facts::from_environment()
     }
 }
@@ -728,6 +769,7 @@ impl Facts {
             xclip: on_path("xclip", path.as_deref()),
             opener: on_path("xdg-open", path.as_deref()),
             audio: Audio::NoneFound,
+            summary: Summary::NotSet,
             editor_set: crate::editor::command_from_env().is_ok(),
             secret_store: SecretStoreMode::File,
             own_theme: false,
@@ -770,6 +812,7 @@ pub(crate) fn sample() -> Facts {
         xclip: false,
         opener: true,
         audio: Audio::Known(crate::audio::Kind::Mpv),
+        summary: Summary::Own,
         editor_set: true,
         secret_store: SecretStoreMode::File,
         own_theme: false,
@@ -819,6 +862,39 @@ mod tests {
         assert_eq!(
             Audio::from_choice(&crate::audio::choose("auto", None, None)),
             Audio::NoneFound
+        );
+    }
+
+    #[test]
+    fn the_summary_line_says_whether_catching_up_works_and_never_the_users_command() {
+        let line = |facts: &Facts| {
+            Report::new(facts)
+                .sections
+                .iter()
+                .flat_map(|section| section.lines.clone())
+                .find(|line| line.label == "Catching up on a room")
+                .unwrap()
+        };
+        let mut facts = sample();
+        assert_eq!(line(&facts).value, "a command of your own");
+        assert_eq!(line(&facts).level, Level::Fine);
+        facts.summary = Summary::NotSet;
+        assert_eq!(line(&facts).value, "not offered");
+        assert_eq!(line(&facts).level, Level::Note);
+        facts.summary = Summary::Missing;
+        assert_eq!(line(&facts).level, Level::Missing);
+        assert!(line(&facts).hint.unwrap().contains("summary_command"));
+        assert_eq!(
+            Summary::from_choice(&crate::catchup::choose("", None, None)),
+            Summary::NotSet
+        );
+        assert_eq!(
+            Summary::from_choice(&crate::catchup::choose(
+                "no-such-program-x --key=1",
+                None,
+                None
+            )),
+            Summary::Missing
         );
     }
 
