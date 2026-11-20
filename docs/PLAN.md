@@ -9,7 +9,7 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-16, with 0.9.0.
+Last brought up to date: 2026-11-20, with the road to 1.0.0 (§6); releases up to 0.9.1.
 
 ## 1. What it is for
 
@@ -135,6 +135,10 @@ Rust 1.96 or newer.
 | 2026-11-15 | The icon: the chef rat, with a one-colour and an outline variant; a launcher entry is installed. |
 | 2026-11-15 | No Windows build. The README says how to run under WSL. |
 | 2026-11-15 | Pictures: kitty graphics and coloured blocks are enough; no sixel or iTerm2 for now. Opening a picture in the system's viewer covers the rest. |
+| 2026-11-20 | The order to 1.0.0: features first (§6, "The road to 1.0.0"), the three passes over the code last. |
+| 2026-11-20 | Voice and video calls wait until after 1.0.0 and until the SDK can join calls itself. |
+| 2026-11-20 | No plugin system. What is wanted of it is built in: transcription, translation, catching up, saved messages with reminders, archiving a room as text. |
+| 2026-11-20 | Not wanted: sticker packs, an image generator, a lock screen, popping out a chat, feeds or Home Assistant posting into rooms (a server's job). Several accounts are run as several profiles. Other languages wait; AUR and `.deb` later. |
 | 2026-11-15 | For 0.7: the sync guard, custom emoji pictures, space management, the rest of the debug hardening, prebuilt binaries. Popping out a chat, audio inside the app and several accounts wait. |
 
 ## 6. What comes next
@@ -143,32 +147,65 @@ See §6a for the plan that came out of looking at faro (0.8, done) and §6b for 
 be done, by demand:
 
 - Playing audio and voice messages inside the app (asked for by the user).
-- "Popping out" a chat into a window of its own (asked for by the user). A second terminal on
-  the same account is refused today by the profile lock, so this needs a design: one program
-  serving several windows, or a second instance that only reads.
-- Several accounts in one window (shares that design).
 - QR login.
 - macOS: notifications and their click, the secret store and following dark/light are
   Linux-only today (D-Bus); a medium piece of work, with nobody to test it.
-- More Linux packaging (AUR, a `.deb`): small now that release archives exist.
-- Other languages; exporting a chat; a gallery of a room's files.
+- More Linux packaging (AUR, a `.deb`): small now that release archives exist; later.
+- A gallery of a room's files.
 - Reading the shortcode a received custom-emoji reaction carries (the SDK does not expose it).
-- A plugin system (asked for by the user on 2026-11-18), not designed yet. The user's ideas:
-  speech to text for audio messages, sticker packs, an image generator, a locally running
-  bot (for example a daily summary of a room). First thoughts: plugins as separate programs;
-  `serve` with `send`/`read`/`listen` already carries bots; missing are actions on a message
-  and commands in the composer; a plugin is allowed per room and gets only what the user
-  hands it. Sticker packs rather built in than as a plugin.
-- A rooms bar for the single chat view (asked for by the user on 2026-11-18): with the room
-  list hidden, a one-line bar above the chat labelled "Rooms"; a click closes the chat and
-  shows the room list; rooms with new notifications appear in it as icons with their count.
-  Meant as a first part of a layout for small touch screens (Linux phones; later perhaps
-  Android or iOS). Open: what an icon is without pictures, and what happens when more rooms
-  are active than fit.
+
+Dropped by the user on 2026-11-20: popping out a chat, several accounts in one window (the
+README is to say how to run one window per `--profile`), a lock screen, sticker packs beyond
+the picker that exists, an image generator, feeds and Home Assistant posting into rooms.
+Other languages wait.
+
+### The road to 1.0.0 (agreed with the user on 2026-11-20)
+
+Features first, each written by matrix-claude with helpers and reviewed by matrix-agy as
+always; the passes over the code (next heading) come last, over the code as it will ship.
+
+1. **Sending voice notes.** A microphone symbol next to the clip and the smiley in the
+   composer. Holding it with the mouse records, letting go stops; from the keyboard one key
+   starts and the same key stops (a terminal does not report a key being let go). The
+   recording is put into the message box and is sent only when the user sends it. Recording
+   is done by a program on the system (as playback is); the symbol shows only where a
+   recorder and a microphone are found, which over ssh means the machine matrix-rat runs on.
+   With it: the three composer symbols get one size and one style (open: which, see below).
+2. **A rooms bar for the single chat view.** With the room list hidden, a one-line bar above
+   the chat labelled "Rooms"; a click closes the chat and shows the room list. Rooms with new
+   notifications appear in it with the icon the room list shows (initials where there is no
+   picture) and their count at the top right, the newest on the left. When more are active
+   than fit, the bar ends in `(n)>`, n being how many rooms are not shown; a click on it
+   opens the room list. A click on an icon opens that room.
+3. **Transcribing an audio message.** A button next to a voice or audio message; the text is
+   shown under it, to the user only. Built in, done by a local program the user installs if
+   they want it (candidate: `whisper-cli` of whisper.cpp, which also needs a model file, so
+   the setting names both); the button shows only where that program is found. Nothing is
+   sent to a service.
+4. **Saved messages and reminders.** A list of messages the user marked; a click goes to the
+   message. A reminder is a saved message with a time; it fires only while the app runs.
+5. **Translating a message.** The translation is shown under the original and stays there.
+   Open: what does the translating (a local program or a service the user names), and
+   whether a room can be set to translate what arrives without asking.
+6. **Catching up.** A summary of what is unread in a room, shown to the user only; it shares
+   the question of the provider with 5. A bot posting a daily summary is the smaller cousin:
+   a script against `serve` with an account of its own, for rooms that account is in (the
+   app and `serve` cannot share a profile).
+7. **Archiving a room as Markdown.** Text only; the flow says so before it writes.
+8. **Small things.** Check that the sticker picker and received stickers, animated ones
+   included, work as they are. A README section on several accounts as several profiles.
+   Right-to-left scripts: research first, then a decision.
+
+Link previews are there since 0.5.0 (`link_previews`); nothing to do.
+
+Open with the user: the look of the composer symbols; QR login, macOS, an update notice, the
+file gallery and the smaller leftovers of §6a; the unmerged branches.
 
 ### Before 1.0.0 (asked for by the user on 2026-11-17)
 
-Not features: three passes over what is there, each ending in a report the user reads.
+Not features: three passes over what is there, each ending in a report the user reads. They
+run after the features above (2026-11-20), in two prongs: the measured look at memory and
+CPU first, so that the review that follows has numbers to hold its findings against.
 
 - **A deep look at memory and CPU use.** Measured, not guessed: memory at rest and over a
   day with a real account (many rooms, large timelines, pictures), CPU at rest, while
@@ -182,7 +219,10 @@ Not features: three passes over what is there, each ending in a report the user 
   `cargo audit`/`cargo deny` are in use already; `cargo geiger` for unsafe code in the tree,
   `cargo udeps`/`cargo machete` for unused dependencies, `miri` or sanitizers for the tests
   that can run under them, a fuzzer for the parsers, another vendor's review model); the
-  user decides.
+  user decides. To try (2026-11-20): matrix-agy's swarm feature on a clean checkout without
+  `docs/reviews/`, for bugs and for speed and efficiency. It writes a report with evidence
+  for each finding; matrix-claude checks it; what all three agree on is implemented, small
+  local fixes by agy, anything in encryption, sync or the agent channel by matrix-claude.
 
 ## 6a. Ideas from faro (0.8: A to E approved by the user on 2026-11-16)
 
