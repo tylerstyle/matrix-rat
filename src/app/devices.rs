@@ -1162,8 +1162,16 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected();
         drain(&mut commands);
         app.on_event(key(KeyCode::F(2)));
-        let text = screen(&mut app, &mut terminal);
+        let mut text = screen(&mut app, &mut terminal);
         find(&text, "Enter to view");
+        // The list is longer than the screen: down until the row is in sight.
+        for _ in 0..40 {
+            if text.contains("Sessions") {
+                break;
+            }
+            app.on_event(key(KeyCode::Down));
+            text = screen(&mut app, &mut terminal);
+        }
         let (col, row) = find(&text, "Sessions");
         app.on_event(click(col, row));
         assert!(matches!(app.modal, Some(Modal::Sessions(_))));

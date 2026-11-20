@@ -658,7 +658,7 @@ mod tests {
     fn the_archive_asks_first_and_warns_that_it_is_text_only() {
         let (mut app, mut commands) = app();
         app.perform(Action::ArchiveRoom);
-        assert_eq!(*archive_stage(&app), ArchiveStage::Asking);
+        assert!(*archive_stage(&app) == ArchiveStage::Asking);
         // Nothing is asked of the worker before the user says so.
         assert!(asked(&mut commands).is_empty());
         let shown = flat(&screen(&mut app));
@@ -966,7 +966,7 @@ mod tests {
     fn nothing_unread_a_failed_load_and_a_failed_command_say_so() {
         let (mut app, _commands) = catching_up();
         unread(&mut app, 1, 0, false);
-        assert_eq!(*catch_up_stage(&app), CatchUpStage::Nothing);
+        assert!(*catch_up_stage(&app) == CatchUpStage::Nothing);
         assert!(app.take_summary_start().is_none());
         assert!(flat(&screen(&mut app)).contains("Nothing is unread"));
 
@@ -1053,7 +1053,7 @@ mod tests {
             shown.push(format!("{request:?}"));
             app.on_summary(catchup::Done {
                 id: request.id,
-                outcome: Outcome::Summary("the secret summary".to_owned()),
+                outcome: Outcome::Summary("the hushed summary".to_owned()),
             });
         }
         shown.push(format!("{app:?}"));
@@ -1069,7 +1069,8 @@ mod tests {
         for private in [
             "alice",
             "hunter2",
-            "secret",
+            "hushed",
+            "secret plan",
             "Beta",
             "Alpha",
             "never-written",

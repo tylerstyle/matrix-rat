@@ -529,12 +529,19 @@ Setting `preset = "vim"` keeps the default keys and adds:
   starts nothing until you set a command and ask for a summary. **With a command that
   sends its input to an online service, the text of the room leaves your machine, also
   that of an encrypted room**: decide for yourself whom you trust with it. A program
-  that runs on your machine keeps it there. An example (not a recommendation, and not
-  tested by us with every version) with [Ollama](https://ollama.com), which runs a
-  model locally and reads the text from its standard input:
+  that runs on your machine keeps it there. An example (only an example: not a
+  recommendation, and not tested by us) with [Ollama](https://ollama.com), which runs
+  a model on your machine and takes the prompt as an argument (`ollama run <model>
+  "prompt"`, see its CLI reference). As no shell is involved, a small script of your
+  own puts the text into the prompt, say `~/bin/summarise-chat` (executable):
+
+  ```sh
+  #!/bin/sh
+  exec ollama run <model> "Summarise this chat in a few sentences: $(cat)"
+  ```
 
   ```toml
-  summary_command = 'ollama run llama3.2 "Summarise this chat in a few sentences:"'
+  summary_command = "~/bin/summarise-chat"
   ```
 
   The command gets one message a line, `[2026-11-20 14:03] Ann: text`, and what it
