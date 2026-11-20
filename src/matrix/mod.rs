@@ -57,7 +57,16 @@ pub use session::{ReauthKind, ReauthTarget};
 pub use source::{EventSource, SOURCE_MAX, SourceKind};
 pub use spaces::{SpaceChild, SpaceDetails, SpaceEdit, SpaceSummary};
 pub use threads::ThreadPage;
-pub use upload::{OutgoingFile, VoiceMeta};
+pub use upload::OutgoingFile;
+// For the app, which does not record yet: so far only tests make one.
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "the composer will pass these once it records"
+    )
+)]
+pub use upload::VoiceMeta;
 pub use verify::{
     Answer, BackupStatus, DeviceTrust, Identity, SasEmoji, Security, SetUpOutcome, VerifyCmd,
     VerifyStage, VerifyUpdate,
