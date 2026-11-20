@@ -159,7 +159,8 @@ Each piece is written by matrix-claude with helpers and reviewed by matrix-agy a
 State on 2026-11-20 (evening): 1, 2, 3, 4, 5, 6, 7 and 8 are merged into the local `main`, reviewed and
 checked (unit and server tests green), nothing of it pushed: 1.0 is published as a whole after the
 passes of 6.2. All of 1 is in, listening to a recording before it is sent included (the ▶ on the
-waiting note, `Alt-L`). 6 and 7 came as one branch (`archive`). The composer symbols are the emoji for now
+waiting note, `Alt-L`). On 2026-11-21 the user sent one from the 1.0 build with a real account: it
+plays with its waveform in matrix-rat and in Element on iOS. 6 and 7 came as one branch (`archive`). The composer symbols are the emoji for now
 (the user: a monochrome look can wait).
 
 1. **Sending voice notes.** A microphone symbol next to the clip and the smiley in the
