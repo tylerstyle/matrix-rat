@@ -532,11 +532,18 @@ impl App {
     /// reply) belonged to, and so sent none: they wait again, and the text is back if
     /// nothing was written in the meantime.
     pub(super) fn on_files_not_sent(&mut self, send: u64, reason: String) {
+        // Stale answers (already answered, or from before a logout) are ignored quietly
+        // so they never flash an error toast over the login form.
+        let Some(handed) = self.attach.handed.remove(&send) else {
+            self.attach.sweep();
+            return;
+        };
+        if self.logged_out {
+            self.attach.sweep();
+            return;
+        }
         // A room that was left meanwhile has no composer for them to wait in.
-        if let Some(handed) = self.attach.handed.remove(&send)
-            && !self.logged_out
-            && self.rooms.iter().any(|room| room.id == handed.scope.0)
-        {
+        if self.rooms.iter().any(|room| room.id == handed.scope.0) {
             let here = self.attach_scope().as_ref() == Some(&handed.scope);
             let waiting = self.attach.pending.entry(handed.scope).or_default();
             for file in handed.files {

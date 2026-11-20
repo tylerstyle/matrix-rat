@@ -5312,21 +5312,24 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let _ = tokio::time::timeout(Duration::from_secs(2), stopped).await;
     drop(players);
     drop(note_programs);
-    // Unless the worker is still to read a file it was handed (a voice message sent
-    // just before quitting): then the files go with the app, a moment later.
-    if !app.attach.sends_out() {
-        crate::audio::remove_leftovers(&paths.audio_dir());
-    }
-    // Let the worker stop syncing cleanly, but never hang on the way out.
+    // Let the worker finish handing any queued files to the send queue and stop
+    // syncing cleanly, while `app` stays alive so temporary voice and picture files
+    // stay on disk until the worker has read them.
     if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
+        let wait = if app.attach.sends_out() {
+            Duration::from_secs(7)
+        } else {
+            Duration::from_secs(3)
+        };
         // The worker takes commands in order: the draft is written before it stops.
         app.shut_down_worker();
         // Close every command sender so the worker also sees the channel end.
         drop(matrix);
-        drop(app);
         let drained = async { while events.recv().await.is_some() {} };
-        let _ = tokio::time::timeout(Duration::from_secs(3), drained).await;
+        let _ = tokio::time::timeout(wait, drained).await;
     }
+    drop(app);
+    crate::audio::remove_leftovers(&paths.audio_dir());
     Ok(())
 }
 

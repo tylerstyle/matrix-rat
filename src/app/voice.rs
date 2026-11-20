@@ -956,6 +956,46 @@ mod tests {
         assert!(app.attachments().is_empty());
         assert!(path.exists());
         assert!(app.attach.sends_out());
+
+        // Shutting down closes the command channel while keeping `app` (and the voice
+        // file) alive so the worker can finish reading it before `app` drops.
+        app.shut_down_worker();
+        assert!(matches!(commands.try_recv(), Ok(MatrixCmd::Shutdown)));
+        assert!(matches!(
+            commands.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert!(path.exists());
+        drop(app);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn logging_out_during_a_send_suppresses_a_late_failure_toast() {
+        use crate::matrix::{MatrixEvent, MatrixHandle};
+        use crate::model::{Room, RoomKind};
+        let dir = Bin::new("logout-send", &[]);
+        let mut app = offered();
+        let (handle, _commands) = MatrixHandle::for_test();
+        app.matrix = Some(handle);
+        app.rooms = vec![Room::new("!alpha", "Alpha", RoomKind::Room)];
+        app.active = 0;
+        app.set_focus(Pane::Composer);
+        app.perform(Action::RecordVoice);
+        let _request = recording(&mut app);
+        let path = done(&mut app, &dir, 4);
+        app.on_event(key(KeyCode::Enter));
+        let send = app.attach.last_send();
+        assert!(path.exists());
+
+        app.reset_session();
+        assert!(!path.exists());
+        assert_eq!(toast(&app), "");
+        app.on_matrix(MatrixEvent::FilesNotSent {
+            send,
+            reason: "The voice message does not exist".to_owned(),
+        });
+        assert_eq!(toast(&app), "");
     }
 
     #[test]

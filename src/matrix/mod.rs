@@ -2165,6 +2165,11 @@ impl Worker {
         user_searcher.stop();
         dir_searcher.stop();
         ignore_tracker.stop();
+        if matches!(end, SessionEnd::Shutdown) {
+            // Give files sent right before quitting a moment to reach the send queue's
+            // persistent store before tearing timelines down.
+            timelines.finish_uploads(upload::SHUTDOWN_WAIT).await;
+        }
         timelines.stop();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
