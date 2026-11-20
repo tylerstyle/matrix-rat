@@ -108,6 +108,7 @@ impl App {
             audio_player: self.audio.setting_text(),
             audio_recorder: self.audio.recorder_setting_text(),
             record_refused: self.recording_refused().map(|why| why.short()),
+            recording: self.recording().is_some(),
             audio: self.audio_caps(),
             notes: self.note_caps(),
             transcribe_command: self.notes.transcribe_text(),

@@ -235,7 +235,9 @@ impl App {
         let has_draft = !self.composer.is_empty() || !self.attachments().is_empty();
         self.set_focus(Pane::Composer);
         let can_record = self.recording_refused().is_none();
-        let items = menu::composer_items(can_attach, can_record, has_draft, &self.keymap);
+        let recording = self.recording().is_some();
+        let items =
+            menu::composer_items(can_attach, can_record, recording, has_draft, &self.keymap);
         self.show_menu(target, "", items, at);
     }
 

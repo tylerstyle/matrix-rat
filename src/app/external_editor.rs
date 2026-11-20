@@ -25,6 +25,8 @@ impl App {
         }
         match command {
             Ok(argv) => {
+                // No microphone stays open behind an editor occupying the terminal.
+                self.stop_recording();
                 self.set_focus(Pane::Composer);
                 self.editor_request = Some(Request {
                     argv,

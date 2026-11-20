@@ -443,8 +443,13 @@ impl App {
         // sent unless all of it can be; the file in question keeps its place, for the
         // user to take off.
         for file in &files {
+            let is_voice = self.attach.voice(&file.path).is_some();
             let problem = match upload::check(&file.path) {
-                Ok(now) => upload::too_large(&now.name, now.size, self.attach.limit),
+                Ok(now) => {
+                    let name = if is_voice { &file.name } else { &now.name };
+                    upload::too_large(name, now.size, self.attach.limit)
+                }
+                Err(_) if is_voice => Some("The voice message is no longer available".to_owned()),
                 Err(reason) => Some(reason),
             };
             if let Some(problem) = problem {

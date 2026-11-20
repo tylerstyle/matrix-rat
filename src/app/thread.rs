@@ -205,6 +205,8 @@ impl App {
         };
         let root_message = message.clone();
 
+        // A recording begun in the room ends and waits there, at once.
+        self.stop_recording();
         // The room's unsent text goes to the store while it still is the open draft.
         self.save_draft();
         // An edit belongs to the room's messages; the room's draft waits for the return.
@@ -267,6 +269,7 @@ impl App {
         if self.thread_open() {
             return;
         }
+        self.stop_recording();
         self.save_draft();
         self.cancel_compose();
         let room_draft = self.composer.take();
@@ -325,6 +328,8 @@ impl App {
     /// do so themselves). False if no thread was open.
     pub(super) fn leave_thread(&mut self) -> bool {
         if self.thread_open() {
+            // A recording begun in the thread ends and waits there, at once.
+            self.stop_recording();
             // The thread's unsent text goes to the store while it still is the open draft.
             self.save_draft();
         }

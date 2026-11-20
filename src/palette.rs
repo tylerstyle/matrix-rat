@@ -441,6 +441,8 @@ pub struct PaletteContext {
     /// Why recording a voice message is not offered here, in a few words; `None`
     /// where it is.
     pub record_refused: Option<&'static str>,
+    /// A voice message recording is running (or saving) right now.
+    pub recording: bool,
     pub audio: AudioCaps,
     pub notes: NoteCaps,
     /// What the settings show for the commands that transcribe and translate, the
@@ -500,6 +502,7 @@ impl std::fmt::Debug for PaletteContext {
             .field("room_previews", &self.room_previews)
             .field("link_previews", &self.link_previews)
             .field("notifications", &self.notifications)
+            .field("recording", &self.recording)
             .field("audio", &self.audio)
             .field("verify_status", &self.verify_status)
             .field("backup_status", &self.backup_status)
@@ -1213,12 +1216,14 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Attach | Action::PastePicture | Action::CreatePoll | Action::OpenStickers => {
             ctx.has_room && !in_pending && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
         }
-        // As attaching a file, and only where something records.
+        // As attaching a file, and only where something records — except while one
+        // runs, when it stops it whatever became of the recorder since.
         Action::RecordVoice => {
-            ctx.record_refused.is_none()
-                && ctx.has_room
-                && !in_pending
-                && !matches!(ctx.compose_mode, ComposeMode::Edit(_))
+            ctx.recording
+                || (ctx.record_refused.is_none()
+                    && ctx.has_room
+                    && !in_pending
+                    && !matches!(ctx.compose_mode, ComposeMode::Edit(_)))
         }
         Action::ComposeInEditor => ctx.has_room && !in_pending,
         Action::JumpToNewest | Action::JumpToOldest | Action::JumpToUnread => {
@@ -1309,13 +1314,24 @@ fn action_meta<'a>(
             Cow::Borrowed(description),
             &["upload", "send file", "attach"],
         ),
-        // Greyed with the reason where the machine has nothing to record with.
+        // Stopping while one runs; otherwise greyed with the reason where the machine
+        // has nothing to record with.
         Action::RecordVoice => (
-            match ctx.record_refused {
-                Some(why) => Cow::Owned(format!("{description} ({why})")),
-                None => Cow::Borrowed(description),
+            if ctx.recording {
+                Cow::Borrowed("Stop recording")
+            } else {
+                match ctx.record_refused {
+                    Some(why) => Cow::Owned(format!("{description} ({why})")),
+                    None => Cow::Borrowed(description),
+                }
             },
-            &["voice note", "microphone", "audio message", "record"],
+            &[
+                "voice note",
+                "microphone",
+                "audio message",
+                "record",
+                "stop recording",
+            ],
         ),
         Action::PastePicture => (
             Cow::Borrowed(description),
@@ -2052,6 +2068,7 @@ mod tests {
             audio_player: "auto: mpv".to_owned(),
             audio_recorder: "auto: pw-record + opusenc".to_owned(),
             record_refused: None,
+            recording: false,
             audio: AudioCaps::default(),
             notes: NoteCaps::default(),
             transcribe_command: "auto: whisper-cli".to_owned(),
@@ -2305,6 +2322,18 @@ mod tests {
         assert!(!enabled(&p, Action::RecordVoice));
         assert_eq!(title(&p), "Record a voice message (no microphone found)");
         ctx.record_refused = None;
+
+        // While a recording runs, the entry says "Stop recording" and stays enabled
+        // even if the recorder became unavailable or Edit mode is set.
+        ctx.recording = true;
+        ctx.record_refused = Some("no microphone found");
+        ctx.compose_mode = ComposeMode::Edit(0);
+        let p = Palette::open(ctx.clone());
+        assert!(enabled(&p, Action::RecordVoice));
+        assert_eq!(title(&p), "Stop recording");
+        ctx.recording = false;
+        ctx.record_refused = None;
+        ctx.compose_mode = ComposeMode::Normal;
 
         // Editing disables Attach; invite rooms also disable Attach.
         ctx.thread_open = false;

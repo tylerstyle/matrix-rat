@@ -2983,6 +2983,9 @@ impl App {
                 }
             }
             Action::Edit => {
+                if self.recording_refuses_edit() {
+                    return;
+                }
                 let selected = self.timeline.selected;
                 match selected.and_then(|i| self.messages().get(i).map(|m| (i, m))) {
                     Some((i, message)) if message.editable() => self.edit_message(i),
@@ -2993,23 +2996,30 @@ impl App {
                     None => {}
                 }
             }
-            Action::EditLast => match self.last_editable() {
-                Some(i) => self.edit_message(i),
-                None if !self.composer.is_empty() || self.compose_mode != ComposeMode::Normal => {
-                    self.show_toast("Finish what you are writing first")
+            Action::EditLast => {
+                if self.recording_refuses_edit() {
+                    return;
                 }
-                // The last one could not be sent: there it is, to be sent again or
-                // discarded, which is offered on the message itself.
-                None if self
-                    .messages()
-                    .iter()
-                    .rfind(|message| message.editable())
-                    .is_some_and(|message| message.state == SendState::Failed) =>
-                {
-                    self.perform(Action::SelectOlder)
+                match self.last_editable() {
+                    Some(i) => self.edit_message(i),
+                    None if !self.composer.is_empty()
+                        || self.compose_mode != ComposeMode::Normal =>
+                    {
+                        self.show_toast("Finish what you are writing first")
+                    }
+                    // The last one could not be sent: there it is, to be sent again or
+                    // discarded, which is offered on the message itself.
+                    None if self
+                        .messages()
+                        .iter()
+                        .rfind(|message| message.editable())
+                        .is_some_and(|message| message.state == SendState::Failed) =>
+                    {
+                        self.perform(Action::SelectOlder)
+                    }
+                    None => self.show_toast("There is no message of yours to edit here"),
                 }
-                None => self.show_toast("There is no message of yours to edit here"),
-            },
+            }
             Action::React => {
                 if let Some(i) = self.timeline.selected
                     && self.modal.is_none()
@@ -3910,6 +3920,9 @@ impl App {
         for room_id in old.keys() {
             self.forget_room_drafts(room_id);
             self.unread.forget(room_id);
+            if self.cancel_recording_in(room_id) {
+                self.show_toast("That room is gone: the recording was discarded");
+            }
         }
 
         // Held back for a moment: if the full notification (with sender and text)
@@ -4084,12 +4097,6 @@ impl App {
             self.on_keybinds_key(key, code, mods);
             return;
         }
-        // Esc throws a running recording away before it does anything else, wherever
-        // the keys go just now: it is what is under way.
-        if code == KeyCode::Esc && mods == KeyModifiers::NONE && self.cancel_recording() {
-            self.show_toast("The recording was discarded");
-            return;
-        }
 
         // Quit and suspend work everywhere, including behind popups (handy for fetching
         // a password from another program).
@@ -4128,6 +4135,13 @@ impl App {
                 (KeyCode::PageDown | KeyCode::End, _) => self.help_scroll += 10,
                 _ => {}
             }
+            return;
+        }
+
+        // With no popup open, Esc discards an active recording of the open chat
+        // before doing anything else. A take that is already Saving is left to finish.
+        if code == KeyCode::Esc && mods == KeyModifiers::NONE && self.discard_active_recording() {
+            self.show_toast("The recording was discarded");
             return;
         }
 
@@ -4358,6 +4372,11 @@ impl App {
     fn on_mouse(&mut self, mouse: MouseEvent) {
         let hit_rect = self.hits.at_rect(mouse.column, mouse.row);
         let hit = hit_rect.map(|(_, id)| id);
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && hit != Some(HitId::Do(Action::RecordVoice))
+        {
+            self.clear_held_mic();
+        }
         if self.menu_mouse(&mouse, hit) {
             return;
         }
@@ -5081,6 +5100,23 @@ fn open_in_browser(url: &str) {
     TEST_OPENED_URLS.with(|urls| urls.borrow_mut().push(url.to_owned()));
 }
 
+/// Waits up to `grace` for `tasks` to end on their own. Returns `false` if any task
+/// outlived the grace and had to be aborted (after aborting, drains briefly so drop
+/// handlers — such as killing child process groups — run before returning).
+async fn drain_or_abort(tasks: &mut tokio::task::JoinSet<()>, grace: Duration) -> bool {
+    if tasks.is_empty() {
+        return true;
+    }
+    let done = async { while tasks.join_next().await.is_some() {} };
+    if tokio::time::timeout(grace, done).await.is_ok() {
+        return true;
+    }
+    tasks.abort_all();
+    let aborted = async { while tasks.join_next().await.is_some() {} };
+    let _ = tokio::time::timeout(Duration::from_millis(500), aborted).await;
+    false
+}
+
 pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<String>) -> Result<()> {
     let (portal_scheme, mut scheme_watch) = crate::portal::SchemeWatch::start().await;
     let guard = TerminalGuard::enter(config.mouse, config.window_title)?;
@@ -5143,9 +5179,11 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let (pasted, mut pasted_back) = tokio::sync::mpsc::unbounded_channel();
     // What the audio players say comes back here; their tasks end with them.
     let (player_news, mut player_back) = tokio::sync::mpsc::unbounded_channel();
-    // And what a recording says; its task is one of the same set.
-    let (record_news, mut record_back) = tokio::sync::mpsc::unbounded_channel();
     let mut players = tokio::task::JoinSet::new();
+    // And what a recording says; kept separate so releasing the terminal for `$EDITOR`
+    // can drain recordings without disturbing playback.
+    let (record_news, mut record_back) = tokio::sync::mpsc::unbounded_channel();
+    let mut recorders = tokio::task::JoinSet::new();
     // So do the programs that transcribe and translate, and what they wrote.
     let (note_news, mut note_back) = tokio::sync::mpsc::unbounded_channel();
     let mut note_programs = tokio::task::JoinSet::new();
@@ -5153,10 +5191,13 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     while !app.should_quit {
         if app.suspend_requested {
             app.suspend_requested = false;
-            // What played was told to stop: it is gone before the app is stopped, which
-            // it would not see to otherwise (a player is not stopped with the terminal).
-            let stopped = async { while players.join_next().await.is_some() {} };
-            let _ = tokio::time::timeout(Duration::from_secs(1), stopped).await;
+            // What played or recorded was told to stop: wait for them to end, and abort
+            // any that outlive the grace so no child process group stays alive across
+            // SIGTSTP (they are not stopped with the terminal).
+            let _ = drain_or_abort(&mut players, Duration::from_secs(1)).await;
+            if !drain_or_abort(&mut recorders, Duration::from_secs(2)).await {
+                app.cancel_recording();
+            }
             // The terminal frees its copies of the pictures now, in case we are
             // never resumed; they are sent again when drawn.
             app.flush_images(true);
@@ -5166,6 +5207,11 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             app.dirty = true;
         }
         if let Some(request) = app.take_editor_request() {
+            // A running recording was told to stop when the editor was requested; wait
+            // for it to finish (or kill it) before giving the terminal to the editor.
+            if !drain_or_abort(&mut recorders, Duration::from_secs(2)).await {
+                app.cancel_recording();
+            }
             // As for Ctrl-Z: the terminal frees its copies of the pictures now.
             app.flush_images(true);
             // Its reader thread would take the keys meant for the editor: the stream
@@ -5217,9 +5263,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         }
         if let Some(request) = app.take_record_start() {
             // As the players: the programs are tied to the thread that starts them.
-            players.spawn(crate::audio::record::run(request, record_news.clone()));
+            recorders.spawn(crate::audio::record::run(request, record_news.clone()));
         }
         while players.try_join_next().is_some() {}
+        while recorders.try_join_next().is_some() {}
         for request in app.take_note_starts() {
             note_programs.spawn(crate::textcmd::run(request, note_news.clone()));
         }
@@ -5307,10 +5354,12 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     app.cancel_recording();
     let stopped = async {
         while players.join_next().await.is_some() {}
+        while recorders.join_next().await.is_some() {}
         while note_programs.join_next().await.is_some() {}
     };
     let _ = tokio::time::timeout(Duration::from_secs(2), stopped).await;
     drop(players);
+    drop(recorders);
     drop(note_programs);
     // Let the worker finish handing any queued files to the send queue and stop
     // syncing cleanly, while `app` stays alive so temporary voice and picture files
@@ -10020,5 +10069,41 @@ mod tests {
                 assert!(!text.contains(private), "{private} in {text}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn drain_or_abort_waits_for_quick_tasks_and_aborts_hung_ones() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct OnDrop(Arc<AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let mut quick = tokio::task::JoinSet::new();
+        let finished = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&finished);
+        quick.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            mark.store(true, Ordering::SeqCst);
+        });
+        assert!(drain_or_abort(&mut quick, Duration::from_secs(1)).await);
+        assert!(finished.load(Ordering::SeqCst));
+
+        let mut hung = tokio::task::JoinSet::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = OnDrop(Arc::clone(&dropped));
+        hung.spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        // Let the spawned task start so the drop guard lives inside its future.
+        tokio::task::yield_now().await;
+        assert!(!drain_or_abort(&mut hung, Duration::from_millis(30)).await);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(hung.is_empty());
     }
 }
