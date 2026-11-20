@@ -1874,7 +1874,8 @@ mod tests {
     }
 
     /// An animated sticker (GIF, animated PNG, animated WebP) is shown as a still
-    /// picture: its first frame. The later frames are never unpacked.
+    /// picture: its first frame. (That the later frames are not read is shown for the
+    /// GIF only, by cutting it off inside its second frame.)
     #[test]
     fn an_animated_picture_is_shown_as_its_first_frame() {
         use image::AnimationDecoder;
@@ -1918,9 +1919,8 @@ mod tests {
             }
         }
 
-        // An animation cut off inside its second frame still shows its first: the
-        // rest of the file is not looked at. (A GIF's and a WebP's frames are found
-        // one after the other; a PNG is checked no further than its first picture.)
+        // A GIF cut off inside its second frame still shows its first: the rest of
+        // the file is not looked at.
         let cut = &gif[..gif.len() - 12];
         assert_eq!(decode(cut, THUMBNAIL_PIXELS).unwrap().original, ANIMATED);
     }
