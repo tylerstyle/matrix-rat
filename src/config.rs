@@ -81,6 +81,10 @@ pub struct Config {
     /// Keep transcripts and translations across restarts, in a file that holds them
     /// in plain form. Off: they last as long as the app runs.
     pub keep_notes: bool,
+    /// A command line of the user's own that summarises the unread messages of a room
+    /// ("Catch up"): the text on its standard input, the summary on its standard
+    /// output. Empty: there is none, and catching up is not offered.
+    pub summary_command: String,
     /// How pictures are shown: "auto", "halfblocks" or "off".
     pub images: ImageMode,
     /// Where the local store passphrase is kept: "auto", "keyring" or "file".
@@ -98,7 +102,8 @@ pub struct Config {
     pub ignored: Vec<String>,
 }
 
-/// Hand-written: the download folder is a path, the click command can hold one, and
+/// Hand-written: the download folder is a path, the click command and the summary
+/// command can hold one (or a key), and
 /// theme names can be the names of the user's own files; for those only whether they
 /// are set is shown.
 impl std::fmt::Debug for Config {
@@ -141,6 +146,7 @@ impl std::fmt::Debug for Config {
             .field("transcribe_model", &!self.transcribe_model.is_empty())
             .field("translate_command", &!self.translate_command.is_empty())
             .field("keep_notes", &self.keep_notes)
+            .field("summary_command", &!self.summary_command.trim().is_empty())
             .field("images", &self.images)
             .field("secret_store", &self.secret_store)
             .field("preset", &self.preset.is_some())
@@ -271,6 +277,7 @@ impl Default for Config {
             translate_command: String::new(),
             translate_language: crate::notes::DEFAULT_LANGUAGE.to_owned(),
             keep_notes: crate::notes::KEEP_BY_DEFAULT,
+            summary_command: String::new(),
             images: ImageMode::Auto,
             secret_store: crate::matrix::SecretStoreMode::File,
             preset: None,

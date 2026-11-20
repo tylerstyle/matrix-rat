@@ -1296,6 +1296,7 @@ impl Timelines {
             | MatrixCmd::Devices(_)
             | MatrixCmd::Keywords(_)
             | MatrixCmd::Agent(_)
+            | MatrixCmd::Collect(_)
             | MatrixCmd::CancelUserSearch
             | MatrixCmd::SearchDirectory { .. }
             | MatrixCmd::DirectoryNextPage { .. }

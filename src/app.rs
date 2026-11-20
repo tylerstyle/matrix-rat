@@ -2,6 +2,7 @@
 
 mod attach;
 mod code;
+pub mod collect;
 mod commands;
 mod complete;
 mod details;
@@ -424,6 +425,8 @@ pub struct App {
     audio: playback::AudioState,
     /// Transcripts and translations under messages, and the programs that make them.
     notes: notes::NotesState,
+    /// Archiving a room and catching up on it: the requests, and the summary command.
+    collect: collect::CollectState,
 }
 
 /// Hand-written: the app holds everything private there is (messages, drafts, ids,
@@ -488,6 +491,7 @@ impl std::fmt::Debug for App {
             .field("emotes", &self.emotes)
             .field("audio", &self.audio)
             .field("notes", &self.notes)
+            .field("collect", &self.collect)
             .finish_non_exhaustive()
     }
 }
@@ -573,6 +577,7 @@ impl App {
         app.download_dir = config.download_dir.clone();
         app.audio = playback::AudioState::new(&config.audio_player, &config.audio_recorder);
         app.notes = notes::NotesState::new(config);
+        app.collect.set_summary_setting(&config.summary_command);
         app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
         app.link_previews = config.link_previews;
@@ -745,6 +750,7 @@ impl App {
             emotes: Default::default(),
             audio: Default::default(),
             notes: Default::default(),
+            collect: Default::default(),
         }
     }
 
@@ -1111,6 +1117,7 @@ impl App {
             Setting::TranslateCommand => self.notes.translate_text(),
             Setting::TranslateLanguage => crate::notes::language(&self.notes.translate_language),
             Setting::KeepNotes => switch(self.notes.keep),
+            Setting::SummaryCommand => self.summary_setting_text(),
             Setting::Keys => self.keymap.preset_summary(),
             Setting::Profile => self.own_profile_summary(),
             Setting::Encryption => crate::verify::setting_text(self.verify.security).to_owned(),
@@ -1259,6 +1266,13 @@ impl App {
                 }
             }
             Setting::KeepNotes => self.toggle_keep_notes(),
+            Setting::SummaryCommand => {
+                if delta == 0
+                    && let Some(Modal::Settings(menu)) = &mut self.modal
+                {
+                    menu.editing = Some(LineEdit::from(self.collect.summary_setting()));
+                }
+            }
             Setting::Keys => {
                 if delta == 0 {
                     self.open_keybinds_editor();
@@ -1541,6 +1555,8 @@ impl App {
         self.stop_audio();
         // So do the transcripts and translations: they are the account's messages.
         self.forget_notes();
+        // So do a summary that is being made and an archive that is being written.
+        self.forget_collections();
         self.rooms.clear();
         self.active = 0;
         // The next session starts as every one does: its first room opens by itself.
@@ -3192,6 +3208,8 @@ impl App {
             Action::UserInfo => self.open_user_info_from_selection(),
             Action::MessageDetails => self.open_message_details(),
             Action::Doctor => self.open_doctor(),
+            Action::ArchiveRoom => self.open_archive(),
+            Action::CatchUp => self.open_catch_up(),
             Action::CreatePoll => self.open_poll_create(""),
             Action::OpenStickers => {
                 self.open_stickers("");
@@ -3307,6 +3325,7 @@ impl App {
             ) => {
                 self.modal = None;
             }
+            Some(Modal::Collect(_)) => self.close_collect(),
             Some(Modal::Palette(_)) => self.close_palette(),
             Some(Modal::Search(_)) => self.close_search(),
             Some(Modal::GlobalSearch(_)) => self.close_global_search(),
@@ -3463,6 +3482,7 @@ impl App {
                         Setting::TranscribeModel => self.set_transcribe_model(&text),
                         Setting::TranslateCommand => self.set_translate_command(&text),
                         Setting::TranslateLanguage => self.set_translate_language(&text),
+                        Setting::SummaryCommand => self.set_summary_command(&text),
                         _ => self.set_download_dir(&text),
                     }
                 }
@@ -3507,6 +3527,7 @@ impl App {
             Some(Modal::Keywords(_)) => self.on_keywords_key(code, mods),
             Some(Modal::Saved(_)) => self.on_saved_key(code, mods),
             Some(Modal::Doctor(_)) => self.on_doctor_key(code, mods),
+            Some(Modal::Collect(_)) => self.on_collect_key(code, mods),
             None => {}
         }
     }
@@ -3795,6 +3816,7 @@ impl App {
             MatrixEvent::Saved(event) => self.on_saved_event(event),
             // Answers for `matrix-rat serve`; the app never asks for them.
             MatrixEvent::Agent(_) => {}
+            MatrixEvent::Collect(event) => self.on_collect(event),
             MatrixEvent::DecryptionRetried {
                 event_id, result, ..
             } => self.on_decryption_retried(&event_id, result),
@@ -4301,7 +4323,9 @@ impl App {
             Some(Modal::Sessions(_) | Modal::Keys(_)) => {
                 return self.on_devices_paste(&text, first_line);
             }
-            Some(Modal::Pinned(_) | Modal::Details(_) | Modal::Doctor(_)) => return,
+            Some(Modal::Pinned(_) | Modal::Details(_) | Modal::Doctor(_) | Modal::Collect(_)) => {
+                return;
+            }
             Some(Modal::UserInfo(_)) => return self.on_user_info_paste(first_line),
             Some(Modal::OwnProfile(_)) => return self.on_own_profile_paste(&text, first_line),
             None => {}
@@ -4376,6 +4400,10 @@ impl App {
                             Some(Modal::OwnProfile(p)) if p.busy.is_none()
                         ) {
                             self.modal = None;
+                        }
+                        // Like Esc: what runs for it is given up.
+                        if matches!(self.modal, Some(Modal::Collect(_))) {
+                            self.close_collect();
                         }
                         if matches!(self.modal, Some(Modal::Sessions(_) | Modal::Keys(_))) {
                             // Like Esc: one step back, and out from the first page.
@@ -4579,6 +4607,7 @@ impl App {
                     Some(HitId::DetailsFlip) => self.flip_details(),
                     Some(HitId::DetailsCopy) => self.copy_details(),
                     Some(HitId::DoctorCopy) => self.copy_doctor(),
+                    Some(HitId::Collect(what)) => self.collect_click(what),
                     Some(HitId::ThreadRow(index)) => self.activate_thread_row(index),
                     Some(HitId::ThreadsMore) => self.click_threads_more(),
                     Some(HitId::ThreadsMine) => self.toggle_threads_mine(),
@@ -4631,6 +4660,7 @@ impl App {
                             | Modal::Keywords(_)
                             | Modal::Saved(_)
                             | Modal::Doctor(_)
+                            | Modal::Collect(_)
                     )
                 ) =>
             {
@@ -4662,6 +4692,7 @@ impl App {
                     Some(Modal::Keywords(_)) => self.scroll_keywords(delta),
                     Some(Modal::Saved(_)) => self.scroll_saved(delta),
                     Some(Modal::Doctor(_)) => self.scroll_doctor(delta),
+                    Some(Modal::Collect(_)) => self.scroll_collect(delta),
                     // Row by row: the list follows the selected row. Not while a
                     // value is being typed.
                     Some(Modal::Settings(menu)) if menu.editing.is_none() => {
@@ -5124,6 +5155,9 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // So do the programs that transcribe and translate, and what they wrote.
     let (note_news, mut note_back) = tokio::sync::mpsc::unbounded_channel();
     let mut note_programs = tokio::task::JoinSet::new();
+    // The same for the summary command of "catch up".
+    let (summary_news, mut summary_back) = tokio::sync::mpsc::unbounded_channel();
+    let mut summaries = tokio::task::JoinSet::new();
 
     while !app.should_quit {
         if app.suspend_requested {
@@ -5195,6 +5229,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             note_programs.spawn(crate::textcmd::run(request, note_news.clone()));
         }
         while note_programs.try_join_next().is_some() {}
+        if let Some(request) = app.take_summary_start() {
+            summaries.spawn(crate::catchup::run(request, summary_news.clone()));
+        }
+        while summaries.try_join_next().is_some() {}
         terminal::set_mouse(app.mouse)?;
         terminal::set_window_title(app.window_title)?;
         if std::mem::take(&mut app.repaint) {
@@ -5256,6 +5294,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             Some(done) = pasted_back.recv() => app.finish_paste(done),
             Some(update) = player_back.recv() => app.on_audio(update),
             Some(done) = note_back.recv() => app.on_note_done(done),
+            Some(done) = summary_back.recv() => app.on_summary(done),
             _ = theme_watch.changed() => app.reload_theme(),
             scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
             Some(done) = encoded_images.recv() => app.on_image_encoded(done),
@@ -5281,6 +5320,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let _ = tokio::time::timeout(Duration::from_secs(2), stopped).await;
     drop(players);
     drop(note_programs);
+    // A summary command that still runs is killed as its task is dropped.
+    drop(summaries);
     crate::audio::remove_leftovers(&paths.audio_dir());
     // Let the worker stop syncing cleanly, but never hang on the way out.
     if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
@@ -9916,6 +9957,7 @@ mod tests {
             (Action::React, true),
             (Action::ForwardMessage, true),
             (Action::Doctor, false),
+            (Action::ArchiveRoom, false),
         ] {
             app.modal = None;
             app.focus = Pane::Timeline;
@@ -9969,6 +10011,7 @@ mod tests {
             "Settings(",
             "Login(",
             "Doctor(",
+            "Collect(",
         ] {
             assert!(all.contains(popup), "{popup} never open in {all}");
         }

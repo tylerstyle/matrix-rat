@@ -30,6 +30,8 @@ pub(super) enum RoomCommand {
     RoomName,
     DirectChat,
     Whois,
+    Archive,
+    CatchUp,
     Help,
 }
 
@@ -50,6 +52,8 @@ impl RoomCommand {
             "roomname" => Self::RoomName,
             "dm" | "msg" => Self::DirectChat,
             "whois" => Self::Whois,
+            "archive" => Self::Archive,
+            "catchup" => Self::CatchUp,
             "help" => Self::Help,
             _ => return None,
         })
@@ -69,6 +73,12 @@ impl RoomCommand {
             Self::RoomName => ("a name", "<new room name>"),
             Self::Leave => return "/leave takes nothing after it: it leaves the open room".into(),
             Self::Help => return "/help takes nothing after it".into(),
+            Self::Archive => {
+                return "/archive takes nothing after it: it asks how far back".into();
+            }
+            Self::CatchUp => {
+                return "/catchup takes nothing after it: it summarises what is unread here".into();
+            }
         };
         format!("/{name} needs {what}: /{name} {form}")
     }
@@ -267,7 +277,10 @@ impl App {
             self.show_toast("Finish or cancel the edit first");
             return true;
         }
-        let bare = matches!(typed.command, RoomCommand::Leave | RoomCommand::Help);
+        let bare = matches!(
+            typed.command,
+            RoomCommand::Leave | RoomCommand::Help | RoomCommand::Archive | RoomCommand::CatchUp
+        );
         let missing = !bare && typed.arg.is_empty();
         // `/leave #elsewhere` must not leave the open room.
         let extra = bare && !typed.arg.is_empty();
@@ -370,6 +383,18 @@ impl App {
             }
             RoomCommand::RoomNick | RoomCommand::Topic | RoomCommand::RoomName => {
                 self.room_text_command(typed)
+            }
+            // The action itself says what stands in its way (as a toast), and the
+            // command is gone from the composer either way: it was understood.
+            RoomCommand::Archive => {
+                self.open_room_or_say()?;
+                self.perform(Action::ArchiveRoom);
+                Ok(())
+            }
+            RoomCommand::CatchUp => {
+                self.open_room_or_say()?;
+                self.perform(Action::CatchUp);
+                Ok(())
             }
             RoomCommand::Help => {
                 if !self.help_open {
@@ -658,7 +683,7 @@ mod tests {
     fn every_room_command_is_offered_in_the_completions() {
         let names = [
             "join", "leave", "invite", "kick", "ban", "unban", "ignore", "unignore", "nick",
-            "roomnick", "topic", "roomname", "dm", "msg", "whois", "help",
+            "roomnick", "topic", "roomname", "dm", "msg", "whois", "archive", "catchup", "help",
         ];
         for name in names {
             assert!(parse(&format!("/{name}")).is_some(), "{name}");

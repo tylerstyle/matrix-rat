@@ -2,6 +2,7 @@
 
 mod attach;
 mod audio;
+mod collect;
 mod complete;
 mod composer;
 mod details;

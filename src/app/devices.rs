@@ -1164,8 +1164,16 @@ mod tests {
         app.on_event(key(KeyCode::F(2)));
         // On a screen tall enough for the whole list of settings: the row is clicked.
         let mut tall = Terminal::new(TestBackend::new(100, 60)).unwrap();
-        let text = screen(&mut app, &mut tall);
+        let mut text = screen(&mut app, &mut tall);
         find(&text, "Enter to view");
+        // Should the list outgrow even that screen: down until the row is in sight.
+        for _ in 0..40 {
+            if text.contains("Sessions") {
+                break;
+            }
+            app.on_event(key(KeyCode::Down));
+            text = screen(&mut app, &mut tall);
+        }
         let (col, row) = find(&text, "Sessions");
         app.on_event(click(col, row));
         assert!(matches!(app.modal, Some(Modal::Sessions(_))));

@@ -57,6 +57,7 @@ impl App {
             recording: self.recording_found(),
             transcribe: self.notes_found().0,
             translate: self.notes_found().1,
+            summary: crate::doctor::Summary::from_choice(&self.summary_command()),
             ..Facts::from_environment()
         }
     }

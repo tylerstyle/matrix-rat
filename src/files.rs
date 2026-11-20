@@ -148,6 +148,77 @@ pub fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBu
     result
 }
 
+/// A private file that is written piece by piece: it appears in `dir` under its name
+/// (or `name (1)`, `name (2)`… where that is taken) only when [`NewFile::finish`] is
+/// called, complete. Nothing is overwritten and no link is followed, as with
+/// [`write_new`]. Only the user may read it (mode 0600): it holds the text of a room
+/// that may be encrypted. Dropped before it is finished, nothing of it stays.
+pub struct NewFile {
+    dir: PathBuf,
+    name: String,
+    partial: PathBuf,
+    file: std::io::BufWriter<std::fs::File>,
+}
+
+impl NewFile {
+    pub fn create(dir: &Path, name: &str) -> std::io::Result<Self> {
+        use std::io::ErrorKind::AlreadyExists;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::create_dir_all(dir)?;
+        for attempt in 0..100u32 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos());
+            let partial = dir.join(format!(
+                ".matrix-rat-{}-{nanos}-{attempt}.part",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&partial)
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        dir: dir.to_owned(),
+                        name: safe_name(name),
+                        partial,
+                        file: std::io::BufWriter::new(file),
+                    });
+                }
+                Err(err) if err.kind() == AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(std::io::Error::other("could not create a temporary file"))
+    }
+
+    /// Everything is written: the file gets its name, which is returned.
+    pub fn finish(mut self) -> std::io::Result<PathBuf> {
+        self.file.flush()?;
+        self.file.get_ref().sync_all()?;
+        // The partial file is removed when `self` is dropped, here as on an error.
+        publish(&self.dir, &self.name, &self.partial)
+    }
+}
+
+impl Write for NewFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.file.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl Drop for NewFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.partial);
+    }
+}
+
 /// Gives the finished file its name. A hard link fails if the name is taken (by
 /// anything, links included) and never shows a half-written file.
 fn publish(dir: &Path, name: &str, partial: &Path) -> std::io::Result<PathBuf> {
@@ -255,6 +326,48 @@ mod tests {
             })
             .count();
         assert_eq!(leftovers, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_written_piece_by_piece_is_private_whole_and_never_in_the_way() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("matrix-rat-newfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let names = |dir: &Path| {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let mut file = NewFile::create(&dir, "../room.md").unwrap();
+        file.write_all(b"one\n").unwrap();
+        // Not under its name before it is complete.
+        assert!(!dir.join("room.md").exists());
+        file.write_all(b"two\n").unwrap();
+        let first = file.finish().unwrap();
+        assert_eq!(first, dir.join("room.md"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"one\ntwo\n");
+        let mode = std::fs::metadata(&first).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // The name is taken: the next one goes beside it, as private.
+        let mut file = NewFile::create(&dir, "room.md").unwrap();
+        file.write_all(b"three").unwrap();
+        let second = file.finish().unwrap();
+        assert_eq!(second, dir.join("room (1).md"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"one\ntwo\n");
+        let mode = std::fs::metadata(&second).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // Given up: nothing of it stays.
+        let mut file = NewFile::create(&dir, "gone.md").unwrap();
+        file.write_all(b"half").unwrap();
+        drop(file);
+        assert_eq!(names(&dir), ["room (1).md", "room.md"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

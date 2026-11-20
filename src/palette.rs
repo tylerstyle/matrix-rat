@@ -441,6 +441,11 @@ pub struct PaletteContext {
     /// Why recording a voice message is not offered here, in a few words; `None`
     /// where it is.
     pub record_refused: Option<&'static str>,
+    /// What the settings show for the summary command.
+    pub summary_command: String,
+    /// Why catching up is not on offer (no summary command, or one that is not
+    /// found), in a few words; `None` when it is.
+    pub no_summary: Option<&'static str>,
     pub audio: AudioCaps,
     pub notes: NoteCaps,
     /// What the settings show for the commands that transcribe and translate, the
@@ -501,6 +506,7 @@ impl std::fmt::Debug for PaletteContext {
             .field("link_previews", &self.link_previews)
             .field("notifications", &self.notifications)
             .field("audio", &self.audio)
+            .field("no_summary", &self.no_summary)
             .field("verify_status", &self.verify_status)
             .field("backup_status", &self.backup_status)
             .field("ignored_users", &self.ignored_users)
@@ -871,6 +877,8 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         // Named after the space, with the spaces.
         Action::SpaceInfo,
         Action::Doctor,
+        Action::ArchiveRoom,
+        Action::CatchUp,
     ];
     for binding in active_bindings {
         if include_keymap_action(binding.action) == ActionInclusion::Skip {
@@ -1137,6 +1145,54 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         true,
         1,
     );
+    collect_room_text_actions(ctx, out);
+}
+
+/// The two room-level entries that work on a room's text: an archive, and a summary
+/// of what is unread. Without a summary command the second is greyed and says why.
+fn collect_room_text_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
+    let key_of = |action| ctx.keymap.label_for(action).map(str::to_owned);
+    let archive = keymap::action_spec(Action::ArchiveRoom).map_or("", |spec| spec.description);
+    push_entry(
+        out,
+        Target::Action(Action::ArchiveRoom),
+        Category::Action,
+        archive,
+        key_of(Action::ArchiveRoom),
+        archive,
+        &[
+            "archive",
+            "export",
+            "save room",
+            "markdown",
+            "backup",
+            "history",
+        ],
+        action_enabled(Action::ArchiveRoom, ctx),
+        1,
+    );
+    let catch_up = match ctx.no_summary {
+        Some(why) => format!("Catch up on unread messages ({why})"),
+        None => "Catch up on unread messages (summary)".to_owned(),
+    };
+    push_entry(
+        out,
+        Target::Action(Action::CatchUp),
+        Category::Action,
+        catch_up.clone(),
+        key_of(Action::CatchUp),
+        catch_up,
+        &[
+            "catch up",
+            "summary",
+            "summarise",
+            "summarize",
+            "unread",
+            "tl;dr",
+        ],
+        action_enabled(Action::CatchUp, ctx),
+        1,
+    );
 }
 
 #[derive(PartialEq, Eq)]
@@ -1196,6 +1252,14 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
             .target
             .as_ref()
             .is_some_and(|(_, kind)| !kind.is_pending()),
+        // About the room that room info would show; a summary needs its command too.
+        Action::ArchiveRoom | Action::CatchUp => {
+            ctx.target
+                .as_ref()
+                .is_some_and(|(_, kind)| !kind.is_pending())
+                && ctx.connected
+                && (action == Action::ArchiveRoom || ctx.no_summary.is_none())
+        }
         Action::Copy => sel.can_copy,
         Action::CopyCode => sel.can_copy_code,
         Action::Save | Action::OpenExternal => sel.can_save,
@@ -1809,6 +1873,13 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             enabled: true,
         },
         SettingItem {
+            target: Target::Action(Action::Setting(Setting::SummaryCommand)),
+            title: Setting::SummaryCommand.label(),
+            hint: Some(ctx.summary_command.clone()),
+            aliases: &["catch up", "summarise", "summarize", "llm", "setting"],
+            enabled: true,
+        },
+        SettingItem {
             target: Target::Action(Action::Setting(Setting::Keys)),
             title: Setting::Keys.label(),
             hint: Some(ctx.keymap.preset_summary()),
@@ -2052,6 +2123,8 @@ mod tests {
             audio_player: "auto: mpv".to_owned(),
             audio_recorder: "auto: pw-record + opusenc".to_owned(),
             record_refused: None,
+            summary_command: "not set".to_owned(),
+            no_summary: Some("set summary_command first"),
             audio: AudioCaps::default(),
             notes: NoteCaps::default(),
             transcribe_command: "auto: whisper-cli".to_owned(),

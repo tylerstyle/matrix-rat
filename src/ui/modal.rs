@@ -57,6 +57,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Keywords(popup) => super::keywords::draw(frame, app, area, popup),
         Modal::Doctor(popup) => super::doctor::draw(frame, app, area, popup),
         Modal::Saved(popup) => super::saved::draw(frame, app, area, popup),
+        Modal::Collect(popup) => super::collect::draw(frame, app, area, popup),
     }
     app.modal = Some(modal);
 }
@@ -315,7 +316,8 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
             | Setting::TranscribeCommand
             | Setting::TranscribeModel
             | Setting::TranslateCommand
-            | Setting::TranslateLanguage => match (&mut menu.editing, selected) {
+            | Setting::TranslateLanguage
+            | Setting::SummaryCommand => match (&mut menu.editing, selected) {
                 (Some(typed), true) => {
                     let view = typed.view(room.saturating_sub(1), false);
                     frame.set_cursor_position(Position::new(

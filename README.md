@@ -214,6 +214,8 @@ before anything changes:
 | `/roomnick <name>` | changes your name in the open room only |
 | `/topic <text>` | changes the open room's topic, where you may |
 | `/roomname <name>` | renames the open room, where you may |
+| `/archive` | asks how far back, then writes the open room's messages to a Markdown file (text only) |
+| `/catchup` | summarises what is unread in the open room with your `summary_command`, for you alone |
 | `/help` | shows the keys |
 
 A `<user>` is a full ID (`@name:server`), a link to them, or the display name or the part
@@ -397,7 +399,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `record_voice`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `room_active`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `close_chat` (unbound by default: close the chat and show the room list, what a click on **Rooms** in the rooms bar does), `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `record_voice`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `room_active`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `close_chat` (unbound by default: close the chat and show the room list, what a click on **Rooms** in the rooms bar does), `doctor`, `archive_room`, `catch_up` (these three unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `save_for_later`, `remind_me` (unbound by default), `saved_messages`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`, `transcribe`, `translate`, `transcribe_again`, `translate_again` (these two unbound by default).
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
@@ -435,6 +437,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `translate_command` | the command line that translates a message (`L`). Empty (default): translating is not offered. It gets the message's text on its standard input, the language as `{lang}` in its arguments and in the variable `MATRIX_RAT_TRANSLATE_TO`, and writes the translation to its standard output (split into words like `$EDITOR`, no shell). Also **Translate with** in the settings. See Good to know |
 | `translate_language` | the language to translate into, handed to your command as you write it (`"en"` by default; a code or a name, whatever your command understands). Also **Translate into** in the settings |
 | `keep_notes` | `false` (default): transcripts and translations are gone when matrix-rat ends. `true` keeps them in `notes.json` in the profile's data folder, **as plain text outside the encrypted store** (see Good to know). Also **Keep transcripts** in the settings |
+| `summary_command` | the program that summarises unread messages for **Catch up**: a command line of your own (split into words like `$EDITOR`, no shell). It gets the unread text on its standard input, one message a line, and must print the summary and end with exit code 0. Empty (default): catching up is not offered. Also **Summary command** in the settings. With an online service the text of encrypted rooms leaves your machine: see Good to know |
 | `mouse` | turn off to use the terminal's own text selection |
 | `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
 | `notification_preview` (file only) | `false` hides message text, names and pictures in notifications |
@@ -594,6 +597,58 @@ There is no command that lists or removes profiles; a profile is its two folders
   the poll and press `o` (also "Vote in poll…" in the message menu); voting again changes
   your vote. Your own poll can be ended from the message menu, and edited (`e`) as long as
   nobody voted. Votes of people you ignore are not counted.
+- **Archive a room**: "Archive this room as Markdown…" in the command palette,
+  "Archive as Markdown…" in a room's menu, or `/archive` asks how far back (what is
+  loaded now, the last 7 days, the last 30 days, or as far back as it goes) and writes
+  one Markdown file into your download folder (`download_dir`): the room's name and
+  the dates it covers on top, then the messages by day with time, sender and text.
+  **Text only**: pictures, files and voice messages appear as a line with their kind
+  and file name, they are not in the archive; the popup says so before anything is
+  written. Replies name what they answer, edited messages show their current text,
+  deleted and undecryptable ones a marker, reactions a count. Times are your local
+  time; the file's top says which offset from UTC that is. The file is readable by you
+  only, is written in one go, and never replaces one that is there (the new one gets a
+  number). Older messages are loaded from the server, which can take a while; the
+  popup counts along and `Esc` gives it up (no file is left then). **One archive takes
+  at most the newest 5,000 messages**, also with "as far back as it goes", and says so
+  in the file and at the end when the room has more. Messages of people you ignore are
+  left out. It is of the room under the cursor while the room list has the focus,
+  otherwise of the open room; "what is loaded now" is offered for the open room only.
+- **Catch up**: "Catch up on unread messages" in the command palette, "Catch up
+  (summary)" in the menu of an unread room, or `/catchup` collects what is unread in
+  the room (at most the newest 300 messages or 24,000 characters; it says when there
+  were more), gives that text to the program you named in `summary_command`, and shows
+  what it prints in a popup that **only you see**: nothing is posted, and nothing is
+  marked as read. If matrix-rat cannot find where you stopped reading, it gives the
+  program nothing and asks first whether to summarise the newest messages instead (as
+  many as the room counts as unread, else 50), and the result then says that these
+  were the newest, read or not. `c` copies the summary, `Esc` closes it and stops the
+  program if it still runs (it is given 3 minutes). matrix-rat has no service of its
+  own for this and starts nothing until you set a command and ask for a summary.
+  **With a command that sends its input to an online service, the text of the room
+  leaves your machine, also that of an encrypted room**: decide for yourself whom you
+  trust with it. The text is what the people in the room wrote, and any of them may
+  have written something meant to steer the program that summarises it: read a summary
+  as that program's guess, and give the program no rights to do anything but print.
+  A program that runs on your machine keeps the text there. An example (only an
+  example: not a recommendation, and not tested by us) with
+  [Ollama](https://ollama.com), which runs a model on your machine and takes the
+  prompt as an argument (`ollama run <model> "prompt"`, see its CLI reference). As no
+  shell is involved, a small script of your own puts the text into the prompt, say
+  `~/bin/summarise-chat` (executable):
+
+  ```sh
+  #!/bin/sh
+  exec ollama run <model> "Summarise this chat in a few sentences: $(cat)"
+  ```
+
+  ```toml
+  summary_command = "~/bin/summarise-chat"
+  ```
+
+  The command gets one message a line, `[2026-11-20 14:03] Ann: text`, and what it
+  prints is treated as plain text: control characters are dropped and it is cut at
+  8,000 characters.
 - **Voice messages, audio, video and places**: a voice message shows its length and
   waveform, audio and video their length and size. `x` on a voice or audio message (or
   a click on its `▶`, or "Play audio" in its menu) plays it **in the app**: its first

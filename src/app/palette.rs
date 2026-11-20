@@ -108,6 +108,8 @@ impl App {
             audio_player: self.audio.setting_text(),
             audio_recorder: self.audio.recorder_setting_text(),
             record_refused: self.recording_refused().map(|why| why.short()),
+            summary_command: self.summary_setting_text(),
+            no_summary: self.summary_command().err().map(|why| why.short()),
             audio: self.audio_caps(),
             notes: self.note_caps(),
             transcribe_command: self.notes.transcribe_text(),
@@ -310,11 +312,13 @@ impl App {
             | Setting::TranscribeCommand
             | Setting::TranscribeModel
             | Setting::TranslateCommand
-            | Setting::TranslateLanguage => {
+            | Setting::TranslateLanguage
+            | Setting::SummaryCommand => {
                 let mut menu = SettingsMenu::select(setting, self.has_theme_pair());
                 let text = match setting {
                     Setting::DownloadDir => self.download_dir.clone(),
                     Setting::AudioRecorder => self.audio.recorder_setting.clone(),
+                    Setting::SummaryCommand => self.collect.summary_setting().to_owned(),
                     _ => self.setting_text(setting),
                 };
                 menu.editing = Some(LineEdit::from(text.as_str()));

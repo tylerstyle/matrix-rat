@@ -207,6 +207,7 @@ impl App {
             remove_from: in_space
                 .filter(|space| space.can_edit)
                 .map(|space| space.name),
+            catch_up: self.summary_command().is_ok(),
         };
         let items = menu::room_items(room, &spaces, &self.keymap);
         self.show_menu(target, &title, items, at);
@@ -536,6 +537,8 @@ impl App {
             Action::RoomInfo
                 | Action::LeaveRoom
                 | Action::OpenThreads
+                | Action::ArchiveRoom
+                | Action::CatchUp
                 | Action::Manage(
                     Click::Favourite
                         | Click::LowPriority
@@ -1150,6 +1153,7 @@ mod tests {
                 "Open",
                 "Room info",
                 "Threads",
+                "Archive as Markdown…",
                 "Mark as unread",
                 "Add to favourites",
                 "Move to low priority",

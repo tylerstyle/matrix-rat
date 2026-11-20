@@ -184,6 +184,8 @@ action_table! {
     Action::MarkAllRead => ("mark_all_read", Context::Global, "Mark all rooms as read"),
     Action::CloseChat => ("close_chat", Context::Global, "Close the chat and show the room list"),
     Action::Doctor => ("doctor", Context::Global, "What the app found here"),
+    Action::ArchiveRoom => ("archive_room", Context::Global, "Archive this room as Markdown…"),
+    Action::CatchUp => ("catch_up", Context::Global, "Catch up: summarise what is unread"),
     Action::SidebarUp => ("sidebar_up", Context::Sidebar, "Previous room"),
     Action::SidebarDown => ("sidebar_down", Context::Sidebar, "Next room"),
     Action::SidebarTop => ("sidebar_top", Context::Sidebar, "First room"),

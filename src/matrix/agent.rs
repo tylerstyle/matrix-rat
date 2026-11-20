@@ -345,7 +345,11 @@ impl Agent {
 
 /// The room with this id, if the account is in it (and has not left it in this
 /// session, whatever a late sync answer makes it look like).
-fn joined_room(client: &Client, left: &super::left::LeftRooms, room_id: &str) -> Result<Room> {
+pub(super) fn joined_room(
+    client: &Client,
+    left: &super::left::LeftRooms,
+    room_id: &str,
+) -> Result<Room> {
     let id = RoomId::parse(room_id).map_err(|_| anyhow!("invalid room id"))?;
     let room = client
         .get_room(&id)

@@ -572,6 +572,9 @@ pub enum Setting {
     TranslateLanguage,
     /// Whether transcripts and translations are kept in a file across restarts.
     KeepNotes,
+    /// The user's command that summarises unread messages (text, like the audio
+    /// player); empty for none.
+    SummaryCommand,
     Keys,
     Encryption,
     Profile,
@@ -597,7 +600,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 33] = [
+    pub const ALL: [Setting; 34] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -623,6 +626,7 @@ impl Setting {
         Setting::TranslateCommand,
         Setting::TranslateLanguage,
         Setting::KeepNotes,
+        Setting::SummaryCommand,
         Setting::Keys,
         Setting::Doctor,
         Setting::Profile,
@@ -670,6 +674,7 @@ impl Setting {
             Setting::TranslateCommand => "Translate with",
             Setting::TranslateLanguage => "Translate into",
             Setting::KeepNotes => "Keep transcripts",
+            Setting::SummaryCommand => "Summary command",
             Setting::Keys => "Key bindings",
             Setting::Profile => "Profile",
             Setting::Encryption => "Encryption",
@@ -740,6 +745,9 @@ impl Setting {
             Setting::KeepNotes => {
                 "On: transcripts and translations survive a restart, in a file that holds them unencrypted. Off: they last while the app runs, and the file is removed."
             }
+            Setting::SummaryCommand => {
+                "A command of your own for Catch up: it reads a room's unread messages and prints a summary. An online service gets the text of encrypted rooms too. Enter to change; empty for none."
+            }
             Setting::Keys => {
                 "Edit key bindings or switch presets (F1 still opens the key overview)."
             }
@@ -775,7 +783,8 @@ pub struct SettingsMenu {
     pub selected: usize,
     /// Log out was chosen once; choosing it again does it.
     pub confirm_logout: bool,
-    /// The download folder or the audio player while it is being typed.
+    /// The download folder, the audio player or the summary command while it is
+    /// being typed.
     pub editing: Option<LineEdit>,
     /// Whether `ThemeDark` and `ThemeLight` slot rows are shown.
     pub show_theme_pair: bool,
@@ -1987,6 +1996,9 @@ pub enum Modal {
     Doctor(crate::doctor::Popup),
     /// The messages saved for later, of all rooms, and the form that sets a reminder.
     Saved(crate::saved::SavedPopup),
+    /// An archive of a room being asked for and written, or a summary of what is
+    /// unread being made and shown.
+    Collect(crate::app::collect::Popup),
 }
 
 /// Hand-written, so that a new kind of popup is added here by hand: each one holds
@@ -2023,6 +2035,7 @@ impl std::fmt::Debug for Modal {
             Self::Keywords(popup) => ("Keywords", popup),
             Self::Doctor(popup) => ("Doctor", popup),
             Self::Saved(popup) => ("Saved", popup),
+            Self::Collect(popup) => ("Collect", popup),
         };
         f.debug_tuple(name).field(popup).finish()
     }

@@ -200,6 +200,13 @@ pub enum Action {
     /// Show what the app found where it runs (terminal, pictures, the desktop's
     /// helpers, keys, config), to be copied into a bug report.
     Doctor,
+    /// Write the messages of the room (the open one; in the room list the one under
+    /// the cursor) to a Markdown file: asks how far back first, and says that it is
+    /// text only.
+    ArchiveRoom,
+    /// Summarise what is unread in that room with the user's summary command, for
+    /// the user alone.
+    CatchUp,
 }
 
 impl Action {
@@ -315,6 +322,8 @@ impl Action {
             | Action::ContextMenu
             | Action::MarkAllRead
             | Action::OpenThreads
+            | Action::ArchiveRoom
+            | Action::CatchUp
             | Action::Devices(_)
             // The saved messages are those of all rooms.
             | Action::OpenSaved
