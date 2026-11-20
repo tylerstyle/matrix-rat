@@ -3628,7 +3628,7 @@ impl App {
                 {
                     let empty_reset = messages.is_empty() && !reached_start;
                     let messages = self.place_unread_line(messages, detached.is_some());
-                    let messages = self.thread_snapshot(messages);
+                    let messages = self.thread_snapshot(messages, reached_start);
                     self.apply_timeline(messages);
                     self.forget_notes_of_deleted();
                     self.sync_pinned_flags(&room_id);
