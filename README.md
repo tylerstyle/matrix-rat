@@ -34,7 +34,7 @@ notifications and themes that follow your desktop are all there.
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, or `Alt-I` for the picture in the clipboard; `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
-| 📐 **Fits any window** | Below 60 columns the room list steps aside and one pane fills the window: the chat while you read and write, the room list when you go to it (`Alt-1`, `Alt-←`, or `Ctrl-K`). Popups scroll and keep their hints on small terminals, so it stays usable in a narrow split or a phone-sized SSH session. `Ctrl-B` puts the room list away the same way in a window of any size. |
+| 📐 **Fits any window** | Below 60 columns the room list steps aside and one pane fills the window: the chat while you read and write, the room list when you go to it (`Alt-1`, `Alt-←`, or `Ctrl-K`). Popups scroll and keep their hints on small terminals, so it stays usable in a narrow split or a phone-sized SSH session. `Ctrl-B` puts the room list away the same way in a window of any size. While the list is out of sight, a **rooms bar** above the chat leads back to it and shows the rooms with new notifications (see Good to know). |
 | 🎨 **Yours to shape** | Twelve built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
 | 🔔 **Notifications** | Desktop notifications with the chat's picture (click one to open its room), or plain ones through the terminal; none for what you are reading right now. Keywords of your own count like a mention. |
 | 🤖 **A channel for agents** | `matrix-rat serve` runs without the screen on a bot account; scripts send and read with `matrix-rat send`, `read` and `listen`, and a coding agent asks you a question and waits for your answer through `matrix-rat mcp`. See [For agents and scripts](#for-agents-and-scripts). |
@@ -168,6 +168,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `x` play or stop a voice or audio message (with mpv: `Space` pause, `←` `→` 5 seconds back or on), `W` transcribe a voice or audio message, `L` translate a message (both only once set up, see Good to know), `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
 | `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
+| `Alt-N` | open the room with the newest notifications (the first one in the rooms bar); again for the next one, round through all of them |
 | `Esc` | one step back at a time: closes the help or a popup, clears the room list's filter, goes back to the composer, gives up a reply or an edit, leaves a thread. In the composer with nothing left to cancel it closes the chat: no room is open (nothing in it counts as read, and its messages notify you like any other room's), your draft waits there, and the room list has the focus; `Enter` or a click opens a room again. Set `esc_closes_chat = false` (or switch off "Esc closes the chat" in the settings) to have `Esc` stop at the composer |
 | `Alt-U` | jump to the first unread message (the "new" line) |
 | `Ctrl-K` · `Ctrl-F` · `Ctrl-G` · `Ctrl-P` | find a room · find in this room · search all rooms · command palette |
@@ -179,7 +180,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 | `Alt-M` | record a voice message (also the 🎤 in the composer, shown where the machine can record: see `audio_recorder`). Not in this build yet: for now it only says so |
 | `Alt-I` | attach the picture in the clipboard (a screenshot, a picture copied in the browser); needs `wl-clipboard` on Wayland or `xclip` on X11 |
 | `Alt-V` | write the message in your editor (`$VISUAL`, else `$EDITOR`); what you save comes back into the composer, unsent |
-| `Ctrl-B` | hide the room list, or show it again (while hidden, going to it with `Alt-1` or `Ctrl-K` shows it in place of the chat, and so does closing the chat with `Esc`) |
+| `Ctrl-B` | hide the room list, or show it again (while hidden, going to it with `Alt-1` or `Ctrl-K` shows it in place of the chat, and so does closing the chat with `Esc`, or a click on **Rooms** in the rooms bar above the chat) |
 | `F2` / `F3` | settings / next theme |
 | `Ctrl-Q` | quit |
 
@@ -368,7 +369,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 **Action names**
 
-- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `record_voice`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
+- **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `record_voice`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `room_active`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `close_chat` (unbound by default: close the chat and show the room list, what a click on **Rooms** in the rooms bar does), `doctor` (unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`, `transcribe`, `translate`, `transcribe_again`, `translate_again` (these two unbound by default).
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
@@ -394,6 +395,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `notification_icon` | the program's icon in desktop notifications: `"color"` (default), `"outline"` (a line drawing in one colour) or `"generic"` (the desktop's own new-message icon). matrix-rat's icons are used when they are installed (the Nix package does that, see [`assets/`](assets/README.md)), else the desktop's own |
 | `sidebar_hidden` | `true`: the room list is put away (`Ctrl-B` changes it) |
 | `sidebar_width` | width of the room list (or drag the divider) |
+| `rooms_bar` | `true` (default): while the room list is out of sight (put away with `Ctrl-B`, or a chat is open in a window below 60 columns), a line above the chat with **☰ Rooms** and the rooms that have new notifications. `false` (or "Rooms bar" in the settings): no such line, the chat has it |
 | `esc_closes_chat` | `true` (default): `Esc` in the composer, with no reply, edit or thread left to step back from, closes the chat and goes to the room list. `false`: `Esc` stops at the composer |
 | `read_receipts`, `read_markers`, `typing_notices` | what others see of you, and what you see of them |
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
@@ -458,6 +460,22 @@ There is no command that lists or removes profiles; a profile is its two folders
 
 ## Good to know
 
+- **The rooms bar.** While the room list is out of sight (put away with `Ctrl-B`, or a
+  chat is open in a window below 60 columns) the line above the chat reads
+  `☰ Rooms R ³ D ¹²`. A click on **Rooms** closes the chat and shows the room list in its
+  place (while you edit a message it asks you to finish or cancel the edit first;
+  the empty rest of the line does nothing). After it come the rooms with new
+  notifications, the newest on the left and never the open one: each with the picture
+  or the coloured initial the room list shows for it, and its count in small raised
+  digits behind it, in the colours of the list's badge (a mention stands out). They
+  are the rooms and the numbers the window title adds up: muted rooms, invitations
+  and rooms that are only marked unread are not among them. A click on one opens it,
+  a right-click gives the room's menu, and `Alt-N` opens the first of them, pressed again
+  the next, and so on round. The line is left out where fewer than three lines would
+  stay for the messages. When more
+  rooms are active than fit, the line ends in `(4)>` for the four that are not shown;
+  a click there shows the room list. "Rooms bar" in the settings (`rooms_bar = false`)
+  turns the line off.
 - **Spaces** narrow the room list (`Alt-S`, or the line above the list). Right-click
   that line, or `Ctrl-P` "Space info", for the space's info: name, topic, members and
   settings as for a room, and its **Rooms**, marked when you are not in one or when

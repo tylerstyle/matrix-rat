@@ -1,0 +1,5 @@
+---
+source: src/ui/rooms_bar.rs
+expression: "bar(&mut app, 60)"
+---
+" ☰ Rooms 日³ 🐀¹ SS⁹⁹⁺ ? ⁹ M ⁴²                            " Hidden by multi-width symbols: [(2, " "), (11, " "), (15, " ")]

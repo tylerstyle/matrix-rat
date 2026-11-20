@@ -958,6 +958,16 @@ impl Room {
         self.kind.is_pending()
     }
 
+    /// Whether the room has news that notifies: a number on its badge that counts.
+    /// The window title adds these numbers up and the rooms bar shows these rooms.
+    ///
+    /// - A muted room does not count (its badge is not news either).
+    /// - A room marked unread by hand, or bold without a number, has nothing to count.
+    /// - Invitations and join requests are not messages; the room list shows them apart.
+    pub fn notifies(&self) -> bool {
+        self.unread > 0 && !self.muted && !self.is_pending()
+    }
+
     /// Whether the room list shows the room as unread, for whatever reason.
     pub fn shows_unread(&self) -> bool {
         self.bold || self.unread > 0 || self.mention || self.marked_unread

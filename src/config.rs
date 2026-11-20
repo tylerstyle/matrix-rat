@@ -25,6 +25,10 @@ pub struct Config {
     /// `Esc` in the composer, with nothing left to cancel, closes the chat: no room is
     /// open then, and the room list has the focus. Off: `Esc` stops at the composer.
     pub esc_closes_chat: bool,
+    /// While the room list is out of sight (put away, or the window is narrow and a
+    /// chat is open): a line above the chat that leads back to the list and shows the
+    /// rooms with new notifications. Off: the chat has that line too.
+    pub rooms_bar: bool,
     /// Let others see when you are typing.
     pub typing_notices: bool,
     /// Let others see how far you have read. When off, the server still learns it
@@ -106,6 +110,7 @@ impl std::fmt::Debug for Config {
             .field("sidebar_hidden", &self.sidebar_hidden)
             .field("mouse", &self.mouse)
             .field("esc_closes_chat", &self.esc_closes_chat)
+            .field("rooms_bar", &self.rooms_bar)
             .field("typing_notices", &self.typing_notices)
             .field("read_receipts", &self.read_receipts)
             .field("do_not_disturb", &self.do_not_disturb)
@@ -246,6 +251,7 @@ impl Default for Config {
             sidebar_hidden: false,
             mouse: true,
             esc_closes_chat: true,
+            rooms_bar: true,
             typing_notices: true,
             read_receipts: true,
             do_not_disturb: false,
@@ -821,6 +827,10 @@ mod tests {
         let config: Config = toml::from_str("window_title = false").unwrap();
         assert!(!config.window_title);
         assert!(config.esc_closes_chat);
+        assert!(config.rooms_bar);
+        let config: Config = toml::from_str("rooms_bar = false").unwrap();
+        assert!(!config.rooms_bar);
+        assert!(config.window_title);
         assert_eq!(config.images, ImageMode::Auto);
     }
 

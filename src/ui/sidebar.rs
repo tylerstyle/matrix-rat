@@ -27,6 +27,33 @@ pub(super) fn initial(name: &str) -> String {
     }
 }
 
+/// The look of the small coloured tile that stands in for a room's picture: the
+/// room's own colour, with its initial on it. The room list and the rooms bar share it.
+pub(super) fn tile_style(theme: &crate::theme::Theme, name: &str) -> ratatui::style::Style {
+    ratatui::style::Style::new()
+        .fg(theme.style(Role::UnreadBadge).fg.unwrap_or_default())
+        .bg(theme.user_color(name))
+        .add_modifier(ratatui::style::Modifier::BOLD)
+}
+
+/// The number on a room's badge; none for a room without one.
+pub(super) fn count_label(unread: u32) -> String {
+    match unread {
+        0 => String::new(),
+        n if n > 99 => "99+".to_owned(),
+        n => n.to_string(),
+    }
+}
+
+/// The colours of a room's badge: a mention stands out.
+pub(super) fn badge_role(mention: bool) -> Role {
+    if mention {
+        Role::MentionBadge
+    } else {
+        Role::UnreadBadge
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = super::pane_block(app, Pane::Sidebar, "Rooms");
     let inner = block.inner(area);
@@ -195,20 +222,16 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     focused && Some(*index) == cursor_room,
                 );
 
-                let badge = match room.unread {
-                    0 => String::new(),
-                    n if n > 99 => " 99+ ".to_owned(),
-                    n => format!(" {n} "),
+                let badge = match count_label(room.unread) {
+                    count if count.is_empty() => count,
+                    count => format!(" {count} "),
                 };
                 let badge_width = width(&badge) as u16;
                 // A small coloured tile with the room's initial stands in for its
                 // picture: 1 column of margin, the tile, 1 of gap.
                 let name_width = (rect.width.saturating_sub(3 + tile_cols + badge_width)) as usize;
                 let name_style = theme.style(base);
-                let tile = ratatui::style::Style::new()
-                    .fg(theme.style(Role::UnreadBadge).fg.unwrap_or_default())
-                    .bg(theme.user_color(&room.name))
-                    .add_modifier(ratatui::style::Modifier::BOLD);
+                let tile = tile_style(theme, &room.name);
                 // The open room keeps a bright bar at the edge, so it is easy to find
                 // wherever the focus is.
                 let marker = if active {
@@ -259,12 +282,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 if badge_width > 0 && rect.width > badge_width + 4 {
                     let badge_rect =
                         Rect::new(rect.right() - badge_width - 1, rect.y, badge_width, 1);
-                    let role = if room.mention {
-                        Role::MentionBadge
-                    } else {
-                        Role::UnreadBadge
-                    };
-                    let line = Line::from(Span::styled(badge, theme.style(role)));
+                    let line =
+                        Line::from(Span::styled(badge, theme.style(badge_role(room.mention))));
                     frame.render_widget(&line, badge_rect);
                 }
                 app.hits.add(rect, HitId::Room(*index));
@@ -434,13 +453,6 @@ fn draw_space_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let name = app.space_name().unwrap_or_else(|| "All rooms".to_owned());
     let cur = app.selected_space_unread();
     let other = app.other_spaces_unread();
-    let badge_role = |mention: bool| {
-        if mention {
-            Role::MentionBadge
-        } else {
-            Role::UnreadBadge
-        }
-    };
     let mut cur_badge = cur.and_then(|c| {
         if c.notifications > 0 {
             Some((format!(" {}", c.notifications), badge_role(c.mention)))

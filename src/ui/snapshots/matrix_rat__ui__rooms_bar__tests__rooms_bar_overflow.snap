@@ -1,0 +1,8 @@
+---
+source: src/ui/rooms_bar.rs
+expression: "lines.join(\"\\n\")"
+---
+" ☰ B ¹ C ² D ³ E ⁴ F ⁵ G ⁶ H ⁷ I ⁸ J ⁹ K ¹⁰ L ¹¹ M ¹² N ¹³ O ¹⁴ P ¹⁵ Q ¹⁶ R ¹⁷ S ¹⁸ T ¹⁹ U ²⁰ (10)>" Hidden by multi-width symbols: [(2, " ")]
+" ☰ B ¹ C ² D ³ E ⁴ F ⁵ G ⁶ H ⁷ I ⁸ J ⁹ K ¹⁰ L ¹¹ M ¹² (18)>" Hidden by multi-width symbols: [(2, " ")]
+" ☰ R… B ¹ C ² D ³ E ⁴ F ⁵ G ⁶ H ⁷ (23)>" Hidden by multi-width symbols: [(2, " ")]
+" ☰ R… B ¹ C ² D ³ (27)>" Hidden by multi-width symbols: [(2, " ")]

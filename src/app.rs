@@ -25,6 +25,7 @@ mod playback;
 mod poll;
 mod previews;
 mod rooms;
+mod rooms_bar;
 mod safety;
 pub mod search;
 mod spaces;
@@ -251,6 +252,12 @@ pub struct App {
     /// The `esc_closes_chat` setting: `Esc` in the composer, with nothing left to
     /// cancel, closes the chat.
     pub esc_closes_chat: bool,
+    /// The `rooms_bar` setting: with the room list out of sight, a line above the
+    /// chat that leads back to it and shows the rooms with new notifications.
+    pub rooms_bar: bool,
+    /// The room the "newest room with notifications" key opened last, while it is
+    /// still the open one: the key goes on from there (see `open_active_room`).
+    active_from: Option<String>,
     /// False while the terminal window is in the background.
     window_focused: bool,
     /// The draft that was in the composer when an edit started.
@@ -439,6 +446,8 @@ impl std::fmt::Debug for App {
             .field("edit_stash", &self.edit_stash.is_some())
             .field("pending_copy", &self.pending_copy.is_some())
             .field("window_title", &self.window_title)
+            .field("rooms_bar", &self.rooms_bar)
+            .field("active_from", &self.active_from.is_some())
             .field("title_written", &self.title_written)
             .field("found", &self.found)
             .field("notify_mode", &self.notify_mode)
@@ -550,6 +559,7 @@ impl App {
         app.window_title = config.window_title;
         app.read_markers = config.read_markers;
         app.esc_closes_chat = config.esc_closes_chat;
+        app.rooms_bar = config.rooms_bar;
         app.mouse = config.mouse;
         app.found.image_mode = config.images;
         app.found.secret_store = config.secret_store;
@@ -635,6 +645,8 @@ impl App {
             auto_opened: true,
             chat_closed: false,
             esc_closes_chat: true,
+            rooms_bar: true,
+            active_from: None,
             window_focused: true,
             edit_stash: None,
             typing_sent: None,
@@ -1074,6 +1086,7 @@ impl App {
             Setting::LinkPreviews => self.link_previews.label().to_owned(),
             Setting::Mouse => switch(self.mouse),
             Setting::EscClosesChat => switch(self.esc_closes_chat),
+            Setting::RoomsBar => switch(self.rooms_bar),
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
             Setting::ReadMarkers => switch(self.read_markers),
@@ -1150,6 +1163,12 @@ impl App {
                         self.chat_closed = false;
                     }
                 }
+            }
+            Setting::RoomsBar => {
+                self.rooms_bar = !self.rooms_bar;
+                self.save_setting("rooms_bar", self.rooms_bar);
+                // Pictures are placed by row: the chat moves up or down a line.
+                self.repaint = true;
             }
             Setting::TypingNotices => {
                 self.typing_notices = !self.typing_notices;
@@ -1490,6 +1509,7 @@ impl App {
         self.active = 0;
         // The next session starts as every one does: its first room opens by itself.
         self.chat_closed = false;
+        self.active_from = None;
         self.timeline = TimelineState::default();
         self.composer.take();
         self.compose_mode = ComposeMode::Normal;
@@ -1611,6 +1631,9 @@ impl App {
             return;
         }
         self.auto_opened = false;
+        // Whatever opens a room: the key for the newest active room starts afresh
+        // (it notes its own room after this).
+        self.active_from = None;
         // With no chat open every room is another one, the one that was left too.
         let other = Some(index) != self.open_index();
         let fresh = opened || other;
@@ -1677,6 +1700,7 @@ impl App {
         self.leave_open_room();
         self.chat_closed = true;
         self.auto_opened = false;
+        self.active_from = None;
         self.timeline = TimelineState::default();
         self.row_cache = None;
         self.timeline_rev += 1;
@@ -2783,6 +2807,7 @@ impl App {
                 self.step_theme(1);
             }
             Action::Back => self.back(),
+            Action::CloseChat => self.leave_for_room_list(),
             Action::PageUp => {
                 self.timeline.scroll += self.timeline.page.saturating_sub(1).max(1);
                 self.timeline.older_armed = true;
@@ -3051,6 +3076,7 @@ impl App {
             Action::FilterPeople => self.toggle_sidebar_filter(false),
             Action::RoomPrev => self.step_room(-1),
             Action::RoomNext => self.step_room(1),
+            Action::RoomActive => self.open_active_room(),
             Action::Save => {
                 if !self.save_attachment(false) {
                     self.show_toast("Nothing to save in this message");
@@ -4353,6 +4379,9 @@ impl App {
                     }
                     Some(HitId::Splitter) => self.dragging_splitter = true,
                     Some(HitId::Room(index)) => self.open_room(index),
+                    // The room list is out of sight: it follows to the room, out of
+                    // a space the room is not in.
+                    Some(HitId::BarRoom(index)) => self.show_room(index),
                     Some(HitId::RoomFilter) => {
                         self.cancel_pending_jump();
                         self.set_focus(Pane::Sidebar);
@@ -7669,6 +7698,14 @@ mod tests {
         assert!(app.sidebar_rows().len() > rows);
         app.on_event(key(KeyCode::Enter));
         assert_eq!(app.sidebar_rows().len(), rows);
+        // The rooms bar: off, and on again.
+        app.on_event(key(KeyCode::Down));
+        assert!(app.rooms_bar);
+        app.on_event(key(KeyCode::Enter));
+        assert!(!app.rooms_bar);
+        assert!(!Config::load(&file).unwrap().rooms_bar);
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.rooms_bar);
         // Link previews: off, unencrypted rooms, all rooms, round; arrows go both ways.
         app.on_event(key(KeyCode::Down));
         assert_eq!(app.link_previews, crate::config::LinkPreviews::Off);

@@ -2,8 +2,8 @@
 source: src/app/rooms.rs
 expression: "screen(&mut app, &mut small)"
 ---
-"╭ 2 #Rats ───────────────────────────────────╮"
-"│╭ Room info ───────────────────────────────╮│"
+" ☰ Rooms                                     " Hidden by multi-width symbols: [(2, " ")]
+"╭╭ Room info ───────────────────────────────╮╮"
 "││   Change topic…                          ││"
 "││   Invite someone…                        ││"
 "││   Name in room…     default              ││"

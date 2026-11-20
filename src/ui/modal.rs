@@ -294,6 +294,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
             Setting::ThemePairing
             | Setting::Mouse
             | Setting::EscClosesChat
+            | Setting::RoomsBar
             | Setting::TypingNotices
             | Setting::ReadReceipts
             | Setting::DoNotDisturb

@@ -1,0 +1,10 @@
+---
+source: src/ui/rooms_bar.rs
+expression: "lines.join(\"\\n\")"
+---
+" ☰ Rooms and everything else that could ever … B ² D ⁵ N ¹²" Hidden by multi-width symbols: [(2, " ")]
+" ☰ Rooms and everything e… B ² D ⁵ N ¹²" Hidden by multi-width symbols: [(2, " ")]
+" ☰ Rooms … B ² D ⁵ N ¹²" Hidden by multi-width symbols: [(2, " ")]
+" ☰ B ² (2)>" Hidden by multi-width symbols: [(2, " ")]
+" ☰  " Hidden by multi-width symbols: [(2, " ")]
+" "

@@ -419,6 +419,8 @@ pub struct PaletteContext {
     pub own_display_name: Option<String>,
     pub mouse: bool,
     pub esc_closes_chat: bool,
+    /// The `rooms_bar` setting: the line above the chat while the room list is hidden.
+    pub rooms_bar: bool,
     pub typing_notices: bool,
     pub read_receipts: bool,
     pub do_not_disturb: bool,
@@ -486,6 +488,7 @@ impl std::fmt::Debug for PaletteContext {
             .field("connected", &self.connected)
             .field("mouse", &self.mouse)
             .field("esc_closes_chat", &self.esc_closes_chat)
+            .field("rooms_bar", &self.rooms_bar)
             .field("typing_notices", &self.typing_notices)
             .field("read_receipts", &self.read_receipts)
             .field("do_not_disturb", &self.do_not_disturb)
@@ -852,6 +855,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
     let mut seen: Vec<Action> = vec![
         Action::ToggleUnread,
         Action::MarkAllRead,
+        Action::CloseChat,
         Action::PinMessage,
         Action::ForwardMessage,
         Action::UserInfo,
@@ -1049,6 +1053,19 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         &["sticker", "image pack", "emote"],
         action_enabled(Action::OpenStickers, ctx),
         0,
+    );
+    // No key by default: the "Rooms" label of the rooms bar is its usual way.
+    let close_chat = keymap::action_spec(Action::CloseChat).map_or("", |spec| spec.description);
+    push_entry(
+        out,
+        Target::Action(Action::CloseChat),
+        Category::Action,
+        close_chat,
+        key_of(Action::CloseChat),
+        close_chat,
+        &["rooms", "room list", "back to the rooms", "no chat open"],
+        action_enabled(Action::CloseChat, ctx),
+        1,
     );
     // No key by default: it is looked for when something does not work.
     let doctor = keymap::action_spec(Action::Doctor).map_or("", |spec| spec.description);
@@ -1260,6 +1277,10 @@ fn action_meta<'a>(
         Action::JumpToUnread => (
             Cow::Borrowed(description),
             &["new messages", "unread line", "first new message"],
+        ),
+        Action::RoomActive => (
+            Cow::Borrowed(description),
+            &["next unread room", "active room", "go to notification"],
         ),
         Action::OpenPinned => (
             Cow::Borrowed(description),
@@ -1594,6 +1615,13 @@ fn collect_settings(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             title: Setting::EscClosesChat.label(),
             hint: Some(switch(ctx.esc_closes_chat)),
             aliases: &["escape", "close chat", "no chat open", "setting"],
+            enabled: true,
+        },
+        SettingItem {
+            target: Target::Action(Action::Setting(Setting::RoomsBar)),
+            title: Setting::RoomsBar.label(),
+            hint: Some(switch(ctx.rooms_bar)),
+            aliases: &["rooms bar", "active rooms", "room list hidden", "setting"],
             enabled: true,
         },
         SettingItem {
@@ -1957,6 +1985,7 @@ mod tests {
             own_display_name: None,
             mouse: true,
             esc_closes_chat: true,
+            rooms_bar: true,
             typing_notices: true,
             read_receipts: true,
             do_not_disturb: false,

@@ -19,7 +19,7 @@ use crate::model::Room;
 pub fn unread_count(rooms: &[Room]) -> u64 {
     rooms
         .iter()
-        .filter(|room| !room.muted && !room.is_pending())
+        .filter(|room| room.notifies())
         .fold(0u64, |sum, room| sum.saturating_add(u64::from(room.unread)))
 }
 
