@@ -158,6 +158,7 @@ fn marker(message: &Message, repeated_shield: bool) -> Option<(String, Role)> {
                 .map(|shield| shield.label())
                 .into_iter()
                 .chain(pinned.then_some("(pinned)"))
+                .chain(message.saved.then_some("(saved)"))
                 .chain(edited.then_some("(edited)"))
                 .collect();
             (!parts.is_empty()).then(|| (parts.join(" "), role))

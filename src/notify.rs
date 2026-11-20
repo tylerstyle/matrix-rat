@@ -152,6 +152,34 @@ pub fn title_and_text(notice: &Notice, preview: bool) -> (String, String) {
     (truncate(&title, 120), notice.body.clone())
 }
 
+/// Title and text of a reminder's notification (see `crate::saved`). The notice
+/// carries the message's sender and text only where they may be shown.
+pub fn reminder_title_and_text(due: &DueReminder, preview: bool) -> (String, String) {
+    let notice = &due.notice;
+    // One for several names none of them, with or without preview.
+    if due.count > 1 {
+        return (
+            "matrix-rat".to_owned(),
+            format!("{} reminders are due", due.count),
+        );
+    }
+    // Without preview: not the text, not who wrote, not where.
+    if !preview {
+        return ("matrix-rat".to_owned(), "A reminder is due".to_owned());
+    }
+    let title = if notice.room.is_empty() {
+        "Reminder".to_owned()
+    } else {
+        format!("Reminder: {}", notice.room)
+    };
+    let text = match (notice.sender.is_empty(), notice.body.is_empty()) {
+        (_, true) => "A saved message is due".to_owned(),
+        (true, false) => notice.body.clone(),
+        (false, false) => format!("{}: {}", notice.sender, notice.body),
+    };
+    (truncate(&title, 120), text)
+}
+
 /// Visual icon attached to a desktop notification.
 #[derive(Clone, Default)]
 pub enum NotifyIcon {
@@ -357,8 +385,8 @@ struct DesktopJob {
     preview: bool,
     icon: NotifyIcon,
     cache: Option<(Arc<IconCache>, u64)>,
-    /// The room to open when the notification is clicked, and whom to tell.
-    click: Option<(String, Clicks)>,
+    /// Where to go when the notification is clicked, and whom to tell.
+    click: Option<(Click, Clicks)>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -410,6 +438,56 @@ pub fn show(
     clicks: Option<&Clicks>,
 ) {
     let (title, text) = title_and_text(notice, preview);
+    let click = Click {
+        room_id: notice.room_id.clone(),
+        event: None,
+    };
+    show_as(
+        mode,
+        (title, text),
+        (notice, click),
+        preview,
+        icon,
+        cache,
+        clicks,
+    );
+}
+
+/// Shows the notification of a reminder that came due: as [`show`] does a message's,
+/// under a title and text of its own. A click on it tells which message it is for.
+pub fn show_reminder(
+    mode: NotifyMode,
+    due: &DueReminder,
+    preview: bool,
+    icon: &NotifyIcon,
+    cache: Option<(Arc<IconCache>, u64)>,
+    clicks: Option<&Clicks>,
+) {
+    let shown = reminder_title_and_text(due, preview);
+    let click = Click {
+        room_id: due.notice.room_id.clone(),
+        event: due.event.clone(),
+    };
+    show_as(
+        mode,
+        shown,
+        (&due.notice, click),
+        preview,
+        icon,
+        cache,
+        clicks,
+    );
+}
+
+fn show_as(
+    mode: NotifyMode,
+    (title, text): (String, String),
+    (notice, click): (&Notice, Click),
+    preview: bool,
+    icon: &NotifyIcon,
+    cache: Option<(Arc<IconCache>, u64)>,
+    clicks: Option<&Clicks>,
+) {
     match mode.resolved() {
         NotifyMode::Desktop => {
             let _ = desktop().unbounded_send(DesktopJob {
@@ -423,7 +501,7 @@ pub fn show(
                     NotifyIcon::Generic
                 },
                 cache: if preview { cache } else { None },
-                click: clicks.map(|clicks| (notice.room_id.clone(), clicks.clone())),
+                click: clicks.map(|clicks| (click, clicks.clone())),
             });
         }
         NotifyMode::Terminal => {
@@ -439,8 +517,53 @@ pub fn show(
 
 static SERIAL: AtomicU32 = AtomicU32::new(1);
 
-/// Where the room ids of clicked notifications go: to the event loop.
-pub type Clicks = tokio::sync::mpsc::UnboundedSender<String>;
+/// What a click on a notification means: each notification carries its own, so that
+/// a click goes where that notification pointed, whatever was shown after it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Click {
+    /// The room to open. Empty for the notification of several reminders, which
+    /// opens the list of saved messages.
+    pub room_id: String,
+    /// For a reminder: the message to go to, and the thread it is in.
+    pub event: Option<(String, Option<String>)>,
+}
+
+/// Hand-written: no room and no message in logs.
+impl std::fmt::Debug for Click {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Click(to a message: {})", self.event.is_some())
+    }
+}
+
+impl From<&str> for Click {
+    fn from(room_id: &str) -> Self {
+        Self {
+            room_id: room_id.to_owned(),
+            event: None,
+        }
+    }
+}
+
+/// A reminder's notification on its way out (see `crate::saved`).
+pub struct DueReminder {
+    /// Room, and sender and text only where they may be shown.
+    pub notice: Notice,
+    /// The message it is for, and its thread; `None` for the one that stands for
+    /// several.
+    pub event: Option<(String, Option<String>)>,
+    /// How many reminders it stands for.
+    pub count: usize,
+}
+
+/// Hand-written: only the count.
+impl std::fmt::Debug for DueReminder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DueReminder({})", self.count)
+    }
+}
+
+/// Where the clicks on notifications go: to the event loop.
+pub type Clicks = tokio::sync::mpsc::UnboundedSender<Click>;
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const SERVICE_PATH: &str = "/org/freedesktop/Notifications";
@@ -516,11 +639,11 @@ async fn show_desktop(job: DesktopJob, clickable: &mut Clickable) {
         tracing::debug!("the notification service does not answer: notification dropped");
         return;
     }
-    if let Some((room_id, clicks)) = job.click {
+    if let Some((click, clicks)) = job.click {
         // The same notification with a default action: what a click on it does.
         let mut with_action = notification.clone();
         with_action.action("default", "Open");
-        if clickable.show(&with_action, room_id, clicks).await || clickable.service_stuck() {
+        if clickable.show(&with_action, click, clicks).await || clickable.service_stuck() {
             return;
         }
     }
@@ -542,7 +665,7 @@ struct Clickable {
     address: Option<String>,
     /// What was shown and can still be clicked: the service's id for it, the room,
     /// and where to report the click. Oldest first.
-    shown: VecDeque<(u32, String, Clicks)>,
+    shown: VecDeque<(u32, Click, Clicks)>,
     /// When the service last failed to answer in time. For a while after that
     /// nothing is sent to it at all, not the plain way either: that way has no
     /// time limit of its own, and one silent service would hold up the thread that
@@ -648,7 +771,7 @@ impl Clickable {
     async fn show(
         &mut self,
         notification: &notify_rust::Notification,
-        room_id: String,
+        click: Click,
         clicks: Clicks,
     ) -> bool {
         let retry = match &self.link {
@@ -697,7 +820,7 @@ impl Clickable {
         match sent {
             Ok(id) => {
                 self.shown.retain(|(shown, _, _)| *shown != id);
-                self.shown.push_back((id, room_id, clicks));
+                self.shown.push_back((id, click, clicks));
                 while self.shown.len() > CLICKABLE_MOST {
                     self.shown.pop_front();
                 }
@@ -756,10 +879,10 @@ impl Clickable {
             Some("ActionInvoked") => {
                 if let Ok((id, action)) = body.deserialize::<(u32, String)>()
                     && action == "default"
-                    && let Some((_, room_id, clicks)) =
+                    && let Some((_, click, clicks)) =
                         self.shown.iter().find(|(shown, _, _)| *shown == id)
                 {
-                    let _ = clicks.send(room_id.clone());
+                    let _ = clicks.send(click.clone());
                 }
             }
             Some("NotificationClosed") => {
@@ -1133,6 +1256,49 @@ mod tests {
             highlight,
             thread: None,
         }
+    }
+
+    #[test]
+    fn a_reminder_shows_its_message_only_with_previews_on() {
+        let due = |notice: Notice, count: usize| DueReminder {
+            notice,
+            event: Some(("$e".into(), None)),
+            count,
+        };
+        let reminder = due(notice("Rust", "ann", "the secret plan", false), 1);
+        assert_eq!(
+            reminder_title_and_text(&reminder, true),
+            (
+                "Reminder: Rust".to_owned(),
+                "ann: the secret plan".to_owned()
+            )
+        );
+        // Without preview: no text, no sender, no room.
+        assert_eq!(
+            reminder_title_and_text(&reminder, false),
+            ("matrix-rat".to_owned(), "A reminder is due".to_owned())
+        );
+        // A message whose text is not known (deleted, not loaded, a room that was left).
+        let bare = due(notice("", "", "", false), 1);
+        assert_eq!(
+            reminder_title_and_text(&bare, true),
+            ("Reminder".to_owned(), "A saved message is due".to_owned())
+        );
+        let nameless = due(notice("Rust", "", "text", false), 1);
+        assert_eq!(reminder_title_and_text(&nameless, true).1, "text");
+        // One notification for several: a count, whatever the notice holds.
+        let many = due(notice("Rust", "ann", "the secret plan", false), 5);
+        for preview in [true, false] {
+            assert_eq!(
+                reminder_title_and_text(&many, preview),
+                ("matrix-rat".to_owned(), "5 reminders are due".to_owned())
+            );
+        }
+        let shown = format!("{many:?} {:?}", Click::from("!secret:example.org"));
+        assert!(
+            !shown.contains("secret") && !shown.contains("ann"),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -1524,22 +1690,37 @@ mod tests {
                 .show(&notification, "!rust:example.org".into(), clicks.clone())
                 .await
         );
+        // A reminder's notification carries its message.
+        let reminder = Click {
+            room_id: "!rust:example.org".into(),
+            event: Some(("$event".into(), Some("$root".into()))),
+        };
         assert!(
             clickable
-                .show(&notification, "!other:example.org".into(), clicks.clone())
+                .show(&notification, reminder.clone(), clicks.clone())
                 .await
         );
         let (first, us, actions) = asked.recv().await.unwrap();
         let (second, _, _) = asked.recv().await.unwrap();
         assert_eq!(actions, ["default", "Open"]);
 
-        // Clicked: the room it was shown for is reported, each time.
+        // Clicked: what it was shown for is reported, each time; the one shown
+        // later in the same room does not change what the earlier one means.
         signal(&service, &us, "ActionInvoked", &(first, "default")).await;
         hear(&mut clickable).await;
-        assert_eq!(clicked.try_recv().unwrap(), "!rust:example.org");
+        assert_eq!(
+            clicked.try_recv().unwrap(),
+            Click::from("!rust:example.org")
+        );
         signal(&service, &us, "ActionInvoked", &(second, "default")).await;
         hear(&mut clickable).await;
-        assert_eq!(clicked.try_recv().unwrap(), "!other:example.org");
+        assert_eq!(clicked.try_recv().unwrap(), reminder);
+        signal(&service, &us, "ActionInvoked", &(first, "default")).await;
+        hear(&mut clickable).await;
+        assert_eq!(
+            clicked.try_recv().unwrap(),
+            Click::from("!rust:example.org")
+        );
         // Another action, or a notification that is not ours: nothing.
         signal(&service, &us, "ActionInvoked", &(first, "reply")).await;
         hear(&mut clickable).await;

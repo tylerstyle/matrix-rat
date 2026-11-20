@@ -1123,6 +1123,7 @@ mod tests {
         drain_cmds(&mut commands);
         app.on_matrix(MatrixEvent::NoticeClicked {
             room_id: "!other:example.org".into(),
+            event: None,
         });
         assert_eq!(app.active, 1);
         assert_eq!(app.room_id().as_deref(), Some("!other:example.org"));

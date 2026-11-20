@@ -163,6 +163,7 @@ impl App {
             can_ban_sender,
             audio: self.audio_caps(),
             notes: self.note_caps(),
+            can_keep: self.saved_key(index).is_some(),
         };
         let items = menu::message_items(message, facts, &self.keymap);
         self.show_menu(Target::Message(target), "", items, at);
@@ -796,6 +797,8 @@ mod tests {
                 "React…",
                 "Copy text",
                 "Forward…",
+                "Save for later",
+                "Remind me…",
                 "Message details"
             ]
         );
@@ -832,6 +835,8 @@ mod tests {
                 "Edit",
                 "Copy text",
                 "Forward…",
+                "Save for later",
+                "Remind me…",
                 "Message details",
                 "Delete"
             ]
@@ -878,7 +883,7 @@ mod tests {
         let count = app.messages().len();
         right_click(&mut app, &mut terminal, "Good to know, thanks.");
         app.on_event(key(KeyCode::Char('d')));
-        assert_eq!(open_menu(&app).selected, 7);
+        assert_eq!(open_menu(&app).selected, 9);
         assert_eq!(app.messages().len(), count);
         // Enter asks, moving away takes the question back, Enter twice deletes.
         app.on_event(key(KeyCode::Enter));

@@ -56,6 +56,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Modal::Threads(list) => super::threads::draw(frame, app, area, list),
         Modal::Keywords(popup) => super::keywords::draw(frame, app, area, popup),
         Modal::Doctor(popup) => super::doctor::draw(frame, app, area, popup),
+        Modal::Saved(popup) => super::saved::draw(frame, app, area, popup),
     }
     app.modal = Some(modal);
 }

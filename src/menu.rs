@@ -408,6 +408,8 @@ pub struct MessageFacts {
     pub audio: crate::palette::AudioCaps,
     /// What transcribing and translating would do with the message (see `NoteCaps`).
     pub notes: crate::palette::NoteCaps,
+    /// The message can be saved for later (it has an address of its own).
+    pub can_keep: bool,
 }
 
 /// The entries for a message. Empty for lines that are not messages.
@@ -599,6 +601,15 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
     if facts.can_pin && sent && addressable && (message.pinned || (!deleted && !undecryptable)) {
         let label = if message.pinned { "Unpin" } else { "Pin" };
         items.push(Item::action(keys, label, Timeline, Action::PinMessage));
+    }
+    if facts.can_keep {
+        let label = if message.saved {
+            "Remove from saved"
+        } else {
+            "Save for later"
+        };
+        items.push(Item::action(keys, label, Timeline, Action::SaveForLater));
+        items.push(Item::action(keys, "Remind me…", Timeline, Action::RemindMe));
     }
     if message.sender_id.is_some() {
         items.push(Item::action(keys, "User info", Timeline, Action::UserInfo));
@@ -897,6 +908,7 @@ mod tests {
             transcribe_again: false,
             translate_again: false,
         },
+        can_keep: false,
     };
 
     #[test]

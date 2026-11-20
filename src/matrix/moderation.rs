@@ -39,6 +39,10 @@ const MAX_PINNED_FETCH: usize = 50;
 const PINNED_CONCURRENCY: usize = 4;
 const PINNED_SNIPPET_MAX: usize = 120;
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(60);
+/// What stands for an event that could not be loaded.
+const UNAVAILABLE: &str = "[message unavailable]";
+/// What stands for an event that has no text to show.
+const UNSUPPORTED: &str = "[unsupported pinned item]";
 
 #[derive(Clone)]
 struct CachedPinned {
@@ -49,6 +53,9 @@ struct CachedPinned {
     snippet: String,
     redacted: bool,
     undecryptable: bool,
+    /// An event of a kind that has no text; `snippet` says so in the pinned
+    /// list's words.
+    no_text: bool,
 }
 
 /// Bounded FIFO cache for pinned events loaded via `/event`.
@@ -204,12 +211,82 @@ pub(super) async fn fetch_pinned(
     (results, note)
 }
 
+/// What an event is, for the saved messages list.
+pub(super) enum EventSummary {
+    Found {
+        sender: String,
+        sender_id: Option<String>,
+        kind: SummaryKind,
+    },
+    /// It could not be loaded (or its id is none).
+    Unavailable,
+}
+
+pub(super) enum SummaryKind {
+    /// Its text, one line, cut as the pinned list cuts it.
+    Text(String),
+    /// A kind of event that has no text to show.
+    NoText,
+    Redacted,
+    Undecryptable,
+}
+
+/// One event summarised as the pinned list would show it.
+pub(super) async fn summarize_event(
+    room: &Room,
+    event_id: &str,
+    cache: &Arc<Mutex<PinnedCache>>,
+) -> EventSummary {
+    let Ok(eid) = EventId::parse(event_id) else {
+        return EventSummary::Unavailable;
+    };
+    let Some(found) = load_event(room, room.room_id().as_str(), &eid, cache).await else {
+        return EventSummary::Unavailable;
+    };
+    EventSummary::Found {
+        sender: found.sender,
+        sender_id: found.sender_id,
+        kind: if found.redacted {
+            SummaryKind::Redacted
+        } else if found.undecryptable {
+            SummaryKind::Undecryptable
+        } else if found.no_text {
+            SummaryKind::NoText
+        } else {
+            SummaryKind::Text(found.snippet)
+        },
+    }
+}
+
+/// One pinned event; what could not be loaded gets a line that says so.
 async fn load_one_pinned(
     room: &Room,
     room_id: &str,
     eid: &EventId,
     cache: &Arc<Mutex<PinnedCache>>,
 ) -> (String, CachedPinned) {
+    let found = load_event(room, room_id, eid, cache).await;
+    let found = found.unwrap_or_else(|| CachedPinned {
+        sender_id: None,
+        sender: String::new(),
+        day: String::new(),
+        time: String::new(),
+        snippet: UNAVAILABLE.to_owned(),
+        redacted: false,
+        undecryptable: false,
+        no_text: false,
+    });
+    (eid.to_string(), found)
+}
+
+/// Loads one event: from the event cache, else from what was loaded before, else
+/// from the server. `None` if it is not to be had.
+async fn load_event(
+    room: &Room,
+    room_id: &str,
+    eid: &EventId,
+    cache: &Arc<Mutex<PinnedCache>>,
+) -> Option<CachedPinned> {
     let eid_str = eid.to_string();
     // Local EventCache reflects redactions and edits without network traffic.
     if let Ok((event_cache, _drops)) = room.event_cache().await
@@ -227,11 +304,11 @@ async fn load_one_pinned(
         if !parsed.undecryptable {
             cache.lock().expect("pinned cache poisoned").insert(
                 room_id.to_owned(),
-                eid_str.clone(),
+                eid_str,
                 parsed.clone(),
             );
         }
-        return (eid_str, parsed);
+        return Some(parsed);
     }
 
     if let Some(hit) = cache
@@ -240,34 +317,19 @@ async fn load_one_pinned(
         .get(room_id, &eid_str)
         .cloned()
     {
-        return (eid_str, hit);
+        return Some(hit);
     }
 
-    match room.load_or_fetch_event(eid, None).await {
-        Ok(ev) => {
-            let parsed = build_cached_pinned(room, &ev, &[]).await;
-            if !parsed.undecryptable {
-                cache.lock().expect("pinned cache poisoned").insert(
-                    room_id.to_owned(),
-                    eid_str.clone(),
-                    parsed.clone(),
-                );
-            }
-            (eid_str, parsed)
-        }
-        Err(_) => (
+    let ev = room.load_or_fetch_event(eid, None).await.ok()?;
+    let parsed = build_cached_pinned(room, &ev, &[]).await;
+    if !parsed.undecryptable {
+        cache.lock().expect("pinned cache poisoned").insert(
+            room_id.to_owned(),
             eid_str,
-            CachedPinned {
-                sender_id: None,
-                sender: String::new(),
-                day: String::new(),
-                time: String::new(),
-                snippet: "[message unavailable]".to_owned(),
-                redacted: false,
-                undecryptable: false,
-            },
-        ),
+            parsed.clone(),
+        );
     }
+    Some(parsed)
 }
 
 async fn build_cached_pinned(
@@ -292,6 +354,7 @@ async fn build_cached_pinned(
             snippet: "Encrypted message (key unavailable)".to_owned(),
             redacted: false,
             undecryptable: true,
+            no_text: false,
         };
     }
 
@@ -304,10 +367,13 @@ async fn build_cached_pinned(
             snippet: "[message deleted]".to_owned(),
             redacted: true,
             undecryptable: false,
+            no_text: false,
         };
     }
 
-    let snippet = match search::extract_event_text(event, relations) {
+    let text = search::extract_event_text(event, relations);
+    let no_text = text.is_none();
+    let snippet = match text {
         Some(text) => {
             let clean = sanitize_line(&text);
             if clean.is_empty() {
@@ -316,7 +382,7 @@ async fn build_cached_pinned(
                 truncate(clean.trim(), PINNED_SNIPPET_MAX)
             }
         }
-        None => "[unsupported pinned item]".to_owned(),
+        None => UNSUPPORTED.to_owned(),
     };
 
     CachedPinned {
@@ -327,6 +393,7 @@ async fn build_cached_pinned(
         snippet,
         redacted: false,
         undecryptable: false,
+        no_text,
     }
 }
 

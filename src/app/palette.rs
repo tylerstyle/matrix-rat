@@ -66,6 +66,11 @@ impl App {
                     can_pin: room.is_some_and(|r| Self::can_pin_message(r, m)),
                     can_forward: Self::can_forward_message(m),
                     can_user_info: m.sender_id.is_some(),
+                    can_keep: self
+                        .timeline
+                        .selected
+                        .is_some_and(|i| self.saved_key(i).is_some()),
+                    kept: m.saved,
                 }
             }
             None => MessageCaps::default(),

@@ -21,6 +21,7 @@ mod people;
 mod poll;
 mod roominfo;
 mod rooms_bar;
+mod saved;
 mod search;
 mod sidebar;
 mod status;

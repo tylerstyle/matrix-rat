@@ -93,6 +93,11 @@ impl Paths {
         self.data_dir.join("notes.json")
     }
 
+    /// The saved messages and their reminders: where they are and when, no text.
+    pub fn saved_file(&self) -> PathBuf {
+        self.data_dir.join("saved.json")
+    }
+
     pub fn lock_file(&self) -> PathBuf {
         self.data_dir.join("lock")
     }

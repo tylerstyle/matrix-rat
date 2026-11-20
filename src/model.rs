@@ -132,6 +132,8 @@ pub struct Message {
     pub own: bool,
     pub edited: bool,
     pub pinned: bool,
+    /// The user saved it for later (see `crate::saved`); set by the app, not the worker.
+    pub saved: bool,
     /// The formatted (HTML) version of the body, when the sender provided one.
     pub html: Option<String>,
     /// Sender and text of the message this one replies to.
