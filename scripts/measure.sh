@@ -16,7 +16,8 @@ set -euo pipefail
 pid=${1:-}
 every=${2:-30}
 if [ -z "$pid" ]; then
-  mapfile -t found < <(pgrep -x matrix-rat || true)
+  # Any program whose name begins so (a test build may be called matrix-rat-1.0-pre).
+  mapfile -t found < <(pgrep '^matrix-rat' || true)
   case ${#found[@]} in
     0) echo "measure: no matrix-rat runs; start it, or give its PID" >&2; exit 1 ;;
     1) pid=${found[0]} ;;
