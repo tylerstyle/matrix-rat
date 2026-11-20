@@ -152,6 +152,13 @@ and [`history/0.9-agent-channel.md`](history/0.9-agent-channel.md).
 
 Each piece is written by matrix-claude with helpers and reviewed by matrix-agy as always.
 
+State on 2026-11-20 (evening): 1, 2, 3, 4, 5 and 8 are merged into the local `main`, reviewed and
+checked (unit and server tests green), nothing of it pushed: 1.0 is published as a whole after the
+passes of 6.2. Of 1, the composer's part (recording from the microphone button or `Alt-M`) is in
+review; listening to a recording before sending it is not built. 6 and 7 are one branch
+(`archive`), its last server test being looked into. The composer symbols are the emoji for now
+(the user: a monochrome look can wait).
+
 1. **Sending voice notes.** A microphone symbol next to the clip and the smiley in the
    composer. Holding it with the mouse records, letting go stops; from the keyboard one key
    starts and the same key stops (a terminal does not report a key being let go). The
