@@ -2,10 +2,10 @@
 //! told. One task per sound, on the async threads; it ends with the player.
 //!
 //! The player never outlives the app. It is killed, with everything it started (it is
-//! the leader of a process group of its own), when the app says stop, when the app's
-//! end of the channel goes (quitting, a panic that unwinds), and when this task is
-//! dropped (the runtime shutting down); the kernel kills it when the app dies any other
-//! way (`PR_SET_PDEATHSIG`). It is always waited for, so it does not stay a zombie.
+//! the leader of a process group of its own, see [`Group`]), when the app says stop,
+//! when the app's end of the channel goes (quitting, a panic that unwinds), and when
+//! this task is dropped (the runtime shutting down); the kernel kills it when the app
+//! dies any other way. It is always waited for, so it does not stay a zombie.
 
 use std::fmt;
 use std::io;
@@ -20,6 +20,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior};
 
+use super::child::Group;
 use super::ipc::{self, Lines, Said};
 use super::{Player, TempAudio};
 
@@ -151,65 +152,23 @@ pub async fn run(request: Request, events: UnboundedSender<PlayerUpdate>) {
 
 /// A started player.
 struct Running {
-    child: tokio::process::Child,
-    /// Its process group, numbered as itself.
-    group: libc::pid_t,
-    /// It was waited for: its number may be another's from now on.
-    reaped: bool,
+    program: Group,
 }
 
 impl Running {
-    /// Starts the player on `file`: no shell, nothing to read, nowhere to write, in a
-    /// process group of its own (the terminal's keys do not reach it, and it is killed
-    /// with all it starts), and set to be killed by the kernel when this thread ends.
-    /// The async threads live as long as the app does, so in effect: when the app does.
+    /// Starts the player on `file`: nothing to read, nowhere to write, and as
+    /// [`Group::spawn`] starts a program.
     fn start(player: &Player, file: &Path, socket: Option<&Path>) -> io::Result<Self> {
-        use std::os::unix::process::CommandExt;
         let (program, args) = player.argv(file, socket);
         let mut command = std::process::Command::new(program);
         command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0);
-        let parent = std::process::id() as libc::pid_t;
-        // SAFETY: this runs in the new process between fork and exec, where only
-        // async-signal-safe calls may be made: these are three system calls, and the
-        // error built from the last one does not allocate.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                // The app may have ended before that was in place.
-                if libc::getppid() != parent {
-                    libc::_exit(1);
-                }
-                Ok(())
-            });
-        }
-        let child = tokio::process::Command::from(command)
-            .kill_on_drop(true)
-            .spawn()?;
-        let group = child
-            .id()
-            .map(|id| id as libc::pid_t)
-            .ok_or_else(|| io::Error::other("the player has no process number"))?;
+            .stderr(Stdio::null());
         Ok(Self {
-            child,
-            group,
-            reaped: false,
+            program: Group::spawn(command)?,
         })
-    }
-
-    /// Kills the player and all it started.
-    fn kill(&self) {
-        if !self.reaped {
-            // SAFETY: a plain system call. While the group's leader is not waited for,
-            // its number is not given to another process.
-            unsafe { libc::kill(-self.group, libc::SIGKILL) };
-        }
     }
 
     /// Waits for the player's end, and meanwhile for the app's commands, mpv's socket
@@ -232,12 +191,8 @@ impl Running {
         let mut told = said;
         loop {
             tokio::select! {
-                status = self.child.wait() => {
-                    self.reaped = true;
-                    // Whatever it started and left behind in its group, if anything:
-                    // the group's number stays taken while anything is in it.
-                    // SAFETY: a plain system call.
-                    unsafe { libc::kill(-self.group, libc::SIGKILL) };
+                status = self.program.wait() => {
+                    self.program.sweep();
                     return match status {
                         Ok(status) if status.success() => End::Finished,
                         _ => End::Failed,
@@ -245,9 +200,7 @@ impl Running {
                 }
                 message = control.recv() => match message {
                     None | Some(Control::Stop) => {
-                        self.kill();
-                        let _ = self.child.wait().await;
-                        self.reaped = true;
+                        self.program.put_down().await;
                         return End::Stopped;
                     }
                     Some(command) => {
@@ -298,13 +251,6 @@ impl Running {
                 }
             }
         }
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        // Dropped before its end (the task was): nothing of it stays.
-        self.kill();
     }
 }
 
@@ -539,7 +485,7 @@ mod tests {
         let pid = std::thread::spawn(move || {
             let _inside = runtime.enter();
             let running = Running::start(&player, &file, None).unwrap();
-            let pid = running.group;
+            let pid = running.program.id();
             // Neither killed nor waited for here: only the kernel can end it now.
             std::mem::forget(running);
             pid

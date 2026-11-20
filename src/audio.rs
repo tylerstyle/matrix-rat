@@ -11,8 +11,11 @@
 //! length, a waveform and a position are shown. [`temp`] keeps the files and sockets,
 //! [`ipc`] speaks to mpv, [`play`] runs the player.
 
+mod child;
 mod ipc;
 mod play;
+pub mod record;
+pub mod recorder;
 mod temp;
 
 use std::ffi::{OsStr, OsString};
