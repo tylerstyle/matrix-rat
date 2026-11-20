@@ -98,71 +98,72 @@
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 17.9 L205.8 36.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 17.9 L919.8 36.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 35.9 L4.2 54.1" stroke-width="1" fill="none"/></g>
-<text x="8.4" y="49.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold"> Favourites</text>
+<text x="16.8" y="49.5" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">○ Unread</text>
+<text x="100.8" y="49.5" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">○ People</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 35.9 L197.4 54.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 35.9 L205.8 54.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 35.9 L919.8 54.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="54.0" width="33.8" height="18" fill="#ffa066"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 53.9 L4.2 72.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="67.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> R  </text>
-<text x="50.4" y="67.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> rust            </text>
+<text x="8.4" y="67.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold"> Favourites</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 53.9 L197.4 72.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 53.9 L205.8 72.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 53.9 L919.8 72.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="72.0" width="33.8" height="18" fill="#ffa066"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 71.9 L4.2 90.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="85.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">dave: Shipping…</text>
+<text x="16.8" y="85.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> R  </text>
+<text x="50.4" y="85.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> rust            </text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 71.9 L197.4 90.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 71.9 L205.8 90.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 71.9 L919.8 90.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="90.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="16.8" y="90.0" width="33.8" height="18" fill="#ffa066"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 89.9 L4.2 108.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="103.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> M  </text>
-<text x="50.4" y="103.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> matrix-rat      </text>
+<text x="58.8" y="103.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">dave: Shipping…</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 89.9 L197.4 108.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 89.9 L205.8 108.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 89.9 L919.8 108.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="108.0" width="33.8" height="18" fill="#957fb8"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 107.9 L4.2 126.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="121.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">alice: Welcome…</text>
+<text x="16.8" y="121.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> M  </text>
+<text x="50.4" y="121.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> matrix-rat      </text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 107.9 L197.4 126.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 107.9 L205.8 126.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 107.9 L919.8 126.1" stroke-width="1" fill="none"/></g>
+<rect x="16.8" y="126.0" width="33.8" height="18" fill="#957fb8"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 125.9 L4.2 144.1" stroke-width="1" fill="none"/></g>
-<text x="8.4" y="139.5" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold"> People</text>
+<text x="58.8" y="139.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">alice: Welcome…</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 125.9 L197.4 144.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 125.9 L205.8 144.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 125.9 L919.8 144.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="144.0" width="33.8" height="18" fill="#d27e99"/>
-<rect x="159.6" y="144.0" width="25.4" height="18" fill="#7fb4ca"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 143.9 L4.2 162.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="157.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> B  </text>
-<text x="58.8" y="157.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold">bob</text>
-<text x="159.6" y="157.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> 2 </text>
+<text x="8.4" y="157.5" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold"> People</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 143.9 L197.4 162.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 143.9 L205.8 162.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 143.9 L919.8 162.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="162.0" width="33.8" height="18" fill="#d27e99"/>
+<rect x="159.6" y="162.0" width="25.4" height="18" fill="#7fb4ca"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 161.9 L4.2 180.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="175.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">I'll bring the…</text>
+<text x="16.8" y="175.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> B  </text>
+<text x="58.8" y="175.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold">bob</text>
+<text x="159.6" y="175.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> 2 </text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 161.9 L197.4 180.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 161.9 L205.8 180.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 161.9 L919.8 180.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="180.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="16.8" y="180.0" width="33.8" height="18" fill="#d27e99"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 179.9 L4.2 198.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="193.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> C  </text>
-<text x="50.4" y="193.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> carol           </text>
+<text x="58.8" y="193.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">I'll bring the…</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 179.9 L197.4 198.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 179.9 L205.8 198.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 179.9 L919.8 198.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="198.0" width="33.8" height="18" fill="#957fb8"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 197.9 L4.2 216.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="211.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">See you tomorr…</text>
+<text x="16.8" y="211.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> C  </text>
+<text x="50.4" y="211.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> carol           </text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 197.9 L197.4 216.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 197.9 L205.8 216.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 197.9 L919.8 216.1" stroke-width="1" fill="none"/></g>
+<rect x="16.8" y="216.0" width="33.8" height="18" fill="#957fb8"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 215.9 L4.2 234.1" stroke-width="1" fill="none"/></g>
-<text x="8.4" y="229.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold"> Rooms</text>
+<text x="58.8" y="229.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">See you tomorr…</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 215.9 L197.4 234.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 215.9 L205.8 234.1" stroke-width="1" fill="none"/></g>
 <g fill="#727169" stroke="#727169"><path d="M209.9 225.0 L218.5 225.0" stroke-width="1" fill="none"/></g>
@@ -243,13 +244,8 @@
 <g fill="#727169" stroke="#727169"><path d="M890.3 225.0 L898.9 225.0" stroke-width="1" fill="none"/></g>
 <g fill="#727169" stroke="#727169"><path d="M898.7 225.0 L907.3 225.0" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 215.9 L919.8 234.1" stroke-width="1" fill="none"/></g>
-<rect x="8.4" y="234.0" width="8.6" height="18" fill="#2a2a37"/>
-<rect x="16.8" y="234.0" width="33.8" height="18" fill="#7aa89f"/>
-<rect x="50.4" y="234.0" width="143.0" height="18" fill="#2a2a37"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 233.9 L4.2 252.1" stroke-width="1" fill="none"/></g>
-<g fill="#7fb4ca" stroke="#7fb4ca"><rect x="8.4" y="234.0" width="4.2" height="18.0" stroke="none"/></g>
-<text x="16.8" y="247.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> D  </text>
-<text x="50.4" y="247.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold"> design          </text>
+<text x="8.4" y="247.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold"> Rooms</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 233.9 L197.4 252.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 233.9 L205.8 252.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="247.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384">● </text>
@@ -261,12 +257,15 @@
 <rect x="50.4" y="252.0" width="143.0" height="18" fill="#2a2a37"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 251.9 L4.2 270.1" stroke-width="1" fill="none"/></g>
 <g fill="#7fb4ca" stroke="#7fb4ca"><rect x="8.4" y="252.0" width="4.2" height="18.0" stroke="none"/></g>
-<text x="58.8" y="265.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">erin: @you can…</text>
+<text x="16.8" y="265.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> D  </text>
+<text x="50.4" y="265.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold"> design          </text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 251.9 L197.4 270.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 251.9 L205.8 270.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="265.5" textLength="705.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">  New palette is up for review.                                                     </text>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 251.9 L919.8 270.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="270.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="8.4" y="270.0" width="8.6" height="18" fill="#2a2a37"/>
+<rect x="16.8" y="270.0" width="33.8" height="18" fill="#7aa89f"/>
+<rect x="50.4" y="270.0" width="143.0" height="18" fill="#2a2a37"/>
 <rect x="226.8" y="270.0" width="33.8" height="18" fill="#e7b298"/>
 <rect x="260.4" y="270.0" width="8.6" height="18" fill="#e7b798"/>
 <rect x="268.8" y="270.0" width="8.6" height="18" fill="#e7d398"/>
@@ -290,8 +289,8 @@
 <rect x="520.8" y="270.0" width="8.6" height="18" fill="#98b5e7"/>
 <rect x="529.2" y="270.0" width="33.8" height="18" fill="#98b0e7"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 269.9 L4.2 288.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="283.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> N  </text>
-<text x="50.4" y="283.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> nixos           </text>
+<g fill="#7fb4ca" stroke="#7fb4ca"><rect x="8.4" y="270.0" width="4.2" height="18.0" stroke="none"/></g>
+<text x="58.8" y="283.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">erin: @you can…</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 269.9 L197.4 288.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 269.9 L205.8 288.1" stroke-width="1" fill="none"/></g>
 <g fill="#e9b89f" stroke="#e9b89f"><rect x="226.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
@@ -359,7 +358,8 @@
 <rect x="520.8" y="288.0" width="8.6" height="18" fill="#86a9e3"/>
 <rect x="529.2" y="288.0" width="33.8" height="18" fill="#86a3e3"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 287.9 L4.2 306.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="301.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">frank: Unstabl…</text>
+<text x="16.8" y="301.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> N  </text>
+<text x="50.4" y="301.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba"> nixos           </text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 287.9 L197.4 306.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 287.9 L205.8 306.1" stroke-width="1" fill="none"/></g>
 <g fill="#e5ac8f" stroke="#e5ac8f"><rect x="226.8" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
@@ -404,7 +404,6 @@
 <g fill="#8faae5" stroke="#8faae5"><rect x="554.4" y="288.0" width="8.6" height="9.0" stroke="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 287.9 L919.8 306.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="306.0" width="33.8" height="18" fill="#957fb8"/>
-<rect x="151.2" y="306.0" width="33.8" height="18" fill="#7fb4ca"/>
 <rect x="226.8" y="306.0" width="33.8" height="18" fill="#df9875"/>
 <rect x="260.4" y="306.0" width="8.6" height="18" fill="#df9f75"/>
 <rect x="268.8" y="306.0" width="8.6" height="18" fill="#dfc575"/>
@@ -428,9 +427,7 @@
 <rect x="520.8" y="306.0" width="8.6" height="18" fill="#759cdf"/>
 <rect x="529.2" y="306.0" width="33.8" height="18" fill="#7596df"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 305.9 L4.2 324.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="319.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> O  </text>
-<text x="58.8" y="319.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold">off-topic</text>
-<text x="151.2" y="319.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> 12 </text>
+<text x="58.8" y="319.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">frank: Unstabl…</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 305.9 L197.4 324.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 305.9 L205.8 324.1" stroke-width="1" fill="none"/></g>
 <g fill="#e19f7e" stroke="#e19f7e"><rect x="226.8" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
@@ -475,6 +472,7 @@
 <g fill="#7e9de1" stroke="#7e9de1"><rect x="554.4" y="306.0" width="8.6" height="9.0" stroke="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 305.9 L919.8 324.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="324.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="151.2" y="324.0" width="33.8" height="18" fill="#7fb4ca"/>
 <rect x="226.8" y="324.0" width="33.8" height="18" fill="#db8b64"/>
 <rect x="260.4" y="324.0" width="8.6" height="18" fill="#db9364"/>
 <rect x="268.8" y="324.0" width="8.6" height="18" fill="#dbbd64"/>
@@ -498,7 +496,9 @@
 <rect x="520.8" y="324.0" width="8.6" height="18" fill="#6490db"/>
 <rect x="529.2" y="324.0" width="33.8" height="18" fill="#6489db"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 323.9 L4.2 342.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="337.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">grace: Anyone …</text>
+<text x="16.8" y="337.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> O  </text>
+<text x="58.8" y="337.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold">off-topic</text>
+<text x="151.2" y="337.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold"> 12 </text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 323.9 L197.4 342.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 323.9 L205.8 342.1" stroke-width="1" fill="none"/></g>
 <g fill="#dd926d" stroke="#dd926d"><rect x="226.8" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
@@ -542,6 +542,7 @@
 <g fill="#6d90dd" stroke="#6d90dd"><rect x="546.0" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
 <g fill="#6d90dd" stroke="#6d90dd"><rect x="554.4" y="324.0" width="8.6" height="9.0" stroke="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 323.9 L919.8 342.1" stroke-width="1" fill="none"/></g>
+<rect x="16.8" y="342.0" width="33.8" height="18" fill="#957fb8"/>
 <rect x="226.8" y="342.0" width="33.8" height="18" fill="#d77f53"/>
 <rect x="260.4" y="342.0" width="8.6" height="18" fill="#d78753"/>
 <rect x="268.8" y="342.0" width="8.6" height="18" fill="#d7b653"/>
@@ -565,6 +566,7 @@
 <rect x="520.8" y="342.0" width="8.6" height="18" fill="#5384d7"/>
 <rect x="529.2" y="342.0" width="33.8" height="18" fill="#537cd7"/>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 341.9 L4.2 360.1" stroke-width="1" fill="none"/></g>
+<text x="58.8" y="355.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">grace: Anyone …</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 341.9 L197.4 360.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 341.9 L205.8 360.1" stroke-width="1" fill="none"/></g>
 <g fill="#d9855b" stroke="#d9855b"><rect x="226.8" y="342.0" width="8.6" height="9.0" stroke="none"/></g>
@@ -1251,7 +1253,7 @@
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M205.8 557.9 L205.8 576.1" stroke-width="1" fill="none"/></g>
 <text x="218.4" y="571.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-style="italic">Type a message…</text>
 <text x="865.2" y="571.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">📎</text>
-<text x="890.4" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">☺</text>
+<text x="890.4" y="571.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">🙂</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M919.8 557.9 L919.8 576.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 575.9 Q4.2 585.0 8.5 585.0" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M8.3 585.0 L16.9 585.0" stroke-width="1" fill="none"/></g>

@@ -100,17 +100,13 @@
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M205.8 17.9 L205.8 36.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 17.9 L919.8 36.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 35.9 L4.2 54.1" stroke-width="1" fill="none"/></g>
-<text x="8.4" y="49.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55"> Favourites</text>
+<text x="16.8" y="49.5" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">○ Unread</text>
+<text x="100.8" y="49.5" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">○ People</text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M197.4 35.9 L197.4 54.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M205.8 35.9 L205.8 54.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 35.9 L919.8 54.1" stroke-width="1" fill="none"/></g>
-<rect x="8.4" y="54.0" width="8.6" height="18" fill="#2a2a37"/>
-<rect x="16.8" y="54.0" width="33.8" height="18" fill="#ffa066"/>
-<rect x="50.4" y="54.0" width="143.0" height="18" fill="#2a2a37"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 53.9 L4.2 72.1" stroke-width="1" fill="none"/></g>
-<g fill="#7fb4ca" stroke="#7fb4ca" opacity="0.55"><rect x="8.4" y="54.0" width="4.2" height="18.0" stroke="none"/></g>
-<text x="16.8" y="67.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> R  </text>
-<text x="50.4" y="67.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold" opacity="0.55"> rust            </text>
+<text x="8.4" y="67.5" textLength="92.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55"> Favourites</text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M197.4 53.9 L197.4 72.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M205.8 53.9 L205.8 72.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 53.9 L919.8 72.1" stroke-width="1" fill="none"/></g>
@@ -119,20 +115,24 @@
 <rect x="50.4" y="72.0" width="143.0" height="18" fill="#2a2a37"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 71.9 L4.2 90.1" stroke-width="1" fill="none"/></g>
 <g fill="#7fb4ca" stroke="#7fb4ca" opacity="0.55"><rect x="8.4" y="72.0" width="4.2" height="18.0" stroke="none"/></g>
-<text x="58.8" y="85.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55">dave: Shipping…</text>
+<text x="16.8" y="85.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> R  </text>
+<text x="50.4" y="85.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold" opacity="0.55"> rust            </text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M197.4 71.9 L197.4 90.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M205.8 71.9 L205.8 90.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 71.9 L919.8 90.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="90.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="8.4" y="90.0" width="8.6" height="18" fill="#2a2a37"/>
+<rect x="16.8" y="90.0" width="33.8" height="18" fill="#ffa066"/>
+<rect x="50.4" y="90.0" width="143.0" height="18" fill="#2a2a37"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 89.9 L4.2 108.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="103.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> M  </text>
-<text x="50.4" y="103.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> matrix-rat      </text>
+<g fill="#7fb4ca" stroke="#7fb4ca" opacity="0.55"><rect x="8.4" y="90.0" width="4.2" height="18.0" stroke="none"/></g>
+<text x="58.8" y="103.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55">dave: Shipping…</text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M197.4 89.9 L197.4 108.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M205.8 89.9 L205.8 108.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 89.9 L919.8 108.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="108.0" width="33.8" height="18" fill="#957fb8"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 107.9 L4.2 126.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="121.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">alice: Welcome…</text>
+<text x="16.8" y="121.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> M  </text>
+<text x="50.4" y="121.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> matrix-rat      </text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M197.4 107.9 L197.4 126.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M205.8 107.9 L205.8 126.1" stroke-width="1" fill="none"/></g>
 <g fill="#727169" stroke="#727169" opacity="0.55"><path d="M209.9 117.0 L218.5 117.0" stroke-width="1" fill="none"/></g>
@@ -209,20 +209,17 @@
 <g fill="#727169" stroke="#727169" opacity="0.55"><path d="M890.3 117.0 L898.9 117.0" stroke-width="1" fill="none"/></g>
 <g fill="#727169" stroke="#727169" opacity="0.55"><path d="M898.7 117.0 L907.3 117.0" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 107.9 L919.8 126.1" stroke-width="1" fill="none"/></g>
+<rect x="16.8" y="126.0" width="33.8" height="18" fill="#957fb8"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 125.9 L4.2 144.1" stroke-width="1" fill="none"/></g>
-<text x="8.4" y="139.5" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55"> People</text>
+<text x="58.8" y="139.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">alice: Welcome…</text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M197.4 125.9 L197.4 144.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M205.8 125.9 L205.8 144.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="139.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" opacity="0.55">● </text>
 <text x="226.8" y="139.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold" opacity="0.55">alice</text>
 <text x="285.6" y="139.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">21:40</text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 125.9 L919.8 144.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="144.0" width="33.8" height="18" fill="#d27e99"/>
-<rect x="159.6" y="144.0" width="17.0" height="18" fill="#7fb4ca"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 143.9 L4.2 162.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="157.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> B  </text>
-<text x="58.8" y="157.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold" opacity="0.55">bob</text>
-<text x="159.6" y="157.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> 2</text>
+<text x="8.4" y="157.5" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55"> People</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 162.1 Q180.6 153.0 184.9 153.0" stroke-width="1" fill="none"/></g>
 <text x="184.8" y="157.5" textLength="142.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold"> Command palette </text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M327.5 153.0 L336.1 153.0" stroke-width="1" fill="none"/></g>
@@ -277,17 +274,19 @@
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M739.1 153.0 Q743.4 153.0 743.4 162.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 143.9 L919.8 162.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="162.0" width="33.8" height="18" fill="#d27e99"/>
+<rect x="159.6" y="162.0" width="17.0" height="18" fill="#7fb4ca"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 161.9 L4.2 180.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="175.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">I'll bring the</text>
+<text x="16.8" y="175.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> B  </text>
+<text x="58.8" y="175.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold" opacity="0.55">bob</text>
+<text x="159.6" y="175.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> 2</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 161.9 L180.6 180.1" stroke-width="1" fill="none"/></g>
 <text x="193.2" y="175.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">⌕ </text>
 <text x="210.0" y="175.5" textLength="529.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">th                                                             </text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 161.9 L743.4 180.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 161.9 L919.8 180.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="180.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="16.8" y="180.0" width="33.8" height="18" fill="#d27e99"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 179.9 L4.2 198.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="193.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> C  </text>
-<text x="50.4" y="193.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> carol         </text>
+<text x="58.8" y="193.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">I'll bring the</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 179.9 L180.6 198.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M193.1 189.0 L201.7 189.0" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M201.5 189.0 L210.1 189.0" stroke-width="1" fill="none"/></g>
@@ -346,14 +345,14 @@
 <g fill="#54546d" stroke="#54546d"><path d="M646.7 189.0 L655.3 189.0" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M655.1 189.0 L663.7 189.0" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M663.5 189.0 L672.1 189.0" stroke-width="1" fill="none"/></g>
-<g fill="#54546d" stroke="#54546d"><path d="M671.9 189.0 L680.5 189.0" stroke-width="1" fill="none"/></g>
-<text x="680.4" y="193.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> 24/60</text>
+<text x="672.0" y="193.5" textLength="58.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169"> 45/121</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 179.9 L743.4 198.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 179.9 L919.8 198.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="198.0" width="33.8" height="18" fill="#957fb8"/>
 <rect x="193.2" y="198.0" width="537.8" height="18" fill="#2a2a37"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 197.9 L4.2 216.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="211.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">See you tomorr</text>
+<text x="16.8" y="211.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> C  </text>
+<text x="50.4" y="211.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> carol         </text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 197.9 L180.6 216.1" stroke-width="1" fill="none"/></g>
 <text x="193.2" y="211.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#7fb4ca" font-weight="bold">› </text>
 <text x="210.0" y="211.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
@@ -362,54 +361,54 @@
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 197.9 L743.4 216.1" stroke-width="1" fill="none"/></g>
 <text x="747.6" y="211.5" textLength="168.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> disk.              </text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 197.9 L919.8 216.1" stroke-width="1" fill="none"/></g>
+<rect x="16.8" y="216.0" width="33.8" height="18" fill="#957fb8"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 215.9 L4.2 234.1" stroke-width="1" fill="none"/></g>
-<text x="8.4" y="229.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55"> Rooms</text>
+<text x="58.8" y="229.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">See you tomorr</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 215.9 L180.6 234.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="229.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
-<text x="285.6" y="229.5" textLength="428.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Next theme                                         </text>
-<text x="714.0" y="229.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">F3</text>
+<text x="285.6" y="229.5" textLength="436.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Threads of this room                                </text>
+<text x="722.4" y="229.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">T</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 215.9 L743.4 234.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 215.9 L919.8 234.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="234.0" width="33.8" height="18" fill="#7aa89f"/>
-<rect x="159.6" y="234.0" width="17.0" height="18" fill="#e46876"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 233.9 L4.2 252.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="247.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> D  </text>
-<text x="58.8" y="247.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold" opacity="0.55">design</text>
-<text x="159.6" y="247.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> 5</text>
+<text x="8.4" y="247.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold" opacity="0.55"> Rooms</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 233.9 L180.6 252.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="247.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
-<text x="285.6" y="247.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Find in this room                              </text>
-<text x="680.4" y="247.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Ctrl-F</text>
+<text x="285.6" y="247.5" textLength="428.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Next theme                                         </text>
+<text x="714.0" y="247.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">F3</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 233.9 L743.4 252.1" stroke-width="1" fill="none"/></g>
 <text x="747.6" y="247.5" textLength="168.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55">r large rooms like  </text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 233.9 L919.8 252.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="252.0" width="33.8" height="18" fill="#7aa89f"/>
+<rect x="159.6" y="252.0" width="17.0" height="18" fill="#e46876"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 251.9 L4.2 270.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="265.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">erin: @you can</text>
+<text x="16.8" y="265.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> D  </text>
+<text x="58.8" y="265.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold" opacity="0.55">design</text>
+<text x="159.6" y="265.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> 5</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 251.9 L180.6 270.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="265.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
-<text x="285.6" y="265.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Suspend to the shell                           </text>
-<text x="680.4" y="265.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Ctrl-Z</text>
+<text x="285.6" y="265.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Find in this room                              </text>
+<text x="680.4" y="265.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Ctrl-F</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 251.9 L743.4 270.1" stroke-width="1" fill="none"/></g>
 <text x="747.6" y="265.5" textLength="168.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55">e server every      </text>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 251.9 L919.8 270.1" stroke-width="1" fill="none"/></g>
-<rect x="16.8" y="270.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="16.8" y="270.0" width="33.8" height="18" fill="#7aa89f"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 269.9 L4.2 288.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="283.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> N  </text>
-<text x="50.4" y="283.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> nixos         </text>
+<text x="58.8" y="283.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">erin: @you can</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 269.9 L180.6 288.1" stroke-width="1" fill="none"/></g>
-<text x="210.0" y="283.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
-<text x="285.6" y="283.5" textLength="411.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Menu for what has the focus                      </text>
-<text x="697.2" y="283.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Menu</text>
+<text x="210.0" y="283.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Setting  </text>
+<text x="285.6" y="283.5" textLength="428.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Esc closes the chat                                </text>
+<text x="714.0" y="283.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">on</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 269.9 L743.4 288.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 269.9 L919.8 288.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="288.0" width="33.8" height="18" fill="#957fb8"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 287.9 L4.2 306.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="301.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">frank: Unstabl</text>
+<text x="16.8" y="301.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> N  </text>
+<text x="50.4" y="301.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" opacity="0.55"> nixos         </text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 287.9 L180.6 306.1" stroke-width="1" fill="none"/></g>
 <text x="210.0" y="301.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
-<text x="285.6" y="301.5" textLength="403.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Next space (then all rooms)                     </text>
-<text x="688.8" y="301.5" textLength="42.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Alt-S</text>
+<text x="285.6" y="301.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Suspend to the shell                           </text>
+<text x="680.4" y="301.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Ctrl-Z</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 287.9 L743.4 306.1" stroke-width="1" fill="none"/></g>
 <g fill="#727169" stroke="#727169" opacity="0.55"><path d="M747.5 297.0 L756.1 297.0" stroke-width="1" fill="none"/></g>
 <g fill="#727169" stroke="#727169" opacity="0.55"><path d="M755.9 297.0 L764.5 297.0" stroke-width="1" fill="none"/></g>
@@ -432,58 +431,60 @@
 <g fill="#727169" stroke="#727169" opacity="0.55"><path d="M898.7 297.0 L907.3 297.0" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 287.9 L919.8 306.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="306.0" width="33.8" height="18" fill="#957fb8"/>
-<rect x="151.2" y="306.0" width="25.4" height="18" fill="#7fb4ca"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 305.9 L4.2 324.1" stroke-width="1" fill="none"/></g>
-<text x="16.8" y="319.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> O  </text>
-<text x="58.8" y="319.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold" opacity="0.55">off-topic</text>
-<text x="151.2" y="319.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> 12</text>
+<text x="58.8" y="319.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">frank: Unstabl</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 305.9 L180.6 324.1" stroke-width="1" fill="none"/></g>
-<text x="193.2" y="319.5" textLength="193.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">  Action   Close thread</text>
+<text x="210.0" y="319.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="319.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">What the app found here                               </text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 305.9 L743.4 324.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 305.9 L919.8 324.1" stroke-width="1" fill="none"/></g>
 <rect x="16.8" y="324.0" width="33.8" height="18" fill="#957fb8"/>
+<rect x="151.2" y="324.0" width="25.4" height="18" fill="#7fb4ca"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 323.9 L4.2 342.1" stroke-width="1" fill="none"/></g>
-<text x="58.8" y="337.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">grace: Anyone </text>
+<text x="16.8" y="337.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> O  </text>
+<text x="58.8" y="337.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba" font-weight="bold" opacity="0.55">off-topic</text>
+<text x="151.2" y="337.5" textLength="25.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#16161d" font-weight="bold" opacity="0.55"> 12</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 323.9 L180.6 342.1" stroke-width="1" fill="none"/></g>
-<text x="193.2" y="337.5" textLength="302.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">  Action   Open the message's thread</text>
-<text x="722.4" y="337.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">t</text>
+<text x="210.0" y="337.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="337.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Mark this room as unread                              </text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 323.9 L743.4 342.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 323.9 L919.8 342.1" stroke-width="1" fill="none"/></g>
+<rect x="16.8" y="342.0" width="33.8" height="18" fill="#957fb8"/>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 341.9 L4.2 360.1" stroke-width="1" fill="none"/></g>
+<text x="58.8" y="355.5" textLength="117.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">grace: Anyone </text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 341.9 L180.6 360.1" stroke-width="1" fill="none"/></g>
-<text x="210.0" y="355.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
-<text x="285.6" y="355.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: tokyo-night                                    </text>
+<text x="210.0" y="355.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="355.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Hide or show the room list                     </text>
+<text x="680.4" y="355.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Ctrl-B</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 341.9 L743.4 360.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 341.9 L919.8 360.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 359.9 L4.2 378.1" stroke-width="1" fill="none"/></g>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 359.9 L180.6 378.1" stroke-width="1" fill="none"/></g>
-<text x="210.0" y="373.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
-<text x="285.6" y="373.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: nord                                           </text>
+<text x="210.0" y="373.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="373.5" textLength="411.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Menu for what has the focus                      </text>
+<text x="697.2" y="373.5" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#e6c384" font-weight="bold">Menu</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 359.9 L743.4 378.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 359.9 L919.8 378.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 377.9 L4.2 396.1" stroke-width="1" fill="none"/></g>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 377.9 L180.6 396.1" stroke-width="1" fill="none"/></g>
-<text x="210.0" y="391.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
-<text x="285.6" y="391.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: dracula                                        </text>
+<text x="210.0" y="391.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Action   </text>
+<text x="285.6" y="391.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Close the chat and show the room list                 </text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 377.9 L743.4 396.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 377.9 L919.8 396.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 395.9 L4.2 414.1" stroke-width="1" fill="none"/></g>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 395.9 L180.6 414.1" stroke-width="1" fill="none"/></g>
-<text x="210.0" y="409.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
-<text x="285.6" y="409.5" textLength="394.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: rat-dark                                </text>
-<text x="680.4" y="409.5" textLength="50.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">active</text>
+<text x="193.2" y="409.5" textLength="193.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">  Action   Close thread</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 395.9 L743.4 414.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 395.9 L919.8 414.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 413.9 L4.2 432.1" stroke-width="1" fill="none"/></g>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 413.9 L180.6 432.1" stroke-width="1" fill="none"/></g>
-<text x="210.0" y="427.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
-<text x="285.6" y="427.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: terminal                                       </text>
+<text x="193.2" y="427.5" textLength="302.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">  Action   Open the message's thread</text>
+<text x="722.4" y="427.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">t</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 413.9 L743.4 432.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 413.9 L919.8 432.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 431.9 L4.2 450.1" stroke-width="1" fill="none"/></g>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M180.6 431.9 L180.6 450.1" stroke-width="1" fill="none"/></g>
-<text x="210.0" y="445.5" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">Theme    </text>
-<text x="285.6" y="445.5" textLength="453.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Theme: rose-pine                                      </text>
+<text x="193.2" y="445.5" textLength="310.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">  Action   Remind me of this message…</text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M743.4 431.9 L743.4 450.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M919.8 431.9 L919.8 450.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 449.9 L4.2 468.1" stroke-width="1" fill="none"/></g>
@@ -695,7 +696,7 @@
 <g fill="#7fb4ca" stroke="#7fb4ca" opacity="0.55"><path d="M205.8 557.9 L205.8 576.1" stroke-width="1" fill="none"/></g>
 <text x="218.4" y="571.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-style="italic" opacity="0.55">Type a message…</text>
 <text x="865.2" y="571.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">📎</text>
-<text x="890.4" y="571.5" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">☺</text>
+<text x="890.4" y="571.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" opacity="0.55">🙂</text>
 <g fill="#7fb4ca" stroke="#7fb4ca" opacity="0.55"><path d="M919.8 557.9 L919.8 576.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M4.2 575.9 Q4.2 585.0 8.5 585.0" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d" opacity="0.55"><path d="M8.3 585.0 L16.9 585.0" stroke-width="1" fill="none"/></g>
