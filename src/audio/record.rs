@@ -21,8 +21,6 @@
 //! recording that is given up leaves nothing.
 //!
 //! Neither program outlives the app: see [`Group`].
-// Until the composer's microphone uses it (the next piece of the voice messages).
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::fmt;
 use std::path::PathBuf;

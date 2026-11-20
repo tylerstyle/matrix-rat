@@ -1,9 +1,123 @@
-//! Recording a voice message: whether it is offered here, and the setting that says
-//! with what. Nothing records yet: the action only says so.
+//! Recording a voice message: whether it is offered here, the setting that says with
+//! what, and the recording itself from the first press to the note that waits in the
+//! composer.
+//!
+//! One recording at a time. The mouse holds the microphone (letting go ends it; a
+//! short click leaves it running until the next click), the key starts and the same
+//! key ends it. However it ends, nothing is sent: the note waits with the files of the
+//! conversation it was begun in, and goes when the user sends it.
+
+use std::fmt;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::App;
-use crate::audio::{self, recorder};
+use super::attach::Scope;
+use crate::action::{Action, Pane};
+use crate::audio::record::{
+    Failure, Limits, RecordControl, RecordEvent, RecordRequest, RecordUpdate, Recording,
+};
+use crate::audio::{self, TempAudio, recorder};
+use crate::keymap::Context;
+use crate::matrix::VoiceMeta;
 use crate::ui::Mic;
+
+/// A press on the microphone shorter than this is a click: the recording runs on until
+/// the next click. A longer one is a hold: letting go ends it. It also covers a
+/// terminal that never says the button was let go.
+const HOLD: Duration = Duration::from_millis(400);
+/// What a recording is called among the waiting files; the room sees another, fixed
+/// name (the worker's).
+pub const VOICE_NAME: &str = "Voice message";
+
+/// The recording that runs.
+pub(in crate::app) struct Take {
+    /// Answers about another are dropped.
+    id: u64,
+    /// The conversation it was begun in, where its note will wait.
+    scope: Scope,
+    control: UnboundedSender<RecordControl>,
+    phase: TakePhase,
+    /// The mouse button went down on the microphone then and has not come up.
+    held: Option<Instant>,
+    elapsed: Duration,
+    level: u16,
+}
+
+/// Hand-written: the conversation is ids.
+impl fmt::Debug for Take {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Take")
+            .field("id", &self.id)
+            .field("phase", &self.phase)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakePhase {
+    /// The programs were started; no sound has arrived.
+    Starting,
+    Running,
+    /// Told to end: the encoder finishes, the file is written.
+    Saving,
+}
+
+/// What is shown of the recording that runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordingView {
+    pub phase: TakePhase,
+    pub elapsed: Duration,
+    /// The loudest of the last moment, 0 to [`audio::MAX_AMPLITUDE`].
+    pub level: u16,
+    /// The mouse holds the microphone: letting go ends it.
+    pub held: bool,
+}
+
+/// A voice message recorded here, waiting to be sent. Its file goes with it.
+pub struct VoiceNote {
+    file: TempAudio,
+    pub duration: Duration,
+    waveform: Vec<u16>,
+}
+
+/// Hand-written: the path names the user's folder, the waveform is the shape of what
+/// was said.
+impl fmt::Debug for VoiceNote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VoiceNote").finish_non_exhaustive()
+    }
+}
+
+impl VoiceNote {
+    pub fn path(&self) -> &Path {
+        self.file.path()
+    }
+
+    /// What makes the file a voice message when it is sent.
+    pub(super) fn meta(&self) -> VoiceMeta {
+        VoiceMeta {
+            duration: self.duration,
+            waveform: self.waveform.clone(),
+        }
+    }
+}
+
+/// Why there is no recording, in the user's words.
+fn failure_text(failure: Failure) -> &'static str {
+    match failure {
+        Failure::Start => "The recorder could not be started",
+        Failure::NoSound => "No sound arrived from the microphone",
+        Failure::Capture => "The recorder ended before it recorded anything",
+        Failure::Encoder => "The recording could not be encoded: nothing was kept",
+        Failure::NotOpus => "The encoder did not write Ogg/Opus: nothing was kept",
+        Failure::TooShort => "Too short to keep: hold the microphone while you speak",
+        Failure::TooLarge => "The recording grew too large: nothing was kept",
+        Failure::NotKept => "The recording could not be kept",
+    }
+}
 
 impl super::playback::AudioState {
     /// What the settings show for the recorder: `auto: parec + opusenc`,
@@ -36,7 +150,7 @@ impl App {
     /// What the microphone button of the composer shows. A recording that runs keeps
     /// its stop button whatever became of the recorder since.
     pub(crate) fn mic_button(&self) -> Mic {
-        if self.audio.recording {
+        if self.audio.take.is_some() {
             Mic::Recording
         } else if self.recording_refused().is_some() {
             Mic::Hidden
@@ -85,8 +199,92 @@ impl App {
         }
     }
 
-    /// Alt-M and the microphone button.
+    /// Alt-M and the palette: starts a recording, or ends the one that runs and
+    /// keeps it.
     pub(super) fn record_voice(&mut self) {
+        if self.audio.take.is_some() {
+            self.stop_recording();
+        } else {
+            self.start_recording(false);
+        }
+    }
+
+    /// The mouse button went down on the microphone: a recording starts and is held,
+    /// or the one that runs ends (its button is the stop sign).
+    pub(super) fn press_mic(&mut self) {
+        if self.modal.is_some() || self.help_open {
+            return;
+        }
+        if self.audio.take.is_some() {
+            self.stop_recording();
+        } else {
+            self.start_recording(true);
+        }
+    }
+
+    /// The mouse button came up, anywhere: a held recording ends, unless the press was
+    /// only a click, which leaves it running until the next one.
+    pub(super) fn release_mic(&mut self) {
+        let Some(take) = &mut self.audio.take else {
+            return;
+        };
+        let Some(pressed) = take.held.take() else {
+            return;
+        };
+        self.dirty = true;
+        if pressed.elapsed() >= HOLD {
+            self.stop_recording();
+        }
+    }
+
+    /// A recording for the event loop to start.
+    pub(super) fn take_record_start(&mut self) -> Option<RecordRequest> {
+        self.audio.record_start.take()
+    }
+
+    /// What the composer shows of a recording begun in the open conversation.
+    pub(crate) fn recording_here(&self) -> Option<RecordingView> {
+        let scope = self.attach_scope()?;
+        self.recording().filter(|_| {
+            self.audio
+                .take
+                .as_ref()
+                .is_some_and(|take| take.scope == scope)
+        })
+    }
+
+    /// What the status line shows of the recording, wherever it was begun.
+    pub(crate) fn recording(&self) -> Option<RecordingView> {
+        self.audio.take.as_ref().map(|take| RecordingView {
+            phase: take.phase,
+            elapsed: take.elapsed,
+            level: take.level,
+            held: take.held.is_some(),
+        })
+    }
+
+    /// The key that ends a recording, for the hints.
+    pub(crate) fn record_key(&self) -> Option<&str> {
+        self.keymap
+            .label_in(Context::Composer, Action::RecordVoice)
+            .or_else(|| self.keymap.label_for(Action::RecordVoice))
+    }
+
+    /// Enter under a recording sends nothing: says what to do first. False where no
+    /// recording is in the way.
+    pub(super) fn recording_refuses_send(&mut self) -> bool {
+        if self.recording_here().is_none() {
+            return false;
+        }
+        let said = match self.record_key() {
+            Some(key) => format!("The recording still runs: {key} ends it, then it can be sent"),
+            None => "The recording still runs: end it first, then it can be sent".to_owned(),
+        };
+        self.show_toast(said);
+        true
+    }
+
+    fn start_recording(&mut self, held: bool) {
         if !self.can_record_here() {
             return;
         }
@@ -99,7 +297,152 @@ impl App {
             self.show_toast(why.message());
             return;
         }
-        self.show_toast("Recording voice messages is not available in this build yet");
+        let (Ok(recorder), Some(dir), Some(scope)) = (
+            self.audio.recorder.clone(),
+            self.audio.dir.clone(),
+            self.attach_scope(),
+        ) else {
+            self.show_toast("Voice messages cannot be recorded here");
+            return;
+        };
+        // A sound that plays would be recorded with it.
+        self.stop_audio();
+        self.audio.next_id += 1;
+        let id = self.audio.next_id;
+        let (control, receiver) = unbounded_channel();
+        self.audio.take = Some(Take {
+            id,
+            scope,
+            control,
+            phase: TakePhase::Starting,
+            held: held.then(Instant::now),
+            elapsed: Duration::ZERO,
+            level: 0,
+        });
+        self.audio.record_start = Some(RecordRequest {
+            id,
+            capture: recorder.capture,
+            encoder: recorder.encoder,
+            dir,
+            limits: Limits::default(),
+            control: receiver,
+        });
+        self.dirty = true;
+    }
+
+    /// Ends the recording and keeps it: its note will wait where it was begun.
+    /// Nothing if none runs, or it is ending already.
+    pub(super) fn stop_recording(&mut self) {
+        let Some(take) = &mut self.audio.take else {
+            return;
+        };
+        if take.phase == TakePhase::Saving {
+            return;
+        }
+        take.phase = TakePhase::Saving;
+        take.held = None;
+        // Its task gone already: its last word is on the way, or it was dropped.
+        let _ = take.control.send(RecordControl::Stop);
+        self.dirty = true;
+    }
+
+    /// Ends the recording and keeps nothing, at any moment of it. False if none ran.
+    pub(super) fn cancel_recording(&mut self) -> bool {
+        // Not started yet: it never is.
+        self.audio.record_start = None;
+        let Some(take) = self.audio.take.take() else {
+            return false;
+        };
+        // The channel going with `take` says the same.
+        let _ = take.control.send(RecordControl::Cancel);
+        self.dirty = true;
+        true
+    }
+
+    /// On every tick: a recording whose conversation is not the open one any more
+    /// (another room, a thread opened or closed, the chat closed) ends and is kept.
+    pub(super) fn recording_tick(&mut self) {
+        let Some(take) = &self.audio.take else {
+            return;
+        };
+        if self.attach_scope().as_ref() != Some(&take.scope) {
+            self.stop_recording();
+        }
+    }
+
+    pub(super) fn on_recording(&mut self, update: RecordUpdate) {
+        // Of a recording given up meanwhile: a file that came with it goes with it.
+        if self
+            .audio
+            .take
+            .as_ref()
+            .is_none_or(|take| take.id != update.id)
+        {
+            return;
+        }
+        self.dirty = true;
+        match update.event {
+            RecordEvent::Started => {
+                if let Some(take) = &mut self.audio.take
+                    && take.phase == TakePhase::Starting
+                {
+                    take.phase = TakePhase::Running;
+                }
+            }
+            RecordEvent::Level { elapsed, level } => {
+                if let Some(take) = &mut self.audio.take {
+                    take.elapsed = elapsed;
+                    take.level = level;
+                }
+            }
+            RecordEvent::Done(recording) => {
+                if let Some(take) = self.audio.take.take() {
+                    self.keep_recording(take.scope, recording);
+                }
+            }
+            RecordEvent::Failed(failure) => {
+                self.audio.take = None;
+                self.show_toast(failure_text(failure));
+            }
+            RecordEvent::Cancelled => self.audio.take = None,
+        }
+    }
+
+    /// A finished recording joins the files waiting in the conversation it was begun
+    /// in, also when that is not the open one any more. Where that conversation's room
+    /// is gone, or the session, it is dropped, and its file with it.
+    fn keep_recording(&mut self, scope: Scope, recording: Recording) {
+        if self.logged_out || !self.rooms.iter().any(|room| room.id == scope.0) {
+            return;
+        }
+        let Recording {
+            file,
+            duration,
+            waveform,
+            size,
+            silent,
+            full,
+        } = recording;
+        let here = self.attach_scope().as_ref() == Some(&scope);
+        let voice = VoiceNote {
+            file,
+            duration,
+            waveform,
+        };
+        self.attach.add_voice(scope, voice, size);
+        let said = if silent {
+            "Only silence was recorded: is the microphone the right one?"
+        } else if full {
+            "The longest voice message was reached: the recording waits to be sent"
+        } else if here {
+            "Recorded: add a caption, or send it"
+        } else {
+            "Recorded: it waits in the chat it was begun in"
+        };
+        self.show_toast(said);
+        if here && self.modal.is_none() && !self.help_open {
+            self.set_focus(Pane::Composer);
+        }
     }
 
     /// Enter on the voice recorder row: the setting is kept, and looked up at once.
@@ -142,7 +485,60 @@ mod tests {
     use crate::modal::Modal;
     use crate::ui::hit::HitId;
 
-    const NOT_YET: &str = "Recording voice messages is not available in this build yet";
+    /// Whether a recording was begun; it is given up again.
+    fn began(app: &mut App) -> bool {
+        let began = app.take_record_start().is_some();
+        app.cancel_recording();
+        began
+    }
+
+    /// The task of the recording that runs says `event`.
+    fn update(app: &mut App, event: RecordEvent) {
+        let id = app.audio.next_id;
+        app.on_recording(RecordUpdate { id, event });
+    }
+
+    /// The recording ends well: its file is in `dir`.
+    fn done(app: &mut App, dir: &Bin, secs: u64) -> PathBuf {
+        let file = TempAudio::voice(&dir.0, b"OggS and so on").unwrap();
+        let path = file.path().to_owned();
+        update(
+            app,
+            RecordEvent::Done(Recording {
+                file,
+                duration: Duration::from_secs(secs),
+                waveform: vec![100, 1024, 3],
+                size: 28_000,
+                silent: false,
+                full: false,
+            }),
+        );
+        path
+    }
+
+    /// The recording is under way: its request, as the event loop would take it.
+    fn recording(app: &mut App) -> RecordRequest {
+        let request = app.take_record_start().expect("a recording to start");
+        update(app, RecordEvent::Started);
+        request
+    }
+
+    fn told(request: &mut RecordRequest) -> Option<RecordControl> {
+        request.control.try_recv().ok()
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
 
     fn tool(name: &str) -> Tool {
         Tool::new(PathBuf::from(format!("/nonexistent/{name}")), Vec::new())
@@ -151,6 +547,8 @@ mod tests {
     fn offered() -> App {
         let mut app = App::demo();
         app.set_test_recorder(tool("capture"), tool("encoder"));
+        // Never written to: the tests that keep a recording bring a folder.
+        app.audio.dir = Some(PathBuf::from("/nonexistent/matrix-rat-voice"));
         app
     }
 
@@ -259,7 +657,7 @@ mod tests {
         assert_eq!((clip.x, smiley.x), (mic.x + 3, mic.x + 6));
 
         // While a recording runs the button is a stop sign, in the same place.
-        app.audio.recording = true;
+        app.perform(Action::RecordVoice);
         let text = screen(&mut app, 100);
         assert!(
             !text.contains(symbols.mic) && text.contains(symbols.stop),
@@ -269,32 +667,312 @@ mod tests {
         // And it stays, should the recorder be gone meanwhile: it is what stops it.
         app.audio.recorder = Err(NoRecorder::Missing);
         assert_eq!(app.mic_button(), Mic::Recording);
-        app.audio.recording = false;
+        app.cancel_recording();
         assert_eq!(app.mic_button(), Mic::Hidden);
     }
 
     #[test]
-    fn the_key_and_a_click_on_the_microphone_say_that_nothing_records_yet() {
-        let mut app = offered();
-        app.perform(Action::RecordVoice);
-        assert_eq!(toast(&app), NOT_YET);
-        app.toast = None;
-        let _ = screen(&mut app, 100);
-        let mic = app.hits.rect_of(HitId::Do(Action::RecordVoice)).unwrap();
-        app.on_event(Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: mic.x,
-            row: mic.y,
-            modifiers: KeyModifiers::NONE,
-        }));
-        assert_eq!(toast(&app), NOT_YET);
-        // Alt-M is its key, in every pane.
+    fn the_key_starts_a_recording_in_every_pane() {
         for pane in [Pane::Sidebar, Pane::Timeline, Pane::Composer] {
-            app.toast = None;
+            let mut app = offered();
             app.set_focus(pane);
             app.on_event(alt_m());
-            assert_eq!(toast(&app), NOT_YET, "{pane:?}");
+            assert_eq!(app.mic_button(), Mic::Recording, "{pane:?}");
+            assert!(began(&mut app), "{pane:?}");
+            assert_eq!(app.mic_button(), Mic::Idle, "{pane:?}");
         }
+    }
+
+    #[test]
+    fn the_key_starts_a_recording_and_the_same_key_ends_it_into_a_waiting_note() {
+        let dir = Bin::new("key", &[]);
+        let mut app = offered();
+        app.on_event(alt_m());
+        assert!(screen(&mut app, 100).contains("● starting…"));
+        let mut request = recording(&mut app);
+        update(
+            &mut app,
+            RecordEvent::Level {
+                elapsed: Duration::from_secs(7),
+                level: 1024,
+            },
+        );
+        let stops = format!("{} stops", app.record_key().unwrap());
+        let text = screen(&mut app, 100);
+        let row = format!("● 0:07 █ · {stops} · Esc discards");
+        assert!(text.contains(&row), "{text}");
+        // The status line says it too, whatever covers the composer.
+        assert_eq!(text.matches("● 0:07").count(), 2, "{text}");
+        assert_eq!(told(&mut request), None);
+
+        app.on_event(alt_m());
+        assert_eq!(told(&mut request), Some(RecordControl::Stop));
+        assert!(screen(&mut app, 100).contains("● 0:07 saving…"));
+        // It is ending: the key has nothing more to say, and the stop sign stays.
+        app.on_event(alt_m());
+        assert_eq!(told(&mut request), None);
+        assert_eq!(app.mic_button(), Mic::Recording);
+
+        let path = done(&mut app, &dir, 12);
+        assert_eq!(app.mic_button(), Mic::Idle);
+        assert_eq!(app.focus, Pane::Composer);
+        let text = screen(&mut app, 100);
+        assert!(text.contains("🎤 Voice message · 0:12 · "), "{text}");
+        assert!(!text.contains("● 0:07"), "{text}");
+        assert_eq!(app.attachments().len(), 1);
+        assert!(path.exists());
+        // Nothing went anywhere by itself: Enter sends it (here, in the demo, as a
+        // row of its own), and its file goes.
+        let before = app.messages().len();
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.messages().len(), before + 1);
+        let sent = &app.messages().last().unwrap().body;
+        assert_eq!(sent, "🎤 Voice message · 0:12");
+        assert!(app.attachments().is_empty());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn holding_the_microphone_records_until_it_is_let_go_and_a_click_latches() {
+        let mut app = offered();
+        let _ = screen(&mut app, 100);
+        let mic = app.hits.rect_of(HitId::Do(Action::RecordVoice)).unwrap();
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+
+        // Let go at once: that was a click, and the recording runs on.
+        app.on_event(mouse(down, mic.x, mic.y));
+        let mut request = recording(&mut app);
+        assert!(screen(&mut app, 100).contains("let go to stop"));
+        app.on_event(mouse(up, mic.x, mic.y));
+        assert_eq!(told(&mut request), None);
+        assert!(screen(&mut app, 100).contains(" stops · Esc discards"));
+        // The next click, on what is the stop sign now, ends it; its letting go
+        // says nothing more.
+        app.on_event(mouse(down, mic.x, mic.y));
+        assert_eq!(told(&mut request), Some(RecordControl::Stop));
+        app.on_event(mouse(up, mic.x, mic.y));
+        assert_eq!(told(&mut request), None);
+        update(&mut app, RecordEvent::Failed(Failure::TooShort));
+        assert!(toast(&app).starts_with("Too short to keep"));
+        assert_eq!(app.mic_button(), Mic::Idle);
+
+        // Held for real: letting go ends it, wherever the pointer is by then.
+        app.on_event(mouse(down, mic.x, mic.y));
+        let mut request = recording(&mut app);
+        app.audio.take.as_mut().unwrap().held = Some(Instant::now() - HOLD);
+        app.on_event(mouse(up, 0, 0));
+        assert_eq!(told(&mut request), Some(RecordControl::Stop));
+        // And the key ends a held one as well.
+        app.cancel_recording();
+        app.on_event(mouse(down, mic.x, mic.y));
+        let mut request = recording(&mut app);
+        app.on_event(alt_m());
+        assert_eq!(told(&mut request), Some(RecordControl::Stop));
+    }
+
+    #[test]
+    fn esc_discards_a_recording_wherever_the_keys_go_and_a_late_file_goes_with_it() {
+        let dir = Bin::new("esc", &[]);
+        let mut app = offered();
+        app.perform(Action::RecordVoice);
+        let mut request = recording(&mut app);
+        app.set_focus(Pane::Timeline);
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(told(&mut request), Some(RecordControl::Cancel));
+        assert_eq!(app.mic_button(), Mic::Idle);
+        assert_eq!(toast(&app), "The recording was discarded");
+        // That was all Esc did.
+        assert_eq!(app.focus, Pane::Timeline);
+        // The task had finished meanwhile: what it brings is not kept.
+        let path = done(&mut app, &dir, 5);
+        assert!(!path.exists());
+        assert!(app.attachments().is_empty());
+        // With nothing recording, Esc is what it always was.
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.focus, Pane::Composer);
+
+        // One that was not even started yet never is.
+        app.perform(Action::RecordVoice);
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.take_record_start().is_none());
+    }
+
+    #[test]
+    fn enter_sends_nothing_from_under_a_recording() {
+        let mut app = offered();
+        app.set_focus(Pane::Composer);
+        for c in "hello".chars() {
+            app.on_event(key(KeyCode::Char(c)));
+        }
+        app.perform(Action::RecordVoice);
+        let _request = recording(&mut app);
+        let before = app.messages().len();
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.messages().len(), before);
+        assert_eq!(app.composer.text(), "hello");
+        assert!(toast(&app).starts_with("The recording still runs"));
+        assert_eq!(app.mic_button(), Mic::Recording);
+    }
+
+    #[test]
+    fn leaving_the_chat_losing_the_window_and_suspending_end_it_and_keep_it() {
+        let dir = Bin::new("leave", &[]);
+        type Way = fn(&mut App);
+        let ways: [(&str, Way); 4] = [
+            ("another room", |app| app.open_room(1)),
+            ("the window", |app| app.on_event(Event::FocusLost)),
+            ("suspend", |app| app.perform(Action::Suspend)),
+            ("a tick elsewhere", |app| {
+                app.active = 1;
+                app.on_tick();
+            }),
+        ];
+        for (name, way) in ways {
+            let mut app = offered();
+            let origin = app.attach_scope().unwrap();
+            app.perform(Action::RecordVoice);
+            let mut request = recording(&mut app);
+            way(&mut app);
+            assert_eq!(told(&mut request), Some(RecordControl::Stop), "{name}");
+            // The note waits where it was begun, also when that is not open now.
+            let path = done(&mut app, &dir, 3);
+            assert!(path.exists(), "{name}");
+            assert_eq!(app.attach.files(Some(&origin)).len(), 1, "{name}");
+            if app.attach_scope().as_ref() != Some(&origin) {
+                assert!(app.attachments().is_empty(), "{name}");
+                assert_eq!(
+                    toast(&app),
+                    "Recorded: it waits in the chat it was begun in",
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn logging_out_gives_a_recording_up_and_removes_the_notes_that_wait() {
+        let dir = Bin::new("logout", &[]);
+        let mut app = offered();
+        app.perform(Action::RecordVoice);
+        let _request = recording(&mut app);
+        let path = done(&mut app, &dir, 3);
+        app.perform(Action::RecordVoice);
+        let mut request = recording(&mut app);
+        app.reset_session();
+        assert_eq!(told(&mut request), Some(RecordControl::Cancel));
+        assert_eq!(app.mic_button(), Mic::Idle);
+        assert!(!path.exists());
+        // What its task still brings finds no session to wait in.
+        let late = done(&mut app, &dir, 3);
+        assert!(!late.exists());
+    }
+
+    #[test]
+    fn a_failure_is_said_and_a_note_taken_off_again_loses_its_file() {
+        let dir = Bin::new("fail", &[]);
+        let mut app = offered();
+        app.perform(Action::RecordVoice);
+        let _request = app.take_record_start().unwrap();
+        update(&mut app, RecordEvent::Failed(Failure::NoSound));
+        assert_eq!(toast(&app), "No sound arrived from the microphone");
+        assert_eq!(app.mic_button(), Mic::Idle);
+        // An answer about another recording than the one that runs is dropped.
+        app.perform(Action::RecordVoice);
+        let _request = recording(&mut app);
+        app.on_recording(RecordUpdate {
+            id: app.audio.next_id - 1,
+            event: RecordEvent::Failed(Failure::Encoder),
+        });
+        assert_eq!(app.mic_button(), Mic::Recording);
+
+        let path = done(&mut app, &dir, 3);
+        assert!(path.exists());
+        // Backspace in the empty message takes the note off, as it does a file.
+        app.on_event(key(KeyCode::Backspace));
+        assert!(app.attachments().is_empty());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_silent_recording_and_one_stopped_by_its_length_are_kept_and_said() {
+        let dir = Bin::new("said", &[]);
+        for (silent, full, said) in [
+            (true, false, "Only silence was recorded"),
+            (false, true, "The longest voice message was reached"),
+        ] {
+            let mut app = offered();
+            app.perform(Action::RecordVoice);
+            let _request = recording(&mut app);
+            let file = TempAudio::voice(&dir.0, b"OggS").unwrap();
+            update(
+                &mut app,
+                RecordEvent::Done(Recording {
+                    file,
+                    duration: Duration::from_secs(300),
+                    waveform: Vec::new(),
+                    size: 4,
+                    silent,
+                    full,
+                }),
+            );
+            assert!(toast(&app).starts_with(said), "{}", toast(&app));
+            assert_eq!(app.attachments().len(), 1);
+        }
+    }
+
+    #[test]
+    fn the_worker_is_handed_a_voice_message_with_its_length_and_waveform() {
+        use crate::matrix::{MatrixCmd, MatrixHandle, OutgoingFile};
+        use crate::model::{Room, RoomKind};
+        let dir = Bin::new("worker", &[]);
+        let mut app = offered();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.matrix = Some(handle);
+        app.rooms = vec![Room::new("!alpha", "Alpha", RoomKind::Room)];
+        app.active = 0;
+        app.set_focus(Pane::Composer);
+        app.perform(Action::RecordVoice);
+        let _request = recording(&mut app);
+        let path = done(&mut app, &dir, 12);
+        app.on_event(key(KeyCode::Enter));
+        let mut sent = None;
+        while let Ok(command) = commands.try_recv() {
+            if let MatrixCmd::SendFiles { files, .. } = command {
+                sent = Some(files);
+            }
+        }
+        let files: Vec<OutgoingFile> = sent.expect("the files to be sent");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, path);
+        assert_eq!(
+            files[0].voice,
+            Some(VoiceMeta {
+                duration: Duration::from_secs(12),
+                waveform: vec![100, 1024, 3],
+            })
+        );
+        // The worker reads the file some time later: it stays until it has answered.
+        assert!(app.attachments().is_empty());
+        assert!(path.exists());
+        assert!(app.attach.sends_out());
+    }
+
+    #[test]
+    fn debug_output_names_no_folder_file_or_conversation() {
+        let dir = Bin::new("debug", &[]);
+        let mut app = offered();
+        app.perform(Action::RecordVoice);
+        let _request = recording(&mut app);
+        let _path = done(&mut app, &dir, 3);
+        app.perform(Action::RecordVoice);
+        let request = recording(&mut app);
+        let shown = format!("{:?} {:?} {request:?}", app.audio, app.attach);
+        let room = app.attach_scope().unwrap().0;
+        for private in ["matrix-rat-voice", "voice-", room.as_str(), "nonexistent"] {
+            assert!(!shown.contains(private), "{private} in {shown}");
+        }
+        assert!(shown.contains("voices: 1"), "{shown}");
     }
 
     #[test]
@@ -328,7 +1006,7 @@ mod tests {
         assert!(enabled);
         app.run_palette_at(index);
         assert!(app.modal.is_none());
-        assert_eq!(toast(&app), NOT_YET);
+        assert!(began(&mut app));
 
         // Greyed where the machine cannot record: choosing it does nothing.
         let mut app = App::demo();
@@ -366,6 +1044,8 @@ mod tests {
         let bin = Bin::new("again", &["arecord"]);
         let mut app = App::demo();
         app.audio.recorder_env = bin.env();
+        // Set by the event loop: there is somewhere to keep a recording.
+        app.audio.dir = Some(PathBuf::from("/nonexistent/matrix-rat-voice"));
         app.perform(Action::RecordVoice);
         assert_eq!(toast(&app), "No Opus encoder found (opusenc or ffmpeg)");
         assert_eq!(app.mic_button(), Mic::Hidden);
@@ -374,13 +1054,13 @@ mod tests {
         bin.add("opusenc");
         assert_eq!(app.mic_button(), Mic::Hidden);
         app.perform(Action::RecordVoice);
-        assert_eq!(toast(&app), NOT_YET);
+        assert!(began(&mut app));
         assert_eq!(app.mic_button(), Mic::Idle);
         assert_eq!(app.audio.recorder_setting_text(), "auto: arecord + opusenc");
         // What is offered is not looked up again on every key.
         std::fs::remove_file(bin.0.join("arecord")).unwrap();
         app.perform(Action::RecordVoice);
-        assert_eq!(toast(&app), NOT_YET);
+        assert!(began(&mut app));
     }
 
     #[test]

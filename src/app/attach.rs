@@ -58,6 +58,9 @@ pub struct AttachState {
     /// Pictures pasted from the clipboard: files of ours, each removed (by being
     /// dropped) once no chip and no send needs it any more.
     pub(super) pasted: Vec<TempPicture>,
+    /// Voice messages recorded here: files of ours with their length and waveform,
+    /// kept and removed exactly as the pasted pictures are.
+    pub(super) voices: Vec<super::voice::VoiceNote>,
     /// The clipboard is being read for this conversation; the number tells the answer
     /// from that of a reading given up before.
     pub(super) reading: Option<(u64, Scope)>,
@@ -82,6 +85,7 @@ impl std::fmt::Debug for AttachState {
             .field("limit", &self.limit)
             .field("hidden", &self.hidden)
             .field("pasted", &self.pasted.len())
+            .field("voices", &self.voices.len())
             .field(
                 "reading",
                 &self.reading.as_ref().map(|(reading, _)| reading),
@@ -138,12 +142,30 @@ impl AttachState {
             return;
         }
         let pending = &self.pending;
-        self.pasted.retain(|picture| {
-            pending
-                .values()
-                .flatten()
-                .any(|file| file.path == picture.path())
+        let waits =
+            |path: &std::path::Path| pending.values().flatten().any(|file| file.path == path);
+        self.pasted.retain(|picture| waits(picture.path()));
+        self.voices.retain(|voice| waits(voice.path()));
+    }
+
+    /// A send was handed to the worker and not answered yet.
+    pub(super) fn sends_out(&self) -> bool {
+        !self.handed.is_empty()
+    }
+
+    /// The voice message recorded here that waits in the file `path`, if it is one.
+    pub fn voice(&self, path: &std::path::Path) -> Option<&super::voice::VoiceNote> {
+        self.voices.iter().find(|voice| voice.path() == path)
+    }
+
+    /// A recording joins the files waiting in `scope`.
+    pub(super) fn add_voice(&mut self, scope: Scope, voice: super::voice::VoiceNote, size: u64) {
+        self.pending.entry(scope).or_default().push(Chosen {
+            path: voice.path().to_owned(),
+            name: super::voice::VOICE_NAME.to_owned(),
+            size,
         });
+        self.voices.push(voice);
     }
 }
 
@@ -439,8 +461,15 @@ impl App {
             self.send_matrix(MatrixCmd::SendFiles {
                 send: self.attach.sends,
                 room_id: room_id.clone(),
-                // Nothing records yet: every file goes as what it is.
-                files: files.iter().map(|file| file.path.clone().into()).collect(),
+                // A recording of ours goes as a voice message, any other file as
+                // what it is.
+                files: files
+                    .iter()
+                    .map(|file| crate::matrix::OutgoingFile {
+                        path: file.path.clone(),
+                        voice: self.attach.voice(&file.path).map(|voice| voice.meta()),
+                    })
+                    .collect(),
                 caption,
                 reply_to,
             });
@@ -454,7 +483,12 @@ impl App {
                 _ => None,
             };
             for (n, file) in files.iter().enumerate() {
-                let mut body = format!("📎 {} · {}", file.name, human_size(file.size));
+                let mut body = match self.attach.voice(&file.path) {
+                    Some(voice) => {
+                        format!("🎤 {} · {}", file.name, crate::audio::clock(voice.duration))
+                    }
+                    None => format!("📎 {} · {}", file.name, human_size(file.size)),
+                };
                 if n == 0 && !text.is_empty() {
                     body.push('\n');
                     body.push_str(&text);

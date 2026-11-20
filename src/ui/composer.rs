@@ -75,7 +75,47 @@ pub fn height(app: &App, pane_width: u16) -> u16 {
         .len();
     let banner = u16::from(app.compose_mode != ComposeMode::Normal);
     let files = super::attach::rows(app.attachments().len());
-    rows.clamp(1, MAX_TEXT_ROWS) as u16 + 2 + banner + files
+    let recording = u16::from(app.recording_here().is_some());
+    rows.clamp(1, MAX_TEXT_ROWS) as u16 + 2 + banner + recording + files
+}
+
+/// The row a recording shows above the text: that it runs, how long, how loud, and
+/// what ends it. What does not fit is left out from the right.
+fn recording_line(app: &App, view: crate::app::RecordingView, width: usize) -> String {
+    use crate::app::TakePhase;
+    let clock = crate::audio::clock(view.elapsed);
+    let parts: Vec<String> = match view.phase {
+        TakePhase::Starting => vec!["● starting…".to_owned(), "Esc discards".to_owned()],
+        TakePhase::Saving => vec![format!("● {clock} saving…")],
+        TakePhase::Running => {
+            let ends = if view.held {
+                "let go to stop".to_owned()
+            } else {
+                match app.record_key() {
+                    Some(key) => format!("{key} stops"),
+                    None => "click ■ to stop".to_owned(),
+                }
+            };
+            vec![
+                format!("● {clock} {}", crate::audio::bars(&[view.level])),
+                ends,
+                "Esc discards".to_owned(),
+            ]
+        }
+    };
+    let mut line = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        let next = if index == 0 {
+            part.clone()
+        } else {
+            format!("{line} · {part}")
+        };
+        if index > 0 && crate::text::width(&next) > width {
+            break;
+        }
+        line = next;
+    }
+    truncate(&line, width)
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -127,13 +167,35 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         text_area.y += 1;
         text_area.height = text_area.height.saturating_sub(1);
     }
+    // A recording that runs, where there is a row to spare (the status line shows it
+    // in any case).
+    if let Some(view) = app.recording_here()
+        && text_area.height > 1
+    {
+        let rect = Rect::new(text_area.x, text_area.y, text_area.width, 1);
+        let line = recording_line(app, view, rect.width as usize);
+        frame.render_widget(
+            Line::from(Span::styled(line, theme.style(Role::Error))),
+            rect,
+        );
+        text_area.y += 1;
+        text_area.height -= 1;
+    }
     // Files waiting to be sent, one line each; the text keeps at least one row.
     let scope = app.attach_scope();
     let files = app.attach.files(scope.as_ref());
     let file_rows = super::attach::rows(files.len()).min(text_area.height.saturating_sub(1));
     if file_rows > 0 {
         let rect = Rect::new(text_area.x, text_area.y, text_area.width, file_rows);
-        super::attach::draw(frame, files, theme, app.hover, &mut app.hits, rect);
+        super::attach::draw(
+            frame,
+            files,
+            &app.attach,
+            theme,
+            app.hover,
+            &mut app.hits,
+            rect,
+        );
         text_area.y += file_rows;
         text_area.height -= file_rows;
     }

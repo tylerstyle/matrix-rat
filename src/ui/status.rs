@@ -70,6 +70,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(format!(" {dot} "), theme.style(dot_role)),
         Span::styled(format!("{text}  "), status),
     ];
+    // The microphone is open: said here too, whatever covers the composer.
+    if let Some(recording) = app.recording() {
+        spans.push(Span::styled(
+            format!("● {}  ", crate::audio::clock(recording.elapsed)),
+            theme.style(Role::Error),
+        ));
+    }
     if app.do_not_disturb {
         spans.push(Span::styled("do not disturb  ", theme.style(Role::Banner)));
     }
