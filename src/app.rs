@@ -253,6 +253,9 @@ pub struct App {
     /// The `rooms_bar` setting: with the room list out of sight, a line above the
     /// chat that leads back to it and shows the rooms with new notifications.
     pub rooms_bar: bool,
+    /// The room the "newest room with notifications" key opened last, while it is
+    /// still the open one: the key goes on from there (see `open_active_room`).
+    active_from: Option<String>,
     /// False while the terminal window is in the background.
     window_focused: bool,
     /// The draft that was in the composer when an edit started.
@@ -440,6 +443,7 @@ impl std::fmt::Debug for App {
             .field("pending_copy", &self.pending_copy.is_some())
             .field("window_title", &self.window_title)
             .field("rooms_bar", &self.rooms_bar)
+            .field("active_from", &self.active_from.is_some())
             .field("title_written", &self.title_written)
             .field("found", &self.found)
             .field("notify_mode", &self.notify_mode)
@@ -635,6 +639,7 @@ impl App {
             chat_closed: false,
             esc_closes_chat: true,
             rooms_bar: true,
+            active_from: None,
             window_focused: true,
             edit_stash: None,
             typing_sent: None,
@@ -1472,6 +1477,7 @@ impl App {
         self.active = 0;
         // The next session starts as every one does: its first room opens by itself.
         self.chat_closed = false;
+        self.active_from = None;
         self.timeline = TimelineState::default();
         self.composer.take();
         self.compose_mode = ComposeMode::Normal;
@@ -1593,6 +1599,9 @@ impl App {
             return;
         }
         self.auto_opened = false;
+        // Whatever opens a room: the key for the newest active room starts afresh
+        // (it notes its own room after this).
+        self.active_from = None;
         // With no chat open every room is another one, the one that was left too.
         let other = Some(index) != self.open_index();
         let fresh = opened || other;
@@ -1659,6 +1668,7 @@ impl App {
         self.leave_open_room();
         self.chat_closed = true;
         self.auto_opened = false;
+        self.active_from = None;
         self.timeline = TimelineState::default();
         self.row_cache = None;
         self.timeline_rev += 1;
@@ -2760,7 +2770,7 @@ impl App {
                 self.step_theme(1);
             }
             Action::Back => self.back(),
-            Action::CloseChat => self.close_chat(),
+            Action::CloseChat => self.leave_for_room_list(),
             Action::PageUp => {
                 self.timeline.scroll += self.timeline.page.saturating_sub(1).max(1);
                 self.timeline.older_armed = true;
