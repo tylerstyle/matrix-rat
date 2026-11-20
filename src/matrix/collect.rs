@@ -1238,29 +1238,28 @@ mod tests {
         });
         let shown = async {
             loop {
-                match events.recv().await.expect("worker stopped") {
-                    MatrixEvent::Timeline {
-                        messages,
+                let MatrixEvent::Timeline {
+                    messages,
+                    generation: 1,
+                    ..
+                } = events.recv().await.expect("worker stopped")
+                else {
+                    continue;
+                };
+                let has = |body: &String| messages.iter().any(|m| &m.body == body);
+                if early.iter().all(has) {
+                    return messages
+                        .iter()
+                        .filter(|m| m.kind != MsgKind::ReadMarker)
+                        .count();
+                }
+                // Not all of them yet: older ones are asked for, as the app does
+                // when one scrolls up.
+                if has(&early[29]) {
+                    handle.send(MatrixCmd::Paginate {
+                        room_id: room_id.clone(),
                         generation: 1,
-                        ..
-                    } => {
-                        let has = |body: &String| messages.iter().any(|m| &m.body == body);
-                        if early.iter().all(has) {
-                            return messages
-                                .iter()
-                                .filter(|m| m.kind != MsgKind::ReadMarker)
-                                .count();
-                        }
-                        // Not all of them yet: older ones are asked for, as the app
-                        // does when one scrolls up.
-                        if has(&early[29]) {
-                            handle.send(MatrixCmd::Paginate {
-                                room_id: room_id.clone(),
-                                generation: 1,
-                            });
-                        }
-                    }
-                    _ => {}
+                    });
                 }
             }
         };
