@@ -288,6 +288,34 @@ impl Timelines {
         }
     }
 
+    /// Loads one page of older messages into `self.paginator` and reports completion for
+    /// `generation`. Any matching `MatrixCmd::Paginate` while this runs is coalesced.
+    fn spawn_paginate(
+        &mut self,
+        timeline: Arc<Timeline>,
+        detached_start: Option<Arc<AtomicBool>>,
+        generation: u64,
+    ) {
+        let events = self.events.clone();
+        self.paginator = Some(tokio::spawn(async move {
+            let reached_start = match timeline.paginate_backwards(PAGE).await {
+                Ok(reached_start) => reached_start,
+                Err(err) => {
+                    tracing::warn!(why = %logsafe::kind(&err), "could not load older messages");
+                    // Report "done" so the UI does not retry in a loop.
+                    true
+                }
+            };
+            if let Some(flag) = detached_start {
+                flag.store(reached_start, Ordering::Release);
+            }
+            let _ = events.send(MatrixEvent::Paginated {
+                generation,
+                reached_start,
+            });
+        }));
+    }
+
     /// Tells the UI the stored draft of a room (or of the thread a command is being
     /// handled for) when it is opened for the first time. After that the UI has the
     /// newer text, so it is told only once.
@@ -660,9 +688,20 @@ impl Timelines {
                 self.tell_draft(&room, &room_id).await;
                 match self.timeline(&room_id).await {
                     Ok(timeline) => {
+                        // A freshly created `TimelineFocus::Thread` starts from an empty
+                        // `ThreadEventCache` unless sync happened to carry the root while
+                        // the cache already existed; its root is only loaded once a
+                        // backwards page reaches the start of `/relations`. Starting that
+                        // first page here (through `self.paginator`, so a matching
+                        // `MatrixCmd::Paginate` from the UI coalesces into it) ensures
+                        // `OpenThread` never stays empty.
+                        let need_page = match &self.thread {
+                            Some(root) => thread_needs_page(&timeline.items().await, root),
+                            None => false,
+                        };
                         self.forwarder = Some(tokio::spawn(forward(
                             room,
-                            timeline,
+                            timeline.clone(),
                             room_id,
                             generation,
                             self.events.clone(),
@@ -673,6 +712,9 @@ impl Timelines {
                             self.own_refresh.clone(),
                             self.own_room_names.clone(),
                         )));
+                        if need_page {
+                            self.spawn_paginate(timeline, None, generation);
+                        }
                     }
                     Err(err) => self.fail("Could not open the room", err),
                 }
@@ -714,24 +756,7 @@ impl Timelines {
                 }
                 match self.active_timeline(&room_id).await {
                     Ok((timeline, detached_start)) => {
-                        let events = self.events.clone();
-                        self.paginator = Some(tokio::spawn(async move {
-                            let reached_start = match timeline.paginate_backwards(PAGE).await {
-                                Ok(reached_start) => reached_start,
-                                Err(err) => {
-                                    tracing::warn!(why = %logsafe::kind(&err), "could not load older messages");
-                                    // Report "done" so the UI does not retry in a loop.
-                                    true
-                                }
-                            };
-                            if let Some(flag) = detached_start {
-                                flag.store(reached_start, Ordering::Release);
-                            }
-                            let _ = events.send(MatrixEvent::Paginated {
-                                generation,
-                                reached_start,
-                            });
-                        }));
+                        self.spawn_paginate(timeline, detached_start, generation);
                     }
                     Err(err) => {
                         self.fail("Could not load older messages", err);
@@ -2022,6 +2047,38 @@ async fn prepare_messages(
     messages
 }
 
+/// Whether an opened thread timeline needs its first backwards page loaded: the SDK's
+/// `ThreadEventCache` starts empty (or with only live replies synced since it was made)
+/// until a backwards page loads `/relations` and the root event.
+fn thread_needs_page(items: &Vector<Arc<TimelineItem>>, root: &str) -> bool {
+    thread_page_needed(
+        items.iter().filter_map(|item| {
+            item.as_event()
+                .map(|event| event.event_id().map(|id| id.as_str()))
+        }),
+        root,
+        usize::from(PAGE),
+    )
+}
+
+fn thread_page_needed<'a>(
+    event_ids: impl IntoIterator<Item = Option<&'a str>>,
+    root: &str,
+    page: usize,
+) -> bool {
+    let mut events = 0usize;
+    for id in event_ids {
+        if id == Some(root) {
+            return false;
+        }
+        events += 1;
+        if events >= page {
+            return false;
+        }
+    }
+    true
+}
+
 /// Sends the whole timeline to the UI whenever it changes, and who is typing.
 /// `thread`: the timeline is not the room's but that of the thread starting at this event.
 #[allow(clippy::too_many_arguments)]
@@ -2561,6 +2618,223 @@ mod tests {
         })
         .await
         .expect("the room is back once joined");
+    }
+
+    #[test]
+    fn thread_page_needed_decides_when_an_opened_thread_needs_a_first_page() {
+        // Empty or only unsent local echoes: still needs the first page (and root).
+        assert!(super::thread_page_needed([], "$root", 40));
+        assert!(super::thread_page_needed([None, None], "$root", 40));
+        // Fewer than a page of replies, without the root: still needs the root loaded.
+        assert!(super::thread_page_needed(
+            [Some("$r1"), Some("$r2")],
+            "$root",
+            40
+        ));
+        // The root is already in the thread timeline: nothing more to ask for.
+        assert!(!super::thread_page_needed([Some("$root")], "$root", 40));
+        assert!(!super::thread_page_needed(
+            [Some("$root"), Some("$r1")],
+            "$root",
+            40
+        ));
+        // A full page of cached replies already loaded: wait for the user to scroll.
+        let full = std::iter::repeat_n(Some("$reply"), 40);
+        assert!(!super::thread_page_needed(full, "$root", 40));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn opening_a_thread_without_replies_loads_its_root_even_after_sync_delivered_it() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+        use crate::model::ItemRef;
+        use matrix_sdk::authentication::SessionTokens;
+        use matrix_sdk::authentication::matrix::MatrixSession;
+        use matrix_sdk::{AuthSession, Client, SessionMeta};
+        use serde_json::json;
+
+        let room = "!thread:localhost";
+        let root = "$root:localhost";
+        let root_event = json!({
+            "type": "m.room.message",
+            "room_id": room,
+            "event_id": root,
+            "sender": fake::ME,
+            "origin_server_ts": 1_000,
+            "content": { "msgtype": "m.text", "body": "start of the thread" }
+        });
+        let mut joined = fake::joined(false, vec![]);
+        joined["timeline"]["events"] = json!([root_event.clone()]);
+
+        let relations_hits = Arc::new(AtomicUsize::new(0));
+        let hits = relations_hits.clone();
+        let event_json = root_event.to_string();
+        let server = fake::Server::answering(
+            json!({ "join": { room: joined } }),
+            Box::new(move |request| {
+                if request.path.contains("/relations/") {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    Some(fake::Reply::Json(r#"{"chunk":[]}"#.to_owned()))
+                } else if request.path.contains("/event/") {
+                    Some(fake::Reply::Json(event_json.clone()))
+                } else {
+                    None
+                }
+            }),
+        )
+        .await;
+
+        let client = Client::builder()
+            .homeserver_url(&server.url)
+            .with_threading_support(super::threads::SUPPORT)
+            .build()
+            .await
+            .unwrap();
+        client
+            .restore_session(AuthSession::Matrix(MatrixSession {
+                meta: SessionMeta {
+                    user_id: fake::ME.try_into().unwrap(),
+                    device_id: "FAKE".into(),
+                },
+                tokens: SessionTokens {
+                    access_token: "token".into(),
+                    refresh_token: None,
+                },
+            }))
+            .await
+            .unwrap();
+        // Subscribing before sync ensures `$root` is delivered to the room's event cache
+        // before `OpenThread` ever creates a `ThreadEventCache` for it — the race where
+        // the SDK's thread cache otherwise starts and stays empty until paginated.
+        client.event_cache().subscribe().unwrap();
+        client.sync_once(SyncSettings::default()).await.unwrap();
+
+        let left = LeftRooms::default();
+        let (event_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        // Keep the watch senders alive so `forward` stays in its select loop.
+        let (_ignored_tx, ignored) = tokio::sync::watch::channel(super::IgnoredSet::default());
+        let (_own_refresh_tx, own_refresh) = tokio::sync::watch::channel(0);
+        let mut timelines = super::Timelines::new(
+            client,
+            event_tx,
+            ignored,
+            own_refresh,
+            crate::matrix::people::OwnRoomNames::default(),
+            left,
+        );
+
+        timelines
+            .handle(MatrixCmd::OpenThread {
+                room_id: room.to_owned(),
+                root: root.to_owned(),
+                generation: 1,
+            })
+            .await;
+        assert!(
+            timelines.paginator.is_some(),
+            "opening an empty thread starts its first page"
+        );
+        // A follow-up `Paginate` from the UI coalesces into the running initial page
+        // rather than issuing a second `/relations` request.
+        timelines
+            .handle(MatrixCmd::InThread {
+                root: root.to_owned(),
+                command: Box::new(MatrixCmd::Paginate {
+                    room_id: room.to_owned(),
+                    generation: 1,
+                }),
+            })
+            .await;
+
+        let mut saw_root = false;
+        let mut saw_paginated = false;
+        let mut seen_events = Vec::new();
+        let waited = tokio::time::timeout(Duration::from_secs(15), async {
+            while !(saw_root && saw_paginated) {
+                let event = events.recv().await.expect("worker channel open");
+                match &event {
+                    MatrixEvent::Timeline {
+                        generation: 1,
+                        messages,
+                        reached_start,
+                        ..
+                    } => {
+                        let summary: Vec<_> = messages
+                            .iter()
+                            .map(|m| (m.body.clone(), m.item.clone(), m.state))
+                            .collect();
+                        seen_events.push(format!(
+                            "Timeline(gen=1, reached_start={reached_start}, msgs={summary:?})"
+                        ));
+                        if messages.len() == 1
+                            && messages[0].body == "start of the thread"
+                            && messages[0].item == Some(ItemRef::Event(root.to_owned()))
+                            && *reached_start
+                        {
+                            saw_root = true;
+                        }
+                    }
+                    MatrixEvent::Paginated {
+                        generation: 1,
+                        reached_start,
+                    } => {
+                        seen_events
+                            .push(format!("Paginated(gen=1, reached_start={reached_start})"));
+                        if *reached_start {
+                            saw_paginated = true;
+                        }
+                    }
+                    other => seen_events.push(format!("{other:?}")),
+                }
+            }
+        })
+        .await;
+        if waited.is_err() {
+            let paths: Vec<_> = server
+                .requests()
+                .into_iter()
+                .map(|r| format!("{} {}?{}", r.method, r.path, r.query))
+                .collect();
+            panic!(
+                "opening an empty thread timed out: saw_root={saw_root} saw_paginated={saw_paginated} \
+                 relations_hits={} events={seen_events:?} requests={paths:?}",
+                relations_hits.load(Ordering::SeqCst)
+            );
+        }
+        assert_eq!(relations_hits.load(Ordering::SeqCst), 1);
+
+        // Reopening the cached thread that already holds its root does not paginate again.
+        timelines.handle(MatrixCmd::CloseRoom).await;
+        timelines
+            .handle(MatrixCmd::OpenThread {
+                room_id: room.to_owned(),
+                root: root.to_owned(),
+                generation: 2,
+            })
+            .await;
+        assert!(timelines.paginator.is_none());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await.expect("worker channel open") {
+                    MatrixEvent::Timeline {
+                        generation: 2,
+                        messages,
+                        reached_start: true,
+                        ..
+                    } if messages.len() == 1 && messages[0].body == "start of the thread" => {
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("reopening the cached thread shows the root immediately");
+        assert_eq!(relations_hits.load(Ordering::SeqCst), 1);
     }
 
     #[test]

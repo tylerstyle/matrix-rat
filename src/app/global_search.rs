@@ -561,7 +561,7 @@ impl App {
         // not the line (the view's state is made anew below).
         let messages = self.place_unread_line(messages, detached.is_some());
         let messages = if self.thread_open() {
-            self.thread_snapshot(messages)
+            self.thread_snapshot(messages, reached_start)
         } else {
             messages
         };

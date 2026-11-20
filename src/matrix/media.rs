@@ -1099,7 +1099,9 @@ mod tests {
                             let ImageSource::Matrix(media) = &image.source else {
                                 panic!("not a Matrix source");
                             };
-                            // The duplicate is dropped while the first one is running.
+                            // The duplicate is dropped while the first one is running;
+                            // from the cache the first may be done before the second is
+                            // read, and is then fetched again (checked below).
                             for full in [false, true, true] {
                                 handle.send(MatrixCmd::FetchImage {
                                     key: image.key.clone(),
@@ -1119,7 +1121,15 @@ mod tests {
                         let decoded = result.expect("picture could not be loaded");
                         let size = (decoded.pixels.width(), decoded.pixels.height());
                         if full {
-                            assert!(whole.is_none(), "fetched twice");
+                            // A second answer is only a fetch that came after the first
+                            // had ended: it must be the same picture.
+                            if let Some((original, first)) = &whole {
+                                assert_eq!(
+                                    (original, *first),
+                                    (&decoded.original, size),
+                                    "fetched twice, differently"
+                                );
+                            }
                             whole = Some((decoded.original, size));
                         } else {
                             small = Some((decoded.original, size));

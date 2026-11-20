@@ -513,14 +513,23 @@ impl App {
     /// identity throughout, so a selection, reply or edit on it stays put: until the
     /// thread's own copy is loaded the one known from the room stands in for it, and
     /// the thread's copy then takes its place under the same id.
-    pub(super) fn thread_snapshot(&mut self, mut messages: Vec<Message>) -> Vec<Message> {
+    pub(super) fn thread_snapshot(
+        &mut self,
+        mut messages: Vec<Message>,
+        reached_start: bool,
+    ) -> Vec<Message> {
         let Some(view) = &mut self.threads.open else {
             return messages;
         };
         let Some(root) = &view.root else {
             return messages;
         };
-        view.loaded = true;
+        // An empty update before the thread has reached its start comes from a freshly
+        // opened `ThreadEventCache` whose first page is still loading; nothing of the
+        // thread has arrived yet.
+        if !messages.is_empty() || reached_start {
+            view.loaded = true;
+        }
         let own = messages
             .iter_mut()
             .find(|m| matches!(&m.item, Some(ItemRef::Event(id)) if id == root));
@@ -1124,5 +1133,44 @@ mod tests {
         type_text(&mut app, "!");
         app.on_event(key(KeyCode::Enter));
         assert_eq!(drain(&mut commands), ["InThread($ev5, Edit(!a))"]);
+    }
+
+    #[test]
+    fn an_empty_initial_thread_snapshot_keeps_loading_until_messages_or_start_arrive() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.open_thread(5);
+        drain(&mut commands);
+
+        // The worker's first snapshot for a freshly opened `ThreadEventCache` can be empty
+        // while the first page of `/relations` and the root are still loading.
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: app.generation,
+            messages: Vec::new(),
+            reached_start: false,
+            detached: None,
+        });
+        assert_eq!(app.rooms[0].messages.len(), 1);
+        assert_eq!(app.rooms[0].messages[0].id, ROOT_ID);
+        assert_eq!(app.rooms[0].messages[0].body, "line 5");
+        assert!(app.thread_loading());
+
+        // Drawing while still loading asks for history and does not mark the thread read yet.
+        screen(&mut app, &mut terminal);
+        app.after_draw();
+        assert_eq!(drain(&mut commands), ["InThread($ev5, Paginate(!a))"]);
+        assert!(app.timeline.marked_read.is_none());
+
+        // Once the thread's own copy of the root arrives (an empty thread reached its start),
+        // loading finishes and reading it marks the thread read.
+        let mut root = remote(0, "ben", "line 5");
+        root.item = Some(ItemRef::Event("$ev5".into()));
+        app.on_matrix(update(&app, app.generation, vec![root]));
+        assert!(!app.thread_loading());
+        assert_eq!(app.rooms[0].messages.len(), 1);
+        assert_eq!(app.rooms[0].messages[0].id, ROOT_ID);
+        screen(&mut app, &mut terminal);
+        app.after_draw();
+        assert_eq!(drain(&mut commands), ["InThread($ev5, MarkRead(!a))"]);
     }
 }

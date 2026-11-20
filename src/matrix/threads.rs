@@ -511,6 +511,9 @@ mod tests {
         mut check: impl FnMut(&[Message]) -> Option<T>,
     ) -> T {
         use crate::matrix::MatrixEvent;
+        // The last update of `generation` that was not yet it, told on a timeout: how
+        // many messages, and each one's text, whether it has an event and is sent.
+        let mut last = String::from("no update of this generation");
         let wait = async {
             loop {
                 match events.recv().await.expect("worker stopped") {
@@ -525,14 +528,23 @@ mod tests {
                         if let Some(found) = check(&messages) {
                             return found;
                         }
+                        let shown: Vec<String> = messages
+                            .iter()
+                            .map(|m| {
+                                let event = matches!(m.item, Some(ItemRef::Event(_)));
+                                format!("{:?} event={event} {:?}", m.body, m.state)
+                            })
+                            .collect();
+                        last = format!("{} messages: {shown:?}", messages.len());
                     }
                     _ => {}
                 }
             }
         };
-        tokio::time::timeout(std::time::Duration::from_secs(30), wait)
-            .await
-            .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+        match tokio::time::timeout(std::time::Duration::from_secs(30), wait).await {
+            Ok(found) => found,
+            Err(_) => panic!("timed out waiting for {what}; last seen: {last}"),
+        }
     }
 
     /// The event id of the confirmed message with this text.
