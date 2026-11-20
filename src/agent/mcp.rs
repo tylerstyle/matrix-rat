@@ -82,22 +82,57 @@ impl std::fmt::Debug for Config {
     }
 }
 
+/// The variable the agent's name is read from when `--name` is not given.
+pub const NAME_ENV: &str = "MATRIX_RAT_AGENT_NAME";
+
 /// Checks a `--name` argument: something short on one line that cannot be taken for
-/// the end of the signature.
+/// the end of the signature, and of which every character can be seen.
 pub fn check_name(name: &str) -> Result<String, String> {
+    check_name_from(name, "--name")
+}
+
+/// What a name must not hold: what could end the signature or a line, what a reader
+/// or a program could take for the end of a quoted name, and what cannot be seen (two
+/// names must not look the same and differ).
+fn not_for_a_name(c: char) -> bool {
+    let mut one = [0; 4];
+    matches!(c, '[' | ']' | '\n' | '"' | '`' | '\\' | '\u{e0000}'..='\u{e007f}')
+        || crate::text::unsafe_char(c)
+        // A plain space between words is the one blank a name may hold.
+        || (c != ' ' && crate::text::is_blank(c.encode_utf8(&mut one)))
+}
+
+/// The one check of an agent's name, wherever it came from (`whence`, for the
+/// message).
+fn check_name_from(name: &str, whence: &str) -> Result<String, String> {
     let name = name.trim();
     let fine = !name.is_empty()
+        && !crate::text::is_blank(name)
         && name.chars().count() <= MAX_AGENT_NAME
-        && !name
-            .chars()
-            .any(|c| matches!(c, '[' | ']' | '\n') || crate::text::unsafe_char(c));
+        && !name.chars().any(not_for_a_name);
     if fine {
         Ok(name.to_owned())
     } else {
         Err(format!(
-            "--name needs a short name (at most {MAX_AGENT_NAME} characters, without \
-             brackets)"
+            "{whence} needs a short name: at most {MAX_AGENT_NAME} characters on one line, \
+             no brackets, quotes, backticks or backslashes, no control or invisible \
+             characters"
         ))
+    }
+}
+
+/// The agent's name: `--name` when it is given, else the environment's ([`NAME_ENV`],
+/// so that agents sharing one command line sign with their own names). Both go
+/// through the same check. A variable that is set and not a fine name is an error
+/// and never the same as none: nothing is guessed in its place.
+pub fn agent_name(arg: Option<&str>, env: Option<&std::ffi::OsStr>) -> Result<String, String> {
+    match (arg, env) {
+        (Some(name), _) => check_name(name),
+        // What is not Unicode fails the check like an empty name.
+        (None, Some(name)) => check_name_from(name.to_str().unwrap_or(""), NAME_ENV),
+        (None, None) => Err(format!(
+            "mcp needs the agent's name: give --name or set {NAME_ENV}"
+        )),
     }
 }
 

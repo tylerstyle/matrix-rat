@@ -404,10 +404,50 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `notification_click_command` (file only) | a shell command run when a notification is clicked, to bring the terminal window to the front (see Good to know) |
 | `secret_store` (file only) | `"file"` (default), `"keyring"` to keep the store's key in the system keyring, or `"auto"` |
 
-`--profile <name>` keeps several accounts apart. Besides the app itself there are
+`--profile <name>` keeps several accounts apart (see
+[Several accounts](#several-accounts)). Besides the app itself there are
 `matrix-rat doctor` (what matrix-rat finds here, see below) and the commands
 [for agents and scripts](#for-agents-and-scripts): `serve`, `rooms`, `send`, `read`,
 `listen` and `mcp`. `matrix-rat --help` lists them all.
+
+## Several accounts
+
+One profile is one account. `matrix-rat --profile work` starts the profile `work`;
+without `--profile` it is the profile `default`. A name is made of letters, digits, `-`
+and `_`, 64 at most. A profile that has no login yet starts with the login form, like
+the very first start.
+
+- **Each profile has its own** login, message store (with its encryption keys), search
+  index and log, in `~/.local/share/matrix-rat/<profile>/` and
+  `~/.local/state/matrix-rat/<profile>/` (under `XDG_DATA_HOME` and `XDG_STATE_HOME`
+  where these are set). With `secret_store = "keyring"` the keyring entry is per profile
+  too.
+- **All profiles share** the settings file `~/.config/matrix-rat/config.toml` and the
+  themes beside it: keys, theme and settings are the same in every profile.
+- **Different profiles run side by side**, one window each: `matrix-rat` in one
+  terminal and `matrix-rat --profile work` in another.
+- **The same profile cannot be opened twice.** Whoever starts first holds the profile
+  until it ends (also when it is killed). A second start ends at once with
+  `matrix-rat is already running with profile "work"; use --profile <name> to start a
+  second account`. `matrix-rat serve` holds its profile exactly like a window does, and
+  so does `--demo`: to look at the demo beside a running matrix-rat, give it a profile
+  of its own (`matrix-rat --profile demo --demo`). `rooms`, `send`, `read`, `listen` and `mcp`
+  hold nothing themselves, but they only work while a `matrix-rat serve` runs on that
+  profile: they talk to it. `matrix-rat doctor` holds nothing and runs anywhere, also
+  beside a running matrix-rat.
+
+There is no command that lists or removes profiles; a profile is its two folders.
+
+- **To list them:** `ls ~/.local/share/matrix-rat/`. Every folder there is a profile
+  that was started at least once.
+- **To remove one:** have your recovery key first. Either way below, the encryption
+  keys in the profile's store are gone, and they may exist nowhere else. Then start the
+  profile and choose **Log out** in the settings (`F2`). That tells the server to end
+  the session and deletes the login, the message store with its keys and the search
+  index. Quit, then delete what is left (the lock file and the logs):
+  `rm -r ~/.local/share/matrix-rat/work ~/.local/state/matrix-rat/work`. Deleting the
+  folders without logging out removes the same, but leaves the session listed on your
+  account and, with `secret_store = "keyring"`, the profile's entry in the keyring.
 
 ## Good to know
 
@@ -594,7 +634,7 @@ terminal. One program stays connected (`matrix-rat serve`); small commands talk 
 | `matrix-rat send --room R TEXT…` | Sends a message (Markdown). A single `-` as the text reads it from standard input. Prints `{"event_id":"$…"}`. |
 | `matrix-rat read --room R [--limit N] [--from @user:server]` | Prints the latest messages (20 unless told, 100 at most), oldest first. With `--from`: only what counts as that user's (below). |
 | `matrix-rat listen --room R [--from @user:server]` | Stays connected and prints messages as they come. With `--from`: only what counts as that user's. |
-| `matrix-rat mcp --room R --name N [--from @user:server]` | An MCP server for one agent, bound to one room (below). |
+| `matrix-rat mcp --room R [--name N] [--from @user:server]` | An MCP server for one agent, bound to one room (below). Without `--name` the agent's name is read from `MATRIX_RAT_AGENT_NAME`. |
 
 All of them take `--profile`, and all but `serve` need a running `serve` for that
 profile. `R` is a room's id (`!…`), its exact name, or its address (`#…`); a name or
@@ -696,6 +736,17 @@ For Claude Code, in the project's `.mcp.json`:
   }
 }
 ```
+
+The agent's name is `--name`, or, when that is not given, the environment variable
+`MATRIX_RAT_AGENT_NAME` of the process that starts `matrix-rat mcp`. So several agents
+can share one entry like the one above without `--name` and still sign with their own
+names: start each agent with its own `MATRIX_RAT_AGENT_NAME`. `--name` wins when both
+are there. The same rules hold for both: at most 40 characters on one line; no `[` or
+`]`, no `"`, backtick or backslash; no control characters and nothing that cannot be
+seen (zero-width and blank characters, combining marks, any blank but a plain space
+between words). With neither, or with a variable that breaks these rules,
+`matrix-rat mcp` ends with exit code `2` and says so on standard error; it never falls
+back to another name.
 
 With `--from`, `wait_for_message` only wakes for what counts as that user's, and every
 message is handed over with `"from_user": true` or `false`. The tools tell the model

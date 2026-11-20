@@ -1717,6 +1717,263 @@ mod tests {
         );
     }
 
+    /// One chunk of a PNG file: its length, its type and data, and their checksum.
+    fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+        chunk.extend(kind);
+        chunk.extend(data);
+        let crc = crc32(&chunk[4..]);
+        chunk.extend(crc.to_be_bytes());
+        chunk
+    }
+
+    /// The chunks of a PNG file as (type, data).
+    fn png_chunks(file: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+        let mut chunks = Vec::new();
+        let mut at = 8;
+        while at + 8 <= file.len() {
+            let length = u32::from_be_bytes(file[at..at + 4].try_into().unwrap()) as usize;
+            let kind: [u8; 4] = file[at + 4..at + 8].try_into().unwrap();
+            chunks.push((kind, file[at + 8..at + 8 + length].to_vec()));
+            at += 12 + length;
+        }
+        chunks
+    }
+
+    const FIRST: Rgba<u8> = Rgba([220, 30, 30, 255]);
+    const SECOND: Rgba<u8> = Rgba([30, 30, 220, 255]);
+    const ANIMATED: (u32, u32) = (8, 6);
+
+    /// Whether `pixel` is `colour`, give or take a shade: a GIF keeps its colours in a
+    /// table, and an animated WebP rounds them when a frame is laid on its canvas.
+    fn same_colour(pixel: [u8; 4], colour: Rgba<u8>) -> bool {
+        pixel
+            .iter()
+            .zip(colour.0)
+            .all(|(got, want)| got.abs_diff(want) <= 12)
+    }
+
+    /// A GIF of two frames: the first all `FIRST`, the second all `SECOND`.
+    fn animated_gif() -> Vec<u8> {
+        let mut gif = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+            encoder
+                .encode_frames([FIRST, SECOND].map(|colour| {
+                    image::Frame::new(RgbaImage::from_pixel(ANIMATED.0, ANIMATED.1, colour))
+                }))
+                .unwrap();
+        }
+        gif
+    }
+
+    /// The same as an animated PNG: the picture of a plain PNG is the first frame, the
+    /// second one follows in the chunks that only an animation has.
+    fn animated_png() -> Vec<u8> {
+        let still = |colour| {
+            let mut png = Vec::new();
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(ANIMATED.0, ANIMATED.1, colour))
+                .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+                .unwrap();
+            png
+        };
+        let (first, second) = (still(FIRST), still(SECOND));
+        let frame_control = |sequence: u32| {
+            let mut data = sequence.to_be_bytes().to_vec();
+            data.extend(ANIMATED.0.to_be_bytes());
+            data.extend(ANIMATED.1.to_be_bytes());
+            // At the top left corner, a tenth of a second, drawn over what was there.
+            data.extend([0u8; 8]);
+            data.extend(1u16.to_be_bytes());
+            data.extend(10u16.to_be_bytes());
+            data.extend([0u8, 0]);
+            png_chunk(b"fcTL", &data)
+        };
+        let mut apng = first[..8].to_vec();
+        for (kind, data) in png_chunks(&first) {
+            match &kind {
+                b"IHDR" => {
+                    apng.extend(png_chunk(&kind, &data));
+                    // Two frames, played for ever.
+                    apng.extend(png_chunk(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]));
+                    apng.extend(frame_control(0));
+                }
+                b"IEND" => {}
+                _ => apng.extend(png_chunk(&kind, &data)),
+            }
+        }
+        apng.extend(frame_control(1));
+        let mut sequence = 2u32;
+        for (kind, data) in png_chunks(&second) {
+            if &kind == b"IDAT" {
+                let mut frame = sequence.to_be_bytes().to_vec();
+                frame.extend(data);
+                apng.extend(png_chunk(b"fdAT", &frame));
+                sequence += 1;
+            }
+        }
+        apng.extend(png_chunk(b"IEND", &[]));
+        apng
+    }
+
+    /// One chunk of a WebP file: its type, its length and its data, padded to an even
+    /// length.
+    fn riff_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = kind.to_vec();
+        chunk.extend((data.len() as u32).to_le_bytes());
+        chunk.extend(data);
+        if !data.len().is_multiple_of(2) {
+            chunk.push(0);
+        }
+        chunk
+    }
+
+    /// The same as an animated WebP: two frames that each fill the canvas.
+    fn animated_webp() -> Vec<u8> {
+        // The picture data of a still WebP of one colour, as the frames hold it.
+        let still = |colour| {
+            let mut webp = Vec::new();
+            let pixels = RgbaImage::from_pixel(ANIMATED.0, ANIMATED.1, colour);
+            image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+                .encode(
+                    pixels.as_raw(),
+                    ANIMATED.0,
+                    ANIMATED.1,
+                    image::ExtendedColorType::Rgba8,
+                )
+                .unwrap();
+            assert_eq!(&webp[12..16], b"VP8L");
+            let length = u32::from_le_bytes(webp[16..20].try_into().unwrap()) as usize;
+            webp[20..20 + length].to_vec()
+        };
+        let three = |value: u32| value.to_le_bytes()[..3].to_vec();
+        let frame = |colour| {
+            // At the top left corner, as large as the canvas, a tenth of a second.
+            let mut data = [three(0), three(0)].concat();
+            data.extend(three(ANIMATED.0 - 1));
+            data.extend(three(ANIMATED.1 - 1));
+            data.extend(three(100));
+            data.push(0);
+            data.extend(riff_chunk(b"VP8L", &still(colour)));
+            riff_chunk(b"ANMF", &data)
+        };
+        // Animated, with transparency; then the size of the canvas.
+        let mut header = vec![0b0001_0010, 0, 0, 0];
+        header.extend(three(ANIMATED.0 - 1));
+        header.extend(three(ANIMATED.1 - 1));
+        let mut body = b"WEBP".to_vec();
+        body.extend(riff_chunk(b"VP8X", &header));
+        // No background colour, played for ever.
+        body.extend(riff_chunk(b"ANIM", &[0; 6]));
+        body.extend(frame(FIRST));
+        body.extend(frame(SECOND));
+        let mut webp = b"RIFF".to_vec();
+        webp.extend((body.len() as u32).to_le_bytes());
+        webp.extend(body);
+        webp
+    }
+
+    /// An animated sticker (GIF, animated PNG, animated WebP) is shown as a still
+    /// picture: its first frame. (That the later frames are not read is shown for the
+    /// GIF only, by cutting it off inside its second frame.)
+    #[test]
+    fn an_animated_picture_is_shown_as_its_first_frame() {
+        use image::AnimationDecoder;
+
+        // What is tested are animations: each file holds two frames.
+        let gif = animated_gif();
+        let frames = image::codecs::gif::GifDecoder::new(Cursor::new(&gif))
+            .unwrap()
+            .into_frames()
+            .count();
+        assert_eq!(frames, 2);
+        let png = animated_png();
+        let frames = image::codecs::png::PngDecoder::new(Cursor::new(&png))
+            .unwrap()
+            .apng()
+            .unwrap()
+            .into_frames()
+            .map(|frame| frame.unwrap().into_buffer().get_pixel(0, 0).0)
+            .collect::<Vec<_>>();
+        assert_eq!(frames, [FIRST.0, SECOND.0]);
+        let webp = animated_webp();
+        let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(&webp)).unwrap();
+        assert!(decoder.has_animation());
+        let frames = decoder
+            .into_frames()
+            .map(|frame| frame.unwrap().into_buffer().get_pixel(0, 0).0)
+            .collect::<Vec<_>>();
+        // Laying a frame on the canvas rounds its colours: a shade off is the same.
+        assert_eq!(frames.len(), 2);
+        assert!(same_colour(frames[0], FIRST) && same_colour(frames[1], SECOND));
+
+        for (kind, file) in [("gif", &gif), ("png", &png), ("webp", &webp)] {
+            let decoded =
+                decode(file, THUMBNAIL_PIXELS).unwrap_or_else(|why| panic!("{kind}: {why}"));
+            assert_eq!(decoded.original, ANIMATED, "{kind}");
+            let shown = decoded.pixels.to_rgba8();
+            for (x, y) in [(0, 0), (ANIMATED.0 - 1, ANIMATED.1 - 1)] {
+                let pixel = shown.get_pixel(x, y).0;
+                let close = same_colour(pixel, FIRST);
+                assert!(close, "{kind} at {x},{y}: {pixel:?}");
+            }
+        }
+
+        // A GIF cut off inside its second frame still shows its first: the rest of
+        // the file is not looked at.
+        let cut = &gif[..gif.len() - 12];
+        assert_eq!(decode(cut, THUMBNAIL_PIXELS).unwrap().original, ANIMATED);
+    }
+
+    /// The canvas of an animation is what has to fit into memory, however small its
+    /// frames and its file are.
+    #[test]
+    fn an_animation_with_an_enormous_canvas_is_refused() {
+        // A GIF says its canvas size in bytes 6 to 9.
+        let mut gif = animated_gif();
+        gif[6..8].copy_from_slice(&16_000u16.to_le_bytes());
+        gif[8..10].copy_from_slice(&16_000u16.to_le_bytes());
+        assert_eq!(
+            decode(&gif, THUMBNAIL_PIXELS).err().as_deref(),
+            Some("too large to show")
+        );
+        // A WebP, in its header chunk: one less than the width and the height, in
+        // three bytes each, after the RIFF header (12), the chunk's own (8) and the
+        // flags (4).
+        let mut webp = animated_webp();
+        webp[24..27].copy_from_slice(&16_383u32.to_le_bytes()[..3]);
+        webp[27..30].copy_from_slice(&16_383u32.to_le_bytes()[..3]);
+        assert_eq!(
+            decode(&webp, THUMBNAIL_PIXELS).err().as_deref(),
+            Some("too large to show")
+        );
+        assert!(gif.len() < 1000 && webp.len() < 1000);
+    }
+
+    #[test]
+    fn a_sticker_gets_less_room_than_a_photo() {
+        let store = ImageStore::new(Graphics::halfblocks());
+        let mut sticker = remote_image("mxc://x/sticker", Some((512, 512)));
+        let photo = sticker.clone();
+        sticker.sticker = true;
+        assert_eq!(store.slot(&photo, 80), Slot::Cells(24, 12));
+        assert_eq!(store.slot(&sticker, 80), Slot::Cells(14, 7));
+        // A small one is not blown up.
+        sticker.dimensions = Some((64, 64));
+        assert_eq!(store.slot(&sticker, 80), Slot::Cells(7, 4));
+        // One that does not say its size: the box of a sticker, not of a photo.
+        sticker.dimensions = None;
+        assert_eq!(store.slot(&sticker, 80), Slot::Cells(18, 7));
+        // A narrow pane bounds it like every picture.
+        assert_eq!(store.slot(&sticker, 10), Slot::Cells(10, 3));
+        // One that claims an absurd shape still takes at least one cell and at most
+        // the box.
+        sticker.dimensions = Some((100_000, 1));
+        assert_eq!(store.slot(&sticker, 80), Slot::Cells(18, 1));
+        sticker.dimensions = Some((1, 100_000));
+        assert_eq!(store.slot(&sticker, 80), Slot::Cells(1, 7));
+    }
+
     /// The checksum PNG uses for its chunks.
     fn crc32(bytes: &[u8]) -> u32 {
         let mut crc = !0u32;

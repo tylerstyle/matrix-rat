@@ -1321,25 +1321,7 @@ impl Timelines {
                 mime,
             } => {
                 self.with_timeline(&room_id, "Could not send sticker", |timeline| async move {
-                    let mxc: matrix_sdk::ruma::OwnedMxcUri = url.into();
-                    if !mxc.is_valid() {
-                        bail!("invalid sticker mxc URL");
-                    }
-                    let mut info = matrix_sdk::ruma::events::room::ImageInfo::new();
-                    if let Some((w, h)) = dimensions {
-                        info.width = Some(w.into());
-                        info.height = Some(h.into());
-                    }
-                    if let Some(sz) = size.and_then(|s| matrix_sdk::ruma::UInt::try_from(s).ok()) {
-                        info.size = Some(sz);
-                    }
-                    if let Some(m) = mime {
-                        info.mimetype = Some(m);
-                    }
-                    let body = crate::text::sanitize_line(&name);
-                    let content = matrix_sdk::ruma::events::sticker::StickerEventContent::new(
-                        body, info, mxc,
-                    );
+                    let content = sticker_content(&name, url, dimensions, size, mime)?;
                     timeline.send(content.into()).await?;
                     Ok(())
                 })
@@ -1473,6 +1455,37 @@ fn item_id(item: &ItemRef) -> Result<TimelineEventItemId> {
             TimelineEventItemId::TransactionId(OwnedTransactionId::from(id.as_str()))
         }
     })
+}
+
+/// The `m.sticker` event for a sticker of a pack: the picture's address as the pack
+/// gives it, the name as the text that stands for the picture, and what the pack says
+/// about the file.
+fn sticker_content(
+    name: &str,
+    url: String,
+    dimensions: Option<(u32, u32)>,
+    size: Option<u64>,
+    mime: Option<String>,
+) -> Result<matrix_sdk::ruma::events::sticker::StickerEventContent> {
+    let mxc: matrix_sdk::ruma::OwnedMxcUri = url.into();
+    if !mxc.is_valid() {
+        bail!("invalid sticker mxc URL");
+    }
+    let mut info = matrix_sdk::ruma::events::room::ImageInfo::new();
+    if let Some((w, h)) = dimensions {
+        info.width = Some(w.into());
+        info.height = Some(h.into());
+    }
+    if let Some(sz) = size.and_then(|s| matrix_sdk::ruma::UInt::try_from(s).ok()) {
+        info.size = Some(sz);
+    }
+    if let Some(m) = mime {
+        info.mimetype = Some(m);
+    }
+    let body = crate::text::sanitize_line(name);
+    Ok(matrix_sdk::ruma::events::sticker::StickerEventContent::new(
+        body, info, mxc,
+    ))
 }
 
 fn poll_start_block(
@@ -2241,6 +2254,58 @@ async fn forward(
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    /// The picker's choice becomes an `m.sticker` event: the pack's address and what
+    /// it says about the file, with the name, made safe, as the event's text.
+    #[test]
+    fn a_sticker_of_a_pack_becomes_a_sticker_event() {
+        use matrix_sdk::ruma::events::sticker::StickerMediaSource;
+
+        let url = "mxc://example.org/crab";
+        let content = super::sticker_content(
+            "Waving crab",
+            url.to_owned(),
+            Some((128, 96)),
+            Some(4096),
+            Some("image/gif".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(content.body, "Waving crab");
+        assert!(matches!(&content.source, StickerMediaSource::Plain(sent) if sent.as_str() == url));
+        let sent = serde_json::to_value(&content).unwrap();
+        assert_eq!(sent["body"], "Waving crab");
+        assert_eq!(sent["url"], url);
+        assert_eq!(sent["info"]["w"], 128);
+        assert_eq!(sent["info"]["h"], 96);
+        assert_eq!(sent["info"]["size"], 4096);
+        assert_eq!(sent["info"]["mimetype"], "image/gif");
+
+        // A pack that says nothing about the file, or a size no event can hold: the
+        // sticker goes without them.
+        let bare =
+            super::sticker_content("crab", url.to_owned(), None, Some(u64::MAX), None).unwrap();
+        assert!(bare.info.width.is_none() && bare.info.height.is_none());
+        assert!(bare.info.size.is_none() && bare.info.mimetype.is_none());
+
+        // The name is the pack's, which someone else may have written.
+        let hostile = super::sticker_content(
+            "crab\u{1b}[2J\r\nsecond\u{202e}",
+            url.to_owned(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(hostile.body, "crab[2J second");
+
+        // What is no `mxc://` address is not sent.
+        for bad in ["", "mxc://", "https://example.org/crab", "example.org/crab"] {
+            assert!(
+                super::sticker_content("crab", bad.to_owned(), None, None, None).is_err(),
+                "{bad}"
+            );
+        }
+    }
 
     /// The session's timelines, for a client of the stand-in server.
     fn timelines_of(

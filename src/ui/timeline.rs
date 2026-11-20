@@ -2077,6 +2077,82 @@ mod tests {
         );
     }
 
+    /// What a received sticker takes in the timeline: the rows of a small picture and
+    /// no text; one line naming it when its picture cannot be read; and the line that
+    /// stands for it where pictures are off.
+    #[test]
+    fn a_sticker_is_a_small_picture_or_one_line_that_names_it() {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let mut room = demo_rooms().remove(0);
+        let mut sticker = room.messages[0].clone();
+        sticker.id = "sticker".into();
+        sticker.html = None;
+        sticker.file = None;
+        sticker.body = "[sticker] Waving crab".to_owned();
+        let mut image = crate::images::testing::remote_image("mxc://example.org/crab", None);
+        image.name = "Waving crab".to_owned();
+        image.sticker = true;
+        sticker.image = Some(image.clone());
+        room.messages = vec![sticker];
+        let rows_of = |images: &ImageStore| {
+            let rows = build_rows(&room, 80, &theme, None, images);
+            let pictures = rows.iter().filter(|row| row.image.is_some()).count();
+            let text: Vec<String> = rows.iter().map(|row| row.line.to_string()).collect();
+            (pictures, text)
+        };
+        let named = |text: &[String]| text.iter().any(|line| line.contains("Waving crab"));
+
+        // Drawn, as coloured blocks or by the kitty protocol alike: the rows of a
+        // sticker's box, a click on which opens it, and no line of text for it.
+        for graphics in [Graphics::halfblocks(), crate::images::testing::kitty()] {
+            let mut images = ImageStore::new(graphics);
+            let (pictures, text) = rows_of(&images);
+            assert_eq!(pictures, 7, "{text:?}");
+            assert!(!named(&text), "{text:?}");
+            // Once it is there, its own size is what counts.
+            images.begin_frame();
+            images.request(&image);
+            images.on_loaded(
+                &image.key,
+                false,
+                Ok(crate::images::testing::decoded(64, 64)),
+            );
+            let (pictures, text) = rows_of(&images);
+            assert_eq!(pictures, 4, "{text:?}");
+            assert!(!named(&text), "{text:?}");
+        }
+
+        // A picture that cannot be read: no rows are kept for it, one line says so.
+        let mut images = ImageStore::new(Graphics::halfblocks());
+        images.begin_frame();
+        images.request(&image);
+        images.on_loaded(
+            &image.key,
+            false,
+            Err("not a picture this app can read".to_owned()),
+        );
+        let (pictures, text) = rows_of(&images);
+        assert_eq!(pictures, 0);
+        assert!(
+            text.iter()
+                .any(|line| line.contains("🖼  Waving crab — not a picture this app can read")),
+            "{text:?}"
+        );
+        assert!(
+            !text.iter().any(|line| line.contains("[sticker]")),
+            "{text:?}"
+        );
+
+        // Pictures off: the line that stands for it.
+        let (pictures, text) = rows_of(&ImageStore::new(Graphics::off()));
+        assert_eq!(pictures, 0);
+        assert!(
+            text.iter()
+                .any(|line| line.contains("[sticker] Waving crab")),
+            "{text:?}"
+        );
+    }
+
     #[test]
     fn playable_media_and_location_rows() {
         use matrix_sdk::ruma::events::room::MediaSource;

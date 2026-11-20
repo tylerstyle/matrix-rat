@@ -370,15 +370,8 @@ pub(super) fn event_message(
                     message.utd = Some(why);
                 }
                 MsgLikeKind::Sticker(sticker) => {
-                    let content = sticker.content();
-                    let mut image = image_info(
-                        MediaSource::from(content.source.clone()),
-                        &content.body,
-                        None,
-                        Some(&content.info),
-                    );
-                    image.sticker = true;
-                    message.body = format!("[sticker] {}", image.name);
+                    let (image, body) = sticker_parts(sticker.content());
+                    message.body = body;
                     message.image = Some(image);
                 }
                 MsgLikeKind::Poll(poll) => {
@@ -658,6 +651,22 @@ fn image_info(
     }
 }
 
+/// A sticker's picture, marked as one, and the line that stands for it where pictures
+/// are not drawn. Its name is the event's `body`, made safe like a file's name.
+fn sticker_parts(
+    content: &matrix_sdk::ruma::events::sticker::StickerEventContent,
+) -> (ImageInfo, String) {
+    let mut image = image_info(
+        MediaSource::from(content.source.clone()),
+        &content.body,
+        None,
+        Some(&content.info),
+    );
+    image.sticker = true;
+    let body = format!("[sticker] {}", image.name);
+    (image, body)
+}
+
 /// The text shown instead of a picture where pictures are not drawn.
 fn image_fallback(image: &ImageInfo) -> String {
     match &image.caption {
@@ -895,6 +904,67 @@ mod tests {
         zero.height = UInt::new(10);
         let source = MediaSource::Plain(mxc_uri!("mxc://example.org/abc").to_owned());
         assert_eq!(image_info(source, "a", None, Some(&zero)).dimensions, None);
+    }
+
+    #[test]
+    fn a_sticker_is_a_small_picture_named_by_its_body_made_safe() {
+        use matrix_sdk::ruma::events::sticker::StickerEventContent;
+        use matrix_sdk::ruma::{UInt, mxc_uri};
+
+        let sticker = |body: &str, info: RumaImageInfo| {
+            let url = mxc_uri!("mxc://example.org/crab").to_owned();
+            sticker_parts(&StickerEventContent::new(body.to_owned(), info, url))
+        };
+        let mut info = RumaImageInfo::new();
+        info.width = UInt::new(256);
+        info.height = UInt::new(192);
+        info.size = UInt::new(4096);
+        info.mimetype = Some("image/gif".to_owned());
+        let (image, body) = sticker("Waving crab", info);
+        assert!(image.sticker);
+        assert_eq!(image.name, "Waving crab");
+        assert_eq!(body, "[sticker] Waving crab");
+        // A sticker has no caption: with its picture drawn, no text goes with it.
+        assert!(image.caption.is_none());
+        assert_eq!(image.key, "mxc://example.org/crab");
+        assert_eq!(image.dimensions, Some((256, 192)));
+        assert_eq!(image.size, Some(4096));
+        let ImageSource::Matrix(media) = &image.source else {
+            panic!("not a Matrix source");
+        };
+        assert!(
+            matches!(&media.full, MediaSource::Plain(url) if url.as_str() == "mxc://example.org/crab")
+        );
+        assert!(media.thumbnail.is_none());
+
+        // The body is the sender's: what could move the cursor, colour the screen,
+        // turn the line around or break it is taken out, in the picture's name and in
+        // the line that stands for the picture.
+        let (image, body) = sticker(
+            "crab\u{1b}[31m\u{7}\r\n[alice] hi\u{202e}\u{2066}",
+            RumaImageInfo::new(),
+        );
+        for text in [&image.name, &body] {
+            assert!(
+                !text
+                    .chars()
+                    .any(|c| c == '\n' || crate::text::unsafe_char(c)),
+                "{text:?}"
+            );
+        }
+        assert!(body.starts_with("[sticker] crab[31m"), "{body:?}");
+        assert_eq!(image.dimensions, None);
+
+        // A body that shows nothing gets a stand-in.
+        let (image, body) = sticker(" \n ", RumaImageInfo::new());
+        assert_eq!(image.name, "image");
+        assert_eq!(body, "[sticker] image");
+
+        // A size that makes no sense is not passed on.
+        let mut zero = RumaImageInfo::new();
+        zero.width = UInt::new(0);
+        zero.height = UInt::new(64);
+        assert_eq!(sticker("a", zero).0.dimensions, None);
     }
 
     #[test]
