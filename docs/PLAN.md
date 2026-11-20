@@ -141,6 +141,10 @@ Rust 1.96 or newer.
 | 2026-11-20 | Voice and video calls wait until after 1.0.0 and until the SDK can join calls itself. |
 | 2026-11-20 | No plugin system. What is wanted of it is built in: transcription, translation, catching up, saved messages with reminders, archiving a room as text. |
 | 2026-11-20 | Not wanted: sticker packs, an image generator, a lock screen, popping out a chat, feeds or Home Assistant posting into rooms (a server's job). Several accounts are run as several profiles. Other languages wait; AUR and `.deb` later. |
+| 2026-11-20 | Nothing of the 1.0 work is pushed before 1.0 is tested and ready; `main` was put back to `de90ba8` on GitHub. |
+| 2026-11-20 | Composer symbols: the emoji for now; a monochrome look later. |
+| 2026-11-20 | Rooms bar: counts in superscript, `(n)>` opens the room list, and the room icons win over the label (it shrinks to `☰`). |
+| 2026-11-21 | The memory and CPU pass is measured with the user's own account: the user runs a build of the 1.0 state for a day with `scripts/measure.sh` beside it, which reads only `/proc`. |
 
 ## 6. What comes next
 
