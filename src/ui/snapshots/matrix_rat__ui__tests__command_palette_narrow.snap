@@ -2,9 +2,9 @@
 source: src/ui/mod.rs
 expression: "render(&mut app, 46, 16)"
 ---
-"╭╭ Command palette ─────────────────────────╮╮"
-"││ ⌕ type a command, room, or theme…        ││"
-"││ ──────────────────────────────── 102/102 ││"
+" ╭ Command palette ─────────────────────────╮ "
+"╭│ ⌕ type a command, room, or theme…        │╮"
+"││ ──────────────────────────────── 105/105 ││"
 "││ › Action   Emoji picker            Alt-E ││"
 "││   Action   Attach a file           Alt-A ││"
 "││   Action   Find a room            Ctrl-K ││"

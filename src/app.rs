@@ -7615,6 +7615,14 @@ mod tests {
         assert!(app.sidebar_rows().len() > rows);
         app.on_event(key(KeyCode::Enter));
         assert_eq!(app.sidebar_rows().len(), rows);
+        // The rooms bar: off, and on again.
+        app.on_event(key(KeyCode::Down));
+        assert!(app.rooms_bar);
+        app.on_event(key(KeyCode::Enter));
+        assert!(!app.rooms_bar);
+        assert!(!Config::load(&file).unwrap().rooms_bar);
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.rooms_bar);
         // Link previews: off, unencrypted rooms, all rooms, round; arrows go both ways.
         app.on_event(key(KeyCode::Down));
         assert_eq!(app.link_previews, crate::config::LinkPreviews::Off);

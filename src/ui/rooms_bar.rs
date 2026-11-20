@@ -24,7 +24,7 @@ use crate::text::{truncate, width};
 use crate::theme::Role;
 
 const LABEL: &str = "Rooms";
-/// The sign the status line uses for the room list as well.
+/// The sign the status line uses for the room list as well (two columns wide).
 const ICON: &str = "☰";
 /// A room's tile, as in the room list with one line per room.
 const TILE: u16 = 2;
@@ -75,14 +75,16 @@ struct Plan {
 fn label_text(label: &str, budget: u16) -> String {
     let full = format!(" {ICON} {label} ");
     let budget = budget as usize;
+    let sign = width(ICON);
+    // The sign, the margins and the gap between sign and text.
+    let fixed = sign + 3;
     if width(&full) <= budget {
         full
-    } else if budget >= 6 {
-        // The sign and the margins take four columns.
-        format!(" {ICON} {} ", truncate(label, budget - 4))
-    } else if budget >= 3 {
+    } else if budget >= fixed + 2 {
+        format!(" {ICON} {} ", truncate(label, budget - fixed))
+    } else if budget >= sign + 2 {
         format!(" {ICON} ")
-    } else if budget >= 1 {
+    } else if budget >= sign {
         ICON.to_owned()
     } else {
         String::new()
@@ -92,11 +94,13 @@ fn label_text(label: &str, budget: u16) -> String {
 /// Lays the bar out in `bar` columns for rooms of these widths.
 ///
 /// The label is the way back to the room list, so it comes first: it gives way to
-/// the rooms only down to half of the bar. Then as many rooms as fit, with the
-/// `(n)>` for the rest; where not even that fits, the label stands alone.
+/// the rooms only down to half of the bar, and never gives up its sign. Then as many
+/// rooms as fit, with the `(n)>` for the rest; where not even that fits, the label
+/// stands alone.
 fn plan(label: &str, rooms: &[u16], bar: u16) -> Plan {
     let wanted = rooms.iter().fold(0u16, |sum, w| sum.saturating_add(*w));
-    let budget = bar.saturating_sub(wanted).max(bar.div_ceil(2));
+    let keep = bar.div_ceil(2).max(width(ICON) as u16 + 2).min(bar);
+    let budget = bar.saturating_sub(wanted).max(keep);
     let label = label_text(label, budget);
     let rest = bar.saturating_sub(width(&label) as u16);
     // The last room's gap may fall off the edge.
@@ -306,28 +310,31 @@ mod tests {
         // No rooms: the label alone.
         assert_eq!(plan("Rooms", &[], 40), of(" ☰ Rooms ", 0, None));
         // All fit; the last one's gap may fall off the edge.
+        assert_eq!(plan("Rooms", &[4, 4, 5], 23), of(" ☰ Rooms ", 3, None));
         assert_eq!(plan("Rooms", &[4, 4, 5], 22), of(" ☰ Rooms ", 3, None));
-        assert_eq!(plan("Rooms", &[4, 4, 5], 21), of(" ☰ Rooms ", 3, None));
         // One column less: the count of what is left out needs room of its own.
         assert_eq!(
-            plan("Rooms", &[4, 4, 5], 20),
+            plan("Rooms", &[4, 4, 5], 21),
             of(" ☰ Rooms ", 1, Some("(2)>"))
         );
         // The number is that of the rooms not shown.
         assert_eq!(
             plan("Rooms", &[4; 40], 30),
-            of(" ☰ Rooms ", 4, Some("(36)>"))
+            of(" ☰ Rooms ", 3, Some("(37)>"))
         );
         // Narrow: the label gives way down to half of the bar, then the rooms do.
-        assert_eq!(plan("Rooms", &[4; 3], 16), of(" ☰ Roo… ", 1, Some("(2)>")));
-        assert_eq!(plan("Rooms", &[4; 3], 12), of(" ☰ R… ", 0, Some("(3)>")));
+        assert_eq!(plan("Rooms", &[4; 3], 16), of(" ☰ Ro… ", 1, Some("(2)>")));
+        assert_eq!(plan("Rooms", &[4; 3], 12), of(" ☰ ", 1, Some("(2)>")));
         assert_eq!(plan("Rooms", &[4; 3], 10), of(" ☰ ", 0, Some("(3)>")));
+        // The sign stays where nothing else fits.
         assert_eq!(plan("Rooms", &[4; 3], 6), of(" ☰ ", 0, None));
+        assert_eq!(plan("Rooms", &[4; 3], 3), of("☰", 0, None));
         assert_eq!(plan("Rooms", &[4; 3], 2), of("☰", 0, None));
+        assert_eq!(plan("Rooms", &[4; 3], 1), of("", 0, None));
         assert_eq!(plan("Rooms", &[4; 3], 0), of("", 0, None));
         // Without rooms the label has the whole bar.
-        assert_eq!(plan("Rooms", &[], 9), of(" ☰ Rooms ", 0, None));
-        assert_eq!(plan("Rooms", &[], 8), of(" ☰ Roo… ", 0, None));
+        assert_eq!(plan("Rooms", &[], 10), of(" ☰ Rooms ", 0, None));
+        assert_eq!(plan("Rooms", &[], 9), of(" ☰ Roo… ", 0, None));
         // Widths that would overflow a `u16` do not.
         assert_eq!(
             plan("Rooms", &[u16::MAX; 3], 30),

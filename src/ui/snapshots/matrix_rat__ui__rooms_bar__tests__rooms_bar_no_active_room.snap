@@ -1,0 +1,6 @@
+---
+source: src/ui/rooms_bar.rs
+expression: "top(&mut app, 60, 12, 2)"
+---
+" ☰ Rooms                                                   " Hidden by multi-width symbols: [(2, " ")]
+"╭ 2 #rust ─────────────────────────────────────────────────╮"

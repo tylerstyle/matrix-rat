@@ -1,0 +1,7 @@
+---
+source: src/ui/rooms_bar.rs
+expression: "top(&mut app, 50, 20, 3)"
+---
+" ☰ Rooms B ² D ⁵ O ¹²                            " Hidden by multi-width symbols: [(2, " ")]
+"╭ 2 #rust ───────────────────────────────────────╮"
+"│  Morning! Is the sliding sync proxy still     ││"

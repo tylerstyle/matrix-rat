@@ -1162,6 +1162,9 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected();
         drain(&mut commands);
         app.on_event(key(KeyCode::F(2)));
+        // Up from the first row goes round to the last: the end of the list, where
+        // the account's rows are, is in view.
+        app.on_event(key(KeyCode::Up));
         let text = screen(&mut app, &mut terminal);
         find(&text, "Enter to view");
         let (col, row) = find(&text, "Sessions");

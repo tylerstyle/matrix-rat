@@ -779,6 +779,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
     let mut seen: Vec<Action> = vec![
         Action::ToggleUnread,
         Action::MarkAllRead,
+        Action::CloseChat,
         Action::PinMessage,
         Action::ForwardMessage,
         Action::UserInfo,
@@ -977,6 +978,19 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         action_enabled(Action::OpenStickers, ctx),
         0,
     );
+    // No key by default: the "Rooms" label of the rooms bar is its usual way.
+    let close_chat = keymap::action_spec(Action::CloseChat).map_or("", |spec| spec.description);
+    push_entry(
+        out,
+        Target::Action(Action::CloseChat),
+        Category::Action,
+        close_chat,
+        key_of(Action::CloseChat),
+        close_chat,
+        &["rooms", "room list", "back to the rooms", "no chat open"],
+        action_enabled(Action::CloseChat, ctx),
+        1,
+    );
     // No key by default: it is looked for when something does not work.
     let doctor = keymap::action_spec(Action::Doctor).map_or("", |spec| spec.description);
     push_entry(
@@ -1163,10 +1177,6 @@ fn action_meta<'a>(
         Action::RoomActive => (
             Cow::Borrowed(description),
             &["next unread room", "active room", "go to notification"],
-        ),
-        Action::CloseChat => (
-            Cow::Borrowed(description),
-            &["rooms", "room list", "back to the rooms", "no chat open"],
         ),
         Action::OpenPinned => (
             Cow::Borrowed(description),
