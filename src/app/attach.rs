@@ -439,7 +439,8 @@ impl App {
             self.send_matrix(MatrixCmd::SendFiles {
                 send: self.attach.sends,
                 room_id: room_id.clone(),
-                files: files.iter().map(|file| file.path.clone()).collect(),
+                // Nothing records yet: every file goes as what it is.
+                files: files.iter().map(|file| file.path.clone().into()).collect(),
                 caption,
                 reply_to,
             });
@@ -592,6 +593,7 @@ mod tests {
                 ..
             } = command
             {
+                let files = files.into_iter().map(|file| file.path).collect();
                 seen.push((room_id, files, caption, reply_to));
             }
         }

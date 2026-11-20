@@ -379,7 +379,12 @@ pub struct Thumbnail {
 /// version. Slow (disk, decoding): runs on a blocking thread. The error is a sentence
 /// for the user.
 pub fn prepare(path: &Path, limit: Option<u64>) -> Result<Prepared, String> {
-    let name = display_name(path);
+    prepare_as(path, display_name(path), limit)
+}
+
+/// [`prepare`] for a file that is called `name` whatever its path says: what cannot
+/// be sent is then reported under that name.
+pub fn prepare_as(path: &Path, name: String, limit: Option<u64>) -> Result<Prepared, String> {
     let file = open(path).map_err(|err| unreadable(&name, &err))?;
     // Asked of the open file, so it is the very thing that gets read.
     let meta = file.metadata().map_err(|err| unreadable(&name, &err))?;

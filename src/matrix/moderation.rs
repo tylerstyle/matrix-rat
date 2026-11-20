@@ -1467,7 +1467,7 @@ mod tests {
             handle.send(MatrixCmd::SendFiles {
                 send: 0,
                 room_id: src_room.clone(),
-                files: vec![sample_file.clone()],
+                files: vec![sample_file.clone().into()],
                 caption: None,
                 reply_to: None,
             });
