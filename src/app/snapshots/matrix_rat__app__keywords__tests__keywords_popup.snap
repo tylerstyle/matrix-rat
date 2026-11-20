@@ -23,6 +23,6 @@ expression: text
 "│                      ││                                                      │"
 "│                      │╰──────────────────────────────────────────────────────╯"
 "│                      │╭ 3 Message ──────────────────────────────── A  alice ─╮"
-"│                      ││ Type a message…                                📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
+"│                      ││ Type a message…                                📎 🙂 │" Hidden by multi-width symbols: [(74, " "), (77, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────╯"
 " ◌ connecting…  Enter send    Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

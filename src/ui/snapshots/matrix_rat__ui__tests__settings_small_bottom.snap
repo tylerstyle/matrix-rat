@@ -23,6 +23,6 @@ expression: bottom
 "│        │   Ignored users         None                               │ 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
 "│        │ › Log out               Enter again logs out · Esc stays   │────────╯"
 "│        │ Ends this session. Encrypted history needs your recovery   │────────╮"
-"│        │ key again.                                                 │  📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
+"│        │ key again.                                                 │  📎 🙂 │" Hidden by multi-width symbols: [(74, " "), (77, " ")]
 "╰────────╰───────────────── ↑↓ select · ←→ change · Enter · Esc close ╯────────╯"
 " ● demo data  Enter send      Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

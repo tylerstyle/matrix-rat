@@ -29,6 +29,6 @@ expression: "render(&mut app, 100, 30)"
 "│           │   Emoji picker                                                     Alt-E │           │"
 "│           │ config: [keys.global] quit                                               │───────────╯"
 "│           │  Rebind    Unbind    Reset    Reset all    Close                         │───────────╮"
-"│           ╰─────────────── ↑↓ move · Enter rebind · Del unbind · r reset · Esc close ╯     📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│           ╰─────────────── ↑↓ move · Enter rebind · Del unbind · r reset · Esc close ╯     📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ● demo data  Enter send  Shift-Enter line break  Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

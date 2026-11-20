@@ -29,6 +29,6 @@ expression: "screen(&mut app, &mut terminal)"
 "│            │   me (you)                  @me:example.org                      admin │            │"
 "│            │   carol                     @carol:example.org               moderator │────────────╯"
 "│            │   bob                       @bob:example.org                           │──── M  me ─╮"
-"│            │ Favourites are listed first in the room list.                   ↓ more │      📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│            │ Favourites are listed first in the room list.                   ↓ more │      📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰────────────╰───────────────────────────────────────── ↑↓ select · Enter · Esc close ╯────────────╯"
 " ◌ connecting…  Enter send  Shift-Enter line break                F1 help  F2 settings  F3 rat-dark "

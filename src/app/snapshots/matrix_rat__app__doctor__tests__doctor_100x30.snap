@@ -29,6 +29,6 @@ expression: "screen(&mut app, &mut terminal)"
 "│         │                              install wl-clipboard                            │         │"
 "│         │   Opening files and links    xdg-open                                        │─────────╯"
 "│         │                                                                              │─────────╮"
-"│         │  Copy as text   2 things are missing                                         │   📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│         │  Copy as text   2 things are missing                                         │   📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰─────────╰────────────────────────────────────────────── ↑↓ scroll · c copy · Esc close ╯─────────╯"
 " ● demo data  Enter send  Shift-Enter line break  Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

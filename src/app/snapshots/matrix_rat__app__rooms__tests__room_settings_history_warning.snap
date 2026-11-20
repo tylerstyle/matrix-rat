@@ -29,6 +29,6 @@ expression: text
 "│            │ Members  ⌕ type to filter…                                             │            │"
 "│            │   me (you)                  @me:example.org                      admin │────────────╯"
 "│            │                                                                        │──── M  me ─╮"
-"│            │ Enter to choose who can read future message history.                   │      📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│            │ Enter to choose who can read future message history.                   │      📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰────────────╰───────────────────────────────────────── ↑↓ select · Enter · Esc close ╯────────────╯"
 " ◌ connecting…   Who can join updated                             F1 help  F2 settings  F3 rat-dark "

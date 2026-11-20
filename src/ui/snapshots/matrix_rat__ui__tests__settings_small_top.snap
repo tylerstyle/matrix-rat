@@ -23,6 +23,6 @@ expression: top
 "│        │   Notification keywords Enter to view                      │ 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
 "│        │   Download folder       ~/Downloads                      ▼ │────────╯"
 "│        │ F3 cycles this, or the active dark/light slot when paired; │────────╮"
-"│        │ themes/ files reload live.                                 │  📎 ☺  │" Hidden by multi-width symbols: [(74, " ")]
+"│        │ themes/ files reload live.                                 │  📎 🙂 │" Hidden by multi-width symbols: [(74, " "), (77, " ")]
 "╰────────╰───────────────── ↑↓ select · ←→ change · Enter · Esc close ╯────────╯"
 " ● demo data  Enter send      Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

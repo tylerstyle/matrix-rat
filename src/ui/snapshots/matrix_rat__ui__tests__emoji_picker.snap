@@ -29,6 +29,6 @@ expression: "render(&mut app, 100, 30)"
 "│                      ││  Shipping a TUI client on t│ cat face  :cat:                          │  │"
 "│                      │╰ carol is typing… ──────────╰──── ↑↓←→ move · Enter insert · Esc close ╯──╯"
 "│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
-"│                      ││ Type a message…                                                    📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│                      ││ Type a message…                                                    📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
 " ● demo data  Enter send  Shift-Enter line break  Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

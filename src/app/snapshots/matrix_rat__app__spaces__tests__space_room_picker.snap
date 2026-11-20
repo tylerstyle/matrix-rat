@@ -23,6 +23,6 @@ expression: "screen(&mut app, &mut terminal)"
 "│     │                                                                  │    ┃│"
 "│     │                                                                  │─────╯"
 "│     ╰────────────────────────────────── ↑↓ move · Enter add · Esc back ╯─────╮"
-"│                      ││ Type a message…                                📎 ☺  │" Hidden by multi-width symbols: [(74, "e")]
+"│                      ││ Type a message…                                📎 🙂 │" Hidden by multi-width symbols: [(74, "e"), (77, " ")]
 "╰──────────────────────╯╰──────────────────────────────────────────────────────╯"
 " ● demo data   rust is suggested in Rat club  F1 help  F2 settings  F3 rat-dark "

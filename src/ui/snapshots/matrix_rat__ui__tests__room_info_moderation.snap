@@ -29,6 +29,6 @@ expression: "render(&mut info_app, 100, 30)"
 "│            │ ────────────────────────────────────────────────────────────────────── │            │"
 "│            │ Ban carol — Reason (optional):                                         │────────────╯"
 "│            │ › (optional)                                                    [Ban]  │────────────╮"
-"│            │ Enter to ban, Esc to cancel                                            │      📎 ☺  │" Hidden by multi-width symbols: [(94, " ")]
+"│            │ Enter to ban, Esc to cancel                                            │      📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
 "╰────────────╰─────────────────────────────── Enter info · type to filter · Esc close ╯────────────╯"
 " ● demo data  Enter send  Shift-Enter line break  Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

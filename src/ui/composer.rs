@@ -29,7 +29,7 @@ pub const SYMBOLS: ComposerSymbols = ComposerSymbols {
     mic: "🎤",
     stop: "■",
     clip: "📎",
-    smiley: "☺",
+    smiley: "🙂",
     cell: 2,
 };
 

@@ -6472,7 +6472,7 @@ mod tests {
     #[test]
     fn emoji_picker_by_mouse() {
         let (mut app, mut terminal) = drawn();
-        let (col, row) = find(&terminal, "☺");
+        let (col, row) = find(&terminal, "🙂");
         app.on_event(click(col, row));
         assert!(matches!(app.modal, Some(Modal::Emoji(_))));
         redraw(&mut app, &mut terminal);
