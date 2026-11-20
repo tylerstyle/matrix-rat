@@ -198,7 +198,7 @@ mod tests {
                 command => command,
             };
             if let MatrixCmd::SendFiles { files: sent, .. } = command {
-                files.extend(sent);
+                files.extend(sent.into_iter().map(|file| file.path));
             }
         }
         files

@@ -72,6 +72,38 @@ impl VoiceMeta {
     }
 }
 
+/// A file to send, with what makes it a voice message if it is one. One thing, so
+/// that the details of a recording can never end up with another file.
+#[derive(Clone)]
+pub struct OutgoingFile {
+    pub path: PathBuf,
+    pub voice: Option<VoiceMeta>,
+}
+
+/// Hand-written: a path can say a lot about the user.
+impl std::fmt::Debug for OutgoingFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.voice {
+            Some(_) => "OutgoingFile(voice)",
+            None => "OutgoingFile",
+        })
+    }
+}
+
+impl From<PathBuf> for OutgoingFile {
+    fn from(path: PathBuf) -> Self {
+        Self { path, voice: None }
+    }
+}
+
+/// For tests that only ask which files were sent.
+#[cfg(test)]
+impl PartialEq<PathBuf> for OutgoingFile {
+    fn eq(&self, path: &PathBuf) -> bool {
+        self.path == *path
+    }
+}
+
 pub struct Uploads {
     client: Client,
     events: UnboundedSender<MatrixEvent>,
@@ -112,15 +144,11 @@ impl Uploads {
     /// one cannot be sent, none is ([`MatrixEvent::FilesNotSent`]). A later file that
     /// cannot be read is reported and the rest still goes, and then
     /// [`MatrixEvent::FilesSent`] says that the files are not needed any more.
-    ///
-    /// `voice` goes by position: the file at a place where it holds something is sent
-    /// as a voice message. It may be shorter than `files`.
     pub fn send(
         &mut self,
         send: u64,
         timeline: Arc<Timeline>,
-        files: Vec<PathBuf>,
-        mut voice: Vec<Option<VoiceMeta>>,
+        files: Vec<OutgoingFile>,
         caption: Option<Outgoing>,
         reply_to: Option<OwnedEventId>,
     ) {
@@ -136,12 +164,11 @@ impl Uploads {
             let (mut caption, mut caption_mentions) =
                 caption.map(caption_content).unwrap_or((None, None));
             let mut reply_to = reply_to;
-            for (n, path) in files.into_iter().enumerate() {
+            for (n, OutgoingFile { path, voice }) in files.into_iter().enumerate() {
                 let prepared =
                     tokio::task::spawn_blocking(move || upload::prepare(&path, limit)).await;
                 let outcome = match prepared {
                     Ok(Ok(prepared)) => {
-                        let voice = voice.get_mut(n).and_then(Option::take);
                         // The name the room sees, which for a voice message is not
                         // the file's.
                         let name = match voice {
@@ -578,16 +605,14 @@ mod tests {
                             handle.send(MatrixCmd::SendFiles {
                                 send: 0,
                                 room_id: room.id.clone(),
-                                files: vec![root.join("gone.txt"), text_path.clone()],
-                                voice: Vec::new(),
+                                files: vec![root.join("gone.txt").into(), text_path.clone().into()],
                                 caption: Some(crate::format::parse("for the file that is gone")),
                                 reply_to: None,
                             });
                             let command = MatrixCmd::SendFiles {
                                 send: 0,
                                 room_id: room.id.clone(),
-                                files: vec![text_path.clone(), picture_path.clone()],
-                                voice: Vec::new(),
+                                files: vec![text_path.clone().into(), picture_path.clone().into()],
                                 caption: Some(crate::format::parse(&format!("**{caption}**"))),
                                 reply_to: None,
                             };
@@ -754,11 +779,13 @@ mod tests {
                             let command = MatrixCmd::SendFiles {
                                 send: 1,
                                 room_id: room.id.clone(),
-                                files: vec![path.clone()],
-                                voice: vec![Some(VoiceMeta {
-                                    duration,
-                                    waveform: waveform.clone(),
-                                })],
+                                files: vec![OutgoingFile {
+                                    path: path.clone(),
+                                    voice: Some(VoiceMeta {
+                                        duration,
+                                        waveform: waveform.clone(),
+                                    }),
+                                }],
                                 caption: Some(crate::format::parse(&caption)),
                                 reply_to: None,
                             };
