@@ -16,8 +16,8 @@ use ratatui::text::{Line, Span};
 
 use super::{Free, INDENT, Row};
 use crate::images::EMOTE_CELLS;
-use crate::model::ReadBy;
-use crate::text::{truncate, width};
+use crate::model::{ReadBy, fit_name};
+use crate::text::width;
 use crate::theme::{Role, Theme};
 use crate::ui::sidebar::initial;
 
@@ -222,8 +222,16 @@ fn marker(
         if read_by.total == 1
             && let Some(reader) = read_by.readers.first()
         {
-            let name = truncate(&reader.name, NAME);
-            forms.push(vec![Span::styled(format!("✓ {name}"), muted)]);
+            // With the user ID where someone else goes by the same name, which is kept
+            // whole (only the name is held to `NAME`); in the colour of the ID, as the
+            // reader's tile is.
+            let shown = reader.shown_name();
+            let id_width = width(&shown).saturating_sub(width(&reader.name));
+            let name = fit_name(&shown, NAME + id_width);
+            forms.push(vec![
+                Span::styled("✓ ", muted),
+                Span::styled(name, Style::new().fg(theme.user_color(reader.key()))),
+            ]);
         }
         for shown in (1..=TILES.min(read_by.readers.len())).rev() {
             let mut spans = vec![tick()];
@@ -496,6 +504,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// One reader of a name someone else has too is named with the id where there is
+    /// room, in the colour of the id as their tile would be.
+    #[test]
+    fn a_single_reader_is_named_with_the_id_and_coloured_by_it() {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let mut said = message("bob", "hi");
+        said.read_by = ReadBy {
+            readers: vec![Reader {
+                name: "carol".into(),
+                id: Some("@carol:elsewhere.org".into()),
+                ambiguous: true,
+                time: "12:00".into(),
+            }],
+            total: 1,
+        };
+        let room = room(RoomKind::Room, vec![said]);
+        let rows = add(
+            build_rows(&room, 80, &theme, None, &images),
+            &room,
+            80,
+            &theme,
+        );
+        let row = rows.last().unwrap();
+        let text = row.line.to_string();
+        assert!(text.ends_with("✓ carol (@carol:elsewhere.org)"), "{text:?}");
+        let name = row
+            .line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("carol"))
+            .unwrap();
+        assert_eq!(
+            name.style.fg,
+            Some(theme.user_color("@carol:elsewhere.org"))
+        );
     }
 
     /// Where the end of a row gives way to "… ✓", what could be clicked there stops

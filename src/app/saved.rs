@@ -366,7 +366,8 @@ impl App {
         let found = find_target_message(&room.messages, &item.event_id, true, false)
             .and_then(|index| room.messages.get(index));
         if let Some(message) = found {
-            details.sender = message.sender.clone();
+            // As the timeline names them, and as the worker does for the others.
+            details.sender = message.sender_name().into_owned();
             details.sender_id = message.sender_id.clone();
             if message.kind == MsgKind::Redacted {
                 details.text = SavedText::Redacted;
@@ -1105,6 +1106,26 @@ mod tests {
         let entry = |title: &str| entries.iter().find(|entry| entry.title == title).unwrap();
         assert!(!entry("Save message for later").enabled);
         assert!(entry("Saved messages and reminders").enabled);
+    }
+
+    /// From the loaded messages, the sender of a saved message is named as in the
+    /// timeline: with the id where someone else goes by the same name.
+    #[test]
+    fn a_saved_message_of_one_of_two_of_a_name_names_them_with_the_id() {
+        let (mut app, _terminal, _commands) = connected();
+        let bob = &mut app.rooms[0].messages[1];
+        bob.sender_id = Some("@bob:elsewhere.org".into());
+        bob.sender_ambiguous = true;
+        let item = SavedItem {
+            room_id: ROOM.into(),
+            event_id: "$e1".into(),
+            thread: None,
+            saved_at: 0,
+            remind_at: None,
+            done: false,
+        };
+        let details = app.demo_saved_details(&item);
+        assert_eq!(details.sender, "Bob (@bob:elsewhere.org)");
     }
 
     #[test]
