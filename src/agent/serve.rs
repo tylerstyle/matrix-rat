@@ -301,7 +301,7 @@ fn mark(message: &Msg) -> u64 {
 #[derive(Default)]
 struct Watch {
     seen: Seen,
-    /// The worker has told the room's messages at least once.
+    /// The worker has told the room's messages at least once (in this session).
     told: bool,
     /// What was there before is noted, so what comes now is news. Not before the
     /// first sync of the session is through: what that brings is what was missed
@@ -598,7 +598,10 @@ impl Hub {
         for (_, (_, reply)) in self.reads.drain() {
             let _ = reply.send(Err(lost.clone()));
         }
-        for room_id in self.watched.keys() {
+        for (room_id, watch) in &mut self.watched {
+            // What the old session's watch told is no baseline for the new one: a
+            // room that has none yet takes it from what the new watch tells first.
+            watch.told = false;
             self.matrix.send(MatrixCmd::Agent(AgentCmd::Watch {
                 room_id: room_id.clone(),
             }));

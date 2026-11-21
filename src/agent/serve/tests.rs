@@ -942,6 +942,34 @@ async fn a_session_that_starts_again_is_watched_again_and_tells_only_what_is_new
     fake.stop().await;
 }
 
+/// A session that starts again before the first sync is through: what the room held
+/// is noted from what the new session's watch tells first, not from what the old one
+/// told, and what the new session missed meanwhile is not news either.
+#[tokio::test]
+async fn a_session_that_starts_again_before_the_first_sync_tells_nothing_it_missed() {
+    let mut fake = Fake::start("early", quick()).await;
+    fake.tell(MatrixEvent::Rooms(vec![room(ROOM, ROOM_NAME)]));
+    let socket = fake.socket.clone();
+    let listening =
+        tokio::spawn(async move { Conn::open(&socket).await.unwrap().listen(ROOM).await });
+    assert!(matches!(fake.asked().await, AgentCmd::Watch { .. }));
+    let old = message("$old", ANN, "before");
+    fake.watched(vec![old.clone()]);
+    fake.tell(MatrixEvent::LoggedIn {
+        user_id: BOT.into(),
+    });
+    assert!(matches!(fake.asked().await, AgentCmd::Watch { .. }));
+    // The new session's first sync is through before its watch has told anything.
+    fake.tell(MatrixEvent::CaughtUp);
+    let missed = message("$missed", ANN, "while away");
+    fake.watched(vec![old.clone(), missed.clone()]);
+    let mut listener = listening.await.unwrap().unwrap();
+    let new = message("$new", ANN, "hello");
+    fake.watched(vec![old, missed, new.clone()]);
+    assert_eq!(next(&mut listener).await.unwrap(), new);
+    fake.stop().await;
+}
+
 #[tokio::test]
 async fn a_watched_room_that_is_left_or_cannot_be_followed_ends_its_streams() {
     let mut fake = Fake::ready("left", quick()).await;
