@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Samples the memory and CPU use of a running matrix-rat (the window or `serve`) from
-# /proc, for the measured pass before 1.0 (docs/PLAN.md §6.2). It reads numbers only:
+# /proc, for the measured pass before 1.0 (docs/history/1.0-road.md, §6.2). It reads numbers only:
 # nothing of the account, its rooms or its messages, and it never talks to the app.
 #
 #   scripts/measure.sh [PID] [SECONDS] [FILE]

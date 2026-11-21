@@ -6,7 +6,8 @@ review, oldest first; the reviews themselves are in [`docs/reviews/`](reviews/).
 such as §4 or §6a in early rows refer to the original plan,
 [`docs/history/original-plan.md`](history/original-plan.md). "PLAN §6a" and "§6b" in the rows of
 M33 to M38 mean [`history/0.8-ideas-from-faro.md`](history/0.8-ideas-from-faro.md) and
-[`history/0.9-agent-channel.md`](history/0.9-agent-channel.md), where those sections moved on 2026-11-20.
+[`history/0.9-agent-channel.md`](history/0.9-agent-channel.md), where those sections moved on 2026-11-20. "§6.1" and
+"§6.2" in rows up to 2026-11-21 mean [`history/1.0-road.md`](history/1.0-road.md) (moved on 2026-11-21).
 
 | Date | Reviewer | Verdict | Outcome |
 |---|---|---|---|
