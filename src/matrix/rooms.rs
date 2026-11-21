@@ -25,7 +25,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use super::convert::convert;
 use super::safety::{IgnoredSet, is_ignored_in};
 use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
 use crate::format::Outgoing;
@@ -2363,6 +2362,7 @@ impl LiveTailCounter {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepare_messages(
     room: &Room,
     items: &Vector<Arc<TimelineItem>>,
@@ -2371,8 +2371,12 @@ async fn prepare_messages(
     own_room_names: &super::people::OwnRoomNames,
     readers: &mut super::receipts::Names,
     dedup: &mut super::convert::EventDedup,
+    reuse: &mut super::convert::Reuse,
 ) -> Vec<crate::model::Message> {
-    let mut messages = convert(items, own, &ignored.borrow());
+    // The set is taken out of the channel first: holding the borrow over a conversion of
+    // the whole room would hold the channel's lock, and a change of the list would wait.
+    let ignored = IgnoredSet::clone(&ignored.borrow());
+    let mut messages = reuse.convert(items, own, &ignored);
     let own_name = super::people::room_own_display_name(room, own_room_names).await;
     super::convert::apply_own_display_name(&mut messages, own_name.as_deref());
     readers.annotate(room, &mut messages, items, own).await;
@@ -2460,6 +2464,8 @@ async fn forward(
     // Who has read up to where, by name.
     let mut readers = super::receipts::Names::default();
     let mut dedup = super::convert::EventDedup::default();
+    // What was made of each item, for the next change.
+    let mut reuse = super::convert::Reuse::default();
     let snapshot = |items: &Vector<Arc<TimelineItem>>,
                     unread: HashSet<String>,
                     mut messages: Vec<crate::model::Message>| {
@@ -2520,6 +2526,7 @@ async fn forward(
         &own_room_names,
         &mut readers,
         &mut dedup,
+        &mut reuse,
     )
     .await;
     if events.send(snapshot(&items, marks, messages)).is_err() {
@@ -2608,6 +2615,12 @@ async fn forward(
                         }
                     });
                 }
+                // What was made before a clear or a reset is not used after it. It would
+                // be right (the same item is the same message), but nothing is assumed
+                // of a timeline that started over, and it is rare.
+                if saw_clear {
+                    reuse.forget();
+                }
                 fetch_replies(&items);
                 let marks = unread(&items).await;
                 let messages = prepare_messages(
@@ -2618,6 +2631,7 @@ async fn forward(
                     &own_room_names,
                     &mut readers,
                     &mut dedup,
+                    &mut reuse,
                 )
                 .await;
                 if events.send(snapshot(&items, marks, messages)).is_err() {
@@ -2637,6 +2651,7 @@ async fn forward(
                     &own_room_names,
                     &mut readers,
                     &mut dedup,
+                    &mut reuse,
                 )
                 .await;
                 if events.send(snapshot(&items, marks, messages)).is_err() {
@@ -2667,6 +2682,7 @@ async fn forward(
                     &own_room_names,
                     &mut readers,
                     &mut dedup,
+                    &mut reuse,
                 )
                 .await;
                 if events.send(snapshot(&items, marks, messages)).is_err() {
@@ -2731,6 +2747,9 @@ async fn forward(
 
 #[cfg(test)]
 pub(super) mod measure;
+
+#[cfg(test)]
+mod reuse;
 
 #[cfg(test)]
 mod tests {
