@@ -913,11 +913,18 @@ mod tests {
                 Standing::Doubted("sender_mismatch")
             );
         }
-        // A third sender never counts, verified or not, nor does the account's own.
+        // A third sender never counts, verified or not, nor does the account's own, nor
+        // one that only looks like an account of the user (case, a suffix, a trailing dot,
+        // a port, white space, a Cyrillic "а" in place of the Latin "a").
         for message in [
             from("@eve:example.org", judged("text", None, None)),
             from("@ann:example.org.evil", judged("text", None, None)),
             from("@ANN:example.org", judged("text", None, None)),
+            from("@ann:example.org.", judged("text", None, None)),
+            from("@ann:example.org:8448", judged("text", None, None)),
+            from(" @ann:example.org", judged("text", None, None)),
+            from("@ann:beeper.example ", judged("text", None, None)),
+            from("@\u{430}nn:example.org", judged("text", None, None)),
             Msg {
                 own: true,
                 ..from(users[1], judged("text", None, None))
