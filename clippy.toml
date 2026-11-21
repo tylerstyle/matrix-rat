@@ -16,4 +16,7 @@ disallowed-methods = [
     { path = "tokio::sync::mpsc::Receiver::blocking_recv", reason = "waits without a limit" },
     { path = "tokio::sync::mpsc::UnboundedReceiver::blocking_recv", reason = "waits without a limit" },
     { path = "tokio::sync::mpsc::Sender::blocking_send", reason = "waits without a limit" },
+    # Not a blocking ban like the others: it asks the terminal for the cursor position and
+    # cannot read the answer while the event stream waits for input (see `terminal::clear`).
+    { path = "ratatui::Terminal::clear", reason = "asks the terminal for the cursor; use `terminal::clear`" },
 ]
