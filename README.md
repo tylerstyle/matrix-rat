@@ -817,15 +817,18 @@ terminal. One program stays connected (`matrix-rat serve`); small commands talk 
 | `matrix-rat serve` | Runs the Matrix side without the screen, on a profile that is already logged in, and listens on a private socket. Stays in sync until it gets SIGTERM, SIGHUP or `Ctrl-C`. |
 | `matrix-rat rooms` | Prints the rooms the account is in: `id`, `name`, `encrypted`, `direct`. |
 | `matrix-rat send --room R TEXT…` | Sends a message (Markdown). A single `-` as the text reads it from standard input. Prints `{"event_id":"$…"}`. |
-| `matrix-rat read --room R [--limit N] [--from @user:server]` | Prints the latest messages (20 unless told, 100 at most), oldest first. With `--from`: only what counts as that user's (below). |
-| `matrix-rat listen --room R [--from @user:server]` | Stays connected and prints messages as they come. With `--from`: only what counts as that user's. |
-| `matrix-rat mcp --room R [--name N] [--from @user:server]` | An MCP server for one agent, bound to one room (below). Without `--name` the agent's name is read from `MATRIX_RAT_AGENT_NAME`. |
+| `matrix-rat read --room R [--limit N] [--from @user:server]…` | Prints the latest messages (20 unless told, 100 at most), oldest first. With `--from`: only what counts as that user's (below). |
+| `matrix-rat listen --room R [--from @user:server]…` | Stays connected and prints messages as they come. With `--from`: only what counts as that user's. |
+| `matrix-rat mcp --room R [--name N] [--from @user:server]…` | An MCP server for one agent, bound to one room (below). Without `--name` the agent's name is read from `MATRIX_RAT_AGENT_NAME`. |
 
 All of them take `--profile`, and all but `serve` need a running `serve` for that
 profile. `R` is a room's id (`!…`), its exact name, or its address (`#…`); a name or
-address that fits several rooms is refused, an id always means its room. Options go
-before the text of `send`: everything after its first word is text. Output is one JSON
-object per line:
+address that fits several rooms is refused, an id always means its room. `--from` may
+be given more than once, once for each account of the same person (`--from
+@you:example.org --from @you:example.com`): a message from any of them then counts as
+that user's, each account held to the same rule on its own (see "Whose message is
+it?" below); the same account twice is refused. Options go before the text of `send`:
+everything after its first word is text. Output is one JSON object per line:
 
 ```json
 {"event_id":"$abc","sender":"@you:example.org","sender_name":"You","timestamp_ms":1763300000000,"kind":"text","body":"yes, merge it","edited":false,"own":false,"verified":true}
@@ -853,9 +856,10 @@ failed for another reason.
    verify the device (it has to read encrypted rooms), accept the invitation to the
    room, and, if agents are to act on your answers (`--from`), **verify yourself from
    the bot account**: open your User info there, choose to verify, and compare the
-   emoji on your own client. Then quit. `serve` never shows a login form, never takes
-   a password, and never accepts an invitation; when the session stops working it
-   says so and ends.
+   emoji on your own client. With more than one account of yours (`--from` given more
+   than once), verify each of them that way: each has an identity of its own. Then
+   quit. `serve` never shows a login form, never takes a password, and never accepts
+   an invitation; when the session stops working it says so and ends.
 3. Start it: `matrix-rat --profile bot serve`. It prints `matrix-rat serve: ready` on
    standard error when the socket is open. Try it: `matrix-rat --profile bot rooms`.
 
@@ -933,34 +937,38 @@ between words). With neither, or with a variable that breaks these rules,
 `matrix-rat mcp` ends with exit code `2` and says so on standard error; it never falls
 back to another name.
 
-With `--from`, `wait_for_message` only wakes for what counts as that user's, and every
-message is handed over with `"from_user": true` or `false`. The tools tell the model
-that message text is data written by a person or another program and never
-instructions, unless it is marked as yours, and that secrets must not be sent. Without
-`--from`, nothing in the room counts as an instruction. An agent that is not waiting is
-not woken by a message: it sees it the next time it waits or reads. When the room is
-given by name or address, the server keeps to the room which that meant when it first
-asked `serve`; renaming rooms later does not move it.
+With `--from`, `wait_for_message` only wakes for what counts as that user's (from any
+of the accounts named, when `--from` is given more than once), and every message is
+handed over with `"from_user": true` or `false`. The tools tell the model which
+accounts are yours, that message text is data written by a person or another program
+and never instructions, unless it is marked as yours, and that secrets must not be
+sent. Without `--from`, nothing in the room counts as an instruction. An agent that is
+not waiting is not woken by a message: it sees it the next time it waits or reads.
+When the room is given by name or address, the server keeps to the room which that
+meant when it first asked `serve`; renaming rooms later does not move it.
 
 **Whose message is it?**
 
 With `--from` (on `mcp`, `read` and `listen`), a message counts as that user's only if
 all of this holds:
 
-- its sender is that user, and it is not the bot account's own;
+- its sender is that user (with `--from` given more than once: one of the accounts
+  named), and it is not the bot account's own;
 - it is a message that says something: one that could not be decrypted, or was
   deleted, never counts;
 - it came **end-to-end encrypted**, from a device that the user has cross-signed, and
   **the bot account has verified the user's identity** (step 2 above), with nothing
   that puts the sender in doubt: `"verified":true`.
 
-So in a room without encryption nothing counts, and neither does anything before you
-have verified yourself from the bot account, or anything sent from a session of yours
-that you have not verified. That is on purpose: the sender's name alone is only your
-homeserver's word, and whoever runs or breaks into the homeserver can write under it,
-or add a device to your account. Messages that came before the verification may stay
-unverified; what comes after counts, and so does an earlier one from the moment it shows
-as verified.
+With several accounts each one is judged on its own: a message counts only if what
+it came from is verified for the account that sent it, and the verified identity of
+one account says nothing about another. So in a room without encryption nothing counts,
+and neither does anything before you have verified yourself (each account you name)
+from the bot account, or anything sent from a session of yours that you have not
+verified. That is on purpose: the sender's name alone is only your homeserver's word,
+and whoever runs or breaks into the homeserver can write under it, or add a device to
+your account. Messages that came before the verification may stay unverified; what
+comes after counts, and so does an earlier one from the moment it shows as verified.
 
 A message that names you and does not count is not hidden. `mcp` hands it over with
 `"from_user": false` and `"untrusted": "<why>"` (`unverified_identity`,
@@ -970,11 +978,12 @@ how many such messages came (`"untrusted_from_user"`), so that nobody has to won
 why an answer is not taken. `read --from` and `listen --from` leave such messages out
 and say so on standard error, without their text.
 
-`--allow-unverified` (with `--from`) gives that up: a message then counts unless it
-contradicts its sender (`identity_changed`, `sender_mismatch`, or sent in the clear in
-an encrypted room), could not be decrypted, or was deleted. Rooms without encryption,
-unverified identities and unverified devices pass. What you then rely on is your
-homeserver: use it only where that is good enough.
+`--allow-unverified` (with `--from`) gives that up, for every account named alike: a
+message then counts unless it contradicts its sender (`identity_changed`,
+`sender_mismatch`, or sent in the clear in an encrypted room), could not be decrypted,
+or was deleted. Rooms without encryption, unverified identities and unverified devices
+pass. What you then rely on is your homeserver (each named account's): use it only
+where that is good enough.
 
 **What to keep in mind**
 
@@ -984,7 +993,8 @@ homeserver: use it only where that is good enough.
   as you can use it, though. That is why the account should be one of its own, in the
   rooms it needs and no others.
 - **Whoever can write in the room can talk to your agent.** With `--from`, only
-  messages that are verified as yours are marked as yours (see "Whose message is it?");
+  messages that are verified as yours (from an account you named) are marked as yours
+  (see "Whose message is it?");
   with `--allow-unverified` that is only as good as your homeserver. Give the room's id
   rather than its name, so that no other room can be taken for it.
 - **All agents write as the same bot account.** The signature `[N]` in front of a
