@@ -40,6 +40,11 @@ const KEEP_TIMELINES: usize = 6;
 /// stay in the store; opened again, it starts from its latest ones and pages back.
 const IDLE_TIMELINE: Duration = Duration::from_secs(20 * 60);
 const PAGE: u16 = 40;
+/// At a shutdown, the changes commands left running (a message on its way to the send
+/// queue, a reaction) are waited for this long at most. Stopping the sync (up to two
+/// seconds) and saving the session come after it, and all of it must end within the
+/// three seconds the app waits for the worker when no file is being sent.
+const ACTIONS_WAIT: Duration = Duration::from_millis(750);
 
 /// A timeline kept for a room (or the open thread), and when it was last used.
 struct Cached {
@@ -144,9 +149,14 @@ pub struct Timelines {
     saved_limit: Arc<tokio::sync::Semaphore>,
     /// The running request for a page of a room's threads, if any.
     thread_lister: Option<JoinHandle<()>>,
-    /// What commands left running (a send, a reaction, a lookup). It holds the
-    /// session's client and timelines, so it ends with the session (see `stop`).
+    /// What commands left running that changes something (a send, a reaction, a read
+    /// receipt). It holds the session's client and timelines, so it ends with the
+    /// session (see `stop`); at a shutdown it is given a moment first.
     actions: tokio::task::JoinSet<()>,
+    /// What commands left running that only looks something up or says something
+    /// passing (pinned and saved messages, a source, a retried decryption, typing).
+    /// Ends with the session too, and is not waited for.
+    lookups: tokio::task::JoinSet<()>,
     /// Rooms left in this session (see [`super::left`]).
     left: super::left::LeftRooms,
 }
@@ -189,6 +199,7 @@ impl Timelines {
             saved_limit: Arc::new(tokio::sync::Semaphore::new(super::saved::CONCURRENCY)),
             thread_lister: None,
             actions: tokio::task::JoinSet::new(),
+            lookups: tokio::task::JoinSet::new(),
             left,
             events,
         }
@@ -232,10 +243,13 @@ impl Timelines {
     }
 
     /// Waits briefly on shutdown for in-flight file sends to reach the SDK's send queue,
-    /// and for what commands left running (a message on its way to the queue) to end.
+    /// and for the changes commands left running (a message on its way to the queue)
+    /// to end: within `wait` in all, and those at most [`ACTIONS_WAIT`]. Lookups are
+    /// not waited for.
     pub async fn finish_uploads(&mut self, wait: std::time::Duration) {
         let deadline = tokio::time::Instant::now() + wait;
         self.uploads.finish(wait).await;
+        let deadline = deadline.min(tokio::time::Instant::now() + ACTIONS_WAIT);
         let actions = async { while self.actions.join_next().await.is_some() {} };
         let _ = tokio::time::timeout_at(deadline, actions).await;
     }
@@ -251,6 +265,7 @@ impl Timelines {
             task.abort();
         }
         self.actions.abort_all();
+        self.lookups.abort_all();
         self.unread_flags.stop();
     }
 
@@ -258,6 +273,12 @@ impl Timelines {
     fn spawn_action(&mut self, work: impl Future<Output = ()> + Send + 'static) {
         while self.actions.try_join_next().is_some() {}
         self.actions.spawn(work);
+    }
+
+    /// Starts `work` among [`Self::lookups`], letting go of those that are done.
+    fn spawn_lookup(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+        while self.lookups.try_join_next().is_some() {}
+        self.lookups.spawn(work);
     }
 
     /// Message keys arrived from outside the usual ways (a key file): has every open
@@ -276,7 +297,7 @@ impl Timelines {
         {
             timelines.push(timeline.clone());
         }
-        self.spawn_action(async move {
+        self.spawn_lookup(async move {
             for timeline in timelines {
                 // Which sessions does not matter: matrix-sdk-ui 0.19.1 retries
                 // everything the timeline shows as undecryptable.
@@ -1282,7 +1303,7 @@ impl Timelines {
                 let events = self.events.clone();
                 let cache = self.pinned_cache.clone();
                 let ignored = self.ignored.borrow().clone();
-                self.spawn_action(async move {
+                self.spawn_lookup(async move {
                     let (items, error) =
                         super::moderation::fetch_pinned(&room, &cache, &ignored).await;
                     let _ = events.send(MatrixEvent::PinnedList {
@@ -1327,7 +1348,7 @@ impl Timelines {
                     self.saved_limit.clone(),
                     self.events.clone(),
                 );
-                self.spawn_action(fetch);
+                self.spawn_lookup(fetch);
             }
             MatrixCmd::Forward {
                 from_room_id,
@@ -1409,7 +1430,7 @@ impl Timelines {
                 };
                 match timeline {
                     Ok((timeline, _)) => {
-                        self.spawn_action(async move {
+                        self.spawn_lookup(async move {
                             let result = decrypt_again(&timeline, &event_id).await;
                             if let Err(err) = &result {
                                 tracing::warn!(why = %logsafe::kind_any(err), "could not retry decryption");
@@ -1434,7 +1455,7 @@ impl Timelines {
                 };
                 match self.active_timeline(&room_id).await {
                     Ok((timeline, _)) => {
-                        self.spawn_action(async move {
+                        self.spawn_lookup(async move {
                             answer(super::source::fetch(&timeline, &item).await);
                         });
                     }
@@ -1443,7 +1464,7 @@ impl Timelines {
             }
             MatrixCmd::Typing { room_id, typing } => {
                 if let Ok(room) = self.room(&room_id) {
-                    self.spawn_action(async move {
+                    self.spawn_lookup(async move {
                         if let Err(err) = room.typing_notice(typing).await {
                             tracing::debug!(why = %logsafe::kind(&err), "could not send typing notice");
                         }
@@ -4865,6 +4886,42 @@ mod tests {
             .await
             .expect("the work was given up");
         assert!(outcome.is_err(), "it ended without finishing");
+    }
+
+    /// At a shutdown, a change on its way is given a moment, and a lookup none: after
+    /// them the sync is stopped and the session saved, all within the three seconds the
+    /// app waits for the worker.
+    #[tokio::test]
+    async fn a_shutdown_waits_briefly_for_changes_and_not_for_lookups() {
+        use crate::matrix::left::{LeftRooms, testing::Server};
+
+        let client = Server::default().client().await;
+        let (mut timelines, _events) = timelines_of(client, &LeftRooms::default());
+        timelines.spawn_lookup(std::future::pending());
+        let started = tokio::time::Instant::now();
+        timelines
+            .finish_uploads(crate::matrix::upload::SHUTDOWN_WAIT)
+            .await;
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_millis(500),
+            "waited for a lookup: {waited:?}"
+        );
+        timelines.spawn("never done", std::future::pending());
+        let started = tokio::time::Instant::now();
+        timelines
+            .finish_uploads(crate::matrix::upload::SHUTDOWN_WAIT)
+            .await;
+        let waited = started.elapsed();
+        assert!(
+            waited >= super::ACTIONS_WAIT,
+            "gave a change no time: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "waited too long: {waited:?}"
+        );
+        timelines.stop();
     }
 
     #[test]
