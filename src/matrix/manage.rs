@@ -1813,9 +1813,25 @@ where
 /// A change made here is known to `settings` at once, but reaches the store only when
 /// the server sends the rules back, which can take a while (and against one server did
 /// not happen within a minute): a room just muted would go on showing as not muted.
+///
+/// Whether the room is encrypted (the account's defaults can differ for such rooms) is
+/// what the store has: the room list asks this of every room, every time it is made,
+/// and must not wait for the server. The sync brings every room's encryption along; a
+/// room it has not told of yet counts as not encrypted until it does.
 pub(super) async fn notification_mode(
     settings: &NotificationSettings,
     room: &Room,
+) -> Option<RoomNotificationMode> {
+    let encrypted = room.encryption_state().is_encrypted();
+    notification_mode_as(settings, room, Some(encrypted)).await
+}
+
+/// [`notification_mode`] for a room that `encrypted` says is encrypted or not (`None`:
+/// not known, and then only a level chosen for the room itself is known).
+async fn notification_mode_as(
+    settings: &NotificationSettings,
+    room: &Room,
+    encrypted: Option<bool>,
 ) -> Option<RoomNotificationMode> {
     if room.state() != RoomState::Joined {
         return None;
@@ -1828,7 +1844,7 @@ pub(super) async fn notification_mode(
     }
     // Not chosen for this room: what the account's defaults say for a room of its kind
     // (for these rules a chat between exactly two people is one-to-one).
-    let encrypted = room.latest_encryption_state().await.ok()?.is_encrypted();
+    let encrypted = encrypted?;
     let one_to_one = room.active_members_count() == 2;
     Some(
         settings
@@ -2307,7 +2323,8 @@ async fn head(
     } else {
         None
     };
-    let notify = match notification_mode(notify_settings, room).await {
+    // With the encryption just looked up (from the server, if the store did not know it).
+    let notify = match notification_mode_as(notify_settings, room, encrypted).await {
         Some(RoomNotificationMode::AllMessages) => Some(NotifyLevel::All),
         Some(RoomNotificationMode::MentionsAndKeywordsOnly) => Some(NotifyLevel::Mentions),
         Some(RoomNotificationMode::Mute) => Some(NotifyLevel::Mute),
@@ -2824,6 +2841,35 @@ mod tests {
     use matrix_sdk::config::SyncSettings;
     use matrix_sdk::ruma::room_id;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    /// The room list's notification levels come from what the store has. A room whose
+    /// encryption the sync has not told (`Unknown`) would have the server asked about it
+    /// by `latest_encryption_state`: in the session's loop, for every such room, every
+    /// time the list is made.
+    #[tokio::test]
+    async fn the_room_list_asks_the_server_nothing_for_a_notification_level() {
+        let room = room_id!("!quiet:localhost");
+        let server = Server {
+            joined: vec![room.as_str()],
+            ..Server::default()
+        };
+        let seen = server.seen.clone();
+        let client = server.client().await;
+        let settings = client.notification_settings().await;
+        let room = client.get_room(room).unwrap();
+        assert!(matches!(
+            room.encryption_state(),
+            matrix_sdk::EncryptionState::Unknown
+        ));
+        seen.lock().unwrap().clear();
+        let level = notification_mode(&settings, &room).await;
+        assert!(level.is_some());
+        let asked = seen.lock().unwrap().clone();
+        assert!(
+            !asked.iter().any(|path| path.contains("m.room.encryption")),
+            "{asked:?}"
+        );
+    }
 
     #[tokio::test]
     async fn muting_a_room_has_the_room_list_made_again_at_once() {
