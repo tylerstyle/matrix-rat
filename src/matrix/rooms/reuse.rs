@@ -1031,6 +1031,60 @@ async fn people_of_the_same_name_are_named_with_their_ids() {
     stage.namesakes().await;
 }
 
+/// Not about reuse, but on the same stand-in server: a pinned (or saved) message that
+/// only the server has is kept in the pinned cache once loaded, and whose it is is
+/// named as the member list has them now: by the name they took after it was kept
+/// too.
+#[tokio::test]
+async fn a_kept_pinned_message_names_its_sender_by_their_name_now() {
+    use crate::matrix::moderation::{EventSummary, PinnedCache, summarize_event};
+    let mut stage = Stage::new(true).await;
+    let cache = Arc::new(Mutex::new(PinnedCache::default()));
+    let sender_of = |found: EventSummary| match found {
+        EventSummary::Found { sender, .. } => sender,
+        EventSummary::Unavailable => panic!("the pinned message was not found"),
+    };
+    let fetched = |stage: &Stage| {
+        stage
+            .server
+            .requests()
+            .iter()
+            .filter(|request| request.path.ends_with(&format!("/event/{GONE}")))
+            .count()
+    };
+    let before = sender_of(summarize_event(&stage.room, GONE, &cache).await);
+    assert!(fetched(&stage) > 0, "loaded from the server");
+
+    // Its sender (who also wrote the reply to it) takes another name.
+    let sender = stage
+        .message(REPLY)
+        .and_then(|message| message.sender_id.clone())
+        .unwrap();
+    stage.clock += 1000;
+    let member = json!({
+        "type": "m.room.member", "state_key": sender, "sender": sender,
+        "event_id": "$pinned-sender-renamed", "origin_server_ts": stage.clock,
+        "content": { "membership": "join", "displayname": "Somebody Else" },
+    });
+    stage
+        .sync(json!({ "timeline": { "events": [member] } }))
+        .await;
+    stage
+        .until("new name", |items| {
+            event(items, REPLY).is_some_and(|event| {
+                matches!(event.sender_profile(), TimelineDetails::Ready(profile)
+                    if profile.display_name.as_deref() == Some("Somebody Else"))
+            })
+        })
+        .await;
+
+    let asked = fetched(&stage);
+    let after = sender_of(summarize_event(&stage.room, GONE, &cache).await);
+    assert_eq!(fetched(&stage), asked, "taken from the pinned cache");
+    assert_ne!(before, "Somebody Else");
+    assert_eq!(after, "Somebody Else");
+}
+
 #[tokio::test]
 async fn a_reply_whose_original_arrives_is_made_again() {
     let mut stage = Stage::new(true).await;
