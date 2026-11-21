@@ -6,17 +6,19 @@
 //! the others are laid out anew.
 //!
 //! Whether a message is as it was is told by a hash of everything its rows are made
-//! from ([`inputs`]): all of the message; what it takes from the messages before it (a
+//! from ([`hash_inputs`]): all of the message; what it takes from the messages before it (a
 //! day divider, its sender's header, a gap, a shield said once for a run); whether its
 //! spoilers are shown; and what it looks up elsewhere: its picture's place, whether
 //! custom emoji are drawn as pictures at all, whether its sender is ignored, whether
 //! the room has link previews, the names of the custom emoji it was reacted with, and
 //! its notes. What its rows took from the link previews and the custom emoji pictures
 //! is known only once they are laid out (which links and emoji they have), so it is
-//! hashed apart ([`fetched`]) and looked up again, for the links and emoji the kept
+//! hashed apart ([`hash_fetched`]) and looked up again, for the links and emoji the kept
 //! rows have. What all messages are laid out with alike (the room, the width, the
 //! theme, read markers on or off, a chat with one person or not: [`Shared`]) is not
-//! hashed: when any of it changes, nothing is kept.
+//! hashed: when any of it changes, nothing is kept. One thing is not of the message nor
+//! of the room: the time its code may take to be coloured. A message whose colouring
+//! was cut short for lack of it is laid out again each time, until it was not.
 //!
 //! The hashes are keyed at random, once for each memo: what someone writes cannot be
 //! made to hash like something else, which would leave a message showing what it said
@@ -36,8 +38,8 @@ use matrix_sdk::ruma::events::room::MediaSource;
 use ratatui::text::Line;
 
 use super::{
-    Before, Flow, Lay, Layout, Row, RowCache, RowKey, is_mxc_key, message_rows, notes,
-    reaction_label, receipts,
+    Before, EmoteView, Flow, Lay, Layout, PreviewView, Row, RowCache, RowKey, is_mxc_key,
+    message_rows, notes, reaction_label, receipts,
 };
 use crate::images::Slot;
 use crate::model::{
@@ -91,10 +93,13 @@ impl fmt::Debug for Memo {
 struct Laid {
     /// Its id, hashed: where its rows are looked for.
     id: u64,
-    /// See [`inputs`].
+    /// See [`hash_inputs`].
     inputs: u64,
-    /// See [`fetched`].
+    /// See [`hash_fetched`].
     fetched: u64,
+    /// The colouring of its code was cut short for lack of time: its rows are not kept,
+    /// so that the next layout colours what it can.
+    cut_short: bool,
     /// Where its rows, its links and its custom emoji end among those of the room.
     rows: usize,
     wants: usize,
@@ -165,35 +170,39 @@ pub(super) fn lay_out(
     for (i, message) in messages.iter().enumerate() {
         let before = flow.next(messages, i);
         let id = keys.hash_one(&message.id);
-        let inputs = inputs(&mut feed, message, i, before, lay, notes, &noted);
+        let inputs = hash_inputs(&mut feed, message, i, before, lay, notes, &noted);
         let (wants, emote_wants) = (out.wants.len(), out.emote_wants.len());
         let found = old.find(id).filter(|&k| {
             let at = &old.laid[k];
-            !old.taken[k] && at.inputs == inputs && {
+            !old.taken[k] && !at.cut_short && at.inputs == inputs && {
                 let (_, wants, emote_wants) = old.ranges(k);
-                fetched(&keys, lay, &old.wants[wants], &old.emote_wants[emote_wants]) == at.fetched
+                hash_fetched(&keys, lay, &old.wants[wants], &old.emote_wants[emote_wants])
+                    == at.fetched
             }
         });
-        let fetched = match found {
+        let (fetched, cut_short) = match found {
+            // Never one that was cut short (see the filter).
             Some(k) => {
                 kept += 1;
                 old.take(k, i, &mut out);
-                old.laid[k].fetched
+                (old.laid[k].fetched, false)
             }
             None => {
-                fresh(i, message, before, lay, notes, &shared, &mut out);
-                fetched(
+                let cut_short = fresh(i, message, before, lay, notes, &shared, &mut out);
+                let fetched = hash_fetched(
                     &keys,
                     lay,
                     &out.wants[wants..],
                     &out.emote_wants[emote_wants..],
-                )
+                );
+                (fetched, cut_short)
             }
         };
         laid.push(Laid {
             id,
             inputs,
             fetched,
+            cut_short,
             rows: out.rows.len(),
             wants: out.wants.len(),
             emote_wants: out.emote_wants.len(),
@@ -225,7 +234,8 @@ fn trim<T>(list: &mut Vec<T>) {
     }
 }
 
-/// Lays out the message at `i` anew, with its notes and its read marker.
+/// Lays out the message at `i` anew, with its notes and its read marker. Whether the
+/// colouring of its code was cut short for lack of time.
 fn fresh(
     i: usize,
     message: &Message,
@@ -234,9 +244,9 @@ fn fresh(
     notes: &NoteView,
     shared: &Shared,
     out: &mut Layout,
-) {
+) -> bool {
     let start = out.rows.len();
-    message_rows(i, message, before, lay, out);
+    let cut_short = message_rows(i, message, before, lay, out);
     // Transcripts and translations, under the message; a read marker then sits at the
     // end of the last of those rows.
     notes::add_under(
@@ -259,6 +269,7 @@ fn fresh(
             lay.theme,
         );
     }
+    cut_short
 }
 
 /// The last layout, its rows being taken out of it.
@@ -367,9 +378,9 @@ impl Old {
 
 /// A hash of everything the rows of the message at `i` are made from, but for what all
 /// messages are laid out with alike ([`Shared`]) and what they took from the link
-/// previews and the custom emoji pictures ([`fetched`]). `noted`: the events that have
-/// notes.
-fn inputs(
+/// previews and the custom emoji pictures ([`hash_fetched`]). `noted`: the events that
+/// have notes.
+fn hash_inputs(
     feed: &mut Feed,
     message: &Message,
     i: usize,
@@ -378,34 +389,67 @@ fn inputs(
     notes: &NoteView,
     noted: &HashSet<&str>,
 ) -> u64 {
+    // Every field is named, as in `hash_message`, so that one added later is decided on
+    // here.
+    let Lay {
+        // In `Shared`: the width, and the theme (the text style is the theme's).
+        max_width: _,
+        theme: _,
+        text_style: _,
+        // The width less the indent: where a picture goes depends on it.
+        body_width,
+        revealed,
+        images,
+        previews,
+        emotes,
+    } = *lay;
+    let EmoteView {
+        catalog,
+        ignored: no_emotes_from,
+    } = *emotes;
+    let NoteView {
+        notes: by_event,
+        current,
+    } = *notes;
     feed.bytes.clear();
     let h = &mut *feed;
     hash_message(message, h);
     before.hash(h);
-    (lay.revealed == Some(i)).hash(h);
+    (revealed == Some(i)).hash(h);
     // The place its picture takes, or the line that says why there is none.
     if let Some(image) = &message.image {
-        hash_slot(&lay.images.slot(image, lay.body_width), h);
+        hash_slot(&images.slot(image, body_width), h);
     }
-    lay.images.emote_pictures().hash(h);
+    images.emote_pictures().hash(h);
     let ignored = |people: &BTreeSet<String>| {
         message
             .sender_id
             .as_deref()
             .is_some_and(|id| people.contains(id))
     };
-    ignored(lay.emotes.ignored).hash(h);
-    lay.previews
-        .map(|view| (view.mode.allows(view.encrypted), ignored(view.ignored)))
-        .hash(h);
+    ignored(no_emotes_from).hash(h);
+    match previews {
+        Some(&PreviewView {
+            // What its rows took from the previews: `hash_fetched`.
+            store: _,
+            mode,
+            encrypted,
+            ignored: no_previews_from,
+        }) => {
+            1u8.hash(h);
+            mode.allows(encrypted).hash(h);
+            ignored(no_previews_from).hash(h);
+        }
+        None => 0u8.hash(h),
+    }
     // A reaction with a custom emoji shows its name where the image packs know it.
     for reaction in &message.reactions {
         if is_mxc_key(&reaction.key) {
-            reaction_label(&reaction.key, lay.emotes.catalog).hash(h);
+            reaction_label(&reaction.key, catalog).hash(h);
         }
     }
     if let Some(event) = message.event_id().filter(|event| noted.contains(event)) {
-        for (kind, note) in notes.notes.of(event) {
+        for (kind, note) in by_event.of(event) {
             kind.hash(h);
             note.hidden.hash(h);
             match &note.state {
@@ -419,7 +463,7 @@ fn inputs(
                     why.hash(h);
                 }
             }
-            (notes.current)(message, kind, note).hash(h);
+            current(message, kind, note).hash(h);
         }
     }
     h.finish()
@@ -491,7 +535,7 @@ impl Hasher for Feed<'_> {
 /// A hash of what rows with these links and custom emoji (`(message, address)` each)
 /// took from the link previews and the custom emoji pictures: the preview of each link
 /// if there is one, and whether the picture of each emoji is there.
-fn fetched(
+fn hash_fetched(
     keys: &RandomState,
     lay: &Lay,
     wants: &[(usize, String)],
@@ -770,7 +814,7 @@ mod tests {
     use crate::previews::{PreviewStore, Raw};
     use crate::theme::{DEFAULT_THEME, Theme};
     use crate::ui::hit::HitId;
-    use crate::ui::timeline::{EmoteView, PreviewView, build_layout};
+    use crate::ui::timeline::build_layout;
 
     const BLOB: &str = "mxc://example.org/blob";
     const PARTY: &str = "mxc://example.org/party";
@@ -1301,6 +1345,43 @@ mod tests {
                 .count()
         };
         assert_eq!((chips(at), chips(at - 3)), (1, 0));
+    }
+
+    /// The rows of one message, as last laid out.
+    fn rows_of(world: &World, id: &str) -> Vec<Row> {
+        let at = world.index(id);
+        let rows = &world.cache.as_ref().unwrap().rows;
+        rows.iter()
+            .filter(|row| row.source == at)
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_message_whose_colours_were_cut_short_is_laid_out_again_until_they_are_not() {
+        // No other code: whether another test coloured it already does not matter.
+        let mut code = message("k1", "kim", "fn cut_short_for_lack_of_time() {}");
+        code.html = Some(
+            "<pre><code class=\"language-rust\">fn cut_short_for_lack_of_time() {}\n</code></pre>"
+                .into(),
+        );
+        let messages = vec![
+            message("a1", "alice", "Some code:"),
+            code,
+            message("b1", "bob", "Thanks"),
+        ];
+        let mut world = World::new(messages);
+        let n = world.len();
+        // Its time was spent before its block was looked at (by another block, say).
+        let late = crate::highlight::OutOfTime::start();
+        world.step("out of time");
+        let plain = rows_of(&world, "k1");
+        assert_eq!(world.step("still out of time"), n - 1);
+        assert_eq!(rows_of(&world, "k1"), plain);
+        drop(late);
+        assert_eq!(world.step("time enough"), n - 1);
+        assert_ne!(rows_of(&world, "k1"), plain, "coloured now");
+        assert_eq!(world.step("again"), n);
     }
 
     #[test]

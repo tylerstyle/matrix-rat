@@ -4,7 +4,9 @@
 //! The code comes from other people, so the work is bounded: blocks over a size are left
 //! plain, a block that takes too long is left plain, and a grammar that gives up on a
 //! line (its matcher has a step limit) leaves the block plain. Outcomes are remembered,
-//! so a block is looked at once however often the timeline is laid out again.
+//! so a block is looked at once however often the timeline is laid out again. A block
+//! left because its message's time ran out before it was looked at is not remembered:
+//! the next layout may colour it, so [`colour`] says when that happened.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -84,12 +86,54 @@ static KINDS: LazyLock<Vec<(Scope, Syntax)>> = LazyLock::new(|| {
 
 static OVERRUNS: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: each message's time is spent before its blocks are looked at.
+    static OUT_OF_TIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests: while one of these lives, every message's time on this thread is spent before
+/// its blocks are looked at (as when an earlier block took it all), without counting as
+/// a block that ran out of time itself.
+#[cfg(test)]
+pub(crate) struct OutOfTime;
+
+#[cfg(test)]
+impl OutOfTime {
+    pub(crate) fn start() -> Self {
+        OUT_OF_TIME.with(|spent| spent.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for OutOfTime {
+    fn drop(&mut self) {
+        OUT_OF_TIME.with(|spent| spent.set(false));
+    }
+}
+
+/// Whether the time of a message whose colouring `started` then is spent.
+fn spent(started: Instant) -> bool {
+    #[cfg(test)]
+    if OUT_OF_TIME.with(std::cell::Cell::get) {
+        return true;
+    }
+    started.elapsed() > BUDGET
+}
+
+/// The block's time ran out before it was looked at.
+struct Late;
+
 static MEMORY: LazyLock<Mutex<HashMap<u64, Option<Arc<Marks>>>>> = LazyLock::new(Mutex::default);
 
-/// Marks the code blocks of `rich` that have a known language.
-pub fn colour(rich: &mut Rich) {
+/// Marks the code blocks of `rich` that have a known language. Whether a block was left
+/// plain because the message's time was spent before it was looked at: laid out again,
+/// the message may get more colours.
+pub fn colour(rich: &mut Rich) -> bool {
+    let mut cut_short = false;
     if rich.code_blocks.iter().all(|block| block.lang.is_none()) {
-        return;
+        return cut_short;
     }
     // Reading the grammars in happens once and is not the sender's doing.
     LazyLock::force(&SYNTAXES);
@@ -123,14 +167,20 @@ pub fn colour(rich: &mut Rich) {
         {
             continue;
         }
-        let Some(marks) = remembered(&lang, &texts, started) else {
-            continue;
+        let marks = match remembered(&lang, &texts, started) {
+            Ok(Some(marks)) => marks,
+            Ok(None) => continue,
+            Err(Late) => {
+                cut_short = true;
+                continue;
+            }
         };
         for (&line, marks) in lines.iter().zip(marks.iter()) {
             let segments = std::mem::take(&mut rich.lines[line].segments);
             rich.lines[line].segments = apply(segments, marks);
         }
     }
+    cut_short
 }
 
 /// The grammar for what a sender wrote as the language. Some usual names are not the
@@ -154,26 +204,32 @@ pub(crate) fn known(lang: &str) -> bool {
     syntax_for(lang).is_some_and(|syntax| syntax.name != SYNTAXES.find_syntax_plain_text().name)
 }
 
-fn remembered(lang: &str, lines: &[String], started: Instant) -> Option<Arc<Marks>> {
+/// The marks of a block, remembered or found now; `None` when it stays plain.
+fn remembered(lang: &str, lines: &[String], started: Instant) -> Result<Option<Arc<Marks>>, Late> {
     let mut hasher = DefaultHasher::new();
     lang.hash(&mut hasher);
     lines.hash(&mut hasher);
     let key = hasher.finish();
-    let mut memory = MEMORY.lock().ok()?;
+    let Ok(mut memory) = MEMORY.lock() else {
+        return Ok(None);
+    };
     if let Some(known) = memory.get(&key) {
-        return known.clone();
+        return Ok(known.clone());
     }
-    // Out of time or switched off: this block was not looked at, so nothing is
-    // remembered about it.
-    if started.elapsed() > BUDGET || OVERRUNS.load(Ordering::Relaxed) >= MAX_OVERRUNS {
-        return None;
+    // Switched off (for good) or out of time (this time): the block was not looked
+    // at, so nothing is remembered about it.
+    if OVERRUNS.load(Ordering::Relaxed) >= MAX_OVERRUNS {
+        return Ok(None);
+    }
+    if spent(started) {
+        return Err(Late);
     }
     let marks = marks(lang, lines, started).map(Arc::new);
     if memory.len() >= REMEMBERED {
         memory.clear();
     }
     memory.insert(key, marks.clone());
-    marks
+    Ok(marks)
 }
 
 /// The marks for every line, or `None` when the block stays plain.
@@ -337,6 +393,30 @@ mod tests {
         }
         assert_eq!(plain.code_blocks, rich.code_blocks);
         assert_eq!(mark_of(&rich, "def"), Some(Syntax::Keyword));
+    }
+
+    #[test]
+    fn a_block_left_for_lack_of_time_is_said_so_and_coloured_next_time() {
+        // Text of its own: what other tests coloured is remembered.
+        let html =
+            "<pre><code class=\"language-rust\">fn left_for_lack_of_time() {}\n</code></pre>";
+        let late = OutOfTime::start();
+        let mut rich = from_html(html);
+        assert!(colour(&mut rich));
+        assert_eq!(mark_of(&rich, "fn"), None);
+        drop(late);
+        let mut rich = from_html(html);
+        assert!(!colour(&mut rich));
+        assert_eq!(mark_of(&rich, "fn"), Some(Syntax::Keyword));
+        // Once looked at, the block is remembered, and time does not matter any more.
+        let _late = OutOfTime::start();
+        let mut rich = from_html(html);
+        assert!(!colour(&mut rich));
+        assert_eq!(mark_of(&rich, "fn"), Some(Syntax::Keyword));
+        // Nor for a block without a language.
+        assert!(!colour(&mut from_html(
+            "<pre><code>fn main() {}\n</code></pre>"
+        )));
     }
 
     #[test]

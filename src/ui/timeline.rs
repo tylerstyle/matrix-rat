@@ -489,7 +489,9 @@ impl<'a> Flow<'a> {
 
 /// Lays out the message at `i` of its room: adds its rows to `out`, and the links and
 /// custom emoji it wants fetched. `before`: what it takes from the messages before it.
-fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mut Layout) {
+/// Whether the colouring of its code was cut short for lack of time: laid out again, it
+/// may get more colours (see [`crate::highlight::colour`]).
+fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mut Layout) -> bool {
     let Lay {
         max_width,
         body_width,
@@ -507,6 +509,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
     } = out;
     let start = rows.len();
     let repeated_shield = before.repeated_shield;
+    let mut cut_short = false;
     'message: {
         match message.kind {
             MsgKind::ReadMarker => {
@@ -678,7 +681,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                 MsgKind::Text | MsgKind::System | MsgKind::ReadMarker => (text_style, None),
             };
             let mut rich = Rich::of(message.html.as_deref(), body_text);
-            crate::highlight::colour(&mut rich);
+            cut_short = crate::highlight::colour(&mut rich);
             if let (Some(intro), Some(first)) = (intro, rich.lines.first_mut()) {
                 first.segments.insert(
                     0,
@@ -954,6 +957,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
     for row in &mut rows[start..] {
         row.source = i;
     }
+    cut_short
 }
 
 /// The line under a message that started a thread: how many replies, and who said
