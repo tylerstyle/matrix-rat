@@ -664,21 +664,41 @@ where
 /// timeline twice (seen in the server test while sync still brought the newest
 /// messages of a flood): a message must not count, or be archived, twice. The later
 /// copy is the one kept: it is the one the SDK's later updates (an edit, a decryption)
-/// reach, and the read marker is placed after it (the SDK looks for the marker's event
-/// from the back). Items without a key (virtual ones, a local echo) all stay.
+/// mostly reach, and the read marker is placed after it (the SDK looks for the
+/// marker's event from the back). But keys that come in later (from a key file, say)
+/// can decrypt the earlier copy: one that is `locked` gives way to one that is not
+/// (see [`super::convert::takes_over`]), in its place. Items without a key (virtual
+/// ones, a local echo) all stay.
 fn without_repeats<T, K: std::hash::Hash + Eq>(
     items: Vector<T>,
     key: impl Fn(&T) -> Option<K>,
+    locked: impl Fn(&T) -> bool,
 ) -> Vector<T>
 where
     T: Clone,
 {
-    let mut seen = std::collections::HashSet::new();
-    let mut kept: Vec<T> = items
-        .into_iter()
-        .rev()
-        .filter(|item| key(item).is_none_or(|key| seen.insert(key)))
-        .collect();
+    use std::collections::hash_map::Entry;
+    // From the back: the first copy met is the later one, and where it is kept.
+    let mut place = std::collections::HashMap::new();
+    let mut kept: Vec<T> = Vec::with_capacity(items.len());
+    for item in items.into_iter().rev() {
+        let Some(key) = key(&item) else {
+            kept.push(item);
+            continue;
+        };
+        match place.entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert(kept.len());
+                kept.push(item);
+            }
+            Entry::Occupied(slot) => {
+                let shown = &mut kept[*slot.get()];
+                if super::convert::takes_over(locked(shown), locked(&item), false) {
+                    *shown = item;
+                }
+            }
+        }
+    }
     kept.reverse();
     kept.into_iter().collect()
 }
@@ -686,6 +706,13 @@ where
 /// The event id of a timeline item, for [`without_repeats`].
 fn event_key(item: &Arc<TimelineItem>) -> Option<String> {
     Some(item.as_event()?.event_id()?.to_string())
+}
+
+/// Whether a timeline item is an event that could not be decrypted, for
+/// [`without_repeats`].
+fn undecryptable(item: &Arc<TimelineItem>) -> bool {
+    item.as_event()
+        .is_some_and(|event| event.content().as_unable_to_decrypt().is_some())
 }
 
 /// The items of `timeline` once `enough` says so, loading older messages page by page
@@ -823,7 +850,7 @@ async fn unread(
             || (from.is_none() && last_own(items).is_some())
     })
     .await;
-    let items = without_repeats(items, event_key);
+    let items = without_repeats(items, event_key, undecryptable);
     read.extend(
         timeline
             .latest_user_read_receipt_timeline_event_id(&own)
@@ -923,7 +950,7 @@ async fn archive(
         Span::Everything => false,
     })
     .await;
-    let items = without_repeats(items, event_key);
+    let items = without_repeats(items, event_key, undecryptable);
     progress.tell(event_count(&items));
     let own = room.own_user_id().to_owned();
     let ignored = ignored.borrow().clone();
@@ -1026,7 +1053,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let kept: Vec<&str> = without_repeats(items, |item| item.0)
+        let kept: Vec<&str> = without_repeats(items, |item| item.0, |_| false)
             .into_iter()
             .map(|item| item.1)
             .collect();
@@ -1052,11 +1079,48 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let kept: Vec<&str> = without_repeats(items, |item| item.0)
+        let kept: Vec<&str> = without_repeats(items, |item| item.0, |_| false)
             .into_iter()
             .map(|item| item.1)
             .collect();
         assert_eq!(kept, ["a", "b'", "read marker", "c'", "d"]);
+    }
+
+    /// Keys that came in later (from a key file) decrypted the earlier copy of an event
+    /// held twice: the later copy, still locked, keeps its place but not its content.
+    #[test]
+    fn of_an_event_twice_a_decrypted_copy_is_not_given_up_for_a_locked_one() {
+        let items: Vector<(Option<u32>, &str, bool)> = [
+            (Some(1), "a readable", false),
+            (Some(2), "b locked", true),
+            (Some(3), "c", false),
+            (Some(1), "a locked", true),
+            (None, "read marker", false),
+            (Some(2), "b readable", false),
+        ]
+        .into_iter()
+        .collect();
+        let kept: Vec<&str> = without_repeats(items, |item| item.0, |item| item.2)
+            .into_iter()
+            .map(|item| item.1)
+            .collect();
+        assert_eq!(kept, ["c", "a readable", "read marker", "b readable"]);
+        // The read marker between the copies: the decrypted one takes the later place,
+        // after the marker, where the SDK put it; it is not moved back before it.
+        let items: Vector<(Option<u32>, &str, bool)> = [
+            (Some(1), "a readable", false),
+            (Some(2), "b", false),
+            (None, "read marker", false),
+            (Some(1), "a locked", true),
+            (Some(3), "c", false),
+        ]
+        .into_iter()
+        .collect();
+        let kept: Vec<&str> = without_repeats(items, |item| item.0, |item| item.2)
+            .into_iter()
+            .map(|item| item.1)
+            .collect();
+        assert_eq!(kept, ["b", "read marker", "a readable", "c"]);
     }
     use crate::collect::tests::{AT, said};
     use crate::files::NewFile;

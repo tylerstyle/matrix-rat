@@ -376,10 +376,13 @@ fn dedup_with_latest(messages: &mut Vec<Message>) {
             let (head, tail) = messages.split_at_mut(i);
             let first = &mut head[target];
             let later = &mut tail[0];
-            // Decryption goes one way only, and the SDK decrypts whichever copy it finds
-            // by position (keys imported from a file, say), often the first: a copy still
-            // locked never stands in for one that was decrypted.
-            if later.kind == MsgKind::Undecryptable && first.kind != MsgKind::Undecryptable {
+            // The SDK decrypts whichever copy it finds by position (keys imported from a
+            // file, say), often the first: see `takes_over`.
+            if !takes_over(
+                first.kind == MsgKind::Undecryptable,
+                later.kind == MsgKind::Undecryptable,
+                true,
+            ) {
                 continue;
             }
             std::mem::swap(first, later);
@@ -414,6 +417,19 @@ fn dedup_with_latest(messages: &mut Vec<Message>) {
         if insert_at < rm_at {
             messages[insert_at..=rm_at].rotate_right(1);
         }
+    }
+}
+
+/// Of two copies of one event that the SDK's timeline holds (see [`EventDedup`]),
+/// whether `other` is the one to show in place of `shown`; `otherwise` says which it
+/// would be were both locked or both readable. Decryption goes one way only, so a copy
+/// still locked never stands in for one that was decrypted, and one decrypted always
+/// does for one still locked.
+pub(super) fn takes_over(shown_locked: bool, other_locked: bool, otherwise: bool) -> bool {
+    if shown_locked == other_locked {
+        otherwise
+    } else {
+        shown_locked
     }
 }
 
