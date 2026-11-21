@@ -360,11 +360,33 @@ async fn wait_indexed(room: &matrix_sdk::Room) {
 }
 
 /// A client of `server`, signed in as `ME`, with the event cache subscribed to (as the
-/// app has it) and synced once; and the sample room.
+/// app has it) and synced once; and the sample room. The event cache stores what a sync
+/// brings on a task of its own, after the sync has returned: this waits until it has the
+/// sample room's messages, as the tests take for granted. (A room opened before that
+/// starts empty, and its first page waits 3 s for a token while the messages come in, see
+/// `messages_that_come_in_while_the_first_page_waits_are_all_shown`. Before the worker
+/// paged on after that, the idle timeline test waited for them for its whole minute now
+/// and then under load.)
 pub(super) async fn client_of(
     server: &fake::Server,
     search: SearchIndexStoreKind,
 ) -> (Client, matrix_sdk::Room) {
+    let client = signed_in(server, search).await;
+    let mut stored = client.event_cache().subscribe_to_room_generic_updates();
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while stored.recv().await.unwrap().room_id.as_str() != ROOM {}
+    })
+    .await
+    .expect("the event cache has the sample room's messages within a minute");
+    let room_id = <&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap();
+    let room = client.get_room(room_id).unwrap();
+    (client, room)
+}
+
+/// A client of `server`, signed in as `ME`, with the event cache subscribed to (as the
+/// app has it); not synced yet.
+async fn signed_in(server: &fake::Server, search: SearchIndexStoreKind) -> Client {
     let client = Client::builder()
         .homeserver_url(&server.url)
         .with_threading_support(super::super::threads::SUPPORT)
@@ -386,10 +408,7 @@ pub(super) async fn client_of(
         .await
         .unwrap();
     client.event_cache().subscribe().unwrap();
-    client.sync_once(SyncSettings::default()).await.unwrap();
-    let room_id = <&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap();
-    let room = client.get_room(room_id).unwrap();
-    (client, room)
+    client
 }
 
 /// What `forward` keeps between changes of one open timeline.
@@ -974,6 +993,71 @@ struct Opened {
     // Kept: `forward` ends when they are gone.
     _ignored: tokio::sync::watch::Sender<super::IgnoredSet>,
     _own_refresh: tokio::sync::watch::Sender<u64>,
+    /// Said if the worker falls silent.
+    heard: Heard,
+}
+
+/// Where a test was and what it had heard so far, said when the worker falls silent, so
+/// that a hang that shows once in thousands of runs tells which wait it was and how far
+/// the test had come. Counts and flags only: nothing of the messages.
+#[derive(Debug, Default)]
+struct Heard {
+    /// The wait the test is in, as it says.
+    phase: &'static str,
+    /// Pages asked for (with [`Opened::page`]).
+    pages_asked: usize,
+    /// Pages answered (`Paginated`).
+    pages_answered: usize,
+    /// Whether the last page answered said the start was reached.
+    page_reached_start: Option<bool>,
+    /// Timelines sent.
+    timelines: usize,
+    /// The messages the last timeline showed (items with an event or a local echo).
+    shown: usize,
+    /// Whether the last timeline said the start was loaded.
+    timeline_at_start: bool,
+    /// Resets sent (`TimelineReset`).
+    resets: usize,
+    /// The generation of the last timeline, page or reset.
+    generation: Option<u64>,
+    /// What came last, by its kind.
+    last: &'static str,
+}
+
+impl Heard {
+    fn note(&mut self, event: Option<&crate::matrix::MatrixEvent>) {
+        use crate::matrix::MatrixEvent;
+        self.last = match event {
+            Some(MatrixEvent::Timeline {
+                generation,
+                messages,
+                reached_start,
+                ..
+            }) => {
+                self.timelines += 1;
+                self.shown = messages.iter().filter(|m| m.item.is_some()).count();
+                self.timeline_at_start = *reached_start;
+                self.generation = Some(*generation);
+                "a timeline"
+            }
+            Some(MatrixEvent::Paginated {
+                generation,
+                reached_start,
+            }) => {
+                self.pages_answered += 1;
+                self.page_reached_start = Some(*reached_start);
+                self.generation = Some(*generation);
+                "a page"
+            }
+            Some(MatrixEvent::TimelineReset { generation, .. }) => {
+                self.resets += 1;
+                self.generation = Some(*generation);
+                "a reset"
+            }
+            Some(_) => "something else",
+            None => "the end of the channel",
+        };
+    }
 }
 
 impl Opened {
@@ -1000,9 +1084,24 @@ impl Opened {
             events: received,
             _ignored,
             _own_refresh,
+            heard: Heard {
+                phase: "the first timeline",
+                ..Heard::default()
+            },
         };
         opened.next_timeline().await;
         opened
+    }
+
+    /// Asks for a page of older messages of the sample room, as the app does.
+    async fn page(&mut self, generation: u64) {
+        self.heard.pages_asked += 1;
+        self.timelines
+            .handle(crate::matrix::MatrixCmd::Paginate {
+                room_id: ROOM.to_owned(),
+                generation,
+            })
+            .await;
     }
 
     /// The next whole timeline the interface is sent.
@@ -1017,13 +1116,36 @@ impl Opened {
     }
 
     async fn next_event(&mut self) -> Option<crate::matrix::MatrixEvent> {
-        tokio::time::timeout(Duration::from_secs(60), self.events.recv())
-            .await
-            .expect("the worker says something within a minute")
+        let Ok(event) = tokio::time::timeout(Duration::from_secs(60), self.events.recv()).await
+        else {
+            // And what the worker and the SDK's timeline of the sample room were at.
+            let page = (self.timelines.paginator.as_ref())
+                .map(|(generation, paging)| (*generation, paging.loading()));
+            let timeline = (self.timelines.cache.iter())
+                .find(|cached| cached.key == ROOM)
+                .map(|cached| cached.timeline.clone());
+            let in_timeline = match timeline {
+                Some(timeline) => Some(
+                    (timeline.items().await.iter())
+                        .filter(|item| item.as_event().is_some())
+                        .count(),
+                ),
+                None => None,
+            };
+            panic!(
+                "the worker says something within a minute, but did not: {:?}, the page of \
+                 older messages running (generation, loading): {page:?}, the messages in the \
+                 sample room's timeline: {in_timeline:?}",
+                self.heard
+            );
+        };
+        self.heard.note(event.as_ref());
+        event
     }
 
     /// Snapshots until one holds all of `wanted`; with the count.
     async fn until_all(&mut self, wanted: &[String]) -> (usize, Vec<Message>) {
+        self.heard.phase = "until the messages wanted are shown";
         let mut snapshots = 0;
         loop {
             let messages = self.next_timeline().await;
@@ -1088,14 +1210,9 @@ async fn measure_snapshots_of_bursts() {
     // Paging back to the start, one request after the other, as the app asks.
     let started = Instant::now();
     let (mut pages, mut snapshots) = (0, 0);
+    opened.heard.phase = "paging back";
     loop {
-        opened
-            .timelines
-            .handle(crate::matrix::MatrixCmd::Paginate {
-                room_id: ROOM.to_owned(),
-                generation: 1,
-            })
-            .await;
+        opened.page(1).await;
         pages += 1;
         let reached_start = loop {
             match opened.next_event().await {
@@ -1195,14 +1312,9 @@ async fn a_timeline_idle_for_long_is_dropped_and_opens_again_from_the_store() {
         .await;
     let mut shown = 0;
     let mut reached_start = false;
+    opened.heard.phase = "paging back after opening again";
     for _ in 0..100 {
-        opened
-            .timelines
-            .handle(MatrixCmd::Paginate {
-                room_id: ROOM.to_owned(),
-                generation: 3,
-            })
-            .await;
+        opened.page(3).await;
         loop {
             match opened.next_event().await {
                 Some(MatrixEvent::Timeline {
@@ -1224,18 +1336,31 @@ async fn a_timeline_idle_for_long_is_dropped_and_opens_again_from_the_store() {
             break;
         }
     }
+    assert!(
+        reached_start,
+        "no page said the start was reached: {:?}",
+        opened.heard
+    );
     // The page that reached the start may be shown right after it said so.
-    while shown < MESSAGES {
-        if let Some(MatrixEvent::Timeline {
-            generation: 3,
-            messages,
-            ..
-        }) = opened.next_event().await
-        {
-            shown = messages.iter().filter(|m| m.item.is_some()).count();
+    opened.heard.phase = "all shown after a page said the start was reached";
+    let all = tokio::time::timeout(Duration::from_secs(10), async {
+        while shown < MESSAGES {
+            if let Some(MatrixEvent::Timeline {
+                generation: 3,
+                messages,
+                ..
+            }) = opened.next_event().await
+            {
+                shown = messages.iter().filter(|m| m.item.is_some()).count();
+            }
         }
-    }
-    assert!(reached_start);
+    })
+    .await;
+    assert!(
+        all.is_ok(),
+        "{shown} of {MESSAGES} messages shown after a page said the start was reached: {:?}",
+        opened.heard
+    );
     assert_eq!(shown, MESSAGES);
     assert_eq!(cached(&opened), [OTHER, ROOM]);
     let asked: Vec<String> = server
@@ -1285,7 +1410,7 @@ async fn a_timeline_idle_for_long_is_dropped_and_opens_again_from_the_store() {
 /// back again (it asks for older messages only while the start is not reached).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_limited_sync_after_the_start_was_loaded_says_the_timeline_was_reset() {
-    use crate::matrix::{MatrixCmd, MatrixEvent};
+    use crate::matrix::MatrixEvent;
     use std::sync::atomic::{AtomicUsize, Ordering};
     const MESSAGES: usize = 30;
     let people = people(&mut Lcg(0x5eed));
@@ -1310,14 +1435,9 @@ async fn a_limited_sync_after_the_start_was_loaded_says_the_timeline_was_reset()
 
     // Paged back to the start, which the interface is told.
     let mut at_start = false;
+    opened.heard.phase = "paging back to the start";
     for _ in 0..20 {
-        opened
-            .timelines
-            .handle(MatrixCmd::Paginate {
-                room_id: ROOM.to_owned(),
-                generation: 1,
-            })
-            .await;
+        opened.page(1).await;
         loop {
             match opened.next_event().await {
                 Some(MatrixEvent::Timeline { reached_start, .. }) => at_start |= reached_start,
@@ -1343,6 +1463,7 @@ async fn a_limited_sync_after_the_start_was_loaded_says_the_timeline_was_reset()
     // interface hears of it before the timeline that has them, which is not empty and
     // not at the start (so it cannot tell that the start was lost).
     client.sync_once(SyncSettings::default()).await.unwrap();
+    opened.heard.phase = "the reset and the timeline after the limited sync";
     let mut reset = false;
     loop {
         match opened.next_event().await {
@@ -1370,6 +1491,272 @@ async fn a_limited_sync_after_the_start_was_loaded_says_the_timeline_was_reset()
             None => panic!("the worker stopped"),
         }
     }
+    drop(opened);
+    drop(server);
+}
+
+/// Not a measurement: a request for older messages made as soon as the one before was
+/// answered is answered too. A request made while a page is loading is answered by that
+/// page's answer, and the worker took every request for one of those as long as the
+/// page's task had not ended; but the task sends its answer a little before it ends, and
+/// the interface asks again as soon as it hears it. That request was dropped and never
+/// answered, and the room paged back no further: the two tests above hung for their
+/// whole minute now and then under load. Here the task is held right as it sends the
+/// answer (by the waker of the channel it sends on) until the next request is made, so
+/// that request comes before the task has ended every time.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_for_older_messages_right_after_an_answer_is_answered() {
+    use crate::matrix::{MatrixCmd, MatrixEvent};
+    use std::sync::{Mutex, mpsc};
+    use std::task::{Context, Wake, Waker};
+
+    /// Tells the test that it was woken, and holds whoever woke it until let go: the first
+    /// time only (the next answer may wake it too, before the test waits another way).
+    struct Hold {
+        woken: mpsc::Sender<()>,
+        go: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+    impl Wake for Hold {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            let go = self.go.lock().unwrap().take();
+            if let Some(go) = go {
+                let _ = self.woken.send(());
+                let _ = go.recv_timeout(Duration::from_secs(10));
+            }
+        }
+    }
+
+    let server = fake::Server::start(json!({ "join": { ROOM: sample_room(100) } })).await;
+    let (client, _room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (_ignored, ignored) = tokio::sync::watch::channel(super::IgnoredSet::default());
+    let (_own_refresh, own_refresh) = tokio::sync::watch::channel(0);
+    let mut timelines = super::Timelines::new(
+        client,
+        events,
+        ignored,
+        own_refresh,
+        super::super::people::OwnRoomNames::default(),
+        super::super::left::LeftRooms::default(),
+    );
+    // The room is shown (a page for a view not shown is answered at once), but nothing
+    // forwards its timeline: nothing but the pages says anything to the interface.
+    timelines.active = Some(super::ActiveStream {
+        room_id: ROOM.to_owned(),
+        thread: None,
+        generation: 1,
+        kind: super::StreamKind::Live,
+    });
+    let paginate = || MatrixCmd::Paginate {
+        room_id: ROOM.to_owned(),
+        generation: 1,
+    };
+    let (woken_tx, woken) = mpsc::channel();
+    let (go, go_rx) = mpsc::channel();
+    let hold = Waker::from(Arc::new(Hold {
+        woken: woken_tx,
+        go: Mutex::new(Some(go_rx)),
+    }));
+    // Waiting for the answer before the request, so that what sends it wakes `hold`.
+    assert!(
+        received
+            .poll_recv(&mut Context::from_waker(&hold))
+            .is_pending()
+    );
+    timelines.handle(paginate()).await;
+    woken
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the request is answered");
+    assert!(matches!(
+        received.try_recv(),
+        Ok(MatrixEvent::Paginated { generation: 1, .. })
+    ));
+    // Asked again while the task that answered is held, before it could end.
+    timelines.handle(paginate()).await;
+    go.send(()).unwrap();
+    let answer = tokio::time::timeout(Duration::from_secs(10), received.recv()).await;
+    assert!(
+        matches!(
+            answer,
+            Ok(Some(MatrixEvent::Paginated { generation: 1, .. }))
+        ),
+        "the request right after the answer is answered"
+    );
+    drop(timelines);
+    drop(server);
+}
+
+/// Not a measurement: messages that come into a room's timeline while it is empty and
+/// its first page of older ones is on its way are all shown once the room has paged back
+/// to its start. The timeline shows only the last 20 items of what comes into it while
+/// empty, and a page that ends at the start shows no more of them (matrix-sdk-ui 0.19.1);
+/// the room said it had reached its start with all but its last messages hidden. The
+/// first page finds nothing and waits for a token (3 s) while the messages come in.
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_that_come_in_while_the_first_page_waits_are_all_shown() {
+    use crate::matrix::MatrixEvent;
+    use matrix_sdk::event_cache::PaginationStatus;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const MESSAGES: usize = 300;
+    let mut room = sample_room(MESSAGES);
+    let messages = room["timeline"]["events"].take();
+    room["timeline"]["events"] = json!([]);
+    let syncs = AtomicUsize::new(0);
+    let server = fake::Server::answering(
+        json!({ "join": { ROOM: room } }),
+        Box::new(move |request| {
+            if !request.path.ends_with("/sync") || syncs.fetch_add(1, Ordering::SeqCst) == 0 {
+                return None;
+            }
+            let rooms = json!({ "join": { ROOM: {
+                "timeline": { "events": messages, "limited": false },
+            } } });
+            let sync = json!({ "next_batch": "s2", "rooms": rooms });
+            Some(fake::Reply::Json(sync.to_string()))
+        }),
+    )
+    .await;
+    let client = signed_in(&server, SearchIndexStoreKind::InMemory).await;
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    let room_id = <&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap();
+    let (cache, _cache_handles) = client
+        .get_room(room_id)
+        .unwrap()
+        .event_cache()
+        .await
+        .unwrap();
+    let mut status = cache.pagination().status();
+    let mut opened = Opened::new(client.clone()).await;
+    opened.page(1).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while status.get() != PaginationStatus::Paginating {
+            status.next().await;
+        }
+    })
+    .await
+    .expect("the first page is on its way");
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    // Paging back as the app does, until a page says it reached the start.
+    opened.heard.phase = "paging back";
+    let mut shown = 0;
+    loop {
+        match opened.next_event().await {
+            Some(MatrixEvent::Timeline { messages, .. }) => {
+                shown = messages.iter().filter(|m| m.item.is_some()).count();
+            }
+            Some(MatrixEvent::Paginated {
+                reached_start: false,
+                ..
+            }) => opened.page(1).await,
+            Some(MatrixEvent::Paginated { .. }) => break,
+            _ => {}
+        }
+    }
+    // The page that reached the start may be shown right after it said so.
+    opened.heard.phase = "all shown after a page said the start was reached";
+    let all = tokio::time::timeout(Duration::from_secs(10), async {
+        while shown < MESSAGES {
+            if let Some(MatrixEvent::Timeline { messages, .. }) = opened.next_event().await {
+                shown = messages.iter().filter(|m| m.item.is_some()).count();
+            }
+        }
+    })
+    .await;
+    assert!(all.is_ok(), "{shown} of {MESSAGES} messages shown");
+    drop(opened);
+    drop(server);
+}
+
+/// Not a measurement: messages that come into a room's timeline while it is empty after
+/// its event cache was cleared (as a change of the ignore list does), and the page the
+/// forwarder then starts waits for the server, are all shown once the room has paged back
+/// to its start. That page must not say the start while it hides some, as the first page
+/// must not (see `messages_that_come_in_while_the_first_page_waits_are_all_shown`): the
+/// UI, told the start, would ask for no more.
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_that_come_in_while_the_page_after_a_clear_waits_are_all_shown() {
+    use crate::matrix::MatrixEvent;
+    use matrix_sdk::event_cache::PaginationStatus;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const MESSAGES: usize = 300;
+    let room = sample_room(MESSAGES);
+    let messages = room["timeline"]["events"].clone();
+    let syncs = AtomicUsize::new(0);
+    let server = fake::Server::answering(
+        json!({ "join": { ROOM: room } }),
+        Box::new(move |request| {
+            if !request.path.ends_with("/sync") || syncs.fetch_add(1, Ordering::SeqCst) == 0 {
+                return None;
+            }
+            // After the clear, the server sends the messages again.
+            let rooms = json!({ "join": { ROOM: {
+                "timeline": { "events": messages, "limited": false },
+            } } });
+            let sync = json!({ "next_batch": "s2", "rooms": rooms });
+            Some(fake::Reply::Json(sync.to_string()))
+        }),
+    )
+    .await;
+    let (client, room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
+    let (cache, _cache_handles) = room.event_cache().await.unwrap();
+    let mut status = cache.pagination().status();
+    let mut opened = Opened::new(client.clone()).await;
+    client.event_cache().clear_all_rooms().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while status.get() != PaginationStatus::Paginating {
+            status.next().await;
+        }
+    })
+    .await
+    .expect("the page after the clear is on its way");
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while status.get() == PaginationStatus::Paginating {
+            status.next().await;
+        }
+    })
+    .await
+    .expect("the page after the clear is loaded");
+    // What it says, if anything, comes right after.
+    opened.heard.phase = "what the page after the clear says";
+    let mut start_said = false;
+    while let Ok(event) =
+        tokio::time::timeout(Duration::from_millis(500), opened.next_event()).await
+    {
+        start_said |= matches!(
+            event,
+            Some(MatrixEvent::Paginated {
+                reached_start: true,
+                ..
+            })
+        );
+    }
+    // Paging back as the app does, until a page says it reached the start.
+    opened.heard.phase = "paging back after the clear";
+    while !start_said {
+        opened.page(1).await;
+        loop {
+            if let Some(MatrixEvent::Paginated { reached_start, .. }) = opened.next_event().await {
+                start_said = reached_start;
+                break;
+            }
+        }
+    }
+    opened.heard.phase = "all shown after a page said the start was reached";
+    let all = tokio::time::timeout(Duration::from_secs(10), async {
+        while opened.heard.shown < MESSAGES {
+            opened.next_event().await;
+        }
+    })
+    .await;
+    assert!(
+        all.is_ok(),
+        "{} of {MESSAGES} messages shown after a page said the start was reached",
+        opened.heard.shown
+    );
     drop(opened);
     drop(server);
 }
@@ -1443,6 +1830,7 @@ async fn measure_idle_timeline_given_back() {
             generation: 3,
         })
         .await;
+    opened.heard.phase = "the first timeline after opening again";
     let first = loop {
         if let Some(crate::matrix::MatrixEvent::Timeline {
             generation: 3,
