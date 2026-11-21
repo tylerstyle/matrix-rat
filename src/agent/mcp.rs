@@ -741,6 +741,16 @@ impl Server {
         }
     }
 
+    /// The messages `ids` are not owed any more: a wait left them out of a long
+    /// backlog, and they count as seen.
+    fn release(&self, ids: &[String]) {
+        if let Ok(mut ledger) = self.ledger.lock() {
+            for id in ids {
+                ledger.owed.take(id);
+            }
+        }
+    }
+
     /// `message` names the user as its sender and does not count as theirs. One the
     /// agent has (it was the user's when handed over: deleted since, or no longer
     /// trusted) is not told again for what it says now; any other is owed.
@@ -1011,8 +1021,14 @@ impl Server {
             json!({ "status": "nothing new", "messages": [] })
         } else {
             // A long backlog is not poured out at once: `read_messages` has the rest.
+            // What is left out counts as seen, also what was owed (it would come
+            // with the next wait, after what is handed over now).
             let earlier = found.len().saturating_sub(WAIT_MESSAGES);
-            found.drain(..earlier);
+            let left_out: Vec<String> = found
+                .drain(..earlier)
+                .map(|message| message.event_id)
+                .collect();
+            self.release(&left_out);
             self.hand(&found);
             let mut woken = json!({ "status": "new", "messages": self.all_shown(&found) });
             if earlier > 0 {
@@ -1132,7 +1148,17 @@ impl Server {
             found.retain(|known| known.event_id != message.event_id);
             doubted.retain(|(known, _)| *known != message.event_id);
             match self.weigh(&message) {
-                Ok(()) => found.push(message),
+                Ok(()) => {
+                    // When the point is lost, what was read is known from now on
+                    // (`look`), and a later look cannot tell this from what was there
+                    // before. Owed, it is handed over by the next wait should this one
+                    // end first (cancelled, or out of time for this part); a wait that
+                    // ends hands over or leaves out all it found.
+                    if lost {
+                        self.owe(&message);
+                    }
+                    found.push(message);
+                }
                 Err(Some(why)) => {
                     // At once, not at the end: a wait may be cancelled.
                     self.doubt(&message);
@@ -1176,7 +1202,11 @@ impl Server {
         // when its key may still come.
         let mut settle: Option<Instant> = None;
         loop {
-            if !found.is_empty() {
+            if found.is_empty() {
+                // What was found is gone again (deleted): nothing is held out for,
+                // and the part goes on as before it found anything.
+                settle = None;
+            } else {
                 let unread = found.iter().any(|message| message.kind == "undecryptable")
                     || doubted.iter().any(|(_, why)| why == "undecryptable");
                 if !unread {
@@ -1189,18 +1219,23 @@ impl Server {
             }
             let until = settle.map_or(part, |settle| settle.min(deadline));
             tokio::select! {
-                next = listener.next() => {
-                    let message = next.map_err(|err| self.told(err))?;
+                next = listener.next_told() => {
+                    let (message, changed) = next.map_err(|err| self.told(err))?;
                     let at = place(&message.event_id, &heard);
-                    // Without a place, and owed or handed over before: not at the
-                    // room's end, but from further back than what was read. It is
-                    // told because it changed, and it must not take the room back.
-                    // (Not: known. Another call may have looked a moment ago.)
-                    let old = at.is_none() && self.reopened(&message);
+                    // Without a place, and told because it changed (`serve` had it
+                    // before), or owed or handed over before: not at the room's end,
+                    // but from further back than what was read. It is history, and
+                    // it must not take the room back. (Not: known. Another call may
+                    // have looked a moment ago.)
+                    let old = at.is_none() && (changed || self.reopened(&message));
                     if at.is_none() && !old {
                         heard.push(message.event_id.clone());
                     }
-                    self.look(std::slice::from_ref(&message));
+                    // (Not what is from further back: what is known has no holes,
+                    // and what stands between it and what was read is not known.)
+                    if !old {
+                        self.look(std::slice::from_ref(&message));
+                    }
                     // What stands before where the room has been seen is told
                     // again by `serve` when it changes, and for less (a sender
                     // trusted differently, history that could not be read at
@@ -1208,7 +1243,8 @@ impl Server {
                     // owed, or was handed over saying something else.
                     let weighed = found.iter().any(|known| known.event_id == message.event_id)
                         || doubted.iter().any(|(known, _)| *known == message.event_id);
-                    if at.is_some_and(|at| at < start) && !weighed && !self.reopened(&message) {
+                    let before = old || at.is_some_and(|at| at < start);
+                    if before && !weighed && !self.reopened(&message) {
                         continue;
                     }
                     sort_in(message, &mut found, &mut doubted);

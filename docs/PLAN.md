@@ -323,7 +323,8 @@ numbers to hold its findings against.
   untrusted or unreadable before are handed over as theirs, however old; the tool's
   description tells the agent to look at the time.
 - A wait hands over twenty messages at most; with more, the older ones of the backlog are
-  left to `read_messages` (as designed), except those owed, which come with the next wait.
+  left to `read_messages` (as designed), also those it owed. Only one that was handed over
+  before and edited since comes again with the next wait.
 - Seen once and not again in seven tries: a `read` right after the first `send` of a fresh
   `serve` listed the new message twice.
 - A config file with a bad value (0.8) has not been tried by the user yet.

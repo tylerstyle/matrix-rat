@@ -472,6 +472,62 @@ async fn listen_tells_what_is_new_or_changed_and_nothing_that_was_there_before()
     fake.stop().await;
 }
 
+/// A message told again because it changed says so on its line; one that is new at
+/// the room's end does not. A wait needs to know: a changed message it never read is
+/// history, not the user's new word.
+#[tokio::test]
+async fn a_message_told_again_says_that_it_changed() {
+    use serde_json::{Value, json};
+    let mut fake = Fake::ready("changed", quick()).await;
+    let mut raw = Raw::open(&fake.socket).await;
+    raw.say(&Request::Listen { room: ROOM.into() }.line()).await;
+    assert!(matches!(fake.asked().await, AgentCmd::Watch { .. }));
+    let old = message("$old", ANN, "before");
+    fake.watched(vec![old.clone()]);
+    assert!(matches!(
+        proto::parse_header(&raw.line().await),
+        Some(Ok(_))
+    ));
+    let new = message("$new", ANN, "hello");
+    fake.watched(vec![old.clone(), new.clone()]);
+    let line: Value = serde_json::from_str(&raw.line().await).unwrap();
+    assert_eq!(line, json!({ "message": new }));
+    let edited = Msg {
+        body: "hello!".into(),
+        edited: true,
+        ..new.clone()
+    };
+    fake.watched(vec![old.clone(), edited.clone()]);
+    let line: Value = serde_json::from_str(&raw.line().await).unwrap();
+    assert_eq!(line, json!({ "message": edited, "changed": true }));
+
+    // The same through the client.
+    let mut listener = Conn::open(&fake.socket)
+        .await
+        .unwrap()
+        .listen(ROOM)
+        .await
+        .unwrap();
+    let corrected = Msg {
+        body: "hello, Ann".into(),
+        ..edited.clone()
+    };
+    fake.watched(vec![old.clone(), corrected.clone()]);
+    let told = tokio::time::timeout(Duration::from_secs(10), listener.next_told())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(told, (corrected.clone(), true));
+    let newer = message("$newer", ANN, "again");
+    fake.watched(vec![old, corrected, newer.clone()]);
+    let told = tokio::time::timeout(Duration::from_secs(10), listener.next_told())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(told, (newer, false));
+    fake.stop().await;
+}
+
 #[tokio::test]
 async fn listening_before_the_first_sync_is_through_is_refused_after_a_while() {
     let limits = Limits {
@@ -883,6 +939,34 @@ async fn a_session_that_starts_again_is_watched_again_and_tells_only_what_is_new
     let second = message("$second", ANN, "two");
     fake.watched(vec![old, first, second.clone()]);
     assert_eq!(next(&mut listener).await.unwrap(), second);
+    fake.stop().await;
+}
+
+/// A session that starts again before the first sync is through: what the room held
+/// is noted from what the new session's watch tells first, not from what the old one
+/// told, and what the new session missed meanwhile is not news either.
+#[tokio::test]
+async fn a_session_that_starts_again_before_the_first_sync_tells_nothing_it_missed() {
+    let mut fake = Fake::start("early", quick()).await;
+    fake.tell(MatrixEvent::Rooms(vec![room(ROOM, ROOM_NAME)]));
+    let socket = fake.socket.clone();
+    let listening =
+        tokio::spawn(async move { Conn::open(&socket).await.unwrap().listen(ROOM).await });
+    assert!(matches!(fake.asked().await, AgentCmd::Watch { .. }));
+    let old = message("$old", ANN, "before");
+    fake.watched(vec![old.clone()]);
+    fake.tell(MatrixEvent::LoggedIn {
+        user_id: BOT.into(),
+    });
+    assert!(matches!(fake.asked().await, AgentCmd::Watch { .. }));
+    // The new session's first sync is through before its watch has told anything.
+    fake.tell(MatrixEvent::CaughtUp);
+    let missed = message("$missed", ANN, "while away");
+    fake.watched(vec![old.clone(), missed.clone()]);
+    let mut listener = listening.await.unwrap().unwrap();
+    let new = message("$new", ANN, "hello");
+    fake.watched(vec![old, missed, new.clone()]);
+    assert_eq!(next(&mut listener).await.unwrap(), new);
     fake.stop().await;
 }
 

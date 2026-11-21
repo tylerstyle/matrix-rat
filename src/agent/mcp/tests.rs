@@ -1897,3 +1897,185 @@ async fn a_wait_in_a_room_that_showed_nothing_is_one_piece() {
     assert_eq!(ids(&woken), ["$answer"]);
     session.end().await;
 }
+
+/// A message from further back than a read reaches is told again by `serve` when it
+/// changes: edited, decrypted at last, its sender verified. That is history, not the
+/// user's new word: it ends no wait, and the room is not taken to be seen up to it.
+#[tokio::test]
+async fn an_old_message_that_changes_beyond_a_read_is_not_news() {
+    let mut history = vec![
+        message("$edited", ANN, "an old answer"),
+        locked("$sealed", ANN),
+        doubted("$doubted", ANN, "an old yes", None, "unverified_identity"),
+    ];
+    history.extend((0..proto::READ_MAX).map(|n| message(&format!("$m{n}"), EVE, "chatter")));
+    let world = World::start("mcp-beyond", history).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.change("$edited", |changed| {
+        changed.body = "an old answer, corrected".into();
+        changed.edited = true;
+    });
+    world.change("$sealed", |changed| {
+        *changed = message("$sealed", ANN, "an old secret");
+    });
+    world.change("$doubted", |changed| {
+        *changed = message("$doubted", ANN, "an old yes");
+    });
+    assert!(
+        session
+            .hear_within(Duration::from_millis(600))
+            .await
+            .is_none(),
+        "woken by history"
+    );
+    // What she says now still is news, once.
+    world.post(message("$new", ANN, "the answer"));
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$new"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+    session.end().await;
+    world.stop().await;
+}
+
+/// So much came that the point the room was seen up to is no longer among what is
+/// read. A wait finds the answer and holds out for the key of another message; it is
+/// cancelled meanwhile. The answer is not lost: the next wait hands it over.
+#[tokio::test]
+async fn an_answer_found_while_the_point_is_lost_survives_a_cancelled_wait() {
+    let world = World::start("mcp-lost-cancel", vec![message("$first", EVE, "hi")]).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session.ok("read_messages", json!({})).await;
+    for n in 0..proto::READ_MAX - 2 {
+        world.post(message(&format!("$m{n}"), EVE, "chatter"));
+    }
+    world.post(locked("$sealed", ANN));
+    world.post(message("$answer", ANN, "merge"));
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    // Well within the time it holds out for the key.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    session
+        .say(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": id }
+        }))
+        .await;
+    world.until_watched(false).await;
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 3 }))
+        .await;
+    assert_eq!(ids(&woken), ["$answer"]);
+    session.end().await;
+    world.stop().await;
+}
+
+/// What was found and is gone again (deleted) leaves nothing to hold out for: the
+/// wait listens on in one piece, as before it found anything.
+#[tokio::test]
+async fn a_wait_whose_find_is_deleted_listens_on_in_one_piece() {
+    let world = World::start("mcp-settle", Vec::new()).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    let reads = world.reads();
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.post(locked("$sealed", ANN));
+    world.post(message("$answer", ANN, "merge"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    world.change("$answer", |changed| {
+        *changed = Msg {
+            kind: "redacted".into(),
+            ..doubted("$answer", ANN, "", None, "redacted")
+        };
+    });
+    // Longer than it would hold out for a key.
+    assert!(
+        session
+            .hear_within(Duration::from_millis(2500))
+            .await
+            .is_none()
+    );
+    assert_eq!(world.reads(), reads + 1, "the room was read again");
+    world.post(message("$again", ANN, "merge after all"));
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$again"]);
+    session.end().await;
+    world.stop().await;
+}
+
+/// Twenty-five verified answers, `$m0` to `$m24`.
+fn post_answers(world: &World) {
+    for n in 0..25 {
+        world.post(message(&format!("$m{n}"), ANN, "one of many"));
+    }
+}
+
+/// The newest twenty of `post_answers`.
+fn newest_answers() -> Vec<String> {
+    (5..25).map(|n| format!("$m{n}")).collect()
+}
+
+/// What a wait leaves out of a long backlog counts as seen (`read_messages` has
+/// it): the next wait does not hand it over after what came later. Also when it was
+/// owed, found by a wait that was cancelled while the point was lost.
+#[tokio::test]
+async fn what_a_wait_left_out_after_a_cancelled_wait_is_not_handed_over_later() {
+    let world = World::start("mcp-backlog-lost", vec![message("$first", EVE, "hi")]).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session.ok("read_messages", json!({})).await;
+    // The point is lost; the wait that finds the answers holds out for a key and is
+    // cancelled.
+    for n in 0..proto::READ_MAX - 26 {
+        world.post(message(&format!("$e{n}"), EVE, "chatter"));
+    }
+    world.post(locked("$sealed", ANN));
+    post_answers(&world);
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    session
+        .say(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": id }
+        }))
+        .await;
+    world.until_watched(false).await;
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 3 }))
+        .await;
+    assert_eq!(ids(&woken), newest_answers());
+    assert_eq!(woken["earlier_messages_not_shown"], 5);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+    session.end().await;
+    world.stop().await;
+}
+
+/// Also when a read showed only the newest message and owed the others.
+#[tokio::test]
+async fn what_a_wait_left_out_after_a_short_read_is_not_handed_over_later() {
+    let world = World::start("mcp-backlog-read", vec![message("$first", EVE, "hi")]).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session.ok("read_messages", json!({})).await;
+    post_answers(&world);
+    world.post(message("$last", ANN, "that is all"));
+    let read = session.ok("read_messages", json!({ "limit": 1 })).await;
+    assert_eq!(ids(&read), ["$last"]);
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 3 }))
+        .await;
+    assert_eq!(ids(&woken), newest_answers());
+    assert_eq!(woken["earlier_messages_not_shown"], 5);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+    session.end().await;
+    world.stop().await;
+}
