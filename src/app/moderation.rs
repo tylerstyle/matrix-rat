@@ -82,7 +82,8 @@ impl App {
             return;
         };
         let room_id = room.id.clone();
-        let sender = sanitize_line(&message.sender);
+        // With the user ID where someone else goes by the same name.
+        let sender = sanitize_line(&message.sender_name());
         let preview = sanitize_line(&message.body);
         self.open_modal(Modal::ReasonConfirm(ReasonConfirmPopup::redact(
             room_id, item, sender, preview,
@@ -101,7 +102,8 @@ impl App {
             return;
         };
         let room_id = room.id.clone();
-        let display_name = sanitize_line(&message.sender);
+        // Whom a ban is for is not left to a name someone else has too.
+        let display_name = sanitize_line(&message.sender_name());
         self.open_modal(Modal::ReasonConfirm(ReasonConfirmPopup::ban(
             room_id,
             user_id,
@@ -959,6 +961,56 @@ mod tests {
         });
         assert!(app.messages().iter().any(|m| m.kind == MsgKind::ReadMarker));
         assert!(!App::can_forward_message(&app.messages()[2]));
+    }
+
+    /// Where two members go by one name, a ban, a deletion and a report name the
+    /// member with their user ID: whom they are about is not left to a guess.
+    #[test]
+    fn dialogs_about_one_of_two_of_a_name_show_the_id() {
+        let (mut app, _terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::RoomPower {
+            room_id: ROOM_A.into(),
+            power: power(true, true, true, false, true),
+        });
+        let namesake = |id: &str, sender_id: &str, body: &str| Message {
+            sender_ambiguous: true,
+            ..sample_msg(id, "bob", sender_id, body, false)
+        };
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: ROOM_A.into(),
+            generation: app.generation,
+            messages: vec![
+                namesake("e1", BOB, "hello from bob"),
+                namesake("e3", "@bob:elsewhere.org", "the other bob"),
+            ],
+            reached_start: false,
+            detached: None,
+        });
+        drain_cmds(&mut commands);
+
+        app.open_ban_confirm_from_message(0);
+        let Some(Modal::ReasonConfirm(popup)) = &app.modal else {
+            panic!("no ban dialog");
+        };
+        assert!(
+            matches!(&popup.kind, ReasonConfirmKind::Ban { user_name, .. }
+                if user_name == "bob (@bob:example.org)")
+        );
+        app.modal = None;
+        app.open_redact_confirm(1);
+        let Some(Modal::ReasonConfirm(popup)) = &app.modal else {
+            panic!("no delete dialog");
+        };
+        assert!(
+            matches!(&popup.kind, ReasonConfirmKind::Redact { sender_name, .. }
+                if sender_name == "bob (@bob:elsewhere.org)")
+        );
+        app.modal = None;
+        app.open_report_modal(1);
+        let Some(Modal::Report(form)) = &app.modal else {
+            panic!("no report form");
+        };
+        assert_eq!(form.sender_name, "bob (@bob:elsewhere.org)");
     }
 
     #[test]
