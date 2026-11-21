@@ -252,9 +252,10 @@ impl App {
     }
 
     /// Esc in the composer: gives up a carried `/command` and restores the aside draft.
+    /// A `//` escape is a real message, not a command, so Esc leaves it alone.
     pub(super) fn restore_aside_draft_on_cancel(&mut self) -> bool {
         let text = self.composer.text();
-        if !starts_with_slash(text) && !text.trim().is_empty() {
+        if !is_slash_command(text) && !text.trim().is_empty() {
             return false;
         }
         if !self
@@ -1257,6 +1258,7 @@ mod tests {
             // Turn `/topic x` into `//topic x` (escaped literal leading `/`).
             app.on_event(key(KeyCode::Home));
             app.on_event(key(KeyCode::Char('/')));
+            app.on_event(key(KeyCode::End));
             (app, commands)
         };
 
@@ -1292,5 +1294,21 @@ mod tests {
         let (mut app, mut commands) = setup_escaped();
         app.shut_down_worker();
         assert_eq!(saves(&mut commands), ["!a=remember milk\n\n//topic x"]);
+
+        // 4. Esc on `//topic x` does not wipe the typed message (normal Esc behaviour,
+        //    and the saved draft stays aside until the escaped message is sent).
+        let (mut app, _commands) = setup_escaped();
+        app.esc_closes_chat = false;
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "//topic x");
+        app.perform(Action::Send);
+        assert_eq!(app.composer.text(), "remember milk");
+
+        let (mut app, mut commands) = setup_escaped();
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed);
+        assert_eq!(saves(&mut commands), ["!a=remember milk\n\n//topic x"]);
+        app.perform(Action::OpenRoom(0));
+        assert_eq!(app.composer.text(), "//topic x");
     }
 }
