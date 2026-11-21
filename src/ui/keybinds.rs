@@ -47,21 +47,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, editor: &mut Editor) {
         let prev_rect = Rect::new(x, preset_row.y, 2, 1);
         app.hits
             .add(prev_rect, HitId::KeybindBtn(EditorButton::PresetPrev));
-        if app.hover == Some(HitId::KeybindBtn(EditorButton::PresetPrev)) {
-            frame
-                .buffer_mut()
-                .set_style(prev_rect, theme.style(Role::Hover));
-        }
         x += 2 + width(preset_name) as u16;
         let next_rect = Rect::new(x, preset_row.y, 2, 1);
         if next_rect.right() <= preset_row.right() {
             app.hits
                 .add(next_rect, HitId::KeybindBtn(EditorButton::PresetNext));
-            if app.hover == Some(HitId::KeybindBtn(EditorButton::PresetNext)) {
-                frame
-                    .buffer_mut()
-                    .set_style(next_rect, theme.style(Role::Hover));
-            }
         }
         if app.keymap.has_overrides() && preset_row.width >= 32 {
             let badge = "modified";
@@ -189,11 +179,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, editor: &mut Editor) {
                     spans.push(Span::styled(key_shown, key_style));
                     frame.render_widget(Line::from(spans), rect);
 
-                    let hit = HitId::KeybindRow(idx);
-                    if app.hover == Some(hit) && !selected {
-                        frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-                    }
-                    app.hits.add(rect, hit);
+                    app.hits.add(rect, HitId::KeybindRow(idx));
                 }
             }
         }
@@ -296,7 +282,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, editor: &mut Editor) {
             }
             let r = Rect::new(x, btn_row.y, w, 1);
             let hit = HitId::KeybindBtn(id);
-            button(frame, &theme, r, label, focused || app.hover == Some(hit));
+            button(frame, &theme, r, label, focused);
             app.hits.add(r, hit);
             x += w + 2;
         }

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    EnableFocusChange, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
@@ -28,7 +28,8 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::layout::Rect;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -92,9 +93,39 @@ impl TerminalGuard {
     pub fn activate(&self) -> Result<Tui> {
         write_activation()?;
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-        terminal.clear()?;
+        clear(&mut terminal)?;
         Ok(terminal)
     }
+}
+
+/// Enables mouse button, wheel, and drag reporting (`?1000`, `?1002`, `?1015`, `?1006`)
+/// without any-event pointer-motion reporting (`?1003`).
+struct EnableMouseButtons;
+
+impl crossterm::Command for EnableMouseButtons {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Clears the whole screen and has the next draw write every cell again.
+///
+/// Not ratatui's `Terminal::clear` (which `clippy.toml` refuses): that one first asks the
+/// terminal where its cursor is and waits up to two seconds for the answer. While the
+/// event stream's reader thread waits for input it holds crossterm's reader, so the
+/// answer cannot be read until a key, a click or a focus change comes: a repaint that no
+/// input had asked for (a member list arriving for the open room) ended the app after
+/// two seconds with "The cursor position could not be read within a normal duration".
+/// A full-screen app has no cursor position to keep: every frame sets its own. A resize
+/// to the size the screen has clears the same way and asks the terminal nothing.
+pub fn clear<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    let size = terminal.size()?;
+    terminal.resize(Rect::new(0, 0, size.width, size.height))
 }
 
 fn write_activation() -> Result<()> {
@@ -108,7 +139,7 @@ fn write_activation() -> Result<()> {
         EnableFocusChange
     )?;
     if MOUSE.load(Ordering::SeqCst) {
-        queue!(out, EnableMouseCapture)?;
+        queue!(out, EnableMouseButtons)?;
     }
     if KEYBOARD_ENHANCED.load(Ordering::SeqCst) && !KEYBOARD_PUSHED.swap(true, Ordering::SeqCst) {
         queue!(
@@ -130,7 +161,7 @@ pub fn set_mouse(on: bool) -> Result<()> {
     }
     let mut out = io::stdout();
     if on {
-        queue!(out, EnableMouseCapture)?;
+        queue!(out, EnableMouseButtons)?;
     } else {
         queue!(out, DisableMouseCapture)?;
     }
@@ -229,8 +260,10 @@ pub fn release() {
 /// Dropping the stream wakes the reader so that its thread can end. If that thread was
 /// not reading just then (it rests between events), nobody takes the wake-up, and the
 /// next read with a time limit returns at once with nothing: the cursor position that
-/// `Terminal::clear` asks for was then "not read within a normal duration", and the app
-/// ended after the first use of an editor. A read that waits for nothing takes it.
+/// `Terminal::clear` asked for was then "not read within a normal duration", and the app
+/// ended after the first use of an editor. [`clear`] asks nothing now; the wake-up is
+/// still taken, so that no later read with a time limit is cut short by it. A read that
+/// waits for nothing takes it.
 pub fn absorb_reader_wake() {
     let _ = crossterm::event::poll(std::time::Duration::ZERO);
 }
@@ -241,7 +274,7 @@ pub fn resume(terminal: &mut Tui) -> Result<()> {
     enable_raw_mode()?;
     RAW.store(true, Ordering::SeqCst);
     write_activation()?;
-    terminal.clear()?;
+    clear(terminal)?;
     Ok(())
 }
 
@@ -310,7 +343,94 @@ fn place(file: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{POP_TITLE, PUSH_TITLE, base64, place};
+    use crossterm::Command;
+    use ratatui::Terminal;
+    use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
+    use ratatui::buffer::Cell;
+    use ratatui::layout::{Position, Size};
+    use ratatui::widgets::Paragraph;
+
+    use super::{EnableMouseButtons, POP_TITLE, PUSH_TITLE, base64, place};
+
+    /// A terminal that cannot say where its cursor is, as while the event stream's reader
+    /// thread waits: asking returns an error instead of the two-second wait.
+    struct NoCursorAnswer(TestBackend);
+
+    impl Backend for NoCursorAnswer {
+        type Error = std::io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            self.0.draw(content).map_err(|never| match never {})
+        }
+        fn hide_cursor(&mut self) -> std::io::Result<()> {
+            self.0.hide_cursor().map_err(|never| match never {})
+        }
+        fn show_cursor(&mut self) -> std::io::Result<()> {
+            self.0.show_cursor().map_err(|never| match never {})
+        }
+        fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+            Err(std::io::Error::other("not read within a normal duration"))
+        }
+        fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> std::io::Result<()> {
+            self.0
+                .set_cursor_position(position)
+                .map_err(|never| match never {})
+        }
+        fn clear(&mut self) -> std::io::Result<()> {
+            self.0.clear().map_err(|never| match never {})
+        }
+        fn clear_region(&mut self, clear_type: ClearType) -> std::io::Result<()> {
+            self.0
+                .clear_region(clear_type)
+                .map_err(|never| match never {})
+        }
+        fn size(&self) -> std::io::Result<Size> {
+            self.0.size().map_err(|never| match never {})
+        }
+        fn window_size(&mut self) -> std::io::Result<WindowSize> {
+            self.0.window_size().map_err(|never| match never {})
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush().map_err(|never| match never {})
+        }
+    }
+
+    fn screen(terminal: &Terminal<NoCursorAnswer>) -> String {
+        let buffer = terminal.backend().0.buffer();
+        buffer.content().iter().map(Cell::symbol).collect()
+    }
+
+    #[test]
+    fn clearing_asks_the_terminal_nothing_and_the_next_draw_writes_every_cell() {
+        let mut terminal = Terminal::new(NoCursorAnswer(TestBackend::new(12, 2))).unwrap();
+        let draw = |terminal: &mut Terminal<NoCursorAnswer>| {
+            terminal
+                .draw(|frame| frame.render_widget(Paragraph::new("hello"), frame.area()))
+                .unwrap();
+        };
+        draw(&mut terminal);
+        assert!(screen(&terminal).starts_with("hello"));
+        // ratatui's own clear would fail here: it asks where the cursor is first.
+        super::clear(&mut terminal).expect("clearing must not ask for the cursor");
+        assert_eq!(screen(&terminal).trim(), "", "the screen is cleared");
+        // The same frame again: written in full, not left out as unchanged.
+        draw(&mut terminal);
+        assert!(screen(&terminal).starts_with("hello"));
+    }
+
+    #[test]
+    fn mouse_capture_enables_buttons_and_drag_without_any_motion() {
+        let mut ansi = String::new();
+        EnableMouseButtons.write_ansi(&mut ansi).unwrap();
+        assert!(ansi.contains("\x1b[?1000h"));
+        assert!(ansi.contains("\x1b[?1002h"));
+        assert!(ansi.contains("\x1b[?1015h"));
+        assert!(ansi.contains("\x1b[?1006h"));
+        assert!(!ansi.contains("1003"));
+    }
 
     #[test]
     fn the_title_is_saved_and_put_back_on_the_terminals_title_stack() {

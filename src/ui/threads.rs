@@ -82,11 +82,10 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App, area: Rect, list: &mut Thre
             let y = inner.y + LIST_Y + (offset * card) as u16;
             let rect = Rect::new(inner.x, y, inner.width, card as u16);
             let selected = index == list.selected;
-            let (hit, hovered) = match list.thread_at(index) {
+            let hit = match list.thread_at(index) {
                 Some(thread) => {
                     thread_card(frame, &theme, rect, thread, selected);
-                    let hit = HitId::ThreadRow(index);
-                    (hit, app.hover == Some(hit))
+                    HitId::ThreadRow(index)
                 }
                 None => {
                     let label = if list.load == ThreadsLoad::Loading {
@@ -101,15 +100,13 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App, area: Rect, list: &mut Thre
                         )),
                         Rect::new(rect.x, rect.y, rect.width, 1),
                     );
-                    (HitId::ThreadsMore, app.hover == Some(HitId::ThreadsMore))
+                    HitId::ThreadsMore
                 }
             };
             if selected {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if hovered {
-                frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }
             app.hits.add(rect, hit);
         }
@@ -142,9 +139,7 @@ fn status_line(frame: &mut Frame, app: &mut App, theme: &Theme, rect: Rect, list
     );
     if shows_switch {
         let at = Rect::new(rect.right() - switch_width, rect.y, switch_width, 1);
-        let style = if app.hover == Some(HitId::ThreadsMine) {
-            theme.style(Role::Hover)
-        } else if list.mine {
+        let style = if list.mine {
             theme.style(Role::TitleFocused)
         } else {
             theme.style(Role::Muted)

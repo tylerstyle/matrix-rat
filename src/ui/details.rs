@@ -141,13 +141,11 @@ fn buttons(frame: &mut Frame, app: &mut App, theme: &Theme, details: &DetailsPop
             break;
         }
         let rect = Rect::new(x, row.y, w, 1);
-        let style = if app.hover == Some(hit) {
-            theme.style(Role::Hover)
-        } else {
-            theme.style(Role::Pill)
-        };
         frame.render_widget(
-            Line::from(Span::styled(truncate(label, w as usize), style)),
+            Line::from(Span::styled(
+                truncate(label, w as usize),
+                theme.style(Role::Pill),
+            )),
             rect,
         );
         app.hits.add(rect, hit);

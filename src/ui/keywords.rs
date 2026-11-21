@@ -131,11 +131,7 @@ fn draw_list(
         let index = state.scroll + offset;
         let at = Rect::new(area.x, area.y + offset as u16, area.width, 1);
         let selected = index == state.selected;
-        let hovered = matches!(
-            app.hover,
-            Some(HitId::KeywordRow(i) | HitId::KeywordRemove(i)) if i == index
-        );
-        let shows_mark = (selected || hovered) && at.width > mark_width + 6;
+        let shows_mark = selected && at.width > mark_width + 6;
         let room = (at.width as usize).saturating_sub(
             2 + if shows_mark {
                 mark_width as usize + 1
@@ -145,8 +141,6 @@ fn draw_list(
         );
         let style = if selected {
             theme.style(Role::TitleFocused)
-        } else if hovered {
-            theme.style(Role::Hover)
         } else {
             theme.style(Role::Text)
         };
@@ -164,13 +158,7 @@ fn draw_list(
         if shows_mark {
             let mark = Rect::new(at.right() - mark_width, at.y, mark_width, 1);
             let asked = state.confirm.as_ref() == Some(keyword);
-            let role = if asked {
-                Role::Error
-            } else if app.hover == Some(HitId::KeywordRemove(index)) {
-                Role::Hover
-            } else {
-                Role::Pill
-            };
+            let role = if asked { Role::Error } else { Role::Pill };
             frame.render_widget(Line::from(Span::styled(REMOVE, theme.style(role))), mark);
             app.hits.add(mark, HitId::KeywordRemove(index));
         }

@@ -103,12 +103,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, chat_area: Rect, composer_top: u16
         let row_rect = Rect::new(inner.x, inner.y + row_offset as u16, inner.width, 1);
         let item = &completion.items[idx];
         let is_selected = idx == selected;
-        let is_hovered = app.hover == Some(HitId::Complete(idx));
 
         let row_style = if is_selected {
             app.theme.style(Role::MessageSelected)
-        } else if is_hovered {
-            app.theme.style(Role::Hover)
         } else {
             app.theme.style(Role::Text)
         };

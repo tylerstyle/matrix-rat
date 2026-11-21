@@ -385,8 +385,6 @@ fn highlight(frame: &mut Frame, app: &App, rect: Rect, index: usize, cursor: boo
         frame
             .buffer_mut()
             .set_style(rect, theme.style(Role::RoomCursor));
-    } else if app.hover == Some(HitId::Room(index)) {
-        frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
     }
 }
 
@@ -399,7 +397,6 @@ fn draw_filter_chips(frame: &mut Frame, app: &mut App, area: Rect) {
         spans.push(Span::raw(" "));
     }
     let mut x = area.x + pad_w;
-    let mut chip_rects = Vec::with_capacity(2);
     for (idx, (label, active, action)) in [
         (
             "Unread",
@@ -427,18 +424,11 @@ fn draw_filter_chips(frame: &mut Frame, app: &mut App, area: Rect) {
             Role::Muted
         };
         spans.push(Span::styled(chip, theme.style(role)));
-        let hit = HitId::Do(action);
         let rect = Rect::new(x, area.y, chip_w.min(area.right().saturating_sub(x)), 1);
-        app.hits.add(rect, hit);
-        chip_rects.push((rect, hit));
+        app.hits.add(rect, HitId::Do(action));
         x += chip_w;
     }
     frame.render_widget(Line::from(spans), area);
-    for (rect, hit) in chip_rects {
-        if rect.width > 0 && app.hover == Some(hit) {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-        }
-    }
 }
 
 fn draw_space_header(frame: &mut Frame, app: &mut App, area: Rect) {

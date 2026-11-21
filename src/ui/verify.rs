@@ -132,9 +132,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut Veri
         let action = Action::Verify(choice);
         let has_focus = focused == Some(choice);
         button(frame, theme, rect, label, has_focus);
-        if app.hover == Some(HitId::Do(action)) && !has_focus {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-        }
         app.hits.add(rect, HitId::Do(action));
         x += w + 2;
     }
@@ -344,7 +341,6 @@ pub fn status_hint(
     state: &VerifyState,
     modal: &Option<Modal>,
     theme: &Theme,
-    hover: Option<HitId>,
     hits: &mut HitMap,
     area: Rect,
     spans: &mut Vec<Span<'static>>,
@@ -405,13 +401,7 @@ pub fn status_hint(
         hint.push(Span::styled(short.to_owned(), theme.style(Role::StatusKey)));
     }
     let end = (start + measure(&hint)).min(area.right());
-    let hovered = hover == Some(HitId::Do(action));
-    for mut span in hint {
-        if hovered {
-            span = span.style(theme.style(Role::Hover));
-        }
-        spans.push(span);
-    }
+    spans.extend(hint);
     spans.push(Span::styled("  ", theme.style(Role::Status)));
     if end > start {
         hits.add(Rect::new(start, area.y, end - start, 1), HitId::Do(action));

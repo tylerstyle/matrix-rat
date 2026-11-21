@@ -19,7 +19,6 @@ warning = "#ffaf00"
 
 [ui]
 room_cursor = { bg = "#3a3a3a", underline = true }
-hover = { underline = true }
 room_active = { fg = "#000000", bg = "#ffff00", bold = true }
 message_selected = { bg = "#3a3a3a", bold = true }
 link = { fg = "#00ffff", underline = true }

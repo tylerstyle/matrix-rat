@@ -31,7 +31,6 @@ pub fn draw(
     state: &crate::app::AttachState,
     audio: &crate::app::AudioState,
     theme: &Theme,
-    hover: Option<HitId>,
     hits: &mut HitMap,
     area: Rect,
 ) {
@@ -94,9 +93,7 @@ pub fn draw(
             let play = Rect::new(row.x + label_width, row.y, width(play_sym) as u16, 1);
             if play.right() <= row.right() {
                 let id = HitId::AttachmentPlay(index);
-                let style = if hover == Some(id) {
-                    theme.style(Role::TitleFocused)
-                } else if playing.is_some() {
+                let style = if playing.is_some() {
                     theme.style(Role::Link).add_modifier(Modifier::BOLD)
                 } else {
                     theme.style(Role::Link)
@@ -107,12 +104,10 @@ pub fn draw(
             let close = Rect::new(play.right(), row.y, width(CLOSE) as u16, 1);
             if close.right() <= row.right() {
                 let id = HitId::Attachment(index);
-                let role = if hover == Some(id) {
-                    Role::TitleFocused
-                } else {
-                    Role::Muted
-                };
-                frame.render_widget(Line::from(Span::styled(CLOSE, theme.style(role))), close);
+                frame.render_widget(
+                    Line::from(Span::styled(CLOSE, theme.style(Role::Muted))),
+                    close,
+                );
                 hits.add(close, id);
             }
         } else {
@@ -130,12 +125,10 @@ pub fn draw(
             let close = Rect::new(row.x + label_width + 1, row.y, width(CLOSE) as u16, 1);
             if close.right() <= row.right() {
                 let id = HitId::Attachment(index);
-                let role = if hover == Some(id) {
-                    Role::TitleFocused
-                } else {
-                    Role::Muted
-                };
-                frame.render_widget(Line::from(Span::styled(CLOSE, theme.style(role))), close);
+                frame.render_widget(
+                    Line::from(Span::styled(CLOSE, theme.style(Role::Muted))),
+                    close,
+                );
                 hits.add(close, id);
             }
         }

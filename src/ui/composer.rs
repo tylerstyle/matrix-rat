@@ -193,7 +193,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             &app.attach,
             &app.audio,
             theme,
-            app.hover,
             &mut app.hits,
             rect,
         );
@@ -216,9 +215,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         let mut x = text_area.right() + 1;
         for (symbol, action) in buttons(mic) {
             let button = Rect::new(x, text_area.y, SYMBOLS.cell, 1);
-            let role = if app.hover == Some(HitId::Do(action)) {
-                Role::TitleFocused
-            } else if symbol == SYMBOLS.stop {
+            let role = if symbol == SYMBOLS.stop {
                 Role::Error
             } else {
                 Role::Muted
@@ -332,16 +329,14 @@ fn draw_own_badge(frame: &mut Frame, app: &mut App, area: Rect, title: &str) {
     }
     let pill_x = area.right().saturating_sub(pill_w + 2);
     let pill_rect = Rect::new(pill_x, area.y, pill_w, 1);
-    let hovered = app.hover == Some(HitId::Button(Button::OwnProfile));
     let theme = app.theme.clone();
-    let label_role = if hovered { Role::Hover } else { Role::Title };
     let color_key = app.user_id.as_deref().unwrap_or(&display);
     let tile = super::image::avatar_tile(&theme, color_key, &display);
     let line = Line::from(vec![
         Span::raw(" "),
         tile,
         Span::raw(" "),
-        Span::styled(short_name, theme.style(label_role)),
+        Span::styled(short_name, theme.style(Role::Title)),
         Span::raw(" "),
     ]);
     frame.render_widget(line, pill_rect);

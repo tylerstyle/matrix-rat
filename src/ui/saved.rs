@@ -97,14 +97,8 @@ fn draw_entry(
     let clock = app.bookmarks.clock;
     let (now, now_local) = (clock.now_secs(), clock.now_local());
     let selected = index == state.selected;
-    let hovered = matches!(
-        app.hover,
-        Some(HitId::SavedRow(i) | HitId::SavedRemind(i) | HitId::SavedRemove(i)) if i == index
-    );
     let base = if selected {
         theme.style(Role::Pill)
-    } else if hovered {
-        theme.style(Role::Hover)
     } else {
         theme.style(Role::Text)
     };
@@ -159,12 +153,7 @@ fn draw_entry(
             (remind, REMIND, HitId::SavedRemind(index), Role::StatusKey),
             (remove, REMOVE, HitId::SavedRemove(index), Role::Error),
         ] {
-            let style = if app.hover == Some(hit) {
-                theme.style(Role::Pill).add_modifier(Modifier::BOLD)
-            } else {
-                theme.style(role)
-            };
-            frame.render_widget(Line::from(Span::styled(label, style)), rect);
+            frame.render_widget(Line::from(Span::styled(label, theme.style(role))), rect);
             app.hits.add(rect, hit);
         }
     }
@@ -248,11 +237,9 @@ fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, state: &mut SavedPopu
             theme.style(Role::TitleFocused),
         )
     };
-    let choice_style = |selected: bool, hovered: bool| {
+    let choice_style = |selected: bool| {
         if selected {
             theme.style(Role::TitleFocused)
-        } else if hovered {
-            theme.style(Role::Hover)
         } else {
             theme.style(Role::Text)
         }
@@ -261,7 +248,6 @@ fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, state: &mut SavedPopu
     for (index, preset) in Preset::ALL.iter().enumerate() {
         let at = row(inner, y);
         let selected = form.selected == index;
-        let hovered = app.hover == Some(HitId::ReminderChoice(index));
         let when = preset
             .when(now)
             .and_then(|when| clock.resolve(when).ok())
@@ -271,7 +257,7 @@ fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, state: &mut SavedPopu
         frame.render_widget(
             Line::from(vec![
                 mark(selected),
-                Span::styled(preset.label(), choice_style(selected, hovered)),
+                Span::styled(preset.label(), choice_style(selected)),
                 Span::styled(when, theme.style(Role::Muted)),
             ]),
             at,
@@ -307,11 +293,10 @@ fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, state: &mut SavedPopu
     if form.has_reminder {
         let at = row(inner, y);
         let selected = form.selected == RemindForm::CLEAR;
-        let hovered = app.hover == Some(HitId::ReminderChoice(RemindForm::CLEAR));
         frame.render_widget(
             Line::from(vec![
                 mark(selected),
-                Span::styled("no reminder", choice_style(selected, hovered)),
+                Span::styled("no reminder", choice_style(selected)),
             ]),
             at,
         );

@@ -100,7 +100,7 @@ Ubuntu 22.04, Debian 12, Fedora 36 and later): releases from 0.7.0 on carry a
 [releases page](https://github.com/tylerstyle/matrix-rat/releases).
 
 ```sh
-f=matrix-rat-1.0.0-x86_64-unknown-linux-gnu   # the archive you downloaded, without .tar.gz
+f=matrix-rat-1.0.1-x86_64-unknown-linux-gnu   # the archive you downloaded, without .tar.gz
 sha256sum -c $f.tar.gz.sha256                 # the file is the one that was built
 tar -xzf $f.tar.gz
 install -Dm755 $f/matrix-rat ~/.local/bin/matrix-rat
@@ -366,7 +366,7 @@ file that is not valid TOML at all stops the start.
 Twelve themes are built in; `F3` cycles them. `theme = "terminal"` uses your terminal's own
 colours, and `theme = "high-contrast"` is black and white with a few strong colours. With
 the environment variable `NO_COLOR` set, every theme is shown without any colour: what is
-selected or a badge is reversed, the row under the mouse underlined. Switch on **Follow dark/light** in the settings (`theme_dark` and `theme_light`
+selected or a badge is reversed, the room-list cursor underlined. Switch on **Follow dark/light** in the settings (`theme_dark` and `theme_light`
 in the file) to use one theme by day and another by night, following your desktop.
 
 Theme files in `~/.config/matrix-rat/themes/` are reloaded the moment they change, so
@@ -693,7 +693,7 @@ There is no command that lists or removes profiles; a profile is its two folders
 - **Transcripts and translations** are text under a message that only you see; nothing
   is sent to the room, and nothing runs until you ask for it on that message: the key,
   the small button at the right end of the message (on voice and audio messages always,
-  on other messages while they are selected or under the mouse), the message's menu or
+  on other messages while they are selected), the message's menu or
   `Ctrl-P`. The same again while the program runs stops it (so does `Esc` on that
   message), on a finished text hides it, and once more shows it again without running
   anything. One program runs per message and two at once. A program gets 15 minutes to

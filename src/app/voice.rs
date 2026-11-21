@@ -1869,7 +1869,6 @@ mod tests {
                         &app.attach,
                         &app.audio,
                         &app.theme,
-                        None,
                         &mut hits,
                         Rect::new(0, 0, w, h),
                     );
