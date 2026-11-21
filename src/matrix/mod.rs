@@ -985,6 +985,7 @@ pub enum MatrixEvent {
     /// this or by [`MatrixEvent::FilesNotSent`].
     FilesSent(u64),
     /// Joined members and `@room` permission for a room, used for `@` completions.
+    /// The members come in the order of their names (see `App::on_room_members`).
     RoomMembers {
         room_id: String,
         members: Vec<crate::complete::Member>,

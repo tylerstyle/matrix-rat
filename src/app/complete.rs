@@ -15,9 +15,8 @@ use crate::model::{Message, MsgKind, OWN_NAME, RoomKind};
 
 #[derive(Default)]
 struct RoomMembers {
+    /// In the order of their names, to find who goes by one.
     members: Vec<Member>,
-    /// The places of `members` in the order of their names, to find who goes by one.
-    by_name: Vec<u32>,
     can_mention_room: bool,
 }
 
@@ -32,31 +31,25 @@ impl std::fmt::Debug for RoomMembers {
 }
 
 impl RoomMembers {
-    fn new(members: Vec<Member>, can_mention_room: bool) -> Self {
-        let mut by_name: Vec<u32> = (0..members.len())
-            .filter_map(|at| u32::try_from(at).ok())
-            .collect();
-        by_name.sort_unstable_by(|a, b| {
-            members[*a as usize]
-                .display_name
-                .cmp(&members[*b as usize].display_name)
-        });
+    /// `members` come sorted by name from the worker; only those that do not (from
+    /// tests) are sorted here.
+    fn new(mut members: Vec<Member>, can_mention_room: bool) -> Self {
+        if !members.is_sorted_by(|a, b| a.display_name <= b.display_name) {
+            members.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+        }
         Self {
             members,
-            by_name,
             can_mention_room,
         }
     }
 
     /// Whether a member other than `id` goes by `name`.
     fn others_named(&self, name: &str, id: &str) -> bool {
-        let named = |at: &u32| &self.members[*at as usize];
         let first = self
-            .by_name
-            .partition_point(|at| named(at).display_name.as_str() < name);
-        self.by_name[first..]
+            .members
+            .partition_point(|member| member.display_name.as_str() < name);
+        self.members[first..]
             .iter()
-            .map(named)
             .take_while(|member| member.display_name == name)
             .any(|member| member.user_id != id)
     }

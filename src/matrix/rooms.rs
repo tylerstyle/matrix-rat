@@ -2053,7 +2053,7 @@ async fn load_room_members(room: Room, room_id: String) -> Option<MatrixEvent> {
         .power_levels()
         .await
         .is_ok_and(|pls| pls.user_can_trigger_room_notification(&own));
-    let members = raw_members
+    let mut members: Vec<crate::complete::Member> = raw_members
         .into_iter()
         .take(MAX_COMPLETION_MEMBERS)
         .map(|member| {
@@ -2069,6 +2069,9 @@ async fn load_room_members(room: Room, room_id: String) -> Option<MatrixEvent> {
             }
         })
         .collect();
+    // In the order of their names: the app finds who goes by a name in them without
+    // sorting them itself (a big room's thousands, on the thread that draws).
+    members.sort_unstable_by(|a, b| a.display_name.cmp(&b.display_name));
     Some(MatrixEvent::RoomMembers {
         room_id,
         members,
