@@ -1959,9 +1959,10 @@ struct MemberList {
     gave_up: Option<(u64, u64)>,
     asked: Option<Instant>,
     error: Option<String>,
-    /// `entries` with roles, sorted, and what it was made from.
-    shown: Vec<RoomMember>,
-    shown_from: Option<(Vec<Entry>, String)>,
+    /// `entries` with roles, sorted, and what it was made from. Made again, it is a new
+    /// `Arc`: the same one means the same list, without comparing the people.
+    shown: Arc<Vec<RoomMember>>,
+    shown_from: Option<(Vec<Entry>, Option<RoomPowerLevels>)>,
 }
 
 impl MemberList {
@@ -1978,8 +1979,9 @@ impl MemberList {
                 .any(|entry| entry.user == own && entry.status == EntryStatus::Joined)
     }
 
-    /// Fills the details' member list, admin count, error, and (once the list is
-    /// complete) counts so the header never disagrees with the people shown.
+    /// Fills the details' admin count, error, and (once the list is complete) counts so
+    /// the header never disagrees with the people shown. The people themselves are
+    /// [`Self::shown`], which goes with the details when they are sent (see `Sent`).
     fn apply(
         &mut self,
         current: &mut RoomDetails,
@@ -1995,9 +1997,8 @@ impl MemberList {
                 }
             }
         }
-        current.members = self.present(levels, own);
-        current.admin_count = current
-            .members
+        current.admin_count = self
+            .present(levels, own)
             .iter()
             .filter(|m| !m.invited && !m.banned && m.role >= MemberRole::Admin)
             .count();
@@ -2008,16 +2009,68 @@ impl MemberList {
     }
 
     /// The list for the screen. Roles and sorting are only redone when the people or
-    /// the power levels changed.
-    fn present(&mut self, levels: Option<&RoomPowerLevels>, own: &UserId) -> Vec<RoomMember> {
-        let key = format!("{levels:?}");
-        let fresh =
-            matches!(&self.shown_from, Some((entries, k)) if *entries == self.entries && *k == key);
+    /// the power levels changed (the room is looked at again on every change of it).
+    fn present(&mut self, levels: Option<&RoomPowerLevels>, own: &UserId) -> &Arc<Vec<RoomMember>> {
+        let fresh = matches!(&self.shown_from, Some((entries, made_with))
+            if *entries == self.entries && same_levels(made_with.as_ref(), levels));
         if !fresh {
-            self.shown = present(&self.entries, levels, own);
-            self.shown_from = Some((self.entries.clone(), key));
+            self.shown = Arc::new(present(&self.entries, levels, own));
+            self.shown_from = Some((self.entries.clone(), levels.cloned()));
         }
-        self.shown.clone()
+        &self.shown
+    }
+}
+
+/// Whether two sets of power levels give everyone the same role and the same rights
+/// over the others, which is what the member list shows. (`RoomPowerLevels` cannot be
+/// compared as a whole. The notification levels are left out: no member's entry
+/// depends on them.)
+fn same_levels(a: Option<&RoomPowerLevels>, b: Option<&RoomPowerLevels>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.ban == b.ban
+                && a.kick == b.kick
+                && a.invite == b.invite
+                && a.redact == b.redact
+                && a.events == b.events
+                && a.events_default == b.events_default
+                && a.state_default == b.state_default
+                && a.users == b.users
+                && a.users_default == b.users_default
+                && a.rules.privileged_creators == b.rules.privileged_creators
+        }
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+/// What the details watcher last sent: the details without their member list, and
+/// the list apart, as [`MemberList::shown`] was then. While neither changes, nothing
+/// is sent, and telling so takes no copy and no comparison of the people.
+#[derive(Default)]
+struct Sent {
+    details: Option<RoomDetails>,
+    members: Option<Arc<Vec<RoomMember>>>,
+}
+
+impl Sent {
+    /// Whether `current` (without members) and `members` differ from what was sent.
+    fn differs(&self, current: &RoomDetails, members: &Arc<Vec<RoomMember>>) -> bool {
+        self.details.as_ref() != Some(current)
+            || !self
+                .members
+                .as_ref()
+                .is_some_and(|sent| Arc::ptr_eq(sent, members) || sent == members)
+    }
+
+    /// The details to send, with their members; remembers them as sent.
+    fn take(&mut self, current: &RoomDetails, members: &Arc<Vec<RoomMember>>) -> RoomDetails {
+        self.details = Some(current.clone());
+        self.members = Some(members.clone());
+        RoomDetails {
+            members: members.to_vec(),
+            ..current.clone()
+        }
     }
 }
 
@@ -2582,7 +2635,7 @@ async fn watch(
     let mut knocks_loaded = false;
     let mut force_knocks = false;
     let mut raw_knocks: Vec<RawKnock> = Vec::new();
-    let mut sent: Option<RoomDetails> = None;
+    let mut sent = Sent::default();
     let mut force_refresh = false;
     let mut local_aliases: Vec<String> = Vec::new();
     let mut local_aliases_error: Option<String> = None;
@@ -2713,11 +2766,8 @@ async fn watch(
         force_knocks = false;
         force_aliases = false;
         force_space_names = false;
-        if sent.as_ref() != Some(&current) {
-            if !emit(Ok(current.clone())) {
-                return;
-            }
-            sent = Some(current.clone());
+        if sent.differs(&current, &list.shown) && !emit(Ok(sent.take(&current, &list.shown))) {
+            return;
         }
         if ask || ask_knocks || ask_aliases || ask_space_names {
             if ask {
@@ -2776,10 +2826,9 @@ async fn watch(
                 current.space =
                     Some(super::spaces::space_details(&client, &room, &space_names, &left).await);
             }
-            if !emit(Ok(current.clone())) {
+            if !emit(Ok(sent.take(&current, &list.shown))) {
                 return;
             }
-            sent = Some(current);
         }
         // Until the room changes, a moderation event or knock arrives, or a postponed fetch is due.
         let deadline = wait.map(|time| tokio::time::Instant::now() + time);
@@ -3874,8 +3923,8 @@ mod tests {
             entries,
             ..MemberList::default()
         };
-        assert!(list.present(None, &own) == shown);
-        list.shown[0].name = "kept".into();
+        assert!(**list.present(None, &own) == shown);
+        Arc::make_mut(&mut list.shown)[0].name = "kept".into();
         assert_eq!(list.present(None, &own)[0].name, "kept");
         list.entries.pop();
         assert_eq!(list.present(None, &own).len(), 3);
@@ -3884,6 +3933,64 @@ mod tests {
         list.entries.push(entry("Me", false));
         assert!(list.agrees((3, 1), &own));
         assert!(!list.agrees((2, 1), &own));
+    }
+
+    /// The member list is made again only when what it shows can differ. Power levels
+    /// read anew but the same are the same (they are compared as values, not by their
+    /// debug text made on every look at the room), and while the list stays, the
+    /// details watcher neither copies nor compares the people to tell it.
+    #[test]
+    fn the_member_list_is_made_again_only_for_other_power_levels() {
+        use matrix_sdk::ruma::events::room::power_levels::RoomPowerLevelsSource;
+        use matrix_sdk::ruma::room_version_rules::AuthorizationRules;
+        use std::collections::BTreeMap;
+
+        let own = UserId::parse("@me:example.org").unwrap();
+        let bob = UserId::parse("@bob:example.org").unwrap();
+        let levels = |bobs: i32| {
+            let mut content = RoomPowerLevelsEventContent::new(&AuthorizationRules::V11);
+            content.users = BTreeMap::from([(bob.clone(), Int::from(bobs))]);
+            RoomPowerLevels::new(
+                RoomPowerLevelsSource::Original(content),
+                &AuthorizationRules::V11,
+                [],
+            )
+        };
+        let mut list = MemberList {
+            entries: vec![entry("bob", false), entry("Me", false)],
+            ..MemberList::default()
+        };
+        let first = list.present(Some(&levels(50)), &own).clone();
+        let again = list.present(Some(&levels(50)), &own).clone();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the same levels: not made again"
+        );
+        let promoted = list.present(Some(&levels(100)), &own).clone();
+        assert!(!Arc::ptr_eq(&first, &promoted));
+        assert!(
+            promoted
+                .iter()
+                .any(|m| m.name == "bob" && m.role == MemberRole::Admin)
+        );
+        let unknown = list.present(None, &own).clone();
+        assert!(!Arc::ptr_eq(&promoted, &unknown));
+
+        // What was sent stays sent while nothing changed; the list goes with it.
+        let mut sent = Sent::default();
+        let details = RoomDetails::default();
+        assert!(sent.differs(&details, &unknown));
+        assert!(sent.take(&details, &unknown).members == *unknown);
+        assert!(!sent.differs(&details, &unknown));
+        // The same people made again: nothing new to tell either.
+        let remade = Arc::new(unknown.to_vec());
+        assert!(!sent.differs(&details, &remade));
+        assert!(sent.differs(&details, &promoted));
+        let renamed = RoomDetails {
+            name: "renamed".into(),
+            ..RoomDetails::default()
+        };
+        assert!(sent.differs(&renamed, &unknown));
     }
 
     #[test]
