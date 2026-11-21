@@ -296,7 +296,7 @@ fn split_header(room: &str, sender: &str, cap: usize) -> (String, String) {
     let room_cap = (cap / 2).max(4).min(cap.saturating_sub(sep + 3));
     let shown_room = truncate(room, room_cap);
     let rem = cap.saturating_sub(width(&shown_room) + sep);
-    (shown_room, truncate(sender, rem))
+    (shown_room, crate::model::fit_name(sender, rem))
 }
 
 fn push_highlighted_snippet<'a>(

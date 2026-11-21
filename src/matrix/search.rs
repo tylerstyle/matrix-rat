@@ -661,16 +661,26 @@ pub(super) async fn cached_sender_name(
     if let Some(name) = cache.get(&key) {
         return name.clone();
     }
-    let member_name = room
-        .get_member_no_sync(user_id)
-        .await
-        .ok()
-        .flatten()
+    let member_name = member_name(room, user_id).await;
+    cache.insert(key, member_name.clone());
+    member_name
+}
+
+/// The name of `user_id` in `room` as the member list has it, made safe: their display
+/// name, or the first part of their ID; with the ID after it where someone else in
+/// the room goes by the same name.
+pub(super) async fn member_name(room: &Room, user_id: &UserId) -> String {
+    let member = room.get_member_no_sync(user_id).await.ok().flatten();
+    let name = member
+        .as_ref()
         .map(|member| crate::text::sanitize_line(member.name()))
         .filter(|name| !crate::text::is_blank(name))
         .unwrap_or_else(|| crate::text::sanitize_line(user_id.localpart()));
-    cache.insert(key, member_name.clone());
-    member_name
+    if member.is_some_and(|member| member.name_ambiguous()) {
+        crate::model::disambiguated(&name, user_id.as_str())
+    } else {
+        name
+    }
 }
 
 /// Strips Tantivy query-parser syntax punctuation so partial quotes, parentheses, or URL

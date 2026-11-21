@@ -56,7 +56,8 @@ impl super::App {
             return self.show_toast("You cannot report your own message");
         }
         let sender_id = message.sender_id.clone();
-        let sender_name = message.sender.clone();
+        // With the user ID where someone else goes by the same name.
+        let sender_name = message.sender_name().into_owned();
         let already_ignored = sender_id
             .as_deref()
             .is_some_and(|id| self.is_user_ignored(id));

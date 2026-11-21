@@ -7,8 +7,8 @@ use super::App;
 use crate::lineedit::EditKeys;
 use crate::matrix::{MatrixCmd, ThreadPage};
 use crate::modal::{Modal, ThreadsLoad, ThreadsPopup};
-use crate::model::{ItemRef, MsgKind, ThreadInfo};
-use crate::text::{first_line, truncate};
+use crate::model::{ItemRef, MsgKind, ThreadInfo, fit_name};
+use crate::text::first_line;
 
 /// Longest start of a first message, and longest name, kept for the list.
 const TEXT: usize = 200;
@@ -78,16 +78,18 @@ impl App {
                 };
                 // Only the demo has the replies at hand, and with them their time.
                 let newest = thread.demo_replies.last();
+                // Named as in the timeline: with the user ID where someone else goes
+                // by the same name (as the latest replier is), which stays whole.
                 Some(ThreadInfo {
                     root,
-                    sender: truncate(&message.sender, NAME),
+                    sender: fit_name(&message.sender_name(), NAME),
                     text: if text.is_empty() {
                         "[message]".to_owned()
                     } else {
                         text
                     },
                     replies: thread.replies,
-                    latest_sender: thread.latest.as_ref().map(|(who, _)| truncate(who, NAME)),
+                    latest_sender: thread.latest.as_ref().map(|(who, _)| fit_name(who, NAME)),
                     latest_when: newest.map(|reply| {
                         if reply.day == "Today" {
                             reply.time.clone()
@@ -429,6 +431,7 @@ mod tests {
         alpha.messages[5].thread = Some(ThreadSummary {
             replies: 3,
             latest: Some(("carol".into(), "sounds good".into())),
+            latest_sender: None,
             unread: true,
             demo_replies: Vec::new(),
         });
@@ -548,6 +551,19 @@ mod tests {
         ] {
             assert!(text.contains(shown), "{shown:?} missing:\n{text}");
         }
+    }
+
+    /// A thread started by one of two of a name is listed with the starter's id, as
+    /// its latest replier is.
+    #[test]
+    fn a_thread_of_one_of_two_of_a_name_names_its_starter_with_the_id() {
+        let (mut app, _terminal, _commands) = connected();
+        let root = &mut app.rooms[0].messages[5];
+        root.sender_id = Some("@ben:elsewhere.org".into());
+        root.sender_ambiguous = true;
+        let listed = app.known_threads(0);
+        let thread = listed.iter().find(|thread| thread.root == "$ev5").unwrap();
+        assert_eq!(thread.sender, "ben (@ben:elsewhere.org)");
     }
 
     #[test]

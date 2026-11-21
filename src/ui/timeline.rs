@@ -46,6 +46,22 @@ pub struct Row {
     /// What of a voice or audio message the row shows, which looks different while
     /// the message loads or plays (see `ui::audio`).
     audio: Option<AudioPart>,
+    /// Where the buttons of its message may be painted on the row (see `notes`).
+    free: Free,
+}
+
+/// Where on a row the buttons of its message may be painted. Said by what lays the
+/// row out, not guessed from what it shows: blanks in a row are no sign of anything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Free {
+    /// After what the row says, to its end.
+    #[default]
+    End,
+    /// Between what the row says (`text` columns) and what is aligned to its right
+    /// end from column `at` on: a code block's "copy", a read marker (see `receipts`).
+    Before { text: u16, at: u16 },
+    /// Nowhere: the row that names the sender.
+    Nowhere,
 }
 
 /// A row of a voice or audio message that changes while it loads or plays.
@@ -73,6 +89,7 @@ impl std::fmt::Debug for Row {
             .field("image", &self.image)
             .field("emotes", &self.emotes.len())
             .field("audio", &self.audio)
+            .field("free", &self.free)
             .finish_non_exhaustive()
     }
 }
@@ -117,6 +134,7 @@ impl Row {
             image: None,
             emotes: Vec::new(),
             audio: None,
+            free: Free::End,
         }
     }
 
@@ -325,6 +343,7 @@ fn preview_rows(preview: &Preview, msg: usize, body_width: usize, theme: &Theme)
         image: None,
         emotes: Vec::new(),
         audio: None,
+        free: Free::End,
     };
     let title = Style {
         fg: theme.style(Role::Text).fg,
@@ -450,7 +469,10 @@ struct Before {
 #[derive(Default)]
 struct Flow<'a> {
     last_day: Option<&'a str>,
-    last_sender: Option<&'a str>,
+    /// The last message of the sender whose header is the last one, while what follows
+    /// is theirs. Senders are told apart by their user IDs: two people may go by the
+    /// same name (see `Message::same_sender`).
+    last_sender: Option<&'a Message>,
 }
 
 impl<'a> Flow<'a> {
@@ -468,16 +490,19 @@ impl<'a> Flow<'a> {
         let repeated_shield = i > 0 && message.shield.is_some() && {
             let before = &messages[i - 1];
             before.shield == message.shield
-                && before.sender == message.sender
+                && before.same_sender(message)
                 && before.day == message.day
         };
         let day = self.last_day != Some(message.day.as_str());
         let is_emote = message.kind == MsgKind::Emote;
-        let header = !is_emote && (day || self.last_sender != Some(message.sender.as_str()));
+        let same = self
+            .last_sender
+            .is_some_and(|last| last.same_sender(message));
+        let header = !is_emote && (day || !same);
         let gap = !day && (header || (is_emote && self.last_sender.is_some()));
         self.last_day = Some(message.day.as_str());
         // An action line stands alone: whoever speaks next gets a header again.
-        self.last_sender = (!is_emote).then_some(message.sender.as_str());
+        self.last_sender = (!is_emote).then_some(message);
         Before {
             day,
             header,
@@ -556,10 +581,13 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
         }
 
         if before.header {
-            let color = Style::new().fg(theme.user_color(&message.sender));
+            // The colour of the user ID, as the name may change or be someone else's too.
+            let color = Style::new().fg(theme.user_color(message.sender_key()));
             let mut spans = vec![Span::styled("● ", color)];
-            let with_time = 2 + width(&message.sender) + 2 + width(&message.time) <= max_width;
-            let name = truncate(&message.sender, max_width.saturating_sub(2));
+            let sender = message.sender_name();
+            let with_time = 2 + width(&sender) + 2 + width(&message.time) <= max_width;
+            // A name told apart by its ID keeps the ID (see `fit_name`).
+            let name = crate::model::fit_name(&sender, max_width.saturating_sub(2));
             let hit_w = (2 + width(&name)).min(max_width) as u16;
             spans.push(Span::styled(name, color.add_modifier(Modifier::BOLD)));
             if with_time {
@@ -573,6 +601,8 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
             if message.sender_id.is_some() && hit_w > 0 {
                 row.hits.push((0, hit_w, HitId::Sender(i)));
             }
+            // The buttons go with what the message says, not with who said it.
+            row.free = Free::Nowhere;
             rows.push(row);
         }
 
@@ -601,6 +631,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                 image: None,
                 emotes: Vec::new(),
                 audio: None,
+                free: Free::End,
             });
         }
 
@@ -641,6 +672,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                                 }),
                                 emotes: Vec::new(),
                                 audio: None,
+                                free: Free::End,
                             });
                         }
                     }
@@ -659,6 +691,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                             image: None,
                             emotes: Vec::new(),
                             audio: None,
+                            free: Free::End,
                         });
                     }
                     Slot::Failed(_) | Slot::Off => {}
@@ -674,8 +707,8 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                 && message.state != SendState::Failed;
             let (body_style, intro) = match message.kind {
                 MsgKind::Emote => (
-                    Style::new().fg(theme.user_color(&message.sender)),
-                    Some(format!("* {} ", message.sender)),
+                    Style::new().fg(theme.user_color(message.sender_key())),
+                    Some(format!("* {} ", message.sender_name())),
                 ),
                 MsgKind::Redacted | MsgKind::Undecryptable => (theme.style(Role::ReplyQuote), None),
                 MsgKind::Text | MsgKind::System | MsgKind::ReadMarker => (text_style, None),
@@ -837,6 +870,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                     }
                 }
                 // "copy" at the right end of a code block's first line, where it fits.
+                let mut free = Free::End;
                 if let Some(block) = first_of {
                     let label_width = width(COPY_LABEL);
                     if col + 1 + label_width <= max_width {
@@ -848,6 +882,10 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                             (start + label_width) as u16,
                             HitId::CopyCode(i, block),
                         ));
+                        free = Free::Before {
+                            text: col as u16,
+                            at: start as u16,
+                        };
                     }
                 }
                 rows.push(Row {
@@ -858,6 +896,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                     image: None,
                     emotes: spots,
                     audio,
+                    free,
                 });
                 rows.extend(own_row);
             }
@@ -917,6 +956,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                     image: None,
                     emotes: std::mem::take(&mut spots),
                     audio: None,
+                    free: Free::End,
                 });
                 col = INDENT.len();
             }
@@ -948,6 +988,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                 image: None,
                 emotes: spots,
                 audio: None,
+                free: Free::End,
             });
         }
         if let Some(thread) = &message.thread {
@@ -1005,6 +1046,7 @@ fn thread_row(thread: &ThreadSummary, msg: usize, body_width: usize, theme: &The
         image: None,
         emotes: Vec::new(),
         audio: None,
+        free: Free::End,
     }
 }
 
@@ -1186,6 +1228,7 @@ fn push_poll_rows(
             image: None,
             emotes: Vec::new(),
             audio: None,
+            free: Free::End,
         });
     }
 
@@ -1765,8 +1808,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
                 waiting = Some((msg, buttons));
             }
             let free = row.image.is_none() && sounding.is_none();
-            // What the row says, and where its read marker begins if it has one.
-            let (taken, end) = notes::free_part(&row.line, usize::from(rect.width));
+            // What the row says, and where what is aligned to its end begins.
+            let (taken, end) = notes::free_part(row, usize::from(rect.width));
             if let Some((_, buttons)) = &mut waiting
                 && free
                 && let Some(placed) = notes::place(buttons, taken, end)
@@ -2281,6 +2324,113 @@ mod tests {
         }
     }
 
+    /// A message by `sender`, a name, from the account `id`.
+    fn by(id: &str, sender: &str, body: &str) -> Message {
+        Message {
+            id: body.into(),
+            sender: sender.into(),
+            sender_id: Some(id.into()),
+            time: "12:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        }
+    }
+
+    /// The name each sender's header shows, and its colour.
+    fn headers(rows: &[Row]) -> Vec<(String, Option<ratatui::style::Color>)> {
+        rows.iter()
+            .filter(|row| row.line.spans.first().is_some_and(|s| s.content == "● "))
+            .map(|row| {
+                let name = &row.line.spans[1];
+                (name.content.to_string(), name.style.fg)
+            })
+            .collect()
+    }
+
+    /// Two accounts on two servers with the same name (no display names: the first
+    /// part of their ids, as the user's own two had) are two people: a header each,
+    /// each in the colour of their id, a shield said again for the other.
+    #[test]
+    fn senders_who_share_a_name_are_told_apart() {
+        use crate::model::Shield;
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let here = "@samuelsson:home1.test";
+        let there = "@samuelsson:home2.test";
+        // Coloured by their ids, which have two colours in this theme.
+        assert_ne!(theme.user_color(here), theme.user_color(there));
+        let (one, two) = (Some(theme.user_color(here)), Some(theme.user_color(there)));
+        let mut room = demo_rooms().remove(0);
+        for name in ["samuelsson", "Sammy"] {
+            room.messages = vec![
+                by(here, name, "from one"),
+                by(here, name, "from one again"),
+                by(there, name, "from the other"),
+            ];
+            let rows = build_rows(&room, 60, &theme, None, &images);
+            assert_eq!(
+                headers(&rows),
+                [(name.to_owned(), one), (name.to_owned(), two)],
+                "{name}"
+            );
+            // A doubt about the sender is said for each of them.
+            for message in &mut room.messages {
+                message.shield = Some(Shield::SenderMismatch);
+            }
+            let text: Vec<String> = build_rows(&room, 60, &theme, None, &images)
+                .iter()
+                .map(|row| row.line.to_string())
+                .collect();
+            let label = Shield::SenderMismatch.label();
+            let said: Vec<usize> = (0..text.len())
+                .filter(|at| text[*at].contains(label))
+                .collect();
+            assert_eq!(said.len(), 2, "{text:#?}");
+            let other = text.iter().position(|row| row.contains("from the other"));
+            assert!(
+                other.is_some_and(|other| said[0] < other && other <= said[1]),
+                "{text:#?}"
+            );
+
+            // The SDK says the name is ambiguous: each is named with their id, in a
+            // header and in an action line.
+            for message in &mut room.messages {
+                message.sender_ambiguous = true;
+            }
+            room.messages[2].kind = MsgKind::Emote;
+            let rows = build_rows(&room, 60, &theme, None, &images);
+            assert_eq!(
+                headers(&rows),
+                [(format!("{name} (@samuelsson:home1.test)"), one)],
+                "{name}"
+            );
+            let text: Vec<String> = rows.iter().map(|row| row.line.to_string()).collect();
+            let action = format!("* {name} (@samuelsson:home2.test) from the other");
+            assert!(text.iter().any(|row| row.contains(&action)), "{text:#?}");
+            // Narrower, the time goes first, then the name gives way before the id
+            // does; nothing is wider than the pane.
+            for max in [10, 20, 30, 40] {
+                for row in build_rows(&room, max, &theme, None, &images) {
+                    assert!(row.line.width() <= max, "{max}: {:?}", row.line);
+                }
+            }
+            let narrow = build_rows(&room, 30, &theme, None, &images);
+            let (header, _) = &headers(&narrow)[0];
+            assert!(header.ends_with(" (@samuelsson:home1.test)"), "{header:?}");
+        }
+
+        // Someone whose name nobody else has is named as before, and two messages of
+        // theirs have one header.
+        room.messages = vec![
+            by("@alice:example.org", "alice", "hi"),
+            by("@alice:example.org", "alice", "again"),
+        ];
+        let rows = build_rows(&room, 60, &theme, None, &images);
+        let alice = Some(theme.user_color("@alice:example.org"));
+        assert_eq!(headers(&rows), [("alice".to_owned(), alice)]);
+    }
+
     #[test]
     fn thread_line_fits_any_width_and_is_one_click_target() {
         let theme = Theme::builtin(DEFAULT_THEME).unwrap();
@@ -2289,6 +2439,7 @@ mod tests {
         room.messages[1].thread = Some(ThreadSummary {
             replies: 12,
             latest: Some(("carol".into(), "a long answer\nover two lines".into())),
+            latest_sender: None,
             unread: true,
             demo_replies: Vec::new(),
         });

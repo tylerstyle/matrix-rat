@@ -10,7 +10,7 @@ use super::hit::{HitId, InputTarget};
 use super::modal::{centered, field, popup, row};
 use crate::app::App;
 use crate::modal::{ThreadsLoad, ThreadsPopup};
-use crate::model::ThreadInfo;
+use crate::model::{ThreadInfo, fit_name};
 use crate::text::{sanitize_line, truncate, width};
 use crate::theme::{Role, Theme};
 
@@ -194,9 +194,14 @@ fn empty_text(list: &ThreadsPopup) -> &'static str {
 fn thread_card(frame: &mut Frame, theme: &Theme, rect: Rect, thread: &ThreadInfo, selected: bool) {
     let room = rect.width as usize;
     let marker = if selected { "› " } else { "  " };
+    // A name told apart by its user ID keeps the ID (see `fit_name`).
     let latest = match (&thread.latest_sender, &thread.latest_when) {
-        (Some(who), Some(when)) => format!("{} · {}", sanitize_line(who), sanitize_line(when)),
-        (Some(who), None) => sanitize_line(who),
+        (Some(who), Some(when)) => {
+            let when = format!(" · {}", sanitize_line(when));
+            let who = fit_name(&sanitize_line(who), (room / 3).saturating_sub(width(&when)));
+            format!("{who}{when}")
+        }
+        (Some(who), None) => fit_name(&sanitize_line(who), room / 3),
         (None, Some(when)) => sanitize_line(when),
         (None, None) => String::new(),
     };
@@ -210,7 +215,7 @@ fn thread_card(frame: &mut Frame, theme: &Theme, rect: Rect, thread: &ThreadInfo
     // the count keeps its place before the name does.
     let left = room.saturating_sub(width(marker) + width(&latest) + 1);
     let counts = width(&replies) + width(new);
-    let sender = truncate(
+    let sender = fit_name(
         &sanitize_line(&thread.sender),
         left.saturating_sub(counts).max(left.min(8)),
     );

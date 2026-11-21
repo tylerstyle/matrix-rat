@@ -20,7 +20,7 @@ use matrix_sdk_ui::timeline::{
     TimelineFocus, TimelineItem, TimelineReadReceiptTracking,
 };
 
-use super::convert::display_name;
+use super::convert::shown_name;
 use super::safety::IgnoredSet;
 use super::{moderation, search};
 use crate::model::{ItemRef, Message, ThreadInfo, ThreadSummary};
@@ -73,23 +73,27 @@ pub fn summary(content: &MsgLikeContent, ignored: &HashSet<OwnedUserId>) -> Opti
     if summary.num_replies == 0 {
         return None;
     }
-    let latest = if let TimelineDetails::Ready(event) = &summary.latest_event
+    let (latest, latest_sender) = if let TimelineDetails::Ready(event) = &summary.latest_event
         && !ignored.contains(&event.sender)
     {
         let text = match event.content.as_message() {
             Some(message) => sanitize_line(message.body()),
             None => "a message".to_owned(),
         };
-        Some((
-            sanitize_line(&display_name(&event.sender_profile, &event.sender)),
-            truncate(text.trim(), PREVIEW),
-        ))
+        (
+            Some((
+                sanitize_line(&shown_name(&event.sender_profile, &event.sender)),
+                truncate(text.trim(), PREVIEW),
+            )),
+            Some(event.sender.to_string()),
+        )
     } else {
-        None
+        (None, None)
     };
     Some(ThreadSummary {
         replies: summary.num_replies,
         latest,
+        latest_sender,
         unread: false,
         demo_replies: Vec::new(),
     })
@@ -427,7 +431,7 @@ async fn short_name(
     user: &UserId,
     names: &mut HashMap<(OwnedRoomId, OwnedUserId), String>,
 ) -> String {
-    truncate(
+    crate::model::fit_name(
         &search::cached_sender_name(room, user, names).await,
         LIST_NAME,
     )

@@ -172,7 +172,8 @@ pub fn entry(message: &Message) -> Option<Entry> {
     });
     Some(Entry {
         at: message.sent_at,
-        sender: sanitize_line(&message.sender).trim().to_owned(),
+        // As the timeline names them: two people of the same name are told apart.
+        sender: sanitize_line(&message.sender_name()).trim().to_owned(),
         kind,
         // Cleaned here too, whatever was done before: nothing but `\n` ends a line
         // in what is written from this.

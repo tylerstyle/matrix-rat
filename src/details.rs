@@ -99,7 +99,7 @@ impl DetailsPopup {
                 .readers
                 .iter()
                 .map(|reader| {
-                    let name = sanitize_line(&reader.name);
+                    let name = sanitize_line(&reader.shown_name());
                     match sanitize_line(&reader.time) {
                         time if time.is_empty() => name,
                         time => format!("{name} · {time}"),
@@ -443,10 +443,12 @@ mod tests {
                 Reader {
                     name: "bob".into(),
                     time: "14:06".into(),
+                    ..Default::default()
                 },
                 Reader {
                     name: "carol\u{7}".into(),
                     time: String::new(),
+                    ..Default::default()
                 },
             ],
             total: 5,

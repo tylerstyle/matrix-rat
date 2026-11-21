@@ -902,8 +902,15 @@ impl App {
                     && msg.sender != eff
                 {
                     msg.sender = eff.clone();
+                    // What the SDK found was about the name the message had: whether
+                    // the new one is someone else's too is worked out anew from what
+                    // is loaded (the SDK says it with its next update).
+                    msg.sender_ambiguous = false;
                     room_changed = true;
                 }
+            }
+            if room_changed {
+                self.complete.mark_namesakes(&room.id, &mut room.messages);
             }
             if room_changed && Some(idx) == open_active {
                 any_changed = true;
@@ -917,7 +924,10 @@ impl App {
             && let Some(eff) = profile.display_or_localpart(Some(active_id), uid.as_deref())
             && let Some(view) = &mut self.threads.open
         {
-            view.rename_own_sender(&eff);
+            let complete = &self.complete;
+            view.rename_own_sender(&eff, &|messages| {
+                complete.mark_namesakes(active_id, messages);
+            });
             any_changed = true;
         }
 
@@ -2135,6 +2145,70 @@ mod tests {
         // Inactive room OTHER has explicit None room override, falling back to localpart.
         let other = app.rooms.iter().find(|r| r.id == OTHER).unwrap();
         assert_eq!(other.messages[0].sender, "alice");
+    }
+
+    /// Our own name, put on our messages when our profile arrives, is told apart as
+    /// it is now: what the SDK found about the name the messages had is not kept for
+    /// another one.
+    #[test]
+    fn an_own_name_put_on_our_messages_is_told_apart_as_it_is_now() {
+        let (mut app, mut terminal, _commands) = connected();
+        let said = |id: &str, sender: &str, sender_id: &str, ambiguous: bool| Message {
+            id: id.into(),
+            item: Some(ItemRef::Event(format!("${id}:example.org"))),
+            sender: sender.into(),
+            sender_id: Some(sender_id.into()),
+            sender_ambiguous: ambiguous,
+            body: format!("said {id}"),
+            day: "Today".into(),
+            time: "12:00".into(),
+            own: sender_id == "@alice:example.org",
+            ..Message::default()
+        };
+        let renamed = |app: &mut App, messages: Vec<Message>| {
+            app.on_matrix(MatrixEvent::Timeline {
+                room_id: ROOM.into(),
+                generation: app.generation,
+                messages,
+                reached_start: false,
+                detached: None,
+            });
+            app.on_matrix(MatrixEvent::OwnProfile(OwnProfile {
+                display_name: Some("Sammy".to_owned()),
+                avatar: None,
+                room_names: std::collections::BTreeMap::new(),
+            }));
+        };
+        let name_of = |app: &App, id: &str| -> String {
+            let messages = &app.room().unwrap().messages;
+            let message = messages.iter().find(|m| m.id == id).unwrap();
+            message.sender_name().into_owned()
+        };
+
+        // The SDK found "alice" to be the name of two: us and someone else.
+        renamed(
+            &mut app,
+            vec![
+                said("t1", "alice", "@alice:example.org", true),
+                said("t2", "alice", "@alice:elsewhere.org", true),
+            ],
+        );
+        // Nobody else here goes by "Sammy": our messages say just that.
+        assert_eq!(name_of(&app, "t1"), "Sammy");
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "● Sammy  12:00");
+        find(&text, "● alice (@alice:elsewhere.org)");
+
+        // Someone here goes by "Sammy" already: both are told apart.
+        renamed(
+            &mut app,
+            vec![
+                said("t1", "alice", "@alice:example.org", false),
+                said("t3", "Sammy", "@sammy:elsewhere.org", false),
+            ],
+        );
+        assert_eq!(name_of(&app, "t1"), "Sammy (@alice:example.org)");
+        assert_eq!(name_of(&app, "t3"), "Sammy (@sammy:elsewhere.org)");
     }
 
     #[test]

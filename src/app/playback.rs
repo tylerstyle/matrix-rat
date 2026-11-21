@@ -1495,6 +1495,7 @@ mod tests {
             readers: vec![crate::model::Reader {
                 name: "Bob".to_owned(),
                 time: "10:05".to_owned(),
+                ..Default::default()
             }],
             total: 1,
         };

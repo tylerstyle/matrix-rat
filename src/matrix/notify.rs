@@ -176,10 +176,7 @@ async fn notice(
             if is_ignored_in(ignored, event.sender()) {
                 return NoticeOutcome::Suppressed(room.room_id().to_string());
             }
-            let sender = match room.get_member_no_sync(event.sender()).await {
-                Ok(Some(member)) => member.name().to_owned(),
-                _ => event.sender().localpart().to_owned(),
-            };
+            let sender = super::search::member_name(room, event.sender()).await;
             (sender, describe(&event))
         }
         // An invitation: only the bare facts are known.

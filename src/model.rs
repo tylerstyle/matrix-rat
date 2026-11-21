@@ -123,6 +123,9 @@ pub struct Message {
     pub sender: String,
     /// Full Matrix user ID (`@user:server`), when known (real events from the SDK).
     pub sender_id: Option<String>,
+    /// Someone else in the room goes by the same name, as the SDK finds: the name is
+    /// shown with the user ID (see [`Message::sender_name`]).
+    pub sender_ambiguous: bool,
     pub time: String,
     pub day: String,
     /// When it was sent, in milliseconds since 1970: as the sender's server says, or
@@ -140,6 +143,12 @@ pub struct Message {
     pub html: Option<String>,
     /// Sender and text of the message this one replies to.
     pub reply_to: Option<(String, String)>,
+    /// The user ID of whoever wrote the message replied to, when known: who is quoted
+    /// is told apart from a namesake as a sender is (see [`mark_namesakes`]).
+    pub reply_sender: Option<String>,
+    /// For a line about someone (a membership change, a new profile): their name as
+    /// the line begins with it, and their user ID (see [`mark_namesakes`]).
+    pub subject: Option<(String, String)>,
     /// Event id of the message this one replies to.
     pub reply_event: Option<String>,
     pub reactions: Vec<Reaction>,
@@ -299,9 +308,31 @@ impl ReadBy {
 pub struct Reader {
     /// Display name, safe to show.
     pub name: String,
+    /// Their user ID, which their colour comes from as a sender's does; `None` for
+    /// demo data.
+    pub id: Option<String>,
+    /// Someone else in the room goes by the same name (see [`Reader::shown_name`]).
+    pub ambiguous: bool,
     /// When they read it ("14:05", or with the day when it was not today); empty if
     /// the receipt does not say.
     pub time: String,
+}
+
+impl Reader {
+    /// What tells them from anyone else (see [`Message::sender_key`]).
+    pub fn key(&self) -> &str {
+        self.id.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Their name as a list of readers shows it: with their user ID where someone else
+    /// in the room goes by the same name. (A read marker has no room for the ID: its
+    /// initials are in the colour of the ID instead.)
+    pub fn shown_name(&self) -> std::borrow::Cow<'_, str> {
+        match &self.id {
+            Some(id) if self.ambiguous => disambiguated(&self.name, id).into(),
+            _ => self.name.as_str().into(),
+        }
+    }
 }
 
 /// Hand-written: who read it stays out of logs.
@@ -353,6 +384,8 @@ pub struct ThreadSummary {
     pub replies: u32,
     /// Sender and start of the newest reply, when known.
     pub latest: Option<(String, String)>,
+    /// The user ID of the newest reply's sender, when known (see [`mark_namesakes`]).
+    pub latest_sender: Option<String>,
     /// There are replies the user has not read.
     pub unread: bool,
     /// The replies themselves, for the demo only; with an account they are loaded
@@ -491,7 +524,8 @@ impl ThreadSummary {
         let latest = replies.last()?;
         Some(Self {
             replies: replies.len() as u32,
-            latest: Some((latest.sender.clone(), latest.body.clone())),
+            latest: Some((latest.sender_name().into_owned(), latest.body.clone())),
+            latest_sender: latest.sender_id.clone(),
             unread: false,
             demo_replies: replies,
         })
@@ -641,6 +675,65 @@ impl Message {
         }
     }
 
+    /// The sender's name as shown: with their user ID after it where someone else in
+    /// the room goes by the same name.
+    pub fn sender_name(&self) -> std::borrow::Cow<'_, str> {
+        match &self.sender_id {
+            Some(id) if self.sender_ambiguous => disambiguated(&self.sender, id).into(),
+            _ => self.sender.as_str().into(),
+        }
+    }
+
+    /// What tells the sender from anyone else (their colour comes from it): their user
+    /// ID, or their name where that is not known.
+    pub fn sender_key(&self) -> &str {
+        self.sender_id.as_deref().unwrap_or(&self.sender)
+    }
+
+    /// Whether `other` is by the same person: the same user ID where both have one,
+    /// else the same name.
+    pub fn same_sender(&self, other: &Message) -> bool {
+        match (&self.sender_id, &other.sender_id) {
+            (Some(one), Some(two)) => one == two,
+            _ => self.sender == other.sender,
+        }
+    }
+
+    /// The people the message names, each by their name as given (not told apart)
+    /// and user ID: its sender, whom its line is about, whoever wrote what it quotes,
+    /// the latest reply of its thread, and its readers.
+    fn people(&self) -> impl Iterator<Item = (&str, &str)> {
+        let sender = self
+            .sender_id
+            .as_deref()
+            .filter(|_| self.kind != MsgKind::ReadMarker)
+            .map(|id| (self.sender.as_str(), id));
+        let subject = self
+            .subject
+            .as_ref()
+            .map(|(name, id)| (name.as_str(), id.as_str()));
+        let quoted = self
+            .reply_to
+            .as_ref()
+            .zip(self.reply_sender.as_deref())
+            .map(|((name, _), id)| (plain_name(name, id), id));
+        let latest = self.thread.as_ref().and_then(|thread| {
+            let (name, _) = thread.latest.as_ref()?;
+            let id = thread.latest_sender.as_deref()?;
+            Some((plain_name(name, id), id))
+        });
+        let readers = self.read_by.readers.iter().filter_map(|reader| {
+            let id = reader.id.as_deref()?;
+            Some((reader.name.as_str(), id))
+        });
+        sender
+            .into_iter()
+            .chain(subject)
+            .chain(quoted)
+            .chain(latest)
+            .chain(readers)
+    }
+
     /// True for non-interactive status or divider rows (`System` or `ReadMarker`).
     pub fn is_system_or_marker(&self) -> bool {
         matches!(self.kind, MsgKind::System | MsgKind::ReadMarker)
@@ -740,6 +833,224 @@ impl Message {
                 .any(|window| window.eq_ignore_ascii_case(MARK))
         })
     }
+}
+
+/// A name that someone else in the room goes by too, told apart as Element does:
+/// `name (@user:server)`. The ID is made safe for the terminal.
+pub fn disambiguated(name: &str, user_id: &str) -> String {
+    format!("{name} ({})", crate::text::sanitize_line(user_id))
+}
+
+/// `shown` without the ID [`disambiguated`] put after it for `user_id`, if it has it.
+fn plain_name<'a>(shown: &'a str, user_id: &str) -> &'a str {
+    told_apart(shown, user_id).unwrap_or(shown)
+}
+
+/// The name in `shown` if [`disambiguated`] told it apart for `user_id`.
+fn told_apart<'a>(shown: &'a str, user_id: &str) -> Option<&'a str> {
+    shown
+        .strip_suffix(')')?
+        .strip_suffix(user_id)?
+        .strip_suffix(" (")
+}
+
+/// Tells apart people of one name among `messages` where the SDK does not: it knows
+/// only the members it has loaded, those without a display name not among each other,
+/// and not those who left. Two user IDs seen under one name (as senders, as whom a
+/// line is about, as the writers of what is quoted or of a thread's latest reply, as
+/// readers) are each named with their ID; and whoever the SDK found ambiguous on one
+/// of their messages is named with the ID in the quotes, thread lines, readers and
+/// system lines about them too, which the SDK leaves as they were made.
+///
+/// Only adds what is missing: what was told apart stays as it is, and the pass may
+/// be made again on what it made. Costs a lookup per name given, and nothing more
+/// where nobody is to be told apart.
+pub fn mark_namesakes(messages: &mut [Message]) {
+    mark_namesakes_among(messages, None);
+}
+
+/// Says whether someone other than an ID (the second) goes by a name (the first)
+/// beyond the messages: among the room's members, as far as they are known.
+pub type Elsewhere<'a> = &'a dyn Fn(&str, &str) -> bool;
+
+/// [`mark_namesakes`], where `elsewhere` also says who else goes by a name.
+pub fn mark_namesakes_among(messages: &mut [Message], elsewhere: Option<Elsewhere<'_>>) {
+    let mut namesakes = Namesakes::default();
+    for message in messages.iter() {
+        namesakes.learn(message);
+    }
+    if elsewhere.is_none() && namesakes.nobody() {
+        return;
+    }
+    for message in messages.iter_mut() {
+        namesakes.mark_among(message, elsewhere);
+    }
+}
+
+/// Who shares a name with someone else among the messages it was shown, for
+/// [`mark_namesakes`]; what it knows can be put on other messages too (an archive's,
+/// written one by one after it has seen them all).
+#[derive(Default)]
+pub struct Namesakes {
+    /// Each name with the one ID seen under it, `None` once there is a second.
+    seen: HashMap<String, Option<String>>,
+    /// Those the SDK found ambiguous on one of their messages.
+    flagged: std::collections::HashSet<String>,
+}
+
+/// Hand-written: names and IDs stay out of logs.
+impl fmt::Debug for Namesakes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Namesakes")
+            .field("seen", &self.seen.len())
+            .field("flagged", &self.flagged.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Namesakes {
+    /// Takes in the people of `message`.
+    pub fn learn(&mut self, message: &Message) {
+        for (name, id) in message.people() {
+            match self.seen.get_mut(name) {
+                Some(only) => {
+                    if only.as_deref() != Some(id) {
+                        *only = None;
+                    }
+                }
+                None => {
+                    self.seen.insert(name.to_owned(), Some(id.to_owned()));
+                }
+            }
+        }
+        if message.sender_ambiguous
+            && let Some(id) = &message.sender_id
+            && !self.flagged.contains(id)
+        {
+            self.flagged.insert(id.clone());
+        }
+    }
+
+    /// Takes in the room's members, each a name and a user ID, after the messages:
+    /// those who go by a name seen among them, as only they can change what is told
+    /// apart there. A ban line about someone who wrote nothing then names them with
+    /// the ID where a member goes by the same name.
+    pub fn learn_members<'a>(&mut self, members: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        for (name, id) in members {
+            if let Some(only) = self.seen.get_mut(name)
+                && only.as_deref() != Some(id)
+            {
+                *only = None;
+            }
+        }
+    }
+
+    /// Nobody seen is to be told apart.
+    fn nobody(&self) -> bool {
+        self.flagged.is_empty() && self.seen.values().all(Option::is_some)
+    }
+
+    /// Someone else goes by `name`.
+    fn shared(&self, name: &str) -> bool {
+        matches!(self.seen.get(name), Some(None))
+    }
+
+    /// Whether [`Namesakes::mark`] names anyone of `message` with the ID.
+    pub fn touches(&self, message: &Message) -> bool {
+        message
+            .people()
+            .any(|(name, id)| self.shared(name) || self.flagged.contains(id))
+    }
+
+    /// Names with their IDs the people of `message` who are to be told apart.
+    pub fn mark(&self, message: &mut Message) {
+        self.mark_among(message, None);
+    }
+
+    /// [`Namesakes::mark`], with `elsewhere` as for [`mark_namesakes_among`].
+    pub fn mark_among(&self, message: &mut Message, elsewhere: Option<Elsewhere<'_>>) {
+        let shared = |name: &str| self.shared(name);
+        let elsewhere = |name: &str, id: &str| elsewhere.is_some_and(|other| other(name, id));
+        let apart =
+            |name: &str, id: &str| shared(name) || self.flagged.contains(id) || elsewhere(name, id);
+        let tell = |shown: &mut String, id: &str| {
+            if told_apart(shown.as_str(), id).is_none() && apart(shown.as_str(), id) {
+                *shown = disambiguated(shown.as_str(), id);
+            }
+        };
+        if let Some(id) = &message.sender_id
+            && (shared(&message.sender) || elsewhere(&message.sender, id))
+        {
+            message.sender_ambiguous = true;
+        }
+        if let (Some((name, _)), Some(id)) = (&mut message.reply_to, &message.reply_sender) {
+            tell(name, id);
+        }
+        if let Some(thread) = &mut message.thread
+            && let (Some((name, _)), Some(id)) = (&mut thread.latest, &thread.latest_sender)
+        {
+            tell(name, id);
+        }
+        for reader in &mut message.read_by.readers {
+            if let Some(id) = &reader.id
+                && apart(&reader.name, id)
+            {
+                reader.ambiguous = true;
+            }
+        }
+        // A line that begins with whom it is about ("bob joined").
+        if let Some((name, id)) = &message.subject
+            && apart(name, id)
+        {
+            let whole = disambiguated(name, id);
+            if !message.body.starts_with(&whole)
+                && let Some(rest) = message.body.strip_prefix(name.as_str())
+                && let Some(rest) = rest.strip_prefix(' ')
+            {
+                message.body = format!("{whole} {rest}");
+            }
+        }
+        // And one that ends with who did it ("bob was banned by carol").
+        if message.kind == MsgKind::System
+            && let Some(id) = &message.sender_id
+            && message
+                .subject
+                .as_ref()
+                .is_some_and(|(_, about)| about != id)
+            && apart(&message.sender, id)
+            && let Some(rest) = message.body.strip_suffix(message.sender.as_str())
+            && rest.ends_with(" by ")
+        {
+            message.body = format!("{rest}{}", disambiguated(&message.sender, id));
+        }
+    }
+}
+
+/// `shown`, a name as it is shown (told apart by [`disambiguated`] or not), in at most
+/// `columns` columns. Too wide, a told-apart name is shortened before its user ID,
+/// which is what tells the two apart and stays whole; where not even one letter of the
+/// name fits beside it, the ID alone is shown; where that does not fit either, the
+/// whole is cut from its end, as any other name is.
+pub fn fit_name(shown: &str, columns: usize) -> String {
+    use crate::text::{truncate, width};
+    if width(shown) <= columns {
+        return shown.to_owned();
+    }
+    if let Some(at) = shown.rfind(" (@")
+        && shown.ends_with(')')
+    {
+        let (name, id) = shown.split_at(at);
+        let id_width = width(id);
+        // A letter and "…" at least.
+        if columns >= id_width + 2 {
+            return truncate(name, columns - id_width) + id;
+        }
+        let bare = &id[2..id.len() - 1];
+        if width(bare) <= columns {
+            return bare.to_owned();
+        }
+    }
+    truncate(shown, columns)
 }
 
 #[derive(Clone)]
@@ -1183,6 +1494,123 @@ pub fn demo_rooms() -> Vec<Room> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Namesakes the SDK did not find (loaded senders without display names, someone
+    /// who left) are told apart among what is loaded: senders, whom a line is about,
+    /// who is quoted, who replied last in a thread, readers. Whoever the SDK found
+    /// ambiguous is told apart there too. Once is enough: a second pass changes
+    /// nothing.
+    #[test]
+    fn namesakes_among_the_loaded_messages_are_told_apart() {
+        let said = |id: &str, name: &str, user: &str| Message {
+            id: id.into(),
+            sender: name.into(),
+            sender_id: Some(user.into()),
+            body: format!("said {id}"),
+            ..Message::default()
+        };
+        let mut quoting = said("q", "carol", "@carol:example.org");
+        quoting.reply_to = Some(("bob".into(), "what bob said".into()));
+        quoting.reply_sender = Some("@bob:elsewhere.org".into());
+        quoting.thread = Some(ThreadSummary {
+            replies: 1,
+            latest: Some(("bob".into(), "a reply".into())),
+            latest_sender: Some("@bob:example.org".into()),
+            ..ThreadSummary::default()
+        });
+        quoting.read_by = ReadBy {
+            readers: vec![Reader {
+                name: "bob".into(),
+                id: Some("@bob:example.org".into()),
+                ..Reader::default()
+            }],
+            total: 1,
+        };
+        let mut banned = said("x", "carol", "@carol:example.org");
+        banned.kind = MsgKind::System;
+        banned.body = "bob was banned by carol".into();
+        banned.subject = Some(("bob".into(), "@bob:third.org".into()));
+        // Carol is a namesake too, as the SDK found: her quotes say so.
+        let mut dave = said("d", "dave", "@dave:example.org");
+        dave.reply_to = Some(("carol".into(), "what carol said".into()));
+        dave.reply_sender = Some("@carol:example.org".into());
+        let mut other_carol = said("c", "carol", "@carol:example.org");
+        other_carol.sender_ambiguous = true;
+        let mut messages = vec![
+            said("a", "bob", "@bob:example.org"),
+            said("b", "bob", "@bob:elsewhere.org"),
+            quoting,
+            banned,
+            dave,
+            other_carol,
+        ];
+        mark_namesakes(&mut messages);
+        let names: Vec<String> = messages.iter().map(|m| m.sender_name().into()).collect();
+        assert_eq!(
+            names,
+            [
+                "bob (@bob:example.org)",
+                "bob (@bob:elsewhere.org)",
+                "carol",
+                "carol",
+                "dave",
+                "carol (@carol:example.org)"
+            ]
+        );
+        let quoting = &messages[2];
+        assert_eq!(
+            quoting.reply_to.as_ref().unwrap().0,
+            "bob (@bob:elsewhere.org)"
+        );
+        let latest = &quoting.thread.as_ref().unwrap().latest;
+        assert_eq!(latest.as_ref().unwrap().0, "bob (@bob:example.org)");
+        assert_eq!(
+            quoting.read_by.readers[0].shown_name(),
+            "bob (@bob:example.org)"
+        );
+        assert_eq!(
+            messages[3].body,
+            "bob (@bob:third.org) was banned by carol (@carol:example.org)"
+        );
+        assert_eq!(
+            messages[4].reply_to.as_ref().unwrap().0,
+            "carol (@carol:example.org)"
+        );
+        let once = messages.clone();
+        mark_namesakes(&mut messages);
+        for (again, before) in messages.iter().zip(&once) {
+            assert_eq!(again.body, before.body);
+            assert_eq!(again.reply_to, before.reply_to);
+            assert_eq!(again.sender_name(), before.sender_name());
+        }
+
+        // Nobody shares a name: nothing changes.
+        let mut alone = vec![
+            said("a", "bob", "@bob:example.org"),
+            said("e", "eve", "@eve:x.org"),
+        ];
+        mark_namesakes(&mut alone);
+        assert!(alone.iter().all(|m| !m.sender_ambiguous));
+    }
+
+    #[test]
+    fn a_name_told_apart_keeps_its_id_when_it_is_shortened() {
+        let shown = disambiguated("Alexander Hamilton", "@alexander:example.org");
+        // Wide enough: as it is.
+        assert_eq!(fit_name(&shown, 60), shown);
+        // The name gives way, down to a letter.
+        assert_eq!(fit_name(&shown, 30), "Alex… (@alexander:example.org)");
+        assert_eq!(fit_name(&shown, 27), "A… (@alexander:example.org)");
+        // Then the ID alone, then the whole cut from its end.
+        assert_eq!(fit_name(&shown, 26), "@alexander:example.org");
+        assert_eq!(fit_name(&shown, 22), "@alexander:example.org");
+        assert_eq!(fit_name(&shown, 12), "Alexander H…");
+        // A name not told apart is cut as before.
+        assert_eq!(fit_name("Alexander Hamilton", 10), "Alexander…");
+        for columns in 0..50 {
+            assert!(crate::text::width(&fit_name(&shown, columns)) <= columns);
+        }
+    }
 
     #[test]
     fn a_message_and_its_room_print_nothing_private() {

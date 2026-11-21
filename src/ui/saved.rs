@@ -142,7 +142,7 @@ fn draw_entry(
     frame.render_widget(
         Line::from(vec![
             Span::styled(
-                truncate(&who, head_w - width(&saved)),
+                crate::model::fit_name(&who, head_w - width(&saved)),
                 base.patch(theme.style(Role::TitleFocused))
                     .add_modifier(Modifier::BOLD),
             ),

@@ -1172,10 +1172,12 @@ mod tests {
                 Reader {
                     name: "bob".into(),
                     time: "14:05".into(),
+                    ..Default::default()
                 },
                 Reader {
                     name: "carol".into(),
                     time: String::new(),
+                    ..Default::default()
                 },
             ],
             total: 4,
@@ -1565,6 +1567,7 @@ mod tests {
             readers: vec![Reader {
                 name: "bob".into(),
                 time: "14:05".into(),
+                ..Default::default()
             }],
             total: 1,
         };
@@ -1660,6 +1663,7 @@ mod tests {
             readers: vec![Reader {
                 name: "bob".into(),
                 time: String::new(),
+                ..Default::default()
             }],
             total: 1,
         };

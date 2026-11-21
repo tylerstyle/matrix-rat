@@ -494,6 +494,128 @@ impl Stage {
         target
     }
 
+    /// Two people join whose ids differ only in their servers, without display names
+    /// (the first part of the id is the name then, to the SDK too), and say something
+    /// each: their messages name them with their ids. Then one of them takes a name
+    /// of their own, and the other's message names them as before.
+    async fn namesakes(&mut self) {
+        self.begin();
+        let people = ["@namesake:localhost", "@namesake:elsewhere.example"];
+        let ids = ["$from-here", "$from-there"];
+        let mut events = Vec::new();
+        for (n, who) in people.into_iter().enumerate() {
+            self.clock += 1000;
+            events.push(json!({
+                "type": "m.room.member", "state_key": who, "sender": who,
+                "event_id": format!("$namesake{n}"), "origin_server_ts": self.clock,
+                "content": { "membership": "join" },
+            }));
+        }
+        for (id, who) in ids.into_iter().zip(people) {
+            let content = json!({ "msgtype": "m.text", "body": format!("said {id}") });
+            events.push(self.event("m.room.message", id, who, content));
+        }
+        self.sync(json!({ "timeline": { "events": events } })).await;
+        let ambiguous = |items: &Vector<Arc<TimelineItem>>, id: &str| {
+            event(items, id).is_some_and(|event| {
+                matches!(event.sender_profile(), TimelineDetails::Ready(profile)
+                    if profile.display_name_ambiguous)
+            })
+        };
+        let joins = ["$namesake0", "$namesake1"];
+        self.until("namesakes", |items| {
+            ids.iter().chain(&joins).all(|id| ambiguous(items, id))
+        })
+        .await;
+        // Their joining is told apart too.
+        let joined: Vec<&str> = joins
+            .iter()
+            .map(|id| self.message(id).map_or("", |m| m.body.as_str()))
+            .collect();
+        assert_eq!(
+            joined,
+            [
+                "namesake (@namesake:localhost) joined",
+                "namesake (@namesake:elsewhere.example) joined"
+            ]
+        );
+        let named = |stage: &Self| -> Vec<(String, Option<String>)> {
+            ids.iter()
+                .map(|id| {
+                    let message = stage.message(id).expect("their message");
+                    (
+                        message.sender_name().into_owned(),
+                        message.sender_id.clone(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            named(self),
+            [
+                (
+                    "namesake (@namesake:localhost)".to_owned(),
+                    Some(people[0].to_owned())
+                ),
+                (
+                    "namesake (@namesake:elsewhere.example)".to_owned(),
+                    Some(people[1].to_owned())
+                ),
+            ]
+        );
+
+        self.clock += 1000;
+        let renamed = json!({
+            "type": "m.room.member", "state_key": people[1], "sender": people[1],
+            "event_id": "$namesake-renamed", "origin_server_ts": self.clock,
+            "content": { "membership": "join", "displayname": "Elsewhere" },
+        });
+        self.sync(json!({ "timeline": { "events": [renamed] } }))
+            .await;
+        self.until("one renamed", |items| {
+            event(items, ids[0]).is_some() && !ids.iter().any(|id| ambiguous(items, id))
+        })
+        .await;
+        assert_eq!(
+            named(self),
+            [
+                ("namesake".to_owned(), Some(people[0].to_owned())),
+                ("Elsewhere".to_owned(), Some(people[1].to_owned())),
+            ]
+        );
+
+        // A third of the name is invited by us. Whom an invitation is for is said by
+        // the name it gives them; the worker tells them apart from the namesakes it
+        // has loaded.
+        self.clock += 1000;
+        let invite = json!({
+            "type": "m.room.member", "state_key": "@namesake:third.example",
+            "sender": self.room.own_user_id().as_str(),
+            "event_id": "$namesake-invited", "origin_server_ts": self.clock,
+            "content": { "membership": "invite" },
+        });
+        self.sync(json!({ "timeline": { "events": [invite] } }))
+            .await;
+        self.until("invited", |items| {
+            event(items, "$namesake-invited").is_some()
+        })
+        .await;
+        let invited = |messages: &[Message]| -> String {
+            let invited = ItemRef::Event("$namesake-invited".to_owned());
+            let found = messages.iter().find(|m| m.item.as_ref() == Some(&invited));
+            found.map_or(String::new(), |m| m.body.clone())
+        };
+        let made = invited(&self.messages);
+        assert!(made.starts_with("namesake was invited by "), "{made}");
+        let mut loaded = self.messages.clone();
+        crate::model::mark_namesakes(&mut loaded);
+        let told = invited(&loaded);
+        assert!(
+            told.starts_with("namesake (@namesake:third.example) was invited by "),
+            "{told}"
+        );
+    }
+
     /// The message replied to, which is not loaded, is fetched.
     async fn reply_details(&mut self) {
         self.begin();
@@ -714,6 +836,7 @@ fn whole(message: &Message) -> String {
         state,
         sender,
         sender_id,
+        sender_ambiguous,
         time,
         day,
         sent_at,
@@ -725,6 +848,8 @@ fn whole(message: &Message) -> String {
         saved,
         html,
         reply_to,
+        reply_sender,
+        subject,
         reply_event,
         reactions,
         image,
@@ -789,11 +914,12 @@ fn whole(message: &Message) -> String {
         |ThreadSummary {
              replies,
              latest,
+             latest_sender,
              unread,
              demo_replies,
          }| {
             let demo: Vec<String> = demo_replies.iter().map(whole).collect();
-            format!("{replies} {latest:?} {unread} {demo:?}")
+            format!("{replies} {latest:?} {latest_sender:?} {unread} {demo:?}")
         },
     );
     let poll = poll.as_ref().map(
@@ -826,13 +952,20 @@ fn whole(message: &Message) -> String {
     let ReadBy { readers, total } = read_by;
     let readers: Vec<String> = readers
         .iter()
-        .map(|Reader { name, time }| format!("{name} {time}"))
+        .map(
+            |Reader {
+                 name,
+                 id,
+                 ambiguous,
+                 time,
+             }| format!("{name} {id:?} {ambiguous} {time}"),
+        )
         .collect();
     format!(
         "id {id}; item {item:?}; kind {kind:?}; state {state:?}; sender {sender} \
-         {sender_id:?}; time {time} {day} {sent_at:?}; encrypted {encrypted}; body {body}; \
+         {sender_id:?} {sender_ambiguous}; time {time} {day} {sent_at:?}; encrypted {encrypted}; body {body}; \
          own {own}; edited {edited}; pinned {pinned}; saved {saved}; html {html:?}; \
-         reply {reply_to:?} {reply_event:?}; reactions {reactions:?}; image {image:?}; \
+         reply {reply_to:?} {reply_sender:?} {reply_event:?}; subject {subject:?}; reactions {reactions:?}; image {image:?}; \
          file {file:?}; thread {thread:?}; poll {poll:?}; upload {upload:?}; \
          send error {send_error:?}; shield {shield:?}; mentions {mentions:?}; \
          read by {readers:?} {total}; utd {utd:?}"
@@ -893,6 +1026,66 @@ async fn a_message_of_someone_who_took_another_name_is_made_again() {
 }
 
 #[tokio::test]
+async fn people_of_the_same_name_are_named_with_their_ids() {
+    let mut stage = Stage::new(true).await;
+    stage.namesakes().await;
+}
+
+/// Not about reuse, but on the same stand-in server: a pinned (or saved) message that
+/// only the server has is kept in the pinned cache once loaded, and whose it is is
+/// named as the member list has them now: by the name they took after it was kept
+/// too.
+#[tokio::test]
+async fn a_kept_pinned_message_names_its_sender_by_their_name_now() {
+    use crate::matrix::moderation::{EventSummary, PinnedCache, summarize_event};
+    let mut stage = Stage::new(true).await;
+    let cache = Arc::new(Mutex::new(PinnedCache::default()));
+    let sender_of = |found: EventSummary| match found {
+        EventSummary::Found { sender, .. } => sender,
+        EventSummary::Unavailable => panic!("the pinned message was not found"),
+    };
+    let fetched = |stage: &Stage| {
+        stage
+            .server
+            .requests()
+            .iter()
+            .filter(|request| request.path.ends_with(&format!("/event/{GONE}")))
+            .count()
+    };
+    let before = sender_of(summarize_event(&stage.room, GONE, &cache).await);
+    assert!(fetched(&stage) > 0, "loaded from the server");
+
+    // Its sender (who also wrote the reply to it) takes another name.
+    let sender = stage
+        .message(REPLY)
+        .and_then(|message| message.sender_id.clone())
+        .unwrap();
+    stage.clock += 1000;
+    let member = json!({
+        "type": "m.room.member", "state_key": sender, "sender": sender,
+        "event_id": "$pinned-sender-renamed", "origin_server_ts": stage.clock,
+        "content": { "membership": "join", "displayname": "Somebody Else" },
+    });
+    stage
+        .sync(json!({ "timeline": { "events": [member] } }))
+        .await;
+    stage
+        .until("new name", |items| {
+            event(items, REPLY).is_some_and(|event| {
+                matches!(event.sender_profile(), TimelineDetails::Ready(profile)
+                    if profile.display_name.as_deref() == Some("Somebody Else"))
+            })
+        })
+        .await;
+
+    let asked = fetched(&stage);
+    let after = sender_of(summarize_event(&stage.room, GONE, &cache).await);
+    assert_eq!(fetched(&stage), asked, "taken from the pinned cache");
+    assert_ne!(before, "Somebody Else");
+    assert_eq!(after, "Somebody Else");
+}
+
+#[tokio::test]
 async fn a_reply_whose_original_arrives_is_made_again() {
     let mut stage = Stage::new(true).await;
     stage.reply_details().await;
@@ -935,6 +1128,7 @@ async fn what_is_used_again_is_what_is_made_afresh_after_every_change() {
     stage.receipt().await;
     stage.redact().await;
     stage.rename().await;
+    stage.namesakes().await;
     stage.reply_details().await;
     stage.thread_reply().await;
     stage.send().await;

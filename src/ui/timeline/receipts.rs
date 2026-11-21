@@ -6,14 +6,19 @@
 //! and nothing on screen jumps. Where there is little room the marker shrinks
 //! (fewer initials, then just the tick), and on a row that is full to the last
 //! columns the end of the text gives way to it. No row is ever added.
+//!
+//! What a row has at its right end already, a code block's "copy", stays there and
+//! whole: the marker goes before it, as if the row ended there. Only where not even
+//! the smallest marker fits before it does it give way to the marker. Nothing that
+//! can be clicked lies under a marker.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{INDENT, Row};
+use super::{Free, INDENT, Row};
 use crate::images::EMOTE_CELLS;
-use crate::model::ReadBy;
-use crate::text::{truncate, width};
+use crate::model::{ReadBy, fit_name};
+use crate::text::width;
 use crate::theme::{Role, Theme};
 use crate::ui::sidebar::initial;
 
@@ -58,43 +63,125 @@ pub(super) fn mark(row: &mut Row, read_by: &ReadBy, direct: bool, max_width: usi
     if read_by.is_empty() {
         return;
     }
+    // What the row says, and where the marker has to end: before what is aligned to
+    // the row's end, if anything is, and the gap to it.
+    let (text, end) = match row.free {
+        Free::Before { text, at } => (usize::from(text), usize::from(at).saturating_sub(GAP)),
+        Free::End | Free::Nowhere => (row.line.width(), max_width),
+    };
     // A picture is painted over its rows: its width counts as taken.
-    let text = row.line.width();
     let taken = match row.image {
         Some(image) => text.max(INDENT.len() + image.cols as usize),
         None => text,
     };
-    let free = max_width.saturating_sub(taken + GAP);
-    if let Some(spans) = marker(read_by, direct, theme, free) {
+    let free = end.saturating_sub(taken + GAP);
+    let fits = marker(read_by, direct, theme, free);
+    let cuts = row.image.is_none() && end >= CUT_MIN;
+    if fits.is_none()
+        && !cuts
+        && let Free::Before { at, .. } = row.free
+    {
+        // Too narrow for a marker before what is aligned to the row's end: that
+        // ("copy", which the menu has too) gives way, and the marker goes on the row
+        // as on any other.
+        take_aligned(row);
+        row.hits.retain(|(from, ..)| *from < at);
+        row.free = Free::End;
+        return mark(row, read_by, direct, max_width, theme);
+    }
+    let (said, at) = if let Some(spans) = fits {
         let marker_width: usize = spans.iter().map(|span| width(&span.content)).sum();
-        let pad = max_width - text - marker_width;
-        row.line.spans.push(Span::raw(" ".repeat(pad)));
+        let aligned = take_aligned(row);
+        let at = end - marker_width;
+        row.line.spans.push(Span::raw(" ".repeat(at - text)));
         row.line.spans.extend(spans);
+        put_back(row, end, aligned);
         // A voice or audio message that plays keeps it (see `draw`).
         if let Some(part) = &mut row.audio {
             part.marker = marker_width as u16;
         }
-    } else if row.image.is_none() && max_width >= CUT_MIN {
+        (text, at)
+    } else if cuts {
         // "… ✓" over the end of the text. (Nothing can be written over a
         // picture; who read that is in the menu.)
-        cut(&mut row.line, max_width - 3);
-        // An emoji's picture cut into is not drawn over the marker.
+        let aligned = take_aligned(row);
+        let at = end - 3;
+        cut(&mut row.line, at);
+        // An emoji's picture cut into is not drawn over the marker, and what could be
+        // clicked there (a link, the thread line) ends before it.
         row.emotes
-            .retain(|spot| usize::from(spot.col) + usize::from(EMOTE_CELLS.0) <= max_width - 3);
+            .retain(|spot| usize::from(spot.col) + usize::from(EMOTE_CELLS.0) <= at);
+        let said = row.line.width();
+        row.hits.retain_mut(|(from, to, _)| {
+            // (What is aligned after the marker keeps its own.)
+            if usize::from(*from) < end {
+                *to = (*to).min(said as u16);
+            }
+            from < to
+        });
         let muted = Style {
             fg: theme.style(Role::Muted).fg,
             ..Style::new()
         };
-        let pad = max_width - 3 - row.line.width();
+        let pad = at - said;
         row.line
             .spans
             .push(Span::styled(format!("…{} ✓", " ".repeat(pad)), muted));
+        put_back(row, end, aligned);
         // Of that, a voice or audio message that plays keeps the tick: what was cut
         // is not shown meanwhile.
         if let Some(part) = &mut row.audio {
             part.marker = 2;
         }
+        // The marker begins at the "…".
+        (said, said)
+    } else {
+        return;
+    };
+    // The buttons of the message stay clear of the marker (see `notes`).
+    if row.free != Free::Nowhere {
+        row.free = Free::Before {
+            text: said as u16,
+            at: at as u16,
+        };
     }
+}
+
+/// Takes what is aligned to the right end of `row` (a code block's "copy") off it,
+/// with the blanks before it: the row then holds what it says, and the spans taken off
+/// are given back with the column they start at.
+fn take_aligned(row: &mut Row) -> Option<(usize, Vec<Span<'static>>)> {
+    let Free::Before { text, at } = row.free else {
+        return None;
+    };
+    let aligned = split_off(&mut row.line, usize::from(at));
+    split_off(&mut row.line, usize::from(text));
+    Some((usize::from(at), aligned))
+}
+
+/// Puts what [`take_aligned`] took back where it was, after the marker that ends at
+/// column `end`.
+fn put_back(row: &mut Row, end: usize, aligned: Option<(usize, Vec<Span<'static>>)>) {
+    if let Some((at, spans)) = aligned {
+        row.line.spans.push(Span::raw(" ".repeat(at - end)));
+        row.line.spans.extend(spans);
+    }
+}
+
+/// Takes the spans of `line` from column `column` on off it; the column is where one
+/// of them starts.
+fn split_off(line: &mut Line<'static>, column: usize) -> Vec<Span<'static>> {
+    let mut start = 0;
+    let at = line
+        .spans
+        .iter()
+        .position(|span| {
+            let here = start;
+            start += width(&span.content);
+            here >= column
+        })
+        .unwrap_or(line.spans.len());
+    line.spans.split_off(at)
 }
 
 /// Shortens `line` to at most `columns` columns, cutting between characters.
@@ -150,8 +237,16 @@ fn marker(
         if read_by.total == 1
             && let Some(reader) = read_by.readers.first()
         {
-            let name = truncate(&reader.name, NAME);
-            forms.push(vec![Span::styled(format!("✓ {name}"), muted)]);
+            // With the user ID where someone else goes by the same name, which is kept
+            // whole (only the name is held to `NAME`); in the colour of the ID, as the
+            // reader's tile is.
+            let shown = reader.shown_name();
+            let id_width = width(&shown).saturating_sub(width(&reader.name));
+            let name = fit_name(&shown, NAME + id_width);
+            forms.push(vec![
+                Span::styled("✓ ", muted),
+                Span::styled(name, Style::new().fg(theme.user_color(reader.key()))),
+            ]);
         }
         for shown in (1..=TILES.min(read_by.readers.len())).rev() {
             let mut spans = vec![tick()];
@@ -160,7 +255,7 @@ fn marker(
                 let tile = initial(&reader.name);
                 spans.push(Span::styled(
                     tile.trim_end().to_owned(),
-                    Style::new().fg(theme.user_color(&reader.name)),
+                    Style::new().fg(theme.user_color(reader.key())),
                 ));
             }
             let more = read_by.total as usize - shown;
@@ -192,6 +287,7 @@ mod tests {
                 .map(|name| Reader {
                     name: (*name).to_owned(),
                     time: "12:00".into(),
+                    ..Default::default()
                 })
                 .collect(),
             total,
@@ -364,6 +460,7 @@ mod tests {
         wide.messages[0].thread = Some(crate::model::ThreadSummary {
             replies: 3,
             latest: Some(("carol".into(), "a long answer ".repeat(5))),
+            latest_sender: None,
             unread: false,
             demo_replies: Vec::new(),
         });
@@ -374,6 +471,169 @@ mod tests {
             "{rows:?}"
         );
         assert_eq!(width(&rows[3]), 40);
+    }
+
+    /// A message that ends on a one-line code block: its "copy" stays whole where it
+    /// always is, clickable on its own columns only; the marker goes before it, and
+    /// still no row is added.
+    #[test]
+    fn a_marker_leaves_a_code_blocks_copy_label_whole() {
+        use crate::ui::hit::HitId;
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let mut code = message("you", "fn main() {}");
+        code.html = Some("<pre><code>fn main() {}\n</code></pre>".into());
+        for max_width in [20, 21, 24, 30, 44, 80] {
+            let mut room = room(RoomKind::Room, vec![code.clone()]);
+            let bare = build_rows(&room, max_width, &theme, None, &images);
+            let copy = |row: &Row| {
+                row.hits
+                    .iter()
+                    .find(|hit| matches!(hit.2, HitId::CopyCode(0, 0)))
+                    .map(|hit| (hit.0, hit.1))
+            };
+            let label = (max_width as u16 - 4, max_width as u16);
+            assert_eq!(copy(bare.last().unwrap()), Some(label), "{max_width}");
+            for who in [readers(&["bob"], 1), readers(&["bob", "carol", "dave"], 7)] {
+                room.messages[0].read_by = who;
+                let rows = add(
+                    build_rows(&room, max_width, &theme, None, &images),
+                    &room,
+                    max_width,
+                    &theme,
+                );
+                assert_eq!(rows.len(), bare.len(), "{max_width}");
+                let row = rows.last().unwrap();
+                let text = row.line.to_string();
+                assert!(
+                    text.ends_with("  copy") && text.contains('✓'),
+                    "{max_width}: {text:?}"
+                );
+                assert_eq!(width(&text), max_width, "{text:?}");
+                assert_eq!(copy(row), Some(label), "{max_width}: {text:?}");
+                // Nothing is clicked where the marker is.
+                let tick = width(&text[..text.find('✓').unwrap()]) as u16;
+                assert!(
+                    row.hits.iter().all(|hit| !(hit.0..hit.1).contains(&tick)),
+                    "{max_width}: {text:?} {:?}",
+                    row.hits
+                );
+            }
+        }
+    }
+
+    /// One reader of a name someone else has too is named with the id where there is
+    /// room, in the colour of the id as their tile would be.
+    #[test]
+    fn a_single_reader_is_named_with_the_id_and_coloured_by_it() {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let mut said = message("bob", "hi");
+        said.read_by = ReadBy {
+            readers: vec![Reader {
+                name: "carol".into(),
+                id: Some("@carol:elsewhere.org".into()),
+                ambiguous: true,
+                time: "12:00".into(),
+            }],
+            total: 1,
+        };
+        let room = room(RoomKind::Room, vec![said]);
+        let rows = add(
+            build_rows(&room, 80, &theme, None, &images),
+            &room,
+            80,
+            &theme,
+        );
+        let row = rows.last().unwrap();
+        let text = row.line.to_string();
+        assert!(text.ends_with("✓ carol (@carol:elsewhere.org)"), "{text:?}");
+        let name = row
+            .line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("carol"))
+            .unwrap();
+        assert_eq!(
+            name.style.fg,
+            Some(theme.user_color("@carol:elsewhere.org"))
+        );
+    }
+
+    /// Where "copy" fits on a code block's row but a marker does not fit before it,
+    /// the marker is not left out: the label gives way to it.
+    #[test]
+    fn in_a_narrow_view_the_copy_label_gives_way_to_a_marker() {
+        use crate::ui::hit::HitId;
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        for max_width in 12..=20 {
+            // A line of code that leaves room for "copy" and no more.
+            let line = "x".repeat(max_width - 7);
+            let mut code = message("you", &line);
+            code.html = Some(format!("<pre><code>{line}\n</code></pre>"));
+            let mut room = room(RoomKind::Room, vec![code]);
+            room.messages[0].read_by = ReadBy::default();
+            let bare = build_rows(&room, max_width, &theme, None, &images);
+            room.messages[0].read_by = readers(&["bob"], 1);
+            let rows = add(
+                build_rows(&room, max_width, &theme, None, &images),
+                &room,
+                max_width,
+                &theme,
+            );
+            assert_eq!(rows.len(), bare.len(), "{max_width}");
+            let row = rows.last().unwrap();
+            let text = row.line.to_string();
+            assert!(text.contains('✓'), "{max_width}: {text:?}");
+            assert!(width(&text) <= max_width, "{max_width}: {text:?}");
+            let tick = width(&text[..text.find('✓').unwrap()]) as u16;
+            assert!(
+                row.hits.iter().all(|hit| !(hit.0..hit.1).contains(&tick)),
+                "{max_width}: {text:?} {:?}",
+                row.hits
+            );
+            // "copy" is either whole, with its button, or not there at all.
+            let copy = row
+                .hits
+                .iter()
+                .any(|hit| matches!(hit.2, HitId::CopyCode(0, 0)));
+            assert_eq!(copy, text.ends_with("copy"), "{max_width}: {text:?}");
+        }
+    }
+
+    /// Where the end of a row gives way to "… ✓", what could be clicked there stops
+    /// before it.
+    #[test]
+    fn a_row_cut_for_a_marker_is_not_clicked_under_it() {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let mut threaded = message("you", "short");
+        threaded.thread = Some(crate::model::ThreadSummary {
+            replies: 3,
+            latest: Some(("carol".into(), "a long answer ".repeat(5))),
+            latest_sender: None,
+            unread: false,
+            demo_replies: Vec::new(),
+        });
+        threaded.read_by = readers(&["bob"], 1);
+        let room = room(RoomKind::Room, vec![threaded]);
+        let rows = add(
+            build_rows(&room, 40, &theme, None, &images),
+            &room,
+            40,
+            &theme,
+        );
+        let row = rows.last().unwrap();
+        let text = row.line.to_string();
+        assert!(text.ends_with("… ✓"), "{text:?}");
+        assert!(!row.hits.is_empty(), "{text:?}");
+        let dots = width(&text[..text.find('…').unwrap()]) as u16;
+        assert!(
+            row.hits.iter().all(|hit| hit.1 <= dots),
+            "{text:?}: {:?}",
+            row.hits
+        );
     }
 
     #[test]

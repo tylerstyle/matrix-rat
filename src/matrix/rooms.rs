@@ -2053,7 +2053,7 @@ async fn load_room_members(room: Room, room_id: String) -> Option<MatrixEvent> {
         .power_levels()
         .await
         .is_ok_and(|pls| pls.user_can_trigger_room_notification(&own));
-    let members = raw_members
+    let mut members: Vec<crate::complete::Member> = raw_members
         .into_iter()
         .take(MAX_COMPLETION_MEMBERS)
         .map(|member| {
@@ -2069,6 +2069,9 @@ async fn load_room_members(room: Room, room_id: String) -> Option<MatrixEvent> {
             }
         })
         .collect();
+    // In the order of their names: the app finds who goes by a name in them without
+    // sorting them itself (a big room's thousands, on the thread that draws).
+    members.sort_unstable_by(|a, b| a.display_name.cmp(&b.display_name));
     Some(MatrixEvent::RoomMembers {
         room_id,
         members,
@@ -2454,6 +2457,8 @@ async fn prepare_messages(
         .annotate(room, &mut messages, items, own, &ignored)
         .await;
     dedup.dedup(&mut messages);
+    // Namesakes the SDK does not know of, among what is loaded.
+    crate::model::mark_namesakes(&mut messages);
     messages
 }
 
@@ -2791,15 +2796,21 @@ async fn forward(
                 }
             }
             users = typing.recv() => {
-                let names = match users {
-                    Ok(users) => users
-                        .iter()
-                        .filter(|u| !is_ignored_in(&ignored, u))
-                        .map(|u| crate::text::sanitize_line(u.localpart()))
-                        .collect(),
+                let users = match users {
+                    Ok(users) => users,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => return,
                 };
+                let users: Vec<_> = users
+                    .iter()
+                    .filter(|u| !is_ignored_in(&ignored, u))
+                    .collect();
+                // Named as their messages are: two people of the same name are told
+                // apart by their IDs.
+                let mut names = Vec::with_capacity(users.len());
+                for user in users {
+                    names.push(super::search::member_name(&room, user).await);
+                }
                 if events.send(MatrixEvent::Typing { generation, names }).is_err() {
                     return;
                 }

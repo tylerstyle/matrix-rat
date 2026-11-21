@@ -1444,6 +1444,72 @@ mod tests {
         );
     }
 
+    /// A one-row message with "(edited)" after its text still has its button there (the
+    /// blank in front of the remark is not a read marker's); with a read marker at the
+    /// row's end, the button stays to the left of it.
+    #[test]
+    fn a_remark_after_a_one_row_message_leaves_room_for_its_button() {
+        use crate::model::{ReadBy, Reader};
+        let dir = Dir::new("notes-remark");
+        let mut edited = text("e", "Guten Morgen");
+        edited.edited = true;
+        let (mut app, _commands) = app_with(vec![edited], &dir, true);
+        select(&mut app, 0);
+        let row = |shown: &str| {
+            shown
+                .lines()
+                .find(|line| line.contains("Guten Morgen"))
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("{shown}"))
+        };
+        let shown = screen(&mut app, 100, 30);
+        let edited = row(&shown);
+        assert!(
+            edited.contains("Guten Morgen (edited)") && edited.contains(" translate "),
+            "{shown}"
+        );
+
+        app.rooms[0].messages[0].read_by = ReadBy {
+            readers: vec![Reader {
+                name: "carol".into(),
+                ..Reader::default()
+            }],
+            total: 1,
+        };
+        app.timeline_rev += 1;
+        let shown = screen(&mut app, 100, 30);
+        let marked = row(&shown);
+        let (button, tick) = (marked.find(" translate "), marked.find("✓ carol"));
+        assert!(
+            button.is_some() && tick.is_some() && button < tick,
+            "{shown}"
+        );
+        // Two blanks between them, as between a row's text and its marker.
+        assert!(marked.contains(" translate   ✓ carol"), "{shown}");
+    }
+
+    /// A message that is a code block has its button on the block's first row, to the
+    /// left of "copy" and two blanks from it: nothing is painted over the label.
+    #[test]
+    fn a_button_on_a_code_blocks_row_stays_left_of_copy() {
+        let dir = Dir::new("notes-copy");
+        let mut code = text("c", "Guten Morgen");
+        code.html = Some("<pre><code>Guten Morgen\n</code></pre>".into());
+        let (mut app, _commands) = app_with(vec![code], &dir, true);
+        select(&mut app, 0);
+        let shown = screen(&mut app, 100, 30);
+        let row = shown
+            .lines()
+            .find(|line| line.contains("Guten Morgen"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        let (button, copy) = (row.find(" translate "), row.find("copy"));
+        assert!(
+            button.is_some() && copy.is_some() && button < copy,
+            "{shown}"
+        );
+        assert!(row.contains(" translate   copy"), "{shown}");
+    }
+
     #[test]
     fn the_buttons_on_a_message_do_what_the_keys_do() {
         let dir = Dir::new("notes-buttons");
@@ -1927,6 +1993,7 @@ mod tests {
             readers: vec![crate::model::Reader {
                 name: "Carol".into(),
                 time: String::new(),
+                ..Default::default()
             }],
             total: 1,
         };
