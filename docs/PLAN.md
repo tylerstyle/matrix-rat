@@ -9,7 +9,7 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-20, with the road to 1.0.0 (§6); releases up to 0.9.1. The
+Last brought up to date: 2026-11-21, with the release of 1.0.0 (§6); releases up to 1.0.0. The
 plans of 0.8 and 0.9 moved to [`docs/history/`](history/) that day.
 
 ## 1. What it is for
@@ -42,6 +42,7 @@ Not goals: calls, widgets, creating or deactivating accounts, a Windows build.
 | 0.8.0 | 2026-11-16 | `Esc` closes one layer at a time, down to "no chat open"; voice and audio messages played inside the app (a player on the system, pause and seek with mpv); `matrix-rat doctor`; unread count in the window title; a config with one bad value still starts. |
 | 0.9.0 | 2026-11-16 | A channel for agents: `matrix-rat serve` without the screen on a bot account, `rooms`/`send`/`read`/`listen` for scripts, and an MCP server bound to one room with which a coding agent asks a question and waits for the answer (only a verified sender counts unless told otherwise). A playing message shows as playing in its thread too, and a long file name goes on over its rows; the doctor keeps key names in one piece. Build checks: no blocking call without a stated reason, `cargo deny` in CI. |
 | 0.9.1 | 2026-11-17 | `serve` ends with exit code 78 when the profile needs a login, so a service can restart after a real failure; a `wait_for_message` that is already waiting finds an answer loaded late; a first read no longer keeps unverified history for later. |
+| 1.0.0 | 2026-11-21 | Voice messages recorded in the composer (listened to before sending), a rooms bar above the chat while the room list is out of sight, local transcripts (`W`) and translations (`L`) under messages, saved messages and reminders (`b`, `B`), `/archive` to Markdown, `/catchup` through a summary command of your own, `--from` once for each account of the user, `MATRIX_RAT_AGENT_NAME` for `mcp`. The passes of 6.2: fewer threads, open files and wakeups, memory that levels off over a day, timeline changes and drawing many times faster; a swarm review of the whole code with every verified finding fixed; people who share a name told apart (colours follow the account); paging that never stalls and no hidden history; no wildcard matches on our own enums. |
 
 Each release is a tag, a GitHub release with notes, the Nix package in the NUR with a binary
 cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
@@ -49,8 +50,9 @@ cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
 
 ## 3. How it is built
 
-One binary crate, about 146,000 lines of Rust with its tests (945 unit tests and 43 tests against
-a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0; 1113 and 45 at 0.9.1).
+One binary crate, about 190,000 lines of Rust with its tests (945 unit tests and 43 tests against
+a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0; 1113 and 45 at 0.9.1;
+1589 and 53 at 1.0.0).
 
 **Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.19.1, pinned exactly (every minor
 release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`; `ratatui-image` and `image` for
@@ -156,6 +158,9 @@ and [`history/0.9-agent-channel.md`](history/0.9-agent-channel.md).
 
 Each piece is written by matrix-claude with helpers and reviewed by matrix-agy as always.
 
+Shipped in 1.0.0 on 2026-11-21, together with the passes of 6.2 and `--from` once for each
+account of the user.
+
 State on 2026-11-20 (evening): 1, 2, 3, 4, 5, 6, 7 and 8 are merged into the local `main`, reviewed and
 checked (unit and server tests green), nothing of it pushed: 1.0 is published as a whole after the
 passes of 6.2. All of 1 is in, listening to a recording before it is sent included (the ▶ on the
@@ -202,6 +207,9 @@ plays with its waveform in matrix-rat and in Element on iOS. 6 and 7 came as one
    `--from` works as before.
 
 ### 6.2 The passes before 1.0.0 (asked for by the user on 2026-11-17)
+
+Done for 1.0.0 on 2026-11-21: all four, with the swarm review's verified findings fixed
+(`docs/REVIEW-LOG.md`).
 
 Not features: passes over what is there, each ending in a report the user reads. They run in
 two prongs: the measured look at memory and CPU first, so that the review that follows has
@@ -309,7 +317,7 @@ numbers to hold its findings against.
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.
 
-### The agent channel (as of 0.9.1)
+### The agent channel (as of 1.0.0)
 
 - `listen` on the command line does not tell an answer that arrived during a gap in the
   sync and is loaded later, and in a room that shows no message within three pages when a
