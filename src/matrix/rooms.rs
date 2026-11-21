@@ -2454,6 +2454,8 @@ async fn prepare_messages(
         .annotate(room, &mut messages, items, own, &ignored)
         .await;
     dedup.dedup(&mut messages);
+    // Namesakes the SDK does not know of, among what is loaded.
+    crate::model::mark_namesakes(&mut messages);
     messages
 }
 

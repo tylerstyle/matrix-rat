@@ -598,6 +598,8 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
         saved,
         html,
         reply_to,
+        reply_sender,
+        subject,
         reply_event,
         reactions,
         image,
@@ -635,6 +637,8 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
     body.hash(h);
     html.hash(h);
     reply_to.hash(h);
+    reply_sender.hash(h);
+    subject.hash(h);
     reply_event.hash(h);
     reactions.len().hash(h);
     for Reaction { key, count, own } in reactions {
@@ -661,12 +665,14 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
         Some(ThreadSummary {
             replies,
             latest,
+            latest_sender,
             unread,
             demo_replies,
         }) => {
             1u8.hash(h);
             replies.hash(h);
             latest.hash(h);
+            latest_sender.hash(h);
             unread.hash(h);
             demo_replies.len().hash(h);
             for reply in demo_replies {
@@ -1120,6 +1126,7 @@ mod tests {
         thread.thread = Some(ThreadSummary {
             replies: 2,
             latest: Some(("alice".into(), "me".into())),
+            latest_sender: None,
             unread: true,
             demo_replies: Vec::new(),
         });
@@ -1747,6 +1754,8 @@ mod tests {
             34 => {
                 message.reply_to = Some(("carol".into(), format!("quoted {made}")));
                 message.reply_event = (dice.below(2) == 0).then(|| "$c1".to_owned());
+                message.reply_sender =
+                    (dice.below(2) == 0).then(|| "@carol:example.org".to_owned());
             }
             // Someone of the same name on another server, or the same person again; and
             // whether the SDK finds that name to be someone else's too.

@@ -735,6 +735,7 @@ mod tests {
         alpha.messages[5].thread = Some(ThreadSummary {
             replies: 3,
             latest: Some(("carol".into(), "sounds good to me".into())),
+            latest_sender: None,
             unread: true,
             demo_replies: Vec::new(),
         });

@@ -460,6 +460,7 @@ mod tests {
         wide.messages[0].thread = Some(crate::model::ThreadSummary {
             replies: 3,
             latest: Some(("carol".into(), "a long answer ".repeat(5))),
+            latest_sender: None,
             unread: false,
             demo_replies: Vec::new(),
         });
@@ -611,6 +612,7 @@ mod tests {
         threaded.thread = Some(crate::model::ThreadSummary {
             replies: 3,
             latest: Some(("carol".into(), "a long answer ".repeat(5))),
+            latest_sender: None,
             unread: false,
             demo_replies: Vec::new(),
         });

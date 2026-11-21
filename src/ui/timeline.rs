@@ -2439,6 +2439,7 @@ mod tests {
         room.messages[1].thread = Some(ThreadSummary {
             replies: 12,
             latest: Some(("carol".into(), "a long answer\nover two lines".into())),
+            latest_sender: None,
             unread: true,
             demo_replies: Vec::new(),
         });

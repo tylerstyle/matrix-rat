@@ -642,6 +642,16 @@ pub(super) fn event_message(
                     ),
                     _ => (String::new(), "an earlier message".to_owned()),
                 });
+            message.reply_sender =
+                content
+                    .in_reply_to
+                    .as_ref()
+                    .and_then(|reply| match &reply.event {
+                        TimelineDetails::Ready(original) if !ignored.contains(&original.sender) => {
+                            Some(original.sender.to_string())
+                        }
+                        _ => None,
+                    });
             message.reply_event = content
                 .in_reply_to
                 .as_ref()
@@ -785,9 +795,21 @@ pub(super) fn event_message(
             }
         }
         TimelineItemContent::MembershipChange(change) => {
-            let who = change
-                .display_name()
-                .unwrap_or_else(|| change.user_id().localpart().to_owned());
+            // Whom it is about, told apart from a namesake: one's own joining or
+            // leaving as the sender is; someone else by the name the change gives
+            // them (with their ID where a namesake is loaded: see `mark_namesakes`).
+            let user = change.user_id();
+            let (name, who) = if user == event.sender() {
+                (message.sender.clone(), shown.clone())
+            } else {
+                let name = change
+                    .display_name()
+                    .map(|name| sanitize_line(&name))
+                    .filter(|name| !crate::text::is_blank(name))
+                    .unwrap_or_else(|| sanitize_line(user.localpart()));
+                (name.clone(), name)
+            };
+            message.subject = Some((name, user.to_string()));
             let what = match change.change() {
                 Some(MembershipChange::Joined | MembershipChange::InvitationAccepted) => {
                     "joined".to_owned()
@@ -809,6 +831,7 @@ pub(super) fn event_message(
             system(&mut message, format!("{who} {what}"));
         }
         TimelineItemContent::ProfileChange(_) => {
+            message.subject = Some((message.sender.clone(), event.sender().to_string()));
             system(&mut message, format!("{shown} updated their profile"));
         }
         TimelineItemContent::OtherState(state) => {
@@ -819,14 +842,17 @@ pub(super) fn event_message(
                 "m.room.avatar" => "the room picture".to_owned(),
                 "m.room.encryption" => "encryption (now on)".to_owned(),
                 "m.room.create" => {
+                    message.subject = Some((message.sender.clone(), event.sender().to_string()));
                     return Some(system_owned(message, format!("{shown} created the room")));
                 }
                 // Power levels, join rules and the like: noise in a chat view.
                 _ => return None,
             };
+            message.subject = Some((message.sender.clone(), event.sender().to_string()));
             system(&mut message, format!("{shown} changed {what}"));
         }
         TimelineItemContent::CallInvite | TimelineItemContent::RtcNotification { .. } => {
+            message.subject = Some((message.sender.clone(), event.sender().to_string()));
             system(&mut message, format!("{shown} started a call"));
         }
         _ => system(&mut message, "An event this app cannot read".to_owned()),

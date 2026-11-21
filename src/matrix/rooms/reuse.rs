@@ -522,10 +522,23 @@ impl Stage {
                     if profile.display_name_ambiguous)
             })
         };
+        let joins = ["$namesake0", "$namesake1"];
         self.until("namesakes", |items| {
-            ids.iter().all(|id| ambiguous(items, id))
+            ids.iter().chain(&joins).all(|id| ambiguous(items, id))
         })
         .await;
+        // Their joining is told apart too.
+        let joined: Vec<&str> = joins
+            .iter()
+            .map(|id| self.message(id).map_or("", |m| m.body.as_str()))
+            .collect();
+        assert_eq!(
+            joined,
+            [
+                "namesake (@namesake:localhost) joined",
+                "namesake (@namesake:elsewhere.example) joined"
+            ]
+        );
         let named = |stage: &Self| -> Vec<(String, Option<String>)> {
             ids.iter()
                 .map(|id| {
@@ -569,6 +582,37 @@ impl Stage {
                 ("namesake".to_owned(), Some(people[0].to_owned())),
                 ("Elsewhere".to_owned(), Some(people[1].to_owned())),
             ]
+        );
+
+        // A third of the name is invited by us. Whom an invitation is for is said by
+        // the name it gives them; the worker tells them apart from the namesakes it
+        // has loaded.
+        self.clock += 1000;
+        let invite = json!({
+            "type": "m.room.member", "state_key": "@namesake:third.example",
+            "sender": self.room.own_user_id().as_str(),
+            "event_id": "$namesake-invited", "origin_server_ts": self.clock,
+            "content": { "membership": "invite" },
+        });
+        self.sync(json!({ "timeline": { "events": [invite] } }))
+            .await;
+        self.until("invited", |items| {
+            event(items, "$namesake-invited").is_some()
+        })
+        .await;
+        let invited = |messages: &[Message]| -> String {
+            let invited = ItemRef::Event("$namesake-invited".to_owned());
+            let found = messages.iter().find(|m| m.item.as_ref() == Some(&invited));
+            found.map_or(String::new(), |m| m.body.clone())
+        };
+        let made = invited(&self.messages);
+        assert!(made.starts_with("namesake was invited by "), "{made}");
+        let mut loaded = self.messages.clone();
+        crate::model::mark_namesakes(&mut loaded);
+        let told = invited(&loaded);
+        assert!(
+            told.starts_with("namesake (@namesake:third.example) was invited by "),
+            "{told}"
         );
     }
 
@@ -804,6 +848,8 @@ fn whole(message: &Message) -> String {
         saved,
         html,
         reply_to,
+        reply_sender,
+        subject,
         reply_event,
         reactions,
         image,
@@ -868,11 +914,12 @@ fn whole(message: &Message) -> String {
         |ThreadSummary {
              replies,
              latest,
+             latest_sender,
              unread,
              demo_replies,
          }| {
             let demo: Vec<String> = demo_replies.iter().map(whole).collect();
-            format!("{replies} {latest:?} {unread} {demo:?}")
+            format!("{replies} {latest:?} {latest_sender:?} {unread} {demo:?}")
         },
     );
     let poll = poll.as_ref().map(
@@ -918,7 +965,7 @@ fn whole(message: &Message) -> String {
         "id {id}; item {item:?}; kind {kind:?}; state {state:?}; sender {sender} \
          {sender_id:?} {sender_ambiguous}; time {time} {day} {sent_at:?}; encrypted {encrypted}; body {body}; \
          own {own}; edited {edited}; pinned {pinned}; saved {saved}; html {html:?}; \
-         reply {reply_to:?} {reply_event:?}; reactions {reactions:?}; image {image:?}; \
+         reply {reply_to:?} {reply_sender:?} {reply_event:?}; subject {subject:?}; reactions {reactions:?}; image {image:?}; \
          file {file:?}; thread {thread:?}; poll {poll:?}; upload {upload:?}; \
          send error {send_error:?}; shield {shield:?}; mentions {mentions:?}; \
          read by {readers:?} {total}; utd {utd:?}"
