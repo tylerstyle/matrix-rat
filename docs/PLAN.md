@@ -293,7 +293,7 @@ numbers to hold its findings against.
   matrix-rust-sdk PR #7248 (merged 2026-10-09, in no release yet; 0.19.1 is the newest). Our fix
   stays as a safety net when the SDK is updated: upstream `main` can still apply updates twice when
   a timeline falls more than 32 updates behind (`RecvError::Lagged` reloads the events but keeps
-  the old receiver; checked 2026-11-21, not reported upstream).
+  the old receiver; checked 2026-11-21, reported as matrix-rust-sdk issue #7533).
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.
