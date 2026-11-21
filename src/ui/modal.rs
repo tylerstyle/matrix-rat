@@ -392,10 +392,6 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
             }
         }
         frame.render_widget(Line::from(spans), rect);
-        let hovered = matches!(app.hover, Some(HitId::Setting(i, _)) if i == index);
-        if hovered && !selected {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-        }
     }
     for (more, at, mark) in [(above, 0, "▲"), (below, y.saturating_sub(1), "▼")] {
         if more && inner.width > 2 && y > 0 {
@@ -845,8 +841,6 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
         // After drawing: rendering a wide glyph resets the style of its second column.
         if n == picker.selected {
             frame.buffer_mut().set_style(cell, theme.style(Role::Pill));
-        } else if app.hover == Some(HitId::Emoji(n)) {
-            frame.buffer_mut().set_style(cell, theme.style(Role::Hover));
         }
         app.hits.add(cell, HitId::Emoji(n));
     }
@@ -989,15 +983,12 @@ fn ignored_users(
                 .get(all_idx)
                 .map(|s| sanitize_line(s))
                 .unwrap_or_default();
-            let hovered = app.hover == Some(HitId::IgnoredRow(index));
             let text_style = if selected {
                 theme.style(Role::TitleFocused)
-            } else if hovered {
-                theme.style(Role::Hover)
             } else {
                 theme.style(Role::Text)
             };
-            let show_button = selected || hovered;
+            let show_button = selected;
             let label_max = (rect.width as usize).saturating_sub(
                 2 + if show_button {
                     button_w as usize + 1
@@ -1014,13 +1005,8 @@ fn ignored_users(
 
             if show_button && rect.width > button_w + 4 {
                 let btn_rect = Rect::new(rect.right() - button_w, rect.y, button_w, 1);
-                let btn_role = if app.hover == Some(HitId::IgnoredUnignore(index)) {
-                    Role::Hover
-                } else {
-                    Role::Pill
-                };
                 frame.render_widget(
-                    Line::from(Span::styled(button_label, theme.style(btn_role))),
+                    Line::from(Span::styled(button_label, theme.style(Role::Pill))),
                     btn_rect,
                 );
                 app.hits.add(btn_rect, HitId::IgnoredUnignore(index));
@@ -1107,8 +1093,7 @@ fn report(frame: &mut Frame, app: &mut App, area: Rect, form: &mut ReportForm) {
     if btn_row.width > 0 {
         let w = (width(label) as u16).min(btn_row.width);
         let btn_rect = Rect::new(btn_row.x, btn_row.y, w, 1);
-        let btn_focused =
-            form.focus == form.submit_slot() || app.hover == Some(HitId::ReportSubmit);
+        let btn_focused = form.focus == form.submit_slot();
         button(frame, &theme, btn_rect, label, btn_focused);
         app.hits.add(btn_rect, HitId::ReportSubmit);
     }
@@ -1188,14 +1173,10 @@ fn pinned(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut Pinned
         let item = &popup_state.items[index];
         let y = inner.y + (vis * rows_per_item) as u16;
         let selected = index == popup_state.selected;
-        let hovered_row = app.hover == Some(HitId::PinnedRow(index));
-        let hovered_unpin = app.hover == Some(HitId::PinnedUnpin(index));
         let row_area = Rect::new(inner.x, y, inner.width, rows_per_item as u16);
 
         let bg_style = if selected {
             theme.style(Role::Pill)
-        } else if hovered_row || hovered_unpin {
-            theme.style(Role::Hover)
         } else {
             theme.style(Role::Text)
         };
@@ -1239,12 +1220,10 @@ fn pinned(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut Pinned
         if popup_state.can_pin && inner.width > unpin_w + 4 {
             let ux = inner.right() - unpin_w;
             let urect = Rect::new(ux, y, unpin_w, 1);
-            let ustyle = if hovered_unpin {
-                theme.style(Role::Pill).add_modifier(Modifier::BOLD)
-            } else {
-                theme.style(Role::Error)
-            };
-            frame.render_widget(Line::from(Span::styled(unpin_label, ustyle)), urect);
+            frame.render_widget(
+                Line::from(Span::styled(unpin_label, theme.style(Role::Error))),
+                urect,
+            );
             app.hits.add(urect, HitId::PinnedUnpin(index));
         }
 
@@ -1413,8 +1392,8 @@ fn reason_confirm(frame: &mut Frame, app: &mut App, area: Rect, form: &mut Reaso
     if inner.width > submit_w + cancel_w {
         let submit_rect = Rect::new(inner.x, btn_y, submit_w, 1);
         let cancel_rect = Rect::new(inner.x + submit_w + 1, btn_y, cancel_w, 1);
-        let submit_focused = form.on_submit() || app.hover == Some(HitId::ReasonConfirmBtn(true));
-        let cancel_focused = form.on_cancel() || app.hover == Some(HitId::ReasonConfirmBtn(false));
+        let submit_focused = form.on_submit();
+        let cancel_focused = form.on_cancel();
         let submit_style = if submit_focused {
             theme
                 .style(Role::Error)

@@ -235,13 +235,8 @@ pub fn draw_user_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut U
                         r,
                     );
                     let copy_rect = Rect::new(r.x + id_w + 1, r.y, copy_w, 1);
-                    let copy_role = if app.hover == Some(HitId::UserInfoCopy) {
-                        Role::Hover
-                    } else {
-                        Role::Pill
-                    };
                     frame.render_widget(
-                        Line::from(Span::styled(copy_label, theme.style(copy_role))),
+                        Line::from(Span::styled(copy_label, theme.style(Role::Pill))),
                         copy_rect,
                     );
                     app.hits.add(copy_rect, HitId::UserInfoCopy);
@@ -255,7 +250,6 @@ pub fn draw_user_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut U
             Entry::Text(line) => frame.render_widget(line, r),
             Entry::Row(index, item) => {
                 let selected = *index == info.selected;
-                let hovered = app.hover == Some(HitId::UserInfoRow(*index));
                 let marker = Span::styled(
                     if selected { "› " } else { "  " },
                     theme.style(Role::TitleFocused),
@@ -309,9 +303,6 @@ pub fn draw_user_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut U
                     }
                 }
                 frame.render_widget(Line::from(spans), r);
-                if hovered && !selected {
-                    frame.buffer_mut().set_style(r, theme.style(Role::Hover));
-                }
                 if !busy {
                     app.hits.add(r, HitId::UserInfoRow(*index));
                 }

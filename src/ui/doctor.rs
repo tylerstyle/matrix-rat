@@ -123,13 +123,11 @@ fn report_lines(theme: &Theme, doctor: &Popup, room: usize) -> Vec<Line<'static>
 fn buttons(frame: &mut Frame, app: &mut App, theme: &Theme, doctor: &Popup, row: Rect) {
     let pill = (width(COPY) as u16).min(row.width);
     let rect = Rect::new(row.x, row.y, pill, 1);
-    let style = if app.hover == Some(HitId::DoctorCopy) {
-        theme.style(Role::Hover)
-    } else {
-        theme.style(Role::Pill)
-    };
     frame.render_widget(
-        Line::from(Span::styled(truncate(COPY, pill as usize), style)),
+        Line::from(Span::styled(
+            truncate(COPY, pill as usize),
+            theme.style(Role::Pill),
+        )),
         rect,
     );
     app.hits.add(rect, HitId::DoctorCopy);

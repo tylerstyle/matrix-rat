@@ -18,7 +18,6 @@ warning = "yellow"
 
 [ui]
 room_cursor = { bold = true, underline = true }
-hover = { underline = true }
 room_active = { fg = "blue", bold = true, reversed = true }
 message_selected = { reversed = true }
 status = { fg = "reset" }

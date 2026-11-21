@@ -50,7 +50,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         draw_button(
             frame,
             &app.theme,
-            app.hover,
             &mut app.hits,
             Rect::new(right, area.y, w, 1),
             (*button, label, text),
@@ -94,12 +93,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         let label = [long, format!("{due} due")].into_iter().find(fits);
         if let Some(label) = label {
             let w = width(&label) as u16;
-            let style = if app.hover == Some(HitId::ReminderDue) {
-                theme.style(Role::Hover)
-            } else {
-                theme.style(Role::Banner)
-            };
-            spans.push(Span::styled(label, style));
+            spans.push(Span::styled(label, theme.style(Role::Banner)));
             spans.push(Span::styled("  ", status));
             app.hits.add(Rect::new(x, area.y, w, 1), HitId::ReminderDue);
         }
@@ -108,7 +102,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         &app.verify,
         &app.modal,
         theme,
-        app.hover,
         &mut app.hits,
         Rect::new(area.x, area.y, right - area.x, 1),
         &mut spans,
@@ -123,13 +116,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             let pill_w = width(pill) as u16;
             if pill_x + pill_w <= right {
                 spans.push(Span::raw(" "));
-                let pill_style = if app.hover == Some(HitId::Toast) {
-                    theme.style(Role::Hover)
-                } else {
-                    theme
-                        .style(Role::Pill)
-                        .add_modifier(ratatui::style::Modifier::BOLD)
-                };
+                let pill_style = theme
+                    .style(Role::Pill)
+                    .add_modifier(ratatui::style::Modifier::BOLD);
                 spans.push(Span::styled(pill, pill_style));
                 app.hits
                     .add(Rect::new(pill_x, area.y, pill_w, 1), HitId::Toast);
@@ -332,7 +321,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             draw_button(
                 frame,
                 theme,
-                app.hover,
                 &mut app.hits,
                 Rect::new(right, area.y, palette_w, 1),
                 (Button::Palette, palette_key, "palette"),
@@ -355,7 +343,6 @@ fn button_width(label: &str, text: &str) -> u16 {
 fn draw_button(
     frame: &mut Frame,
     theme: &crate::theme::Theme,
-    hover: Option<HitId>,
     hits: &mut super::hit::HitMap,
     rect: Rect,
     (button, label, text): (Button, &str, &str),
@@ -370,8 +357,5 @@ fn draw_button(
     spans.push(Span::styled(format!(" {text} "), theme.style(Role::Status)));
     let line = Line::from(spans);
     frame.render_widget(&line, rect);
-    if hover == Some(HitId::Button(button)) {
-        frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-    }
     hits.add(rect, HitId::Button(button));
 }

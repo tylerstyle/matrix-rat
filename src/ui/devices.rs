@@ -342,8 +342,6 @@ fn sessions_list(frame: &mut Frame, app: &mut App, area: Rect, state: &mut Sessi
         let click = HitId::Do(Action::Devices(Click::Row(index)));
         let name_style = if is_selected {
             theme.style(Role::TitleFocused)
-        } else if app.hover == Some(click) {
-            theme.style(Role::Hover)
         } else {
             theme.style(Role::Text)
         };
@@ -413,7 +411,7 @@ fn sessions_list(frame: &mut Frame, app: &mut App, area: Rect, state: &mut Sessi
         let w = (width(text) as u16).min(at.right().saturating_sub(x));
         let rect = Rect::new(x, at.y, w, at.height);
         let id = HitId::Do(Action::Devices(click));
-        button(frame, &theme, rect, text, app.hover == Some(id));
+        button(frame, &theme, rect, text, false);
         app.hits.add(rect, id);
         x += w + 2;
     }

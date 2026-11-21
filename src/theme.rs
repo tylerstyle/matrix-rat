@@ -79,7 +79,6 @@ roles! {
     RoomUnread => "room_unread",
     RoomActive => "room_active",
     RoomCursor => "room_cursor",
-    Hover => "hover",
     UnreadBadge => "unread_badge",
     MentionBadge => "mention_badge",
     Online => "online",
@@ -329,6 +328,11 @@ impl Theme {
             .map(|role| default_style(*role, &palette))
             .collect();
         for (key, def) in &file.ui {
+            if key == "hover" {
+                // Retired when mouse-over highlighting was removed; ignored silently so
+                // existing user themes load without warnings.
+                continue;
+            }
             let Some(role) = Role::from_name(key) else {
                 warnings.push(format!("ui.{key}: unknown role"));
                 continue;
@@ -425,8 +429,8 @@ impl Theme {
             let marked = style.bg.is_some_and(|bg| bg != Color::Reset) && style.bg != plain_bg;
             if marked && !style.add_modifier.contains(Modifier::REVERSED) {
                 *style = match role {
-                    // Under the mouse or the cursor all the time: a quiet mark.
-                    Role::Hover | Role::RoomCursor => style.add_modifier(Modifier::UNDERLINED),
+                    // Under the room-list cursor: a quiet mark.
+                    Role::RoomCursor => style.add_modifier(Modifier::UNDERLINED),
                     Role::Text => *style,
                     Role::Muted
                     | Role::Border
@@ -500,7 +504,7 @@ fn default_style(role: Role, p: &Palette) -> Style {
         Role::Room => s.fg(p.fg),
         Role::RoomUnread => s.fg(p.fg).add_modifier(bold),
         Role::RoomActive => s.fg(p.primary).bg(p.surface_high).add_modifier(bold),
-        Role::RoomCursor | Role::Hover => s.bg(p.surface),
+        Role::RoomCursor => s.bg(p.surface),
         Role::UnreadBadge | Role::Toast | Role::Pill => {
             s.fg(p.on_primary).bg(p.primary).add_modifier(bold)
         }
@@ -710,11 +714,42 @@ mod tests {
             );
             assert!(
                 !theme
-                    .style(Role::Hover)
+                    .style(Role::RoomCursor)
                     .add_modifier
                     .contains(Modifier::REVERSED)
             );
         }
+    }
+
+    #[test]
+    fn retired_hover_role_loads_without_warning() {
+        let full = Theme::parse(
+            r#"
+[palette]
+bg = "reset"
+fg = "reset"
+
+[ui]
+hover = { bg = "surface", underline = true }
+"#,
+            "custom-full",
+        )
+        .unwrap();
+        assert!(full.warnings.is_empty(), "{:?}", full.warnings);
+
+        let short = Theme::parse(
+            r#"
+[palette]
+bg = "reset"
+fg = "reset"
+
+[ui]
+hover = "primary"
+"#,
+            "custom-short",
+        )
+        .unwrap();
+        assert!(short.warnings.is_empty(), "{:?}", short.warnings);
     }
 
     #[test]

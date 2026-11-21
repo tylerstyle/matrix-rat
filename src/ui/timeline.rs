@@ -146,7 +146,7 @@ impl Row {
         }
         self.source = to;
         for hit in &mut self.hits {
-            hit.2 = message_target(hit.2, to).1;
+            hit.2 = renumber_hit(hit.2, to);
         }
     }
 }
@@ -417,7 +417,7 @@ struct Lay<'a> {
     /// What is left of it after the indent.
     body_width: usize,
     theme: &'a Theme,
-    /// Foreground only, so the row's background (selection, hover) shows through.
+    /// Foreground only, so the row's selection background shows through.
     text_style: Style,
     /// The message whose spoilers are shown.
     revealed: Option<usize>,
@@ -1320,26 +1320,20 @@ impl std::fmt::Debug for RowKey {
     }
 }
 
-/// The message the mouse is on, by whatever of it.
-fn hovered_message(hover: Option<HitId>) -> Option<usize> {
-    message_target(hover?, 0).0
-}
-
-/// The message that `id` is a part of, if it is one of a message; and the same part of
-/// the message at `to`.
-fn message_target(id: HitId, to: usize) -> (Option<usize>, HitId) {
+/// If `id` targets a message, returns the same part pointing at message index `to`.
+fn renumber_hit(id: HitId, to: usize) -> HitId {
     match id {
-        HitId::Message(m) => (Some(m), HitId::Message(to)),
-        HitId::Reaction(m, r) => (Some(m), HitId::Reaction(to, r)),
-        HitId::Link(m, link) => (Some(m), HitId::Link(to, link)),
-        HitId::Image(m) => (Some(m), HitId::Image(to)),
-        HitId::PlayMedia(m) => (Some(m), HitId::PlayMedia(to)),
-        HitId::PollAnswer(m, answer) => (Some(m), HitId::PollAnswer(to, answer)),
-        HitId::Thread(m) => (Some(m), HitId::Thread(to)),
-        HitId::CopyCode(m, block) => (Some(m), HitId::CopyCode(to, block)),
-        HitId::ReplyQuote(m) => (Some(m), HitId::ReplyQuote(to)),
-        HitId::Sender(m) => (Some(m), HitId::Sender(to)),
-        HitId::NoteButton(m, kind) => (Some(m), HitId::NoteButton(to, kind)),
+        HitId::Message(_) => HitId::Message(to),
+        HitId::Reaction(_, r) => HitId::Reaction(to, r),
+        HitId::Link(_, link) => HitId::Link(to, link),
+        HitId::Image(_) => HitId::Image(to),
+        HitId::PlayMedia(_) => HitId::PlayMedia(to),
+        HitId::PollAnswer(_, answer) => HitId::PollAnswer(to, answer),
+        HitId::Thread(_) => HitId::Thread(to),
+        HitId::CopyCode(_, block) => HitId::CopyCode(to, block),
+        HitId::ReplyQuote(_) => HitId::ReplyQuote(to),
+        HitId::Sender(_) => HitId::Sender(to),
+        HitId::NoteButton(_, kind) => HitId::NoteButton(to, kind),
         HitId::Pane(_)
         | HitId::Room(_)
         | HitId::BarRoom(_)
@@ -1397,7 +1391,7 @@ fn message_target(id: HitId, to: usize) -> (Option<usize>, HitId) {
         | HitId::SavedRemove(_)
         | HitId::SavedGap
         | HitId::ReminderChoice(_)
-        | HitId::ReminderDue => (None, id),
+        | HitId::ReminderDue => id,
     }
 }
 
@@ -1494,12 +1488,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
     let back_width = width(back) as u16;
     if in_thread && area.width > back_width + width(&title) as u16 + 8 {
         let rect = Rect::new(area.right() - back_width - 2, area.y, back_width, 1);
-        let role = if app.hover == Some(HitId::Do(Action::CloseThread)) {
-            Role::Hover
-        } else {
-            Role::Pill
-        };
-        frame.render_widget(Line::from(Span::styled(back, app.theme.style(role))), rect);
+        frame.render_widget(
+            Line::from(Span::styled(back, app.theme.style(Role::Pill))),
+            rect,
+        );
         app.hits.add(rect, HitId::Do(Action::CloseThread));
     }
     if inner.width < 2 || inner.height == 0 {
@@ -1736,7 +1728,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
 
     // A short conversation sits at the bottom, next to the composer.
     let pad = height.saturating_sub(rows.len()) as u16;
-    let hovered = hovered_message(app.hover);
     // The message whose buttons are still to be put on a row with room for them.
     let mut waiting: Option<(usize, notes::Buttons)> = None;
     for (n, row) in rows.iter().skip(top).take(height).enumerate() {
@@ -1746,8 +1737,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
                 frame
                     .buffer_mut()
                     .set_style(rect, theme.style(Role::MessageSelected));
-            } else if hovered == Some(msg) {
-                frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
             }
             app.hits.add(rect, HitId::Message(msg));
         }
@@ -1798,7 +1787,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
         // The buttons that transcribe and translate, at the free end of the first row
         // of their message that has room for them (see `notes`).
         if let Some(msg) = row.msg {
-            let lit = selected == Some(msg) || hovered == Some(msg);
+            let lit = selected == Some(msg);
             if waiting.as_ref().is_none_or(|(of, _)| *of != msg) {
                 let buttons = room
                     .messages
@@ -1816,8 +1805,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
             {
                 for (col, label, kind) in placed {
                     let spot = Rect::new(rect.x + col, rect.y, width(&label) as u16, 1);
-                    let style =
-                        notes::button_style(theme, lit, notes::is_hovered(app.hover, msg, kind));
+                    let style = notes::button_style(theme, lit);
                     frame.render_widget(Line::from(Span::styled(label, style)), spot);
                     app.hits.add(spot, HitId::NoteButton(msg, kind));
                 }

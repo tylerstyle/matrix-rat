@@ -91,11 +91,8 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut St
                 continue;
             }
             let selected = index == picker.selected;
-            let hovered = app.hover == Some(HitId::StickerRow(index));
             let style = if selected {
                 theme.style(Role::TitleFocused)
-            } else if hovered {
-                theme.style(Role::Hover)
             } else {
                 theme.style(Role::Text)
             };

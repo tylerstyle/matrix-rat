@@ -157,7 +157,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
         let rect = row(inner, list_y + (vis - palette.scroll) as u16);
         let entry = &palette.entries[entry_idx];
         let selected = vis == palette.selected;
-        let hovered = app.hover == Some(HitId::Palette(vis));
 
         let marker = if selected { "› " } else { "  " };
         let marker_role = if entry.enabled {
@@ -247,8 +246,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, palette: &mut Palette)
                 Role::RoomCursor
             };
             frame.buffer_mut().set_style(rect, theme.style(bg));
-        } else if hovered && entry.enabled {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
         }
         app.hits.add(rect, HitId::Palette(vis));
     }

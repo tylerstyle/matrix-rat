@@ -32,12 +32,10 @@ pub fn new_button(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     let rect = Rect::new(area.right() - 4, area.y, 3, 1);
     let action = Action::NewRoom;
-    let role = if app.hover == Some(HitId::Do(action)) {
-        Role::Hover
-    } else {
-        Role::StatusKey
-    };
-    frame.render_widget(Line::from(Span::styled(" + ", app.theme.style(role))), rect);
+    frame.render_widget(
+        Line::from(Span::styled(" + ", app.theme.style(Role::StatusKey))),
+        rect,
+    );
     app.hits.add(rect, HitId::Do(action));
 }
 
@@ -122,11 +120,7 @@ fn chooser(frame: &mut Frame, app: &mut App, area: Rect, form: &NewPopup) {
             summary,
         );
         for rect in [title, summary] {
-            let id = hit(Click::Stage(stage));
-            if app.hover == Some(id) && !selected {
-                frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-            }
-            app.hits.add(rect, id);
+            app.hits.add(rect, hit(Click::Stage(stage)));
         }
     }
 }
@@ -380,10 +374,6 @@ fn browse(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
         let r2 = row(inner, top + 1);
         let entry = &form.dir_results[idx];
         let selected = idx == form.dir_selected;
-        let hovered = matches!(
-            app.hover,
-            Some(HitId::Do(Action::Manage(Click::BrowseRow(h)))) if h == idx
-        );
         let marker = if selected { "› " } else { "  " };
         let clean_name = entry.name.as_deref().map(sanitize_line);
         let clean_alias = entry.alias.as_deref().map(sanitize_line);
@@ -416,8 +406,6 @@ fn browse(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
 
         let name_style = if selected {
             theme.style(Role::TitleFocused)
-        } else if hovered {
-            theme.style(Role::Hover)
         } else {
             theme.style(Role::Text)
         };
@@ -471,12 +459,6 @@ fn browse(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) {
                 );
                 frame.render_widget(Line::from(Span::styled(text, theme.style(Role::Muted))), r2);
             }
-            if hovered && !selected {
-                frame.buffer_mut().set_style(r2, theme.style(Role::Hover));
-            }
-        }
-        if hovered && !selected {
-            frame.buffer_mut().set_style(r1, theme.style(Role::Hover));
         }
         if !busy {
             app.hits.add(r1, hit(Click::BrowseRow(idx)));
@@ -716,10 +698,6 @@ fn user_search_rows(frame: &mut Frame, app: &mut App, theme: &Theme, inner: Rect
             continue;
         }
         let selected = form.user_selected == Some(i);
-        let hovered = matches!(
-            app.hover,
-            Some(HitId::UserSearchRow(h) | HitId::UserSearchInfo(h)) if h == i
-        );
         let marker = if selected { "› " } else { "  " };
         let clean_name = person
             .display_name
@@ -735,13 +713,11 @@ fn user_search_rows(frame: &mut Frame, app: &mut App, theme: &Theme, inner: Rect
             spans.push(Span::raw(" "));
             used += 3;
         }
-        let show_info = (selected || hovered) && (r.width as usize) > used + 12;
+        let show_info = selected && (r.width as usize) > used + 12;
         let info_w: usize = if show_info { 7 } else { 0 };
         let avail = (r.width as usize).saturating_sub(used + info_w);
         let text_style = if selected {
             theme.style(Role::TitleFocused)
-        } else if hovered {
-            theme.style(Role::Hover)
         } else {
             theme.style(Role::Text)
         };
@@ -765,13 +741,8 @@ fn user_search_rows(frame: &mut Frame, app: &mut App, theme: &Theme, inner: Rect
         app.hits.add(r, HitId::UserSearchRow(i));
         if show_info {
             let info_rect = Rect::new(r.right().saturating_sub(6), r.y, 6, 1);
-            let info_role = if app.hover == Some(HitId::UserSearchInfo(i)) {
-                Role::Hover
-            } else {
-                Role::Pill
-            };
             frame.render_widget(
-                Line::from(Span::styled(" info ", theme.style(info_role))),
+                Line::from(Span::styled(" info ", theme.style(Role::Pill))),
                 info_rect,
             );
             app.hits.add(info_rect, HitId::UserSearchInfo(i));
@@ -1611,17 +1582,8 @@ fn info_row(
     } else {
         theme.style(Role::Text)
     };
-    let hovered = matches!(
-        app.hover,
-        Some(HitId::Do(Action::Manage(
-            Click::Row(i) | Click::Select(i) | Click::Step(i, _)
-        ))) if i == index
-    );
     let finish = |frame: &mut Frame, spans: Vec<Span<'static>>| {
         frame.render_widget(Line::from(spans), rect);
-        if hovered && !selected {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-        }
     };
 
     if let Some(req) = info.knock_request(row) {
@@ -1636,9 +1598,6 @@ fn info_row(
             label_style,
             selected && !busy,
         );
-        if hovered && !selected {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-        }
         return None;
     }
 
@@ -1656,9 +1615,6 @@ fn info_row(
             label_style,
             selected && !busy,
         );
-        if hovered && !selected {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-        }
         return None;
     }
 
@@ -1674,9 +1630,6 @@ fn info_row(
             label_style,
             selected && !busy,
         );
-        if hovered && !selected {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
-        }
         return None;
     }
 
@@ -2227,13 +2180,8 @@ fn draw_pill_buttons(
         let w = width(label) as u16;
         let button_rect = Rect::new(x, rect.y, w, 1);
         let id = hit(click);
-        let role = if app.hover == Some(id) {
-            Role::Hover
-        } else {
-            Role::Pill
-        };
         frame.render_widget(
-            Line::from(Span::styled(label, theme.style(role))),
+            Line::from(Span::styled(label, theme.style(Role::Pill))),
             button_rect,
         );
         app.hits.add(button_rect, id);
@@ -2304,14 +2252,7 @@ pub(super) fn draw_ban_prompt(
         input_y,
     );
     let btn_rect = Rect::new(inner.x + field_w + 1, input_y, btn_w, 1);
-    let hovered = app.hover == Some(submit_hit);
-    let bstyle = if hovered {
-        theme
-            .style(Role::Error)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        theme.style(Role::Error).add_modifier(Modifier::BOLD)
-    };
+    let bstyle = theme.style(Role::Error).add_modifier(Modifier::BOLD);
     frame.render_widget(Line::from(Span::styled(btn, bstyle)), btn_rect);
     app.hits.add(btn_rect, submit_hit);
     Some(cursor)
@@ -2354,11 +2295,8 @@ pub(super) fn draw_role_chooser(
         let r = Rect::new(inner.x, y, inner.width, 1);
         let active = idx == chooser.selected;
         let hit_id = option_hit(idx);
-        let hovered = app.hover == Some(hit_id);
         let style = if active {
             theme.style(Role::Pill)
-        } else if hovered {
-            theme.style(Role::Hover)
         } else {
             theme.style(Role::Text)
         };
@@ -2557,11 +2495,8 @@ fn draw_setting_picker<T>(
         let r = row(inner, y);
         let active = idx == selected;
         let hit_id = hit(Click::SettingChoice(idx));
-        let hovered = app.hover == Some(hit_id);
         let style = if active {
             theme.style(Role::Pill)
-        } else if hovered {
-            theme.style(Role::Hover)
         } else {
             theme.style(Role::Text)
         };
@@ -2893,7 +2828,6 @@ fn draw_addresses_subview(
             let r = row(inner, y);
             let is_sel = idx == *selected;
             let row_hit = hit(Click::AddressRow(idx));
-            let hovered = app.hover == Some(row_hit);
             let mut tags = Vec::new();
             if entry.is_canonical {
                 tags.push("main");
@@ -2946,9 +2880,6 @@ fn draw_addresses_subview(
                 ]),
                 r,
             );
-            if hovered && !is_sel {
-                frame.buffer_mut().set_style(r, theme.style(Role::Hover));
-            }
             if !busy {
                 app.hits.add(r, row_hit);
                 if !pills.is_empty() {
@@ -3067,13 +2998,10 @@ fn draw_permissions_subview(
             let pr = Rect::new(x, r.y, pw, 1);
             let hit_id = hit(Click::PermSet(row_idx, level));
             let active = val == level;
-            let hovered = editable && app.hover == Some(hit_id);
             let role = if active && editable {
                 Role::Pill
             } else if active {
                 Role::TitleFocused
-            } else if hovered {
-                Role::Hover
             } else if editable {
                 Role::StatusKey
             } else {
@@ -3144,14 +3072,7 @@ fn draw_slot_buttons(
         let r = Rect::new(x, rect.y, w, 1);
         let id = hit(Click::SettingSlot(slot));
         let focused = focus == slot;
-        if !focused && app.hover == Some(id) {
-            frame.render_widget(
-                Line::from(Span::styled(label.to_owned(), theme.style(Role::Hover))),
-                r,
-            );
-        } else {
-            button(frame, theme, r, label, focused);
-        }
+        button(frame, theme, r, label, focused);
         if !busy {
             app.hits.add(r, id);
         }
