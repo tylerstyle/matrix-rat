@@ -1,3 +1,4 @@
+mod memo;
 mod notes;
 mod receipts;
 
@@ -18,7 +19,9 @@ use crate::config::LinkPreviews;
 use crate::highlight::Syntax;
 use crate::images::{EMOTE_CELLS, ImageStore, Slot};
 use crate::matrix::{EmoteCatalog, is_valid_mxc};
-use crate::model::{Message, MsgKind, Room, RoomKind, SendState, ThreadSummary};
+#[cfg(test)]
+use crate::model::Room;
+use crate::model::{Message, MsgKind, RoomKind, SendState, ThreadSummary};
 use crate::previews::{Preview, PreviewStore};
 use crate::rich::{self, Format, Rich, Segment};
 use crate::text::{truncate, width, wrap};
@@ -26,6 +29,7 @@ use crate::theme::{Role, Theme};
 
 /// One screen row of the timeline.
 #[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct Row {
     line: Line<'static>,
     /// The message that can be selected through this row; `None` for dividers,
@@ -75,6 +79,7 @@ impl std::fmt::Debug for Row {
 
 /// The two cells of a row that a custom emoji's picture goes over.
 #[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 struct EmoteSpot {
     /// Column of the first cell, from the row's left edge.
     col: u16,
@@ -93,6 +98,7 @@ impl std::fmt::Debug for EmoteSpot {
 
 /// One row of the space a picture takes.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(test, derive(PartialEq))]
 struct ImageRow {
     /// Which row of the picture, from its top.
     row: u16,
@@ -111,6 +117,18 @@ impl Row {
             image: None,
             emotes: Vec::new(),
             audio: None,
+        }
+    }
+
+    /// Makes the row one of the message at `to`: the row's message is at another place
+    /// among the room's now (see `memo`).
+    fn renumber(&mut self, to: usize) {
+        if self.msg.is_some() {
+            self.msg = Some(to);
+        }
+        self.source = to;
+        for hit in &mut self.hits {
+            hit.2 = message_target(hit.2, to).1;
         }
     }
 }
@@ -225,6 +243,7 @@ pub struct EmoteView<'a> {
 }
 
 /// The rows of a room, and the links that would be previewed if they were known.
+#[derive(Default)]
 pub struct Layout {
     pub rows: Vec<Row>,
     /// Message index and address of the link to ask the homeserver about, for each
@@ -350,7 +369,9 @@ pub fn build_rows(
     .rows
 }
 
-/// [`build_rows`], with link previews when `previews` says so.
+/// [`build_rows`], with link previews when `previews` says so. (The timeline lays its
+/// rows out through `memo::lay_out`, which adds notes and read markers to them.)
+#[cfg(test)]
 pub fn build_layout(
     room: &Room,
     max_width: usize,
@@ -360,257 +381,453 @@ pub fn build_layout(
     previews: Option<&PreviewView>,
     emotes: &EmoteView,
 ) -> Layout {
-    let mut wants = Vec::new();
-    let mut emote_wants = Vec::new();
-    let body_width = max_width.saturating_sub(INDENT.len()).max(1);
-    // Foreground only, so the row's background (selection, hover) shows through.
-    let text_style = Style {
-        fg: theme.style(Role::Text).fg,
-        ..Style::new()
-    };
-    let mut rows = Vec::new();
-    // What the previous row showed, to decide on day dividers and sender headers.
-    let mut last_day: Option<&str> = None;
-    let mut last_sender: Option<&str> = None;
-
+    let lay = Lay::new(max_width, theme, revealed, images, previews, emotes);
+    let mut layout = Layout::default();
+    let mut flow = Flow::default();
     for (i, message) in room.messages.iter().enumerate() {
-        let start = rows.len();
+        let before = flow.next(&room.messages, i);
+        message_rows(i, message, before, &lay, &mut layout);
+    }
+    layout
+}
+
+/// What all messages of a room are laid out with alike.
+#[derive(Clone, Copy)]
+struct Lay<'a> {
+    max_width: usize,
+    /// What is left of it after the indent.
+    body_width: usize,
+    theme: &'a Theme,
+    /// Foreground only, so the row's background (selection, hover) shows through.
+    text_style: Style,
+    /// The message whose spoilers are shown.
+    revealed: Option<usize>,
+    /// How much space each picture gets, and which custom emoji pictures are there.
+    images: &'a ImageStore,
+    previews: Option<&'a PreviewView<'a>>,
+    emotes: &'a EmoteView<'a>,
+}
+
+impl<'a> Lay<'a> {
+    fn new(
+        max_width: usize,
+        theme: &'a Theme,
+        revealed: Option<usize>,
+        images: &'a ImageStore,
+        previews: Option<&'a PreviewView<'a>>,
+        emotes: &'a EmoteView<'a>,
+    ) -> Self {
+        Self {
+            max_width,
+            body_width: max_width.saturating_sub(INDENT.len()).max(1),
+            theme,
+            text_style: Style {
+                fg: theme.style(Role::Text).fg,
+                ..Style::new()
+            },
+            revealed,
+            images,
+            previews,
+            emotes,
+        }
+    }
+}
+
+/// What the rows of a message take from the messages before it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+struct Before {
+    /// A day divider goes first: the message before was on another day.
+    day: bool,
+    /// The sender's name and the time go first.
+    header: bool,
+    /// An empty row goes first.
+    gap: bool,
+    /// The message before it, from the same sender, carries the same shield.
+    repeated_shield: bool,
+}
+
+/// What the rows so far showed, to decide on day dividers and sender headers.
+#[derive(Default)]
+struct Flow<'a> {
+    last_day: Option<&'a str>,
+    last_sender: Option<&'a str>,
+}
+
+impl<'a> Flow<'a> {
+    /// What the message at `i` takes from the messages before it; the flow moves past it.
+    fn next(&mut self, messages: &'a [Message], i: usize) -> Before {
+        let message = &messages[i];
+        match message.kind {
+            // A line of its own: whoever speaks next gets a header again.
+            MsgKind::ReadMarker | MsgKind::System => {
+                self.last_sender = None;
+                return Before::default();
+            }
+            MsgKind::Text | MsgKind::Emote | MsgKind::Redacted | MsgKind::Undecryptable => {}
+        }
         let repeated_shield = i > 0 && message.shield.is_some() && {
-            let before = &room.messages[i - 1];
+            let before = &messages[i - 1];
             before.shield == message.shield
                 && before.sender == message.sender
                 && before.day == message.day
         };
-        'message: {
-            match message.kind {
-                MsgKind::ReadMarker => {
-                    let label = " new ";
-                    let fill = max_width.saturating_sub(width(label));
-                    let left = fill / 2;
-                    rows.push(Row::plain(
-                        Line::from(Span::styled(
-                            format!("{}{label}{}", "─".repeat(left), "─".repeat(fill - left)),
-                            theme.style(Role::BorderFocused),
-                        )),
-                        None,
-                    ));
-                    last_sender = None;
-                    break 'message;
-                }
-                MsgKind::System => {
-                    for text in wrap(&format!("· {}", message.body), body_width) {
-                        rows.push(Row::plain(
-                            Line::from(vec![
-                                Span::raw(INDENT),
-                                Span::styled(text, theme.style(Role::Muted)),
-                            ]),
-                            None,
-                        ));
-                    }
-                    last_sender = None;
-                    break 'message;
-                }
-                MsgKind::Text | MsgKind::Emote | MsgKind::Redacted | MsgKind::Undecryptable => {}
-            }
+        let day = self.last_day != Some(message.day.as_str());
+        let is_emote = message.kind == MsgKind::Emote;
+        let header = !is_emote && (day || self.last_sender != Some(message.sender.as_str()));
+        let gap = !day && (header || (is_emote && self.last_sender.is_some()));
+        self.last_day = Some(message.day.as_str());
+        // An action line stands alone: whoever speaks next gets a header again.
+        self.last_sender = (!is_emote).then_some(message.sender.as_str());
+        Before {
+            day,
+            header,
+            gap,
+            repeated_shield,
+        }
+    }
+}
 
-            let new_day = last_day != Some(message.day.as_str());
-            let is_emote = message.kind == MsgKind::Emote;
-            let show_header =
-                !is_emote && (new_day || last_sender != Some(message.sender.as_str()));
-
-            if new_day {
-                let label = truncate(&format!(" {} ", message.day), max_width);
-                let fill = max_width.saturating_sub(width(&label));
+/// Lays out the message at `i` of its room: adds its rows to `out`, and the links and
+/// custom emoji it wants fetched. `before`: what it takes from the messages before it.
+/// Whether the colouring of its code was cut short for lack of time: laid out again, it
+/// may get more colours (see [`crate::highlight::colour`]).
+fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mut Layout) -> bool {
+    let Lay {
+        max_width,
+        body_width,
+        theme,
+        text_style,
+        revealed,
+        images,
+        previews,
+        emotes,
+    } = *lay;
+    let Layout {
+        rows,
+        wants,
+        emote_wants,
+    } = out;
+    let start = rows.len();
+    let repeated_shield = before.repeated_shield;
+    let mut cut_short = false;
+    'message: {
+        match message.kind {
+            MsgKind::ReadMarker => {
+                let label = " new ";
+                let fill = max_width.saturating_sub(width(label));
                 let left = fill / 2;
                 rows.push(Row::plain(
                     Line::from(Span::styled(
                         format!("{}{label}{}", "─".repeat(left), "─".repeat(fill - left)),
-                        theme.style(Role::DateDivider),
+                        theme.style(Role::BorderFocused),
                     )),
                     None,
                 ));
-            } else if show_header || (is_emote && last_sender.is_some()) {
-                rows.push(Row::plain(Line::default(), None));
+                break 'message;
             }
-            last_day = Some(message.day.as_str());
-            // An action line stands alone: whoever speaks next gets a header again.
-            last_sender = (!is_emote).then_some(message.sender.as_str());
-
-            if show_header {
-                let color = Style::new().fg(theme.user_color(&message.sender));
-                let mut spans = vec![Span::styled("● ", color)];
-                let with_time = 2 + width(&message.sender) + 2 + width(&message.time) <= max_width;
-                let name = truncate(&message.sender, max_width.saturating_sub(2));
-                let hit_w = (2 + width(&name)).min(max_width) as u16;
-                spans.push(Span::styled(name, color.add_modifier(Modifier::BOLD)));
-                if with_time {
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(
-                        message.time.clone(),
-                        theme.style(Role::Timestamp),
+            MsgKind::System => {
+                for text in wrap(&format!("· {}", message.body), body_width) {
+                    rows.push(Row::plain(
+                        Line::from(vec![
+                            Span::raw(INDENT),
+                            Span::styled(text, theme.style(Role::Muted)),
+                        ]),
+                        None,
                     ));
                 }
-                let mut row = Row::plain(Line::from(spans), Some(i));
-                if message.sender_id.is_some() && hit_w > 0 {
-                    row.hits.push((0, hit_w, HitId::Sender(i)));
-                }
-                rows.push(row);
+                break 'message;
             }
+            MsgKind::Text | MsgKind::Emote | MsgKind::Redacted | MsgKind::Undecryptable => {}
+        }
 
-            if let Some((sender, quoted)) = &message.reply_to {
-                let quoted = quoted.replace('\n', " ");
-                let quote = if sender.is_empty() {
-                    format!("┃ {quoted}")
-                } else {
-                    format!("┃ {sender}: {quoted}")
-                };
-                let shown = truncate(&quote, body_width);
-                let start = INDENT.len() as u16;
-                let hits = if message.reply_event.is_some() {
-                    vec![(start, start + width(&shown) as u16, HitId::ReplyQuote(i))]
-                } else {
-                    Vec::new()
-                };
-                rows.push(Row {
-                    line: Line::from(vec![
-                        Span::raw(INDENT),
-                        Span::styled(shown, theme.style(Role::ReplyQuote)),
-                    ]),
-                    msg: Some(i),
-                    source: i,
-                    hits,
-                    image: None,
-                    emotes: Vec::new(),
-                    audio: None,
-                });
+        if before.day {
+            let label = truncate(&format!(" {} ", message.day), max_width);
+            let fill = max_width.saturating_sub(width(&label));
+            let left = fill / 2;
+            rows.push(Row::plain(
+                Line::from(Span::styled(
+                    format!("{}{label}{}", "─".repeat(left), "─".repeat(fill - left)),
+                    theme.style(Role::DateDivider),
+                )),
+                None,
+            ));
+        } else if before.gap {
+            rows.push(Row::plain(Line::default(), None));
+        }
+
+        if before.header {
+            let color = Style::new().fg(theme.user_color(&message.sender));
+            let mut spans = vec![Span::styled("● ", color)];
+            let with_time = 2 + width(&message.sender) + 2 + width(&message.time) <= max_width;
+            let name = truncate(&message.sender, max_width.saturating_sub(2));
+            let hit_w = (2 + width(&name)).min(max_width) as u16;
+            spans.push(Span::styled(name, color.add_modifier(Modifier::BOLD)));
+            if with_time {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    message.time.clone(),
+                    theme.style(Role::Timestamp),
+                ));
             }
+            let mut row = Row::plain(Line::from(spans), Some(i));
+            if message.sender_id.is_some() && hit_w > 0 {
+                row.hits.push((0, hit_w, HitId::Sender(i)));
+            }
+            rows.push(row);
+        }
 
-            if let Some(poll) = &message.poll
-                && message.kind != MsgKind::Redacted
-            {
-                push_poll_rows(
-                    &mut rows,
-                    i,
-                    message,
-                    poll,
-                    body_width,
-                    max_width,
-                    theme,
-                    text_style,
-                    repeated_shield,
-                );
+        if let Some((sender, quoted)) = &message.reply_to {
+            let quoted = quoted.replace('\n', " ");
+            let quote = if sender.is_empty() {
+                format!("┃ {quoted}")
             } else {
-                // A picture: rows are kept free here and painted over when drawn. Its
-                // caption follows as the text; without pictures the text names the file.
-                let mut body_text = message.body.as_str();
-                let mut text_wanted = true;
-                if let Some(image) = &message.image {
-                    let slot = images.slot(image, body_width);
-                    let start = INDENT.len() as u16;
-                    match &slot {
-                        Slot::Cells(cols, count) => {
-                            for row in 0..*count {
-                                rows.push(Row {
-                                    line: Line::from(Span::raw(INDENT)),
-                                    msg: Some(i),
-                                    source: i,
-                                    hits: vec![(start, start + cols, HitId::Image(i))],
-                                    image: Some(ImageRow {
-                                        row,
-                                        cols: *cols,
-                                        rows: *count,
-                                    }),
-                                    emotes: Vec::new(),
-                                    audio: None,
-                                });
-                            }
-                        }
-                        Slot::Failed(reason) if message.file.is_none() => {
-                            let text =
-                                truncate(&format!("🖼  {} — {reason}", image.name), body_width);
-                            let end = start + width(&text) as u16;
+                format!("┃ {sender}: {quoted}")
+            };
+            let shown = truncate(&quote, body_width);
+            let start = INDENT.len() as u16;
+            let hits = if message.reply_event.is_some() {
+                vec![(start, start + width(&shown) as u16, HitId::ReplyQuote(i))]
+            } else {
+                Vec::new()
+            };
+            rows.push(Row {
+                line: Line::from(vec![
+                    Span::raw(INDENT),
+                    Span::styled(shown, theme.style(Role::ReplyQuote)),
+                ]),
+                msg: Some(i),
+                source: i,
+                hits,
+                image: None,
+                emotes: Vec::new(),
+                audio: None,
+            });
+        }
+
+        if let Some(poll) = &message.poll
+            && message.kind != MsgKind::Redacted
+        {
+            push_poll_rows(
+                rows,
+                i,
+                message,
+                poll,
+                body_width,
+                max_width,
+                theme,
+                text_style,
+                repeated_shield,
+            );
+        } else {
+            // A picture: rows are kept free here and painted over when drawn. Its
+            // caption follows as the text; without pictures the text names the file.
+            let mut body_text = message.body.as_str();
+            let mut text_wanted = true;
+            if let Some(image) = &message.image {
+                let slot = images.slot(image, body_width);
+                let start = INDENT.len() as u16;
+                match &slot {
+                    Slot::Cells(cols, count) => {
+                        for row in 0..*count {
                             rows.push(Row {
-                                line: Line::from(vec![
-                                    Span::raw(INDENT),
-                                    Span::styled(text, theme.style(Role::Muted)),
-                                ]),
+                                line: Line::from(Span::raw(INDENT)),
                                 msg: Some(i),
                                 source: i,
-                                // Clicking tries again, through the viewer.
-                                hits: vec![(start, end, HitId::Image(i))],
-                                image: None,
+                                hits: vec![(start, start + cols, HitId::Image(i))],
+                                image: Some(ImageRow {
+                                    row,
+                                    cols: *cols,
+                                    rows: *count,
+                                }),
                                 emotes: Vec::new(),
                                 audio: None,
                             });
                         }
-                        Slot::Failed(_) | Slot::Off => {}
                     }
-                    if slot != Slot::Off && message.file.is_none() {
-                        body_text = image.caption.as_deref().unwrap_or("");
-                        text_wanted = !body_text.is_empty();
+                    Slot::Failed(reason) if message.file.is_none() => {
+                        let text = truncate(&format!("🖼  {} — {reason}", image.name), body_width);
+                        let end = start + width(&text) as u16;
+                        rows.push(Row {
+                            line: Line::from(vec![
+                                Span::raw(INDENT),
+                                Span::styled(text, theme.style(Role::Muted)),
+                            ]),
+                            msg: Some(i),
+                            source: i,
+                            // Clicking tries again, through the viewer.
+                            hits: vec![(start, end, HitId::Image(i))],
+                            image: None,
+                            emotes: Vec::new(),
+                            audio: None,
+                        });
                     }
+                    Slot::Failed(_) | Slot::Off => {}
                 }
+                if slot != Slot::Off && message.file.is_none() {
+                    body_text = image.caption.as_deref().unwrap_or("");
+                    text_wanted = !body_text.is_empty();
+                }
+            }
 
-                let playable = message.is_playable()
-                    && message.kind != MsgKind::Redacted
-                    && message.state != SendState::Failed;
-                let (body_style, intro) = match message.kind {
-                    MsgKind::Emote => (
-                        Style::new().fg(theme.user_color(&message.sender)),
-                        Some(format!("* {} ", message.sender)),
-                    ),
-                    MsgKind::Redacted | MsgKind::Undecryptable => {
-                        (theme.style(Role::ReplyQuote), None)
+            let playable = message.is_playable()
+                && message.kind != MsgKind::Redacted
+                && message.state != SendState::Failed;
+            let (body_style, intro) = match message.kind {
+                MsgKind::Emote => (
+                    Style::new().fg(theme.user_color(&message.sender)),
+                    Some(format!("* {} ", message.sender)),
+                ),
+                MsgKind::Redacted | MsgKind::Undecryptable => (theme.style(Role::ReplyQuote), None),
+                MsgKind::Text | MsgKind::System | MsgKind::ReadMarker => (text_style, None),
+            };
+            let mut rich = Rich::of(message.html.as_deref(), body_text);
+            cut_short = crate::highlight::colour(&mut rich);
+            if let (Some(intro), Some(first)) = (intro, rich.lines.first_mut()) {
+                first.segments.insert(
+                    0,
+                    Segment {
+                        text: intro,
+                        format: Format::default(),
+                    },
+                );
+            }
+            if playable && let Some(first) = rich.lines.first_mut() {
+                first.segments.insert(
+                    0,
+                    Segment {
+                        text: "▶ ".to_owned(),
+                        format: Format::default(),
+                    },
+                );
+            }
+            let reveal = revealed == Some(i);
+            // Custom emoji get two cells for their picture where it is there to draw;
+            // one under a spoiler only while the message is uncovered.
+            if emote_pictures(message, images, emotes.ignored) {
+                let mut hidden = vec![false; rich.emotes.len()];
+                for segment in rich.lines.iter().flat_map(|line| &line.segments) {
+                    if let Some(e) = segment.format.emote
+                        && segment.format.spoiler
+                        && !reveal
+                        && let Some(hidden) = hidden.get_mut(e)
+                    {
+                        *hidden = true;
                     }
-                    MsgKind::Text | MsgKind::System | MsgKind::ReadMarker => (text_style, None),
-                };
-                let mut rich = Rich::of(message.html.as_deref(), body_text);
-                crate::highlight::colour(&mut rich);
-                if let (Some(intro), Some(first)) = (intro, rich.lines.first_mut()) {
-                    first.segments.insert(
-                        0,
-                        Segment {
-                            text: intro,
-                            format: Format::default(),
-                        },
-                    );
                 }
-                if playable && let Some(first) = rich.lines.first_mut() {
-                    first.segments.insert(
-                        0,
-                        Segment {
-                            text: "▶ ".to_owned(),
-                            format: Format::default(),
-                        },
-                    );
+                for (emote, hidden) in rich.emotes.iter_mut().zip(hidden) {
+                    if !hidden {
+                        emote.picture = images.emote_ready(&emote.url);
+                        emote_wants.push((i, emote.url.clone()));
+                    }
                 }
-                let reveal = revealed == Some(i);
-                // Custom emoji get two cells for their picture where it is there to draw;
-                // one under a spoiler only while the message is uncovered.
-                if emote_pictures(message, images, emotes.ignored) {
-                    let mut hidden = vec![false; rich.emotes.len()];
-                    for segment in rich.lines.iter().flat_map(|line| &line.segments) {
-                        if let Some(e) = segment.format.emote
-                            && segment.format.spoiler
-                            && !reveal
-                            && let Some(hidden) = hidden.get_mut(e)
-                        {
-                            *hidden = true;
+            }
+            let mut wrapped = if text_wanted {
+                rich::wrap(&rich, body_width)
+            } else {
+                // A picture without a caption; a marker still gets its row.
+                if let Some((label, role)) = marker(message, repeated_shield) {
+                    rows.push(Row::plain(
+                        Line::from(vec![
+                            Span::raw(INDENT),
+                            Span::styled(truncate(&label, body_width), theme.style(role)),
+                        ]),
+                        Some(i),
+                    ));
+                }
+                Vec::new()
+            };
+            let last = wrapped.len().saturating_sub(1);
+            // A voice or audio message: its first line and its waveform change
+            // while it loads or plays (they are drawn over, see `draw`).
+            let sound = sound_rows(message, &rich);
+            let head_rows = wrapped.iter().filter(|row| row.line == 0).count() as u16;
+            let mut wave_seen = false;
+            let play_style = Style {
+                fg: theme.style(Role::Link).fg,
+                ..Style::new()
+            }
+            .add_modifier(Modifier::BOLD);
+            // The block the previous row belonged to, to find the first row of each.
+            let mut in_block = None;
+            for (n, row) in wrapped.drain(..).enumerate() {
+                let first_of = row
+                    .block
+                    .filter(|b| in_block != Some(*b))
+                    .filter(|b| rich.code_blocks.get(*b).is_some_and(|c| !c.text.is_empty()));
+                in_block = row.block;
+                let audio = sound.and_then(|waveform| match row.line {
+                    0 => Some(AudioPart {
+                        head: true,
+                        first: n == 0,
+                        nth: n as u16,
+                        of: head_rows,
+                        marker: 0,
+                    }),
+                    1 if waveform => Some(AudioPart {
+                        head: false,
+                        first: !std::mem::replace(&mut wave_seen, true),
+                        nth: 0,
+                        of: 1,
+                        marker: 0,
+                    }),
+                    _ => None,
+                });
+                let mut spans = vec![Span::raw(INDENT)];
+                let mut segment_hits = Vec::new();
+                let mut spots = Vec::new();
+                let mut col = INDENT.len();
+                let play_start = col as u16;
+                if !row.prefix.is_empty() {
+                    col += width(&row.prefix);
+                    spans.push(Span::styled(row.prefix, theme.style(Role::Muted)));
+                }
+                for (seg_idx, segment) in row.segments.into_iter().enumerate() {
+                    let segment_width = width(&segment.text);
+                    if let Some(emote) = segment.emote_box().and_then(|e| rich.emotes.get(e)) {
+                        spots.push(EmoteSpot {
+                            col: col as u16,
+                            url: emote.url.clone(),
+                        });
+                    }
+                    let (text, style) = styled(&segment, body_style, theme, reveal);
+                    if let Some(link) = segment.format.link {
+                        segment_hits.push((
+                            col as u16,
+                            (col + segment_width) as u16,
+                            HitId::Link(i, link),
+                        ));
+                    }
+                    col += segment_width;
+                    if n == 0
+                        && seg_idx == 0
+                        && playable
+                        && let Some(rest) = text.strip_prefix("▶ ")
+                    {
+                        spans.push(Span::styled("▶ ", play_style));
+                        if !rest.is_empty() {
+                            spans.push(Span::styled(rest.to_owned(), style));
                         }
-                    }
-                    for (emote, hidden) in rich.emotes.iter_mut().zip(hidden) {
-                        if !hidden {
-                            emote.picture = images.emote_ready(&emote.url);
-                            emote_wants.push((i, emote.url.clone()));
-                        }
+                    } else {
+                        spans.push(Span::styled(text, style));
                     }
                 }
-                let mut wrapped = if text_wanted {
-                    rich::wrap(&rich, body_width)
-                } else {
-                    // A picture without a caption; a marker still gets its row.
-                    if let Some((label, role)) = marker(message, repeated_shield) {
-                        rows.push(Row::plain(
+                let mut hits = Vec::new();
+                if n == 0 && playable && (col as u16) > play_start {
+                    hits.push((play_start, col as u16, HitId::PlayMedia(i)));
+                }
+                hits.extend(segment_hits);
+                // "(edited)", "sending" and "not sent" go after the text, or on a row of
+                // their own when there is no room left.
+                let mut own_row = None;
+                if n == last
+                    && let Some((label, role)) = marker(message, repeated_shield)
+                {
+                    if col + 1 + width(&label) <= max_width {
+                        spans.push(Span::raw(" "));
+                        col += 1 + width(&label);
+                        spans.push(Span::styled(label, theme.style(role)));
+                    } else {
+                        own_row = Some(Row::plain(
                             Line::from(vec![
                                 Span::raw(INDENT),
                                 Span::styled(truncate(&label, body_width), theme.style(role)),
@@ -618,212 +835,21 @@ pub fn build_layout(
                             Some(i),
                         ));
                     }
-                    Vec::new()
-                };
-                let last = wrapped.len().saturating_sub(1);
-                // A voice or audio message: its first line and its waveform change
-                // while it loads or plays (they are drawn over, see `draw`).
-                let sound = sound_rows(message, &rich);
-                let head_rows = wrapped.iter().filter(|row| row.line == 0).count() as u16;
-                let mut wave_seen = false;
-                let play_style = Style {
-                    fg: theme.style(Role::Link).fg,
-                    ..Style::new()
                 }
-                .add_modifier(Modifier::BOLD);
-                // The block the previous row belonged to, to find the first row of each.
-                let mut in_block = None;
-                for (n, row) in wrapped.drain(..).enumerate() {
-                    let first_of = row
-                        .block
-                        .filter(|b| in_block != Some(*b))
-                        .filter(|b| rich.code_blocks.get(*b).is_some_and(|c| !c.text.is_empty()));
-                    in_block = row.block;
-                    let audio = sound.and_then(|waveform| match row.line {
-                        0 => Some(AudioPart {
-                            head: true,
-                            first: n == 0,
-                            nth: n as u16,
-                            of: head_rows,
-                            marker: 0,
-                        }),
-                        1 if waveform => Some(AudioPart {
-                            head: false,
-                            first: !std::mem::replace(&mut wave_seen, true),
-                            nth: 0,
-                            of: 1,
-                            marker: 0,
-                        }),
-                        _ => None,
-                    });
-                    let mut spans = vec![Span::raw(INDENT)];
-                    let mut segment_hits = Vec::new();
-                    let mut spots = Vec::new();
-                    let mut col = INDENT.len();
-                    let play_start = col as u16;
-                    if !row.prefix.is_empty() {
-                        col += width(&row.prefix);
-                        spans.push(Span::styled(row.prefix, theme.style(Role::Muted)));
-                    }
-                    for (seg_idx, segment) in row.segments.into_iter().enumerate() {
-                        let segment_width = width(&segment.text);
-                        if let Some(emote) = segment.emote_box().and_then(|e| rich.emotes.get(e)) {
-                            spots.push(EmoteSpot {
-                                col: col as u16,
-                                url: emote.url.clone(),
-                            });
-                        }
-                        let (text, style) = styled(&segment, body_style, theme, reveal);
-                        if let Some(link) = segment.format.link {
-                            segment_hits.push((
-                                col as u16,
-                                (col + segment_width) as u16,
-                                HitId::Link(i, link),
-                            ));
-                        }
-                        col += segment_width;
-                        if n == 0
-                            && seg_idx == 0
-                            && playable
-                            && let Some(rest) = text.strip_prefix("▶ ")
-                        {
-                            spans.push(Span::styled("▶ ", play_style));
-                            if !rest.is_empty() {
-                                spans.push(Span::styled(rest.to_owned(), style));
-                            }
-                        } else {
-                            spans.push(Span::styled(text, style));
-                        }
-                    }
-                    let mut hits = Vec::new();
-                    if n == 0 && playable && (col as u16) > play_start {
-                        hits.push((play_start, col as u16, HitId::PlayMedia(i)));
-                    }
-                    hits.extend(segment_hits);
-                    // "(edited)", "sending" and "not sent" go after the text, or on a row of
-                    // their own when there is no room left.
-                    let mut own_row = None;
-                    if n == last
-                        && let Some((label, role)) = marker(message, repeated_shield)
-                    {
-                        if col + 1 + width(&label) <= max_width {
-                            spans.push(Span::raw(" "));
-                            col += 1 + width(&label);
-                            spans.push(Span::styled(label, theme.style(role)));
-                        } else {
-                            own_row = Some(Row::plain(
-                                Line::from(vec![
-                                    Span::raw(INDENT),
-                                    Span::styled(truncate(&label, body_width), theme.style(role)),
-                                ]),
-                                Some(i),
-                            ));
-                        }
-                    }
-                    // "copy" at the right end of a code block's first line, where it fits.
-                    if let Some(block) = first_of {
-                        let label_width = width(COPY_LABEL);
-                        if col + 1 + label_width <= max_width {
-                            let start = max_width - label_width;
-                            spans.push(Span::raw(" ".repeat(start - col)));
-                            spans.push(Span::styled(COPY_LABEL, theme.style(Role::Muted)));
-                            hits.push((
-                                start as u16,
-                                (start + label_width) as u16,
-                                HitId::CopyCode(i, block),
-                            ));
-                        }
-                    }
-                    rows.push(Row {
-                        line: Line::from(spans),
-                        msg: Some(i),
-                        source: i,
-                        hits,
-                        image: None,
-                        emotes: spots,
-                        audio,
-                    });
-                    rows.extend(own_row);
-                }
-
-                // The first link's preview, under the text.
-                if let Some(view) = previews
-                    && let Some(url) = preview_url(message, &rich, view)
-                {
-                    wants.push((i, url.to_owned()));
-                    if let Some(preview) = view.store.get(url) {
-                        rows.extend(preview_rows(preview, i, body_width, theme));
+                // "copy" at the right end of a code block's first line, where it fits.
+                if let Some(block) = first_of {
+                    let label_width = width(COPY_LABEL);
+                    if col + 1 + label_width <= max_width {
+                        let start = max_width - label_width;
+                        spans.push(Span::raw(" ".repeat(start - col)));
+                        spans.push(Span::styled(COPY_LABEL, theme.style(Role::Muted)));
+                        hits.push((
+                            start as u16,
+                            (start + label_width) as u16,
+                            HitId::CopyCode(i, block),
+                        ));
                     }
                 }
-            }
-
-            // Reaction chips, wrapped onto further rows when they do not fit. One made
-            // with a custom emoji shows its picture once it is there.
-            let mut spans = vec![Span::raw(INDENT)];
-            let mut hits = Vec::new();
-            let mut spots = Vec::new();
-            let mut col = INDENT.len();
-            // Reactions stay on a message that could not be decrypted (they are not
-            // encrypted), but like its text they show nothing of their pictures.
-            let chip_pictures = images.emote_pictures()
-                && !matches!(message.kind, MsgKind::Redacted | MsgKind::Undecryptable)
-                && !message
-                    .sender_id
-                    .as_deref()
-                    .is_some_and(|id| emotes.ignored.contains(id));
-            for (r, reaction) in message.reactions.iter().enumerate() {
-                let key = reaction.key.trim();
-                let wanted = chip_pictures && is_mxc_key(key) && is_valid_mxc(key);
-                if wanted {
-                    emote_wants.push((i, key.to_owned()));
-                }
-                // A chip too wide for the pane is cut short, and then has no room for
-                // the picture: it shows the name instead, as much of it as fits.
-                let pictured = format!(" {} {} ", rich::EMOTE_BOX, reaction.count);
-                let picture = wanted && images.emote_ready(key) && width(&pictured) <= body_width;
-                let whole = if picture {
-                    pictured
-                } else {
-                    format!(
-                        " {} {} ",
-                        reaction_label(&reaction.key, emotes.catalog),
-                        reaction.count
-                    )
-                };
-                let chip = truncate(&whole, body_width);
-                let chip_width = width(&chip);
-                if col + chip_width > max_width && !hits.is_empty() {
-                    rows.push(Row {
-                        line: Line::from(std::mem::replace(&mut spans, vec![Span::raw(INDENT)])),
-                        msg: Some(i),
-                        source: i,
-                        hits: std::mem::take(&mut hits),
-                        image: None,
-                        emotes: std::mem::take(&mut spots),
-                        audio: None,
-                    });
-                    col = INDENT.len();
-                }
-                if picture {
-                    spots.push(EmoteSpot {
-                        col: col as u16 + 1,
-                        url: key.to_owned(),
-                    });
-                }
-                let role = if reaction.own {
-                    Role::ReactionOwn
-                } else {
-                    Role::Reaction
-                };
-                spans.push(Span::styled(chip, theme.style(role)));
-                hits.push((col as u16, (col + chip_width) as u16, HitId::Reaction(i, r)));
-                col += chip_width;
-                if col < max_width {
-                    spans.push(Span::raw(" "));
-                    col += 1;
-                }
-            }
-            if !hits.is_empty() {
                 rows.push(Row {
                     line: Line::from(spans),
                     msg: Some(i),
@@ -831,22 +857,107 @@ pub fn build_layout(
                     hits,
                     image: None,
                     emotes: spots,
+                    audio,
+                });
+                rows.extend(own_row);
+            }
+
+            // The first link's preview, under the text.
+            if let Some(view) = previews
+                && let Some(url) = preview_url(message, &rich, view)
+            {
+                wants.push((i, url.to_owned()));
+                if let Some(preview) = view.store.get(url) {
+                    rows.extend(preview_rows(preview, i, body_width, theme));
+                }
+            }
+        }
+
+        // Reaction chips, wrapped onto further rows when they do not fit. One made
+        // with a custom emoji shows its picture once it is there.
+        let mut spans = vec![Span::raw(INDENT)];
+        let mut hits = Vec::new();
+        let mut spots = Vec::new();
+        let mut col = INDENT.len();
+        // Reactions stay on a message that could not be decrypted (they are not
+        // encrypted), but like its text they show nothing of their pictures.
+        let chip_pictures = images.emote_pictures()
+            && !matches!(message.kind, MsgKind::Redacted | MsgKind::Undecryptable)
+            && !message
+                .sender_id
+                .as_deref()
+                .is_some_and(|id| emotes.ignored.contains(id));
+        for (r, reaction) in message.reactions.iter().enumerate() {
+            let key = reaction.key.trim();
+            let wanted = chip_pictures && is_mxc_key(key) && is_valid_mxc(key);
+            if wanted {
+                emote_wants.push((i, key.to_owned()));
+            }
+            // A chip too wide for the pane is cut short, and then has no room for
+            // the picture: it shows the name instead, as much of it as fits.
+            let pictured = format!(" {} {} ", rich::EMOTE_BOX, reaction.count);
+            let picture = wanted && images.emote_ready(key) && width(&pictured) <= body_width;
+            let whole = if picture {
+                pictured
+            } else {
+                format!(
+                    " {} {} ",
+                    reaction_label(&reaction.key, emotes.catalog),
+                    reaction.count
+                )
+            };
+            let chip = truncate(&whole, body_width);
+            let chip_width = width(&chip);
+            if col + chip_width > max_width && !hits.is_empty() {
+                rows.push(Row {
+                    line: Line::from(std::mem::replace(&mut spans, vec![Span::raw(INDENT)])),
+                    msg: Some(i),
+                    source: i,
+                    hits: std::mem::take(&mut hits),
+                    image: None,
+                    emotes: std::mem::take(&mut spots),
                     audio: None,
                 });
+                col = INDENT.len();
             }
-            if let Some(thread) = &message.thread {
-                rows.push(thread_row(thread, i, body_width, theme));
+            if picture {
+                spots.push(EmoteSpot {
+                    col: col as u16 + 1,
+                    url: key.to_owned(),
+                });
+            }
+            let role = if reaction.own {
+                Role::ReactionOwn
+            } else {
+                Role::Reaction
+            };
+            spans.push(Span::styled(chip, theme.style(role)));
+            hits.push((col as u16, (col + chip_width) as u16, HitId::Reaction(i, r)));
+            col += chip_width;
+            if col < max_width {
+                spans.push(Span::raw(" "));
+                col += 1;
             }
         }
-        for row in &mut rows[start..] {
-            row.source = i;
+        if !hits.is_empty() {
+            rows.push(Row {
+                line: Line::from(spans),
+                msg: Some(i),
+                source: i,
+                hits,
+                image: None,
+                emotes: spots,
+                audio: None,
+            });
+        }
+        if let Some(thread) = &message.thread {
+            rows.push(thread_row(thread, i, body_width, theme));
         }
     }
-    Layout {
-        rows,
-        wants,
-        emote_wants,
+    for row in &mut rows[start..] {
+        row.source = i;
     }
+    cut_short
 }
 
 /// The line under a message that started a thread: how many replies, and who said
@@ -1129,6 +1240,7 @@ fn push_poll_rows(
 
 /// Everything the rows depend on: they are laid out again when any of it changes.
 #[derive(PartialEq)]
+#[cfg_attr(test, derive(Default))]
 struct RowKey {
     room: String,
     messages: u64,
@@ -1167,18 +1279,24 @@ impl std::fmt::Debug for RowKey {
 
 /// The message the mouse is on, by whatever of it.
 fn hovered_message(hover: Option<HitId>) -> Option<usize> {
-    match hover? {
-        HitId::Message(m)
-        | HitId::Reaction(m, _)
-        | HitId::Link(m, _)
-        | HitId::Image(m)
-        | HitId::PlayMedia(m)
-        | HitId::PollAnswer(m, _)
-        | HitId::Thread(m)
-        | HitId::CopyCode(m, _)
-        | HitId::ReplyQuote(m)
-        | HitId::Sender(m)
-        | HitId::NoteButton(m, _) => Some(m),
+    message_target(hover?, 0).0
+}
+
+/// The message that `id` is a part of, if it is one of a message; and the same part of
+/// the message at `to`.
+fn message_target(id: HitId, to: usize) -> (Option<usize>, HitId) {
+    match id {
+        HitId::Message(m) => (Some(m), HitId::Message(to)),
+        HitId::Reaction(m, r) => (Some(m), HitId::Reaction(to, r)),
+        HitId::Link(m, link) => (Some(m), HitId::Link(to, link)),
+        HitId::Image(m) => (Some(m), HitId::Image(to)),
+        HitId::PlayMedia(m) => (Some(m), HitId::PlayMedia(to)),
+        HitId::PollAnswer(m, answer) => (Some(m), HitId::PollAnswer(to, answer)),
+        HitId::Thread(m) => (Some(m), HitId::Thread(to)),
+        HitId::CopyCode(m, block) => (Some(m), HitId::CopyCode(to, block)),
+        HitId::ReplyQuote(m) => (Some(m), HitId::ReplyQuote(to)),
+        HitId::Sender(m) => (Some(m), HitId::Sender(to)),
+        HitId::NoteButton(m, kind) => (Some(m), HitId::NoteButton(to, kind)),
         HitId::Pane(_)
         | HitId::Room(_)
         | HitId::BarRoom(_)
@@ -1236,7 +1354,7 @@ fn hovered_message(hover: Option<HitId>) -> Option<usize> {
         | HitId::SavedRemove(_)
         | HitId::SavedGap
         | HitId::ReminderChoice(_)
-        | HitId::ReminderDue => None,
+        | HitId::ReminderDue => (None, id),
     }
 }
 
@@ -1249,6 +1367,9 @@ pub struct RowCache {
     wants: Vec<(usize, String)>,
     /// The custom emoji pictures to fetch (see `Layout::emote_wants`).
     emote_wants: Vec<(usize, String)>,
+    /// What the rows of each message were laid out from: when anything changes, those
+    /// of the messages that are as they were are kept.
+    memo: memo::Memo,
     /// What was at the bottom of the view when it was last drawn scrolled up.
     anchor: Option<Anchor>,
 }
@@ -1262,6 +1383,7 @@ impl std::fmt::Debug for RowCache {
             .field("rows", &self.rows.len())
             .field("wants", &self.wants.len())
             .field("emote_wants", &self.emote_wants.len())
+            .field("memo", &self.memo)
             .field("anchor", &self.anchor)
             .finish_non_exhaustive()
     }
@@ -1455,7 +1577,11 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
     let previous = app.row_cache.take();
     let mut cache = match previous {
         Some(cache) if cache.key == key => cache,
-        previous => {
+        mut previous => {
+            let anchor = previous
+                .as_mut()
+                .filter(|old| old.key.room == key.room)
+                .and_then(|old| old.anchor.take());
             let view = PreviewView {
                 store: &app.previews,
                 mode: app.link_previews,
@@ -1466,12 +1592,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
                 catalog: &app.emotes.catalog,
                 ignored: &app.ignored_users,
             };
-            let Layout {
-                mut rows,
-                wants,
-                emote_wants,
-            } = build_layout(
-                room,
+            let lay = Lay::new(
                 content.width as usize,
                 theme,
                 revealed,
@@ -1479,24 +1600,25 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
                 Some(&view),
                 &emote_view,
             );
-            // Transcripts and translations, under their messages; a read marker then
-            // sits at the end of the last of those rows.
-            rows = notes::add(
-                rows,
+            // Transcripts and translations go under their messages.
+            let notes = memo::NoteView {
+                notes: app.notes(),
+                current: &|message, kind, note| app.note_current(message, kind, note),
+            };
+            // Only the messages that changed are laid out again (see `memo`).
+            let cache = memo::lay_out(
                 room,
-                app.notes(),
-                &|message, kind, note| app.note_current(message, kind, note),
-                content.width as usize,
-                theme,
+                &lay,
+                &notes,
+                app.theme_rev,
+                app.read_markers,
+                key,
+                previous,
             );
-            if app.read_markers {
-                rows = receipts::add(rows, room, content.width as usize, theme);
-            }
+            let rows = &cache.rows;
             // Reading older messages (or paging forwards in a detached view): keep the
             // same bottom row on screen when messages arrive below or change height.
-            if let Some(anchor) = previous
-                .filter(|old| old.key.room == key.room)
-                .and_then(|old| old.anchor)
+            if let Some(anchor) = anchor
                 && (app.timeline.scroll > 0 || app.timeline.detached)
                 && let Some(at) = room.messages.iter().position(|m| m.id == anchor.id)
                 && let Some(last) = rows.iter().rposition(|row| row.source == at)
@@ -1509,13 +1631,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
                     .saturating_add(app.timeline.scroll)
                     .saturating_sub(anchor.scroll);
             }
-            RowCache {
-                key,
-                rows,
-                wants,
-                emote_wants,
-                anchor: None,
-            }
+            cache
         }
     };
     let rows = &cache.rows;

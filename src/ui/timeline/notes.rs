@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 
 use super::{INDENT, Row};
 use crate::app::App;
-use crate::model::{Message, Room};
+use crate::model::Message;
 use crate::notes::{Note, NoteKind, NoteState, Notes};
 use crate::text::{truncate, width, wrap};
 use crate::theme::{Role, Theme};
@@ -25,43 +25,61 @@ const BAR: &str = "┊ ";
 /// Columns kept free between what a row says and its buttons.
 const GAP: usize = 2;
 
-/// Adds the notes of `room`'s messages under them. A hidden note takes no row, nor
-/// does one that `current` says is not of its message as it is now (the message was
-/// edited or deleted since).
+/// Adds the notes of `room`'s messages under them (see [`add_under`]).
+#[cfg(test)]
 pub(super) fn add(
     rows: Vec<Row>,
-    room: &Room,
+    room: &crate::model::Room,
     notes: &Notes,
     current: &dyn Fn(&Message, NoteKind, &Note) -> bool,
     max_width: usize,
     theme: &Theme,
 ) -> Vec<Row> {
-    if notes.is_empty() {
-        return rows;
-    }
-    let body_width = max_width.saturating_sub(INDENT.len()).max(1);
     let mut out = Vec::with_capacity(rows.len());
     let mut rows = rows.into_iter().peekable();
     while let Some(row) = rows.next() {
         let source = row.source;
-        let selectable = row.msg.is_some();
+        let start = out.len();
         out.push(row);
-        if rows.peek().is_some_and(|next| next.source == source) || !selectable {
-            continue;
+        while let Some(next) = rows.next_if(|next| next.source == source) {
+            out.push(next);
         }
-        let Some(message) = room.messages.get(source) else {
-            continue;
-        };
-        let Some(event) = message.event_id() else {
-            continue;
-        };
-        for (kind, note) in notes.of(event) {
-            if !note.hidden && current(message, kind, note) {
-                out.extend(note_rows(kind, note, source, body_width, theme));
-            }
+        if let Some(message) = room.messages.get(source) {
+            add_under(&mut out, start, message, notes, current, max_width, theme);
         }
     }
     out
+}
+
+/// Adds the notes of `message` under its rows, which are those of `rows` from `start`
+/// on. A hidden note takes no row, nor does one that `current` says is not of its
+/// message as it is now (the message was edited or deleted since); and a message whose
+/// last row does not select it (a line of its own) gets none.
+pub(super) fn add_under(
+    rows: &mut Vec<Row>,
+    start: usize,
+    message: &Message,
+    notes: &Notes,
+    current: &dyn Fn(&Message, NoteKind, &Note) -> bool,
+    max_width: usize,
+    theme: &Theme,
+) {
+    if notes.is_empty() {
+        return;
+    }
+    let Some(last) = rows[start..].last().filter(|row| row.msg.is_some()) else {
+        return;
+    };
+    let source = last.source;
+    let Some(event) = message.event_id() else {
+        return;
+    };
+    let body_width = max_width.saturating_sub(INDENT.len()).max(1);
+    for (kind, note) in notes.of(event) {
+        if !note.hidden && current(message, kind, note) {
+            rows.extend(note_rows(kind, note, source, body_width, theme));
+        }
+    }
 }
 
 /// The rows of one note under the message `msg`.
@@ -254,7 +272,7 @@ pub(super) fn is_hovered(hover: Option<HitId>, msg: usize, kind: NoteKind) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ItemRef, RoomKind};
+    use crate::model::{ItemRef, Room, RoomKind};
     use crate::ui::timeline::build_rows;
 
     fn message(id: &str, body: &str) -> Message {
