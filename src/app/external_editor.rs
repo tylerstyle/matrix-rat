@@ -74,6 +74,23 @@ fn begins_or_ends_a_session(event: &MatrixEvent) -> bool {
     )
 }
 
+/// An empty timeline that has not reached the start: the worker sends it when the SDK
+/// cleared the room (an ignore-list change does), and the app takes it as a reset (it
+/// forgets that the start was reached) where any other timeline only adds to what it
+/// knows. So it is no snapshot of the same as the timelines around it: it neither takes
+/// an earlier one's place (it would come before what came between) nor gives its own up
+/// to a later one (the reset would be lost, and the room stuck short of its start).
+fn resets_a_timeline(event: &MatrixEvent) -> bool {
+    matches!(
+        event,
+        MatrixEvent::Timeline {
+            messages,
+            reached_start: false,
+            ..
+        } if messages.is_empty()
+    )
+}
+
 impl HeldEvents {
     pub fn push(&mut self, event: MatrixEvent) {
         if begins_or_ends_a_session(&event) {
@@ -81,12 +98,19 @@ impl HeldEvents {
             self.session_start = self.events.len();
             return;
         }
-        let earlier = snapshot_of(&event).and_then(|what| {
-            self.events
-                .iter()
-                .skip(self.session_start)
-                .position(|held| snapshot_of(held).as_ref() == Some(&what))
-        });
+        if resets_a_timeline(&event) {
+            self.events.push_back(event);
+            return;
+        }
+        // The last held one of the same: after a reset there can be two of a timeline,
+        // and only the one after it may be replaced.
+        let earlier = snapshot_of(&event)
+            .and_then(|what| {
+                self.events
+                    .range(self.session_start..)
+                    .rposition(|held| snapshot_of(held).as_ref() == Some(&what))
+            })
+            .filter(|&at| !resets_a_timeline(&self.events[self.session_start + at]));
         match earlier {
             Some(at) => self.events[self.session_start + at] = event,
             None => self.events.push_back(event),
@@ -578,6 +602,39 @@ mod tests {
         assert_eq!(held.pop().unwrap().describe(), "Rooms(5)");
         held.push(rooms(7));
         assert_eq!(drain(&mut held), ["NeedLogin(None)", "Rooms(7)"]);
+    }
+
+    /// An empty timeline short of the start (the SDK cleared the room) is a reset to the
+    /// app: it is held where it came, after what came before it, and the timeline after it
+    /// does not take its place, so the app still forgets that the start was reached.
+    #[test]
+    fn a_reset_timeline_is_held_where_it_came_and_never_replaced() {
+        let start = |mut event: MatrixEvent| {
+            if let MatrixEvent::Timeline { reached_start, .. } = &mut event {
+                *reached_start = true;
+            }
+            event
+        };
+        let mut held = HeldEvents::default();
+        held.push(start(timeline("!a", 1, 100)));
+        held.push(MatrixEvent::Paginated {
+            generation: 1,
+            reached_start: true,
+        });
+        held.push(timeline("!a", 1, 0));
+        held.push(timeline("!a", 1, 40));
+        held.push(timeline("!a", 1, 41));
+        held.push(timeline("!a", 1, 0));
+        assert_eq!(
+            drain(&mut held),
+            [
+                "Timeline(!a, generation 1, 100 messages, start: true, detached: false)",
+                "Paginated(generation 1, start: true)",
+                "Timeline(!a, generation 1, 0 messages, start: false, detached: false)",
+                "Timeline(!a, generation 1, 41 messages, start: false, detached: false)",
+                "Timeline(!a, generation 1, 0 messages, start: false, detached: false)",
+            ]
+        );
     }
 
     /// Back from the editor, the app gets what was held first, in order, then what the
