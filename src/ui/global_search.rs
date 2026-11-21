@@ -153,7 +153,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, state: &mut GlobalSear
         let top_y = list_y + (offset * card_rows) as u16;
         let selected = vis == state.selected;
         let hovered = app.hover == Some(HitId::GlobalSearch(vis));
-        let card_rect = Rect::new(inner.x, top_y, inner.width, card_rows as u16);
+        // `top_y` counts from the top of `inner`, as for `row`.
+        let card_rect =
+            Rect::new(inner.x, inner.y + top_y, inner.width, card_rows as u16).intersection(inner);
         let head_rect = row(inner, top_y);
 
         // Header line: marker + room name + sender + right-aligned date.
