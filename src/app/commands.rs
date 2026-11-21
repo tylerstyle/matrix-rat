@@ -288,26 +288,32 @@ impl App {
             self.show_toast(typed.command.usage(typed.name));
             return true;
         }
-        let went_ahead = match self.run_room_command(&typed) {
-            Ok(()) => true,
-            Err(reason) => {
-                self.show_toast(reason);
-                false
+        match self.run_room_command(&typed) {
+            Ok(already_cleared) => {
+                if !already_cleared {
+                    self.clear_room_command();
+                }
             }
-        };
-        if went_ahead {
-            // As after `/poll`: the emptied composer is saved as the draft in due course,
-            // unless a saved draft was kept aside for this command.
-            self.composer.set_text("");
-            self.clear_completion_marks();
-            if !self.restore_aside_draft() {
-                self.sync_completion();
-            }
+            Err(reason) => self.show_toast(reason),
         }
         true
     }
 
-    fn run_room_command(&mut self, typed: &Typed<'_>) -> Result<(), String> {
+    /// Clears a finished room command from the composer, restoring any saved draft that
+    /// was kept aside for it.
+    fn clear_room_command(&mut self) {
+        // As after `/poll`: the emptied composer is saved as the draft in due course,
+        // unless a saved draft was kept aside for this command.
+        self.composer.set_text("");
+        self.clear_completion_marks();
+        if !self.restore_aside_draft() {
+            self.sync_completion();
+        }
+    }
+
+    /// Runs `typed`, returning `Ok(true)` when the command already cleared itself from
+    /// the composer (e.g. before switching to another room).
+    fn run_room_command(&mut self, typed: &Typed<'_>) -> Result<bool, String> {
         match typed.command {
             RoomCommand::Join => self.join_command(typed),
             RoomCommand::Leave => {
@@ -317,7 +323,7 @@ impl App {
                 if let Some(Modal::RoomInfo(info)) = &mut self.modal {
                     info.confirm = Some(Confirm::Leave);
                 }
-                Ok(())
+                Ok(false)
             }
             RoomCommand::Invite | RoomCommand::DirectChat => {
                 // Inviting needs a room to invite into; said here, so the draft stays.
@@ -336,10 +342,10 @@ impl App {
                     popup.user.set(person.user_id.as_str());
                 });
                 self.submit_new();
-                Ok(())
+                Ok(false)
             }
             RoomCommand::Kick | RoomCommand::Ban | RoomCommand::Unban => {
-                self.moderation_command(typed)
+                self.moderation_command(typed).map(|()| false)
             }
             RoomCommand::Ignore | RoomCommand::Unignore => {
                 let (person, _) = self.named(typed)?;
@@ -359,13 +365,13 @@ impl App {
                     person.name,
                     UserAction::IgnoreToggle,
                 );
-                Ok(())
+                Ok(false)
             }
             RoomCommand::Whois => {
                 let (person, _) = self.named(typed)?;
                 let room_id = self.room_id();
                 self.open_user_info(person.user_id, room_id, person.name);
-                Ok(())
+                Ok(false)
             }
             RoomCommand::Nick => {
                 if self.matrix.is_none() {
@@ -382,35 +388,36 @@ impl App {
                 }
                 // The answer comes as a toast, as from the profile popup when it is closed.
                 self.send_matrix(MatrixCmd::SetOwnDisplayName { name: Some(name) });
-                Ok(())
+                Ok(false)
             }
             RoomCommand::RoomNick | RoomCommand::Topic | RoomCommand::RoomName => {
-                self.room_text_command(typed)
+                self.room_text_command(typed).map(|()| false)
             }
             // The action itself says what stands in its way (as a toast), and the
             // command is gone from the composer either way: it was understood.
             RoomCommand::Archive => {
                 self.open_room_or_say()?;
                 self.perform(Action::ArchiveRoom);
-                Ok(())
+                Ok(false)
             }
             RoomCommand::CatchUp => {
                 self.open_room_or_say()?;
                 self.perform(Action::CatchUp);
-                Ok(())
+                Ok(false)
             }
             RoomCommand::Help => {
                 if !self.help_open {
                     self.perform(Action::ToggleHelp);
                 }
-                Ok(())
+                Ok(false)
             }
         }
     }
 
     /// `/join`: the room if it is joined, else its preview, from which it is joined
-    /// as from a link.
-    fn join_command(&mut self, typed: &Typed<'_>) -> Result<(), String> {
+    /// as from a link. Clears the command from the old room before switching so the old
+    /// room keeps its real draft and the newly opened room keeps its own.
+    fn join_command(&mut self, typed: &Typed<'_>) -> Result<bool, String> {
         // A room picked from the `#` completions stands for its link.
         let picked = self
             .complete
@@ -433,13 +440,17 @@ impl App {
             Address::Room { target, via }
             | Address::Event {
                 room: target, via, ..
-            } => {
-                match self.find_joined_room(&target) {
-                    Some(index) => self.show_room(index),
-                    None => self.open_room_preview(&target, via),
+            } => match self.find_joined_room(&target) {
+                Some(index) => {
+                    self.clear_room_command();
+                    self.show_room(index);
+                    Ok(true)
                 }
-                Ok(())
-            }
+                None => {
+                    self.open_room_preview(&target, via);
+                    Ok(false)
+                }
+            },
             Address::User(_) => Err("That is a person, not a room: /dm opens a chat".into()),
         }
     }
@@ -1123,6 +1134,45 @@ mod tests {
             assert_eq!(toast(&app), super::super::NO_ACCOUNT);
             run(&mut app, "/whois @someone:example.org");
             assert!(matches!(&app.modal, Some(Modal::UserInfo(_))));
+        }
+
+        #[test]
+        fn join_command_to_already_joined_room_keeps_both_drafts() {
+            // 1. Plain `/join #already-joined` clears the command from the old room before
+            //    switching so the new room's draft is preserved and the old room does not
+            //    keep `/join ...` as its draft.
+            let (mut app, _commands) = connected(false);
+            app.rooms[1].draft = "mice draft".to_owned();
+            run(&mut app, "/join #mice:example.org");
+            assert_eq!(app.active, 1);
+            assert_eq!(app.composer.text(), "mice draft");
+            assert_eq!(app.rooms[0].draft, "");
+
+            // 2. When the old room had a saved draft kept aside behind `/join`, the old
+            //    room keeps its real draft and the newly opened room keeps its own.
+            let (handle, _commands) = MatrixHandle::for_test();
+            let mut app = App::new(&Config::default(), std::path::PathBuf::new(), Some(handle));
+            app.on_matrix(MatrixEvent::LoggedIn { user_id: ME.into() });
+            app.perform(Action::Focus(Pane::Composer));
+            app.composer.set_text("/join #mice:example.org");
+            app.on_matrix(MatrixEvent::Rooms(vec![
+                summary(ROOM, "Rats", Some("#rats:example.org")),
+                summary("!mice:example.org", "Mice", Some("#mice:example.org")),
+            ]));
+            app.rooms[1].draft = "mice draft".to_owned();
+            app.on_matrix(MatrixEvent::Draft {
+                room_id: ROOM.into(),
+                thread: None,
+                text: "rats real draft".into(),
+            });
+            assert_eq!(app.composer.text(), "/join #mice:example.org");
+
+            app.perform(Action::Send);
+            assert_eq!(app.active, 1);
+            assert_eq!(app.composer.text(), "mice draft");
+            assert_eq!(app.rooms[0].draft, "rats real draft");
+            app.perform(Action::OpenRoom(0));
+            assert_eq!(app.composer.text(), "rats real draft");
         }
     }
 
