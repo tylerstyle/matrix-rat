@@ -2135,9 +2135,12 @@ impl Worker {
                         summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                     ));
                 }
+                // The timelines stay: the SDK clears every room's event cache in place
+                // when the list changes (each timeline, shown or kept, starts over from
+                // the same empty cache a new one would), and their forwarders, and any
+                // opened later, leave out who is ignored now.
                 Ok(()) = ignored.changed() => {
                     previews.lines.clear();
-                    timelines.clear_cache();
                     self.emit(MatrixEvent::Rooms(
                         summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                     ));

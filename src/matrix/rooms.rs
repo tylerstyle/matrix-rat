@@ -190,11 +190,6 @@ impl Timelines {
         }
     }
 
-    /// Drops cached live timelines so the next room open reflects a changed ignore list.
-    pub fn clear_cache(&mut self) {
-        self.cache.clear();
-    }
-
     pub(super) async fn next_opened(&mut self) -> Option<OpenedTimeline> {
         self.open_rx.recv().await
     }
@@ -4408,6 +4403,120 @@ mod tests {
         wait_for_restored_timeline(&mut events, room_a, 3, "in a").await;
         client.sync_once(SyncSettings::default()).await.unwrap();
         wait_for_timeline(&mut events, room_a, 3, "later in a").await;
+        drop(server);
+    }
+
+    /// A message of the stand-in server's rooms: `sender` said `body` in `room`;
+    /// `thread`: as a reply in the thread that starts at that event.
+    fn said(
+        room: &str,
+        id: &str,
+        sender: &str,
+        body: &str,
+        thread: Option<&str>,
+    ) -> serde_json::Value {
+        let mut content = serde_json::json!({ "msgtype": "m.text", "body": body });
+        if let Some(root) = thread {
+            content["m.relates_to"] = serde_json::json!({
+                "rel_type": "m.thread", "event_id": root, "is_falling_back": true,
+                "m.in_reply_to": { "event_id": root },
+            });
+        }
+        serde_json::json!({
+            "type": "m.room.message", "room_id": room, "event_id": id,
+            "sender": sender, "origin_server_ts": 1_000, "content": content,
+        })
+    }
+
+    /// The timelines of a client of a stand-in server whose one sync brings `rooms`
+    /// (as the `join` of a sync); and the server, to be kept while they are used.
+    async fn opened_with(
+        rooms: serde_json::Value,
+    ) -> (
+        crate::matrix::spaces::fake::Server,
+        matrix_sdk::Client,
+        super::Timelines,
+        tokio::sync::mpsc::UnboundedReceiver<crate::matrix::MatrixEvent>,
+        (
+            tokio::sync::watch::Sender<super::IgnoredSet>,
+            tokio::sync::watch::Sender<u64>,
+        ),
+    ) {
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+
+        let server = fake::Server::start(serde_json::json!({ "join": rooms })).await;
+        let client = fake_client_with_cache(&server.url).await;
+        let (timelines, events, watches) = live_timelines_of(client.clone(), &LeftRooms::default());
+        (server, client, timelines, events, watches)
+    }
+
+    /// Ignoring or unignoring someone has the SDK clear every room's event cache in place
+    /// (`EventCache::clear_all_rooms`, from its task that watches the ignore list). The
+    /// timelines on it, shown or kept, start over from the same empty cache a new one
+    /// would, so the session keeps them; the shown one is told to start over.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cleared_event_cache_starts_the_timelines_over_in_place() {
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+
+        let (kept, shown) = ("!kept:localhost", "!shown:localhost");
+        let mut joined_kept = fake::joined(false, vec![]);
+        joined_kept["timeline"]["events"] =
+            serde_json::json!([said(kept, "$k:localhost", fake::ME, "in kept", None)]);
+        let mut joined_shown = fake::joined(false, vec![]);
+        joined_shown["timeline"]["events"] =
+            serde_json::json!([said(shown, "$s:localhost", fake::ME, "in shown", None)]);
+        let (server, client, mut timelines, mut events, _watches) =
+            opened_with(serde_json::json!({ kept: joined_kept, shown: joined_shown })).await;
+        for (room, generation, body) in [(kept, 1, "in kept"), (shown, 2, "in shown")] {
+            timelines
+                .handle(MatrixCmd::OpenRoom {
+                    room_id: room.to_owned(),
+                    generation,
+                })
+                .await;
+            wait_for_timeline(&mut events, room, generation, body).await;
+        }
+        let kept_key = super::threads::key(kept, None);
+        let shown_key = super::threads::key(shown, None);
+        let before = [&kept_key, &shown_key].map(|key| timelines.cached(key).unwrap());
+
+        client.event_cache().clear_all_rooms().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Some(MatrixEvent::TimelineReset {
+                        room_id,
+                        generation: 2,
+                    }) if room_id == shown => return,
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .expect("the shown timeline was told to start over");
+        let after = [&kept_key, &shown_key].map(|key| timelines.cached(key).unwrap());
+        for (before, after) in before.iter().zip(&after) {
+            assert!(
+                std::sync::Arc::ptr_eq(before, after),
+                "the same timeline, kept"
+            );
+            // What the cache had is gone from it too (the stand-in server has nothing
+            // older to page back to).
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while after.items().await.iter().any(|item| {
+                    item.as_event()
+                        .and_then(|event| event.content().as_message())
+                        .is_some_and(|message| message.body().starts_with("in "))
+                }) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the timeline started over");
+        }
         drop(server);
     }
 
