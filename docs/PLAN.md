@@ -167,6 +167,16 @@ yet; each piece is written and reviewed as in §4.
   room, read or not, the way `/catchup` does for what is unread (same limits: at most 300
   messages and 24,000 characters). Scrolling through a chat moves the read marker, and then
   nothing is left unread to catch up on.
+- **The room cursor is invisible over ssh** (the user, 2026-11-21: arrow keys in the room list
+  mark nothing, and what is selected is unclear). ssh does not pass `COLORTERM` on, so the
+  theme is brought down to 256 colours, and `to_256` puts every colour whose channels are all
+  below 48 on the same black (16). The cursor is only a background shade (`Role::RoomCursor`,
+  the theme's `surface`): in `rat-dark`, the default, and `rose-pine` it becomes the window's
+  own background; in `catppuccin-mocha`, `dracula`, `gruvbox-dark` and `nord` it becomes the
+  open room's colour. On the open room itself the cursor shows nothing at all. To do: a
+  nearest-colour mapping that uses the grey ramp too and keeps the roles apart, a cue for the
+  cursor that does not rest on colour alone (as `high-contrast` underlines it), and a test
+  that every built-in theme keeps cursor, open room and background apart in 256 colours.
 
 ### 6.2 Later, after 1.0.0 or by demand
 
