@@ -245,6 +245,10 @@ numbers to hold its findings against.
 
 ### 6.3 Later, after 1.0.0 or by demand
 
+- **`/catchup N`** (the user's idea, 2026-11-21): summarise the last N messages of the open
+  room, read or not, the way `/catchup` does for what is unread (same limits: at most 300
+  messages and 24,000 characters). Scrolling through a chat moves the read marker, and then
+  nothing is left unread to catch up on.
 - **Calls.** Voice calls wait until the SDK can join calls itself; with them a line in the
   room saying that a call is running, and a key that opens it in the browser. Video after
   that, if at all.
