@@ -2580,24 +2580,24 @@ impl App {
         }
     }
 
-    /// The event id of the message a pending reply or edit points at, if it has one.
-    pub(super) fn compose_target_event_id(&self) -> Option<String> {
+    /// The stable identity (event or local transaction id) of the message a pending reply
+    /// or edit points at, if it has one.
+    pub(super) fn compose_target_item(&self) -> Option<ItemRef> {
         match self.compose_mode {
-            ComposeMode::Reply(i) | ComposeMode::Edit(i) => self
-                .messages()
-                .get(i)
-                .and_then(|m| m.event_id().map(str::to_owned)),
+            ComposeMode::Reply(i) | ComposeMode::Edit(i) => {
+                self.messages().get(i).and_then(|m| m.item.clone())
+            }
             ComposeMode::Normal => None,
         }
     }
 
-    /// Keeps a pending reply or edit on the message with `event_id` after switching to
-    /// another timeline, or cancels it if that event is not shown (or had none).
-    pub(super) fn remap_compose_mode_by_event(&mut self, event_id: Option<&str>) {
-        let compose_at = event_id.and_then(|ev| {
+    /// Keeps a pending reply or edit on the message with `item` after switching to
+    /// another timeline, or cancels it if that message is not shown (or had no identity).
+    pub(super) fn remap_compose_mode_by_item(&mut self, item: Option<&ItemRef>) {
+        let compose_at = item.and_then(|wanted| {
             self.messages()
                 .iter()
-                .position(|m| m.event_id() == Some(ev))
+                .position(|m| m.item.as_ref() == Some(wanted))
         });
         self.apply_remapped_compose(compose_at);
     }
@@ -2609,9 +2609,14 @@ impl App {
             (ComposeMode::Edit(_), None) => {
                 // The message being edited is gone; its text must not be sent as new.
                 self.end_edit();
+                self.show_toast("Edit cancelled: that message is no longer shown");
                 ComposeMode::Normal
             }
-            _ => ComposeMode::Normal,
+            (ComposeMode::Reply(_), None) => {
+                self.show_toast("Reply cancelled: that message is no longer shown");
+                ComposeMode::Normal
+            }
+            (ComposeMode::Normal, _) => ComposeMode::Normal,
         };
     }
 
@@ -2631,9 +2636,10 @@ impl App {
 
     /// Replaces the open conversation's messages with `messages`, keeping the selection
     /// and any pending reply or edit on the same messages. On updates from the same
-    /// timeline, messages match by their local timeline id (falling back to event id if
-    /// rebuilt in place); across a timeline change or reset, they match only by event id
-    /// so local ids from another timeline can never collide.
+    /// timeline, messages match by their local timeline id (falling back to `ItemRef` if
+    /// rebuilt in place); across a timeline change or reset, they match by `ItemRef`
+    /// (covering both server event ids and in-flight transaction ids) so local ids from
+    /// another timeline can never collide.
     fn apply_timeline(&mut self, mut messages: Vec<Message>, same_timeline: bool) {
         // The worker told apart who shares a name among the messages; the room's
         // members, where the app holds them, may know of more.
@@ -2647,30 +2653,29 @@ impl App {
                     .and_then(|i| self.messages().get(i).map(|m| m.id.clone()))
             })
             .flatten();
-        let selected_event = self
+        let selected_item = self
             .timeline
             .selected
             .and_then(|i| self.messages().get(i))
-            .and_then(|m| m.event_id().map(str::to_owned));
+            .and_then(|m| m.item.clone());
         let compose_id = same_timeline.then(|| self.compose_target_id()).flatten();
-        let compose_event = self.compose_target_event_id();
+        let compose_item = self.compose_target_item();
         if let Some(target) = self.messages_mut() {
             *target = messages;
         }
         self.request_custom_reaction_emotes();
-        let find = |id: Option<&str>, event: Option<&str>| {
+        let find = |id: Option<&str>, item: Option<&ItemRef>| {
             id.and_then(|id| self.messages().iter().position(|m| m.id == id))
                 .or_else(|| {
-                    event.and_then(|ev| {
+                    item.and_then(|wanted| {
                         self.messages()
                             .iter()
-                            .position(|m| m.event_id() == Some(ev))
+                            .position(|m| m.item.as_ref() == Some(wanted))
                     })
                 })
         };
-        let selected_at = find(selected_id.as_deref(), selected_event.as_deref());
-        let compose_at =
-            same_timeline.then(|| find(compose_id.as_deref(), compose_event.as_deref()));
+        let selected_at = find(selected_id.as_deref(), selected_item.as_ref());
+        let compose_at = same_timeline.then(|| find(compose_id.as_deref(), compose_item.as_ref()));
 
         if self.timeline.selected.is_some() {
             self.timeline.selected =
@@ -2682,7 +2687,7 @@ impl App {
         if let Some(compose_at) = compose_at {
             self.apply_remapped_compose(compose_at);
         } else {
-            self.remap_compose_mode_by_event(compose_event.as_deref());
+            self.remap_compose_mode_by_item(compose_item.as_ref());
         }
     }
 
@@ -9577,15 +9582,24 @@ mod tests {
 
         app.return_to_live();
         drain(&mut commands);
+        app.toast = None;
         app.on_matrix(timeline(
             &app,
             vec![with_id("0", "$ev_other_mine", "me", "other mine")],
         ));
         assert_eq!(app.compose_mode, ComposeMode::Normal);
         assert_eq!(app.composer.text(), "unsent draft");
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("Edit cancelled")),
+            "expected cancel toast, got {:?}",
+            app.toast.as_ref().map(|(m, _)| m)
+        );
 
         // 3. A timeline rebuilt after `TimelineReset` (new prefix `t3-`) also keeps reply
-        //    and selection on the same event id.
+        //    and selection on the same event id (with a newer message after it so index 1
+        //    cannot pass via the last-message fallback).
         app.compose_mode = ComposeMode::Reply(0);
         app.set_focus(Pane::Timeline);
         app.timeline.selected = Some(0);
@@ -9598,10 +9612,104 @@ mod tests {
             vec![
                 with_id("t3-0", "$ev_before", "ann", "before"),
                 with_id("t3-1", "$ev_other_mine", "me", "other mine"),
+                with_id("t3-2", "$ev_after", "bob", "after"),
             ],
         ));
         assert_eq!(app.compose_mode, ComposeMode::Reply(1));
         assert_eq!(app.timeline.selected, Some(1));
+    }
+
+    #[test]
+    fn timeline_reset_keeps_transaction_target_and_toasts_on_cancel() {
+        let remote_msg = |id: &str, event: &str, body: &str| Message {
+            id: id.into(),
+            item: Some(ItemRef::Event(event.into())),
+            sender: "ann".into(),
+            time: "10:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        };
+        let sending_msg = |id: &str, txn: &str, body: &str| Message {
+            id: id.into(),
+            item: Some(ItemRef::Transaction(txn.into())),
+            sender: "me".into(),
+            own: true,
+            state: SendState::Sending,
+            time: "10:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        };
+
+        let (mut app, _terminal, mut commands) = connected();
+        app.rooms[0].messages = vec![
+            sending_msg("t1-0", "txn-sending", "still sending"),
+            remote_msg("t1-1", "$ev_after", "after"),
+        ];
+        app.timeline.generation = Some(app.generation);
+        app.composer.set_text("saved draft");
+        app.begin_edit(0, "still sending");
+        type_text(&mut app, " revised");
+        app.set_focus(Pane::Timeline);
+        app.timeline.selected = Some(0);
+        assert_eq!(app.compose_mode, ComposeMode::Edit(0));
+        drain(&mut commands);
+
+        // TimelineReset + rebuilt timeline (`t2-*`): edit, edited text, and selection all
+        // stay on `txn-sending` at index 1 (not last index 2).
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(
+            &app,
+            vec![
+                remote_msg("t2-0", "$ev_before", "before"),
+                sending_msg("t2-1", "txn-sending", "still sending"),
+                remote_msg("t2-2", "$ev_after", "after"),
+            ],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Edit(1));
+        assert_eq!(app.composer.text(), "still sending revised");
+        assert_eq!(app.timeline.selected, Some(1));
+
+        // Reply on the same `Transaction` target also survives a reset.
+        app.cancel_compose();
+        app.compose_mode = ComposeMode::Reply(1);
+        app.timeline.selected = Some(1);
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(
+            &app,
+            vec![
+                sending_msg("t3-0", "txn-sending", "still sending"),
+                remote_msg("t3-1", "$ev_after", "after"),
+            ],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Reply(0));
+        assert_eq!(app.timeline.selected, Some(0));
+
+        // When the reply target vanishes across a reset, cancelling shows a toast.
+        app.toast = None;
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(
+            &app,
+            vec![remote_msg("t4-0", "$ev_after", "after")],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("Reply cancelled")),
+            "expected reply-cancel toast, got {:?}",
+            app.toast.as_ref().map(|(m, _)| m)
+        );
     }
 
     #[test]
