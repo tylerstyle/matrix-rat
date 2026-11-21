@@ -954,6 +954,10 @@ async fn export_keys(
 }
 
 fn import_error(err: &RoomKeyImportError) -> String {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign matrix_sdk RoomKeyImportError"
+    )]
     match err {
         RoomKeyImportError::Export(KeyExportError::InvalidMac) => {
             "Wrong passphrase (or the file is damaged). Nothing was imported.".to_owned()

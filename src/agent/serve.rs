@@ -512,7 +512,63 @@ impl Hub {
             MatrixEvent::Rooms(rooms) => self.on_rooms(rooms),
             MatrixEvent::Agent(event) => self.on_agent(event),
             // Everything else is for a screen: there is none.
-            _ => {}
+            MatrixEvent::LoginFailed(_)
+            | MatrixEvent::BrowserLoginUrl(_)
+            | MatrixEvent::Sync(_)
+            | MatrixEvent::Recovery(_)
+            | MatrixEvent::RecoverResult(_)
+            | MatrixEvent::Timeline { .. }
+            | MatrixEvent::TimelineReset { .. }
+            | MatrixEvent::Paginated { .. }
+            | MatrixEvent::PaginatedForwards { .. }
+            | MatrixEvent::DetachedNew { .. }
+            | MatrixEvent::JumpFailed { .. }
+            | MatrixEvent::Typing { .. }
+            | MatrixEvent::ActionFailed(_)
+            | MatrixEvent::Error(_)
+            | MatrixEvent::Image { .. }
+            | MatrixEvent::Security(_)
+            | MatrixEvent::Verification(_)
+            | MatrixEvent::CrossSigningSetUp(_)
+            | MatrixEvent::Spaces(_)
+            | MatrixEvent::Notice(_)
+            | MatrixEvent::SuppressedNotice { .. }
+            | MatrixEvent::NoticeClicked { .. }
+            | MatrixEvent::FileSaved { .. }
+            | MatrixEvent::AudioFetched { .. }
+            | MatrixEvent::SpeechFetched { .. }
+            | MatrixEvent::LinkPreview { .. }
+            | MatrixEvent::Avatar { .. }
+            | MatrixEvent::EmotePicture { .. }
+            | MatrixEvent::UploadLimit(_)
+            | MatrixEvent::FilesNotSent { .. }
+            | MatrixEvent::FilesSent(_)
+            | MatrixEvent::RoomMembers { .. }
+            | MatrixEvent::Manage(_)
+            | MatrixEvent::SearchResults { .. }
+            | MatrixEvent::Draft { .. }
+            | MatrixEvent::IgnoredUsers(_)
+            | MatrixEvent::IgnoreResult { .. }
+            | MatrixEvent::ReportResult(_)
+            | MatrixEvent::UserSearchResults { .. }
+            | MatrixEvent::RoomPower { .. }
+            | MatrixEvent::PinnedEvents { .. }
+            | MatrixEvent::PinnedList { .. }
+            | MatrixEvent::ForwardResult { .. }
+            | MatrixEvent::Devices(_)
+            | MatrixEvent::Keywords(_)
+            | MatrixEvent::Saved(_)
+            | MatrixEvent::DecryptionRetried { .. }
+            | MatrixEvent::OwnProfile(_)
+            | MatrixEvent::OwnProfileResult { .. }
+            | MatrixEvent::Source { .. }
+            | MatrixEvent::UserProfile { .. }
+            | MatrixEvent::DirectoryResults(_)
+            | MatrixEvent::DirectoryError { .. }
+            | MatrixEvent::EmotePacks { .. }
+            | MatrixEvent::Threads(_)
+            | MatrixEvent::ThreadsFailed { .. }
+            | MatrixEvent::Collect(_) => {}
         }
         None
     }

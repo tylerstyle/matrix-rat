@@ -1233,7 +1233,88 @@ fn include_keymap_action(action: Action) -> ActionInclusion {
         | Action::Send
         | Action::Newline
         | Action::SeekAudio(_) => ActionInclusion::Skip,
-        _ => ActionInclusion::Include,
+        Action::Quit
+        | Action::Suspend
+        | Action::Focus(_)
+        | Action::FocusRoomFilter
+        | Action::ToggleHelp
+        | Action::CycleTheme
+        | Action::ToggleSidebar
+        | Action::CloseChat
+        | Action::JumpToNewest
+        | Action::Reply
+        | Action::Edit
+        | Action::React
+        | Action::Delete
+        | Action::Copy
+        | Action::CopyCode
+        | Action::Open
+        | Action::OpenExternal
+        | Action::JumpToReply
+        | Action::CancelCompose
+        | Action::EditLast
+        | Action::ComposeInEditor
+        | Action::OpenEmoji
+        | Action::AcceptInvite
+        | Action::DeclineInvite
+        | Action::WithdrawKnock
+        | Action::LoginSubmit
+        | Action::LoginBrowser
+        | Action::RecoverySubmit
+        | Action::CloseModal
+        | Action::OpenSettings
+        | Action::StartVerification
+        | Action::RoomActive
+        | Action::Search
+        | Action::SearchEverywhere
+        | Action::SpaceNext
+        | Action::SpacePrev
+        | Action::SpaceInfo
+        | Action::FilterUnread
+        | Action::FilterPeople
+        | Action::Save
+        | Action::Verify(_)
+        | Action::OpenThread
+        | Action::CloseThread
+        | Action::Attach
+        | Action::RecordVoice
+        | Action::PastePicture
+        | Action::OpenRoom(_)
+        | Action::SelectTheme(_)
+        | Action::Setting(_)
+        | Action::NewRoom
+        | Action::RoomInfo
+        | Action::LeaveRoom
+        | Action::InviteUser
+        | Action::Manage(_)
+        | Action::ContextMenu
+        | Action::JumpToOldest
+        | Action::JumpToUnread
+        | Action::ToggleUnread
+        | Action::MarkAllRead
+        | Action::PinMessage
+        | Action::OpenPinned
+        | Action::OpenThreads
+        | Action::ForwardMessage
+        | Action::Devices(_)
+        | Action::RetryDecryption
+        | Action::UserInfo
+        | Action::MessageDetails
+        | Action::CreatePoll
+        | Action::OpenStickers
+        | Action::PlayAudio
+        | Action::PlayVoiceNote
+        | Action::PauseAudio
+        | Action::Transcribe
+        | Action::Translate
+        | Action::TranscribeAgain
+        | Action::TranslateAgain
+        | Action::SaveForLater
+        | Action::RemindMe
+        | Action::OpenSaved
+        | Action::Doctor
+        | Action::ArchiveRoom
+        | Action::CatchUp => ActionInclusion::Include,
     }
 }
 
@@ -1305,7 +1386,60 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::RoomInfo => ctx.target.is_some(),
         Action::Search => ctx.has_room && !in_pending,
         Action::SpaceNext | Action::SpacePrev => !ctx.spaces.is_empty(),
-        _ => true,
+        Action::Quit
+        | Action::Suspend
+        | Action::FocusNext
+        | Action::FocusPrev
+        | Action::Focus(_)
+        | Action::FocusDir(_)
+        | Action::FocusRoomFilter
+        | Action::ToggleHelp
+        | Action::CycleTheme
+        | Action::ToggleSidebar
+        | Action::Back
+        | Action::CloseChat
+        | Action::PageUp
+        | Action::PageDown
+        | Action::SidebarUp
+        | Action::SidebarDown
+        | Action::SidebarOpen
+        | Action::SelectOlder
+        | Action::SelectNewer
+        | Action::Send
+        | Action::Newline
+        | Action::CancelCompose
+        | Action::OpenEmoji
+        | Action::LoginSubmit
+        | Action::LoginBrowser
+        | Action::RecoverySubmit
+        | Action::CloseModal
+        | Action::OpenSettings
+        | Action::StartVerification
+        | Action::RoomPrev
+        | Action::RoomNext
+        | Action::RoomActive
+        | Action::SearchEverywhere
+        | Action::SpaceInfo
+        | Action::FilterUnread
+        | Action::FilterPeople
+        | Action::Verify(_)
+        | Action::OpenPalette
+        | Action::OpenRoom(_)
+        | Action::SelectTheme(_)
+        | Action::Setting(_)
+        | Action::NewRoom
+        | Action::LeaveRoom
+        | Action::InviteUser
+        | Action::Manage(_)
+        | Action::ContextMenu
+        | Action::SidebarTop
+        | Action::SidebarBottom
+        | Action::ToggleUnread
+        | Action::MarkAllRead
+        | Action::Devices(_)
+        | Action::SeekAudio(_)
+        | Action::OpenSaved
+        | Action::Doctor => true,
     }
 }
 
@@ -1450,7 +1584,85 @@ fn action_meta<'a>(
             Cow::Borrowed(description),
             &["delete", "redact", "remove message"],
         ),
-        _ => (Cow::Borrowed(description), &[]),
+        Action::Quit
+        | Action::Suspend
+        | Action::FocusNext
+        | Action::FocusPrev
+        | Action::Focus(_)
+        | Action::FocusDir(_)
+        | Action::CycleTheme
+        | Action::ToggleSidebar
+        | Action::Back
+        | Action::CloseChat
+        | Action::PageUp
+        | Action::PageDown
+        | Action::JumpToNewest
+        | Action::SidebarUp
+        | Action::SidebarDown
+        | Action::SidebarOpen
+        | Action::SelectOlder
+        | Action::SelectNewer
+        | Action::Reply
+        | Action::Edit
+        | Action::React
+        | Action::Copy
+        | Action::CopyCode
+        | Action::OpenExternal
+        | Action::Send
+        | Action::Newline
+        | Action::CancelCompose
+        | Action::EditLast
+        | Action::ComposeInEditor
+        | Action::OpenEmoji
+        | Action::AcceptInvite
+        | Action::DeclineInvite
+        | Action::LoginSubmit
+        | Action::LoginBrowser
+        | Action::RecoverySubmit
+        | Action::CloseModal
+        | Action::OpenSettings
+        | Action::StartVerification
+        | Action::RoomPrev
+        | Action::RoomNext
+        | Action::Search
+        | Action::SpaceNext
+        | Action::SpacePrev
+        | Action::SpaceInfo
+        | Action::Save
+        | Action::Verify(_)
+        | Action::CloseThread
+        | Action::OpenPalette
+        | Action::OpenRoom(_)
+        | Action::SelectTheme(_)
+        | Action::Setting(_)
+        | Action::NewRoom
+        | Action::RoomInfo
+        | Action::LeaveRoom
+        | Action::InviteUser
+        | Action::Manage(_)
+        | Action::ContextMenu
+        | Action::JumpToOldest
+        | Action::SidebarTop
+        | Action::SidebarBottom
+        | Action::ToggleUnread
+        | Action::MarkAllRead
+        | Action::PinMessage
+        | Action::ForwardMessage
+        | Action::Devices(_)
+        | Action::RetryDecryption
+        | Action::UserInfo
+        | Action::MessageDetails
+        | Action::CreatePoll
+        | Action::OpenStickers
+        | Action::SeekAudio(_)
+        | Action::TranscribeAgain
+        | Action::TranslateAgain
+        | Action::SaveForLater
+        | Action::RemindMe
+        | Action::OpenSaved
+        | Action::Doctor
+        | Action::ArchiveRoom
+        | Action::CatchUp => (Cow::Borrowed(description), &[]),
     }
 }
 
@@ -1459,7 +1671,11 @@ fn action_meta<'a>(
 fn note_title(offer: NoteOffer, kind: crate::notes::NoteKind) -> Cow<'static, str> {
     match offer {
         NoteOffer::Unavailable(why) => Cow::Owned(format!("{} ({why})", offer.title(kind))),
-        offer => Cow::Borrowed(offer.title(kind)),
+        offer @ (NoteOffer::NotThis
+        | NoteOffer::Run
+        | NoteOffer::Stop
+        | NoteOffer::Hide
+        | NoteOffer::Show) => Cow::Borrowed(offer.title(kind)),
     }
 }
 

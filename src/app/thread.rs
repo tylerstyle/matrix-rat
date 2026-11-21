@@ -476,7 +476,73 @@ impl App {
                 }
                 MatrixCmd::VotePoll { poll_event_id, .. }
                 | MatrixCmd::EndPoll { poll_event_id, .. } => poll_event_id == root,
-                _ => false,
+                MatrixCmd::LoginPassword { .. }
+                | MatrixCmd::LoginBrowser { .. }
+                | MatrixCmd::CancelLogin
+                | MatrixCmd::Recover { .. }
+                | MatrixCmd::OpenRoom { .. }
+                | MatrixCmd::CloseRoom
+                | MatrixCmd::OpenEvent { .. }
+                | MatrixCmd::CancelOpenEvent { .. }
+                | MatrixCmd::Paginate { .. }
+                | MatrixCmd::PaginateForwards { .. }
+                | MatrixCmd::Send { .. }
+                | MatrixCmd::SendPoll { .. }
+                | MatrixCmd::EnsureEmotePacks { .. }
+                | MatrixCmd::SendSticker { .. }
+                | MatrixCmd::Pin { .. }
+                | MatrixCmd::FetchPinned { .. }
+                | MatrixCmd::Forward { .. }
+                | MatrixCmd::Retry { .. }
+                | MatrixCmd::Typing { .. }
+                | MatrixCmd::MarkRead { .. }
+                | MatrixCmd::SetUnread { .. }
+                | MatrixCmd::MarkRoomsRead { .. }
+                | MatrixCmd::Join { .. }
+                | MatrixCmd::Leave { .. }
+                | MatrixCmd::Logout
+                | MatrixCmd::Previews(_)
+                | MatrixCmd::Shutdown
+                | MatrixCmd::FetchImage { .. }
+                | MatrixCmd::Verification(_)
+                | MatrixCmd::SaveFile { .. }
+                | MatrixCmd::FetchAudio { .. }
+                | MatrixCmd::CancelAudio
+                | MatrixCmd::FetchSpeech { .. }
+                | MatrixCmd::CancelSpeech { .. }
+                | MatrixCmd::LinkPreview { .. }
+                | MatrixCmd::FetchAvatar { .. }
+                | MatrixCmd::FetchEmotePicture { .. }
+                | MatrixCmd::OpenThread { .. }
+                | MatrixCmd::InThread { .. }
+                | MatrixCmd::SendFiles { .. }
+                | MatrixCmd::FetchMembers { .. }
+                | MatrixCmd::Manage(_)
+                | MatrixCmd::ReauthPassword { .. }
+                | MatrixCmd::ReauthBrowser
+                | MatrixCmd::SearchMessages { .. }
+                | MatrixCmd::CancelSearch
+                | MatrixCmd::SaveDraft { .. }
+                | MatrixCmd::ForgetDrafts { .. }
+                | MatrixCmd::IgnoreUser { .. }
+                | MatrixCmd::UnignoreUser { .. }
+                | MatrixCmd::ReportContent { .. }
+                | MatrixCmd::SearchUsers { .. }
+                | MatrixCmd::CancelUserSearch
+                | MatrixCmd::Devices(_)
+                | MatrixCmd::Keywords(_)
+                | MatrixCmd::Saved(_)
+                | MatrixCmd::RetryDecryption { .. }
+                | MatrixCmd::FetchUserProfile { .. }
+                | MatrixCmd::SetOwnDisplayName { .. }
+                | MatrixCmd::SetOwnAvatar { .. }
+                | MatrixCmd::RemoveOwnAvatar
+                | MatrixCmd::SearchDirectory { .. }
+                | MatrixCmd::DirectoryNextPage { .. }
+                | MatrixCmd::CancelDirectorySearch
+                | MatrixCmd::ListThreads { .. }
+                | MatrixCmd::Agent(_)
+                | MatrixCmd::Collect(_) => false,
             }
         {
             return command;

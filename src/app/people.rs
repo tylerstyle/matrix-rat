@@ -402,6 +402,10 @@ impl App {
             return;
         }
         if let Some(chooser) = &mut popup.role_chooser {
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "foreign crossterm::event::KeyCode"
+            )]
             match code {
                 KeyCode::Up => chooser.step(-1),
                 KeyCode::Char('k') if plain => chooser.step(-1),
@@ -412,6 +416,10 @@ impl App {
             }
             return;
         }
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         match code {
             KeyCode::Up | KeyCode::BackTab => popup.step(-1, &ctx),
             KeyCode::Char('k') if plain => popup.step(-1, &ctx),

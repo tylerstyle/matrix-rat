@@ -459,6 +459,10 @@ impl App {
         };
         if let Stage::Remind(form) = &mut popup.stage {
             let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "foreign crossterm::event::KeyCode"
+            )]
             match code {
                 KeyCode::Esc => self.saved_escape(),
                 KeyCode::Enter => self.accept_reminder(),

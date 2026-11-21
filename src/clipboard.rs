@@ -401,7 +401,7 @@ pub fn paste(
             Ran::Missing => {
                 missing.get_or_insert(tool);
             }
-            ran => {
+            ran @ (Ran::Output(_) | Ran::Failed | Ran::TooLarge | Ran::TimedOut) => {
                 listed = Some((tool, ran));
                 break;
             }

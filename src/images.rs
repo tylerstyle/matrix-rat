@@ -246,10 +246,13 @@ pub fn decode(bytes: &[u8], max: (u32, u32)) -> Result<Decoded, String> {
         .with_guessed_format()
         .map_err(|_| "not a picture this app can read".to_owned())?;
     reader.limits(limits);
-    let reason = |err: image::ImageError| match err {
-        image::ImageError::Limits(_) => "too large to show".to_owned(),
-        image::ImageError::Unsupported(_) => "not a picture this app can read".to_owned(),
-        _ => "the file is damaged".to_owned(),
+    let reason = |err: image::ImageError| {
+        #[expect(clippy::wildcard_enum_match_arm, reason = "foreign image::ImageError")]
+        match err {
+            image::ImageError::Limits(_) => "too large to show".to_owned(),
+            image::ImageError::Unsupported(_) => "not a picture this app can read".to_owned(),
+            _ => "the file is damaged".to_owned(),
+        }
     };
     // The decoder is taken apart from the reader to get at the orientation a camera
     // noted; the reader's own check of the memory needed has to be repeated then.
@@ -506,7 +509,7 @@ impl Entry {
             State::Ready { pixels, encoded } => {
                 pixels.as_bytes().len() + encoded.as_ref().map_or(0, |encoded| encoded.bytes)
             }
-            _ => 0,
+            State::Loading { .. } | State::Failed(_) => 0,
         }
     }
 }
@@ -782,7 +785,7 @@ impl ImageStore {
             entry.used = frame;
             match entry.state {
                 State::Loading { since } if since.elapsed() >= REQUEST_TIMEOUT => {}
-                _ => return,
+                State::Loading { .. } | State::Failed(_) | State::Ready { .. } => return,
             }
         }
         match &info.source {
@@ -941,7 +944,7 @@ impl ImageStore {
         avatar.used = self.frame;
         match &avatar.state {
             SmallState::Ready { pixels, .. } => Some(Arc::clone(pixels)),
-            _ => None,
+            SmallState::Loading { .. } | SmallState::Failed => None,
         }
     }
 
@@ -1290,7 +1293,7 @@ impl ImageStore {
         let frame = self.frame;
         let stale = match &self.entries.get(key)?.state {
             State::Ready { encoded, .. } => encoded.as_ref().is_none_or(|e| e.size != size),
-            _ => return None,
+            State::Loading { .. } | State::Failed(_) => return None,
         };
         let id = if stale && !hold { self.fresh_id() } else { 0 };
         let entry = self.entries.get_mut(key)?;
@@ -1311,7 +1314,7 @@ impl ImageStore {
             State::Ready { encoded, .. } => {
                 encoded.as_mut().filter(|encoded| encoded.shown || !hold)
             }
-            _ => None,
+            State::Loading { .. } | State::Failed(_) => None,
         }
     }
 
@@ -1474,7 +1477,7 @@ impl ImageStore {
     pub fn viewer_pixels(&self) -> Option<(u32, u32)> {
         match &self.viewer.as_ref()?.state {
             ViewerState::Ready(pixels) => Some((pixels.width(), pixels.height())),
-            _ => None,
+            ViewerState::Loading | ViewerState::Failed(_) => None,
         }
     }
 

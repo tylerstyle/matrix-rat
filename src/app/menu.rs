@@ -322,6 +322,10 @@ impl App {
     /// click runs an entry or closes it. True if the event was dealt with.
     pub(super) fn menu_mouse(&mut self, mouse: &MouseEvent, hit: Option<HitId>) -> bool {
         let open = self.menu_open();
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::MouseEventKind"
+        )]
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if open => {
                 self.dirty = true;
@@ -400,6 +404,10 @@ impl App {
         let Some(Modal::Menu(menu)) = &mut self.modal else {
             return;
         };
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         match code {
             KeyCode::Esc | KeyCode::Left => self.modal = None,
             KeyCode::Up | KeyCode::BackTab => menu.step(-1),
@@ -469,7 +477,13 @@ impl App {
                     Run::BanUser => self.open_ban_confirm_from_message(index),
                     Run::VotePoll => self.open_poll_vote(index),
                     Run::EndPoll => self.end_poll(index),
-                    _ => {}
+                    Run::OpenLink
+                    | Run::CopyLink
+                    | Run::OpenRoom
+                    | Run::MarkRead
+                    | Run::MarkUnread
+                    | Run::Notifications
+                    | Run::ClearDraft => {}
                 }
             }
             Target::Link { message, url } => {
@@ -489,7 +503,21 @@ impl App {
                         self.pending_copy = Some(url);
                         self.show_toast("Link copied");
                     }
-                    _ => {}
+                    Run::Do(_)
+                    | Run::CopyPermalink
+                    | Run::ReadBy
+                    | Run::CopyCode(_)
+                    | Run::OpenRoom
+                    | Run::MarkRead
+                    | Run::MarkUnread
+                    | Run::Notifications
+                    | Run::ClearDraft
+                    | Run::IgnoreUser
+                    | Run::UnignoreUser
+                    | Run::Report
+                    | Run::BanUser
+                    | Run::VotePoll
+                    | Run::EndPoll => {}
                 }
             }
             Target::Room { id, kind } => {
@@ -503,7 +531,18 @@ impl App {
                     Run::MarkUnread => self.mark_room_unread(index),
                     Run::Notifications => self.open_info(Some(index), Some(InfoRow::Notify)),
                     Run::Do(action) => self.perform_for_room(at, action),
-                    _ => {}
+                    Run::CopyPermalink
+                    | Run::ReadBy
+                    | Run::OpenLink
+                    | Run::CopyLink
+                    | Run::CopyCode(_)
+                    | Run::ClearDraft
+                    | Run::IgnoreUser
+                    | Run::UnignoreUser
+                    | Run::Report
+                    | Run::BanUser
+                    | Run::VotePoll
+                    | Run::EndPoll => {}
                 }
             }
             Target::Space { id } => {
@@ -525,7 +564,21 @@ impl App {
                     Run::ClearDraft => {
                         self.clear_draft();
                     }
-                    _ => {}
+                    Run::CopyPermalink
+                    | Run::ReadBy
+                    | Run::OpenLink
+                    | Run::CopyLink
+                    | Run::CopyCode(_)
+                    | Run::OpenRoom
+                    | Run::MarkRead
+                    | Run::MarkUnread
+                    | Run::Notifications
+                    | Run::IgnoreUser
+                    | Run::UnignoreUser
+                    | Run::Report
+                    | Run::BanUser
+                    | Run::VotePoll
+                    | Run::EndPoll => {}
                 }
             }
         }

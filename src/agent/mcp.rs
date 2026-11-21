@@ -822,7 +822,7 @@ impl Server {
             );
             match standing {
                 Standing::Doubted(why) => fields.insert("untrusted".to_owned(), why.into()),
-                _ => fields.remove("untrusted"),
+                Standing::Other | Standing::Theirs => fields.remove("untrusted"),
             };
         }
         shown

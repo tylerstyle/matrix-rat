@@ -410,7 +410,7 @@ pub fn build_layout(
                     last_sender = None;
                     break 'message;
                 }
-                _ => {}
+                MsgKind::Text | MsgKind::Emote | MsgKind::Redacted | MsgKind::Undecryptable => {}
             }
 
             let new_day = last_day != Some(message.day.as_str());
@@ -562,7 +562,7 @@ pub fn build_layout(
                     MsgKind::Redacted | MsgKind::Undecryptable => {
                         (theme.style(Role::ReplyQuote), None)
                     }
-                    _ => (text_style, None),
+                    MsgKind::Text | MsgKind::System | MsgKind::ReadMarker => (text_style, None),
                 };
                 let mut rich = Rich::of(message.html.as_deref(), body_text);
                 crate::highlight::colour(&mut rich);
@@ -1179,7 +1179,64 @@ fn hovered_message(hover: Option<HitId>) -> Option<usize> {
         | HitId::ReplyQuote(m)
         | HitId::Sender(m)
         | HitId::NoteButton(m, _) => Some(m),
-        _ => None,
+        HitId::Pane(_)
+        | HitId::Room(_)
+        | HitId::BarRoom(_)
+        | HitId::RoomFilter
+        | HitId::ComposerText
+        | HitId::Field(_)
+        | HitId::Input(_)
+        | HitId::Emoji(_)
+        | HitId::Setting(..)
+        | HitId::Splitter
+        | HitId::Button(_)
+        | HitId::Do(_)
+        | HitId::Backdrop
+        | HitId::Overlay
+        | HitId::Attachment(_)
+        | HitId::AttachmentPlay(_)
+        | HitId::Palette(_)
+        | HitId::GlobalSearch(_)
+        | HitId::Complete(_)
+        | HitId::Menu(_)
+        | HitId::KeybindRow(_)
+        | HitId::KeybindBtn(_)
+        | HitId::IgnoredRow(_)
+        | HitId::IgnoredUnignore(_)
+        | HitId::ReportIgnoreToggle
+        | HitId::ReportSubmit
+        | HitId::UserSearchRow(_)
+        | HitId::UserSearchInfo(_)
+        | HitId::UserInfoRow(_)
+        | HitId::UserInfoCopy
+        | HitId::UserInfoBanSubmit
+        | HitId::UserInfoRoleOption(_)
+        | HitId::OwnProfileSlot(_)
+        | HitId::PinnedRow(_)
+        | HitId::PinnedUnpin(_)
+        | HitId::ReasonConfirmBtn(_)
+        | HitId::Toast
+        | HitId::PollFormSlot(_)
+        | HitId::PollFormRemove(_)
+        | HitId::PollFormMaxStep(_)
+        | HitId::PollVoteAnswer(_)
+        | HitId::PollVoteBtn(_)
+        | HitId::StickerRow(_)
+        | HitId::DetailsFlip
+        | HitId::DetailsCopy
+        | HitId::DoctorCopy
+        | HitId::ThreadRow(_)
+        | HitId::ThreadsMore
+        | HitId::ThreadsMine
+        | HitId::Collect(_)
+        | HitId::KeywordRow(_)
+        | HitId::KeywordRemove(_)
+        | HitId::SavedRow(_)
+        | HitId::SavedRemind(_)
+        | HitId::SavedRemove(_)
+        | HitId::SavedGap
+        | HitId::ReminderChoice(_)
+        | HitId::ReminderDue => None,
     }
 }
 

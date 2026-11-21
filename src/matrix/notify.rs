@@ -289,6 +289,10 @@ fn describe(event: &AnySyncTimelineEvent) -> String {
     let AnySyncTimelineEvent::MessageLike(event) = event else {
         return "New activity".to_owned();
     };
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign ruma AnySyncMessageLikeEvent and MessageType"
+    )]
     match event {
         AnySyncMessageLikeEvent::RoomMessage(message) => match message.as_original() {
             Some(message) => match &message.content.msgtype {

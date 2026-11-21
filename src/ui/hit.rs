@@ -247,9 +247,14 @@ impl HitMap {
     /// The pane under the pointer, looking through whatever lies on top of it.
     pub fn pane_at(&self, column: u16, row: u16) -> Option<Pane> {
         let position = Position::new(column, row);
-        self.entries.iter().rev().find_map(|(rect, id)| match id {
-            HitId::Pane(pane) if rect.contains(position) => Some(*pane),
-            _ => None,
+        self.entries.iter().rev().find_map(|(rect, id)| {
+            if let HitId::Pane(pane) = id
+                && rect.contains(position)
+            {
+                Some(*pane)
+            } else {
+                None
+            }
         })
     }
 }

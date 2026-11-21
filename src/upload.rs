@@ -79,6 +79,7 @@ fn open(path: &Path) -> std::io::Result<std::fs::File> {
 
 fn unreadable(name: &str, err: &std::io::Error) -> String {
     use std::io::ErrorKind::{NotFound, PermissionDenied};
+    #[expect(clippy::wildcard_enum_match_arm, reason = "foreign std::io::ErrorKind")]
     match err.kind() {
         NotFound => format!("{name} does not exist"),
         PermissionDenied => format!("{name} cannot be read (permission denied)"),

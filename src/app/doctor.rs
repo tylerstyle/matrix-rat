@@ -82,6 +82,10 @@ impl App {
             return;
         };
         let page = popup.page.saturating_sub(1).max(1) as isize;
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         match code {
             KeyCode::Esc => self.close_modal(),
             KeyCode::Up => popup.scroll_by(-1),

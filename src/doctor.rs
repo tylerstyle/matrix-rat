@@ -529,7 +529,7 @@ fn desktop(facts: &Facts) -> Section {
     let resolved = match facts.notifications {
         NotifyMode::Auto if facts.session_bus && !facts.ssh => NotifyMode::Desktop,
         NotifyMode::Auto => NotifyMode::Terminal,
-        other => other,
+        other @ (NotifyMode::Desktop | NotifyMode::Terminal | NotifyMode::Off) => other,
     };
     lines.push(match resolved {
         NotifyMode::Off => with(
@@ -545,7 +545,7 @@ fn desktop(facts: &Facts) -> Section {
             "no session bus found, so the desktop's service cannot be reached",
         ),
         NotifyMode::Desktop => fine("Notifications", "desktop service"),
-        _ if facts.notifications == NotifyMode::Auto => with(
+        NotifyMode::Auto | NotifyMode::Terminal if facts.notifications == NotifyMode::Auto => with(
             "Notifications",
             "through the terminal",
             Level::Note,
@@ -555,7 +555,7 @@ fn desktop(facts: &Facts) -> Section {
                 "no session bus found"
             },
         ),
-        _ => fine("Notifications", "through the terminal"),
+        NotifyMode::Auto | NotifyMode::Terminal => fine("Notifications", "through the terminal"),
     });
     if facts.do_not_disturb {
         lines.push(with(

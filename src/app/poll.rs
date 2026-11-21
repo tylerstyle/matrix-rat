@@ -285,7 +285,9 @@ impl App {
                     PollFormSlot::Kind => form.flip_kind(),
                     PollFormSlot::Submit => self.submit_poll_form(),
                     PollFormSlot::Cancel => self.modal = None,
-                    _ => {}
+                    PollFormSlot::Question
+                    | PollFormSlot::Answer(_)
+                    | PollFormSlot::MaxSelections => {}
                 }
             }
             (KeyCode::Left, KeyModifiers::NONE) if slot == PollFormSlot::Kind => {

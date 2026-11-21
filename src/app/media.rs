@@ -97,6 +97,10 @@ impl App {
 
     pub(super) fn on_viewer_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         if let Some(action) = self.keymap.lookup_popup_global(code, mods) {
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "lookup_popup_global only returns Action::Quit or Action::Suspend"
+            )]
             match action {
                 crate::action::Action::Quit => self.should_quit = true,
                 crate::action::Action::Suspend => {

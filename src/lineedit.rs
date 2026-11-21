@@ -520,6 +520,10 @@ impl LineEdit {
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers, keys: EditKeys) -> EditOutcome {
         let ctrl = mods.contains(KeyModifiers::CONTROL);
         let alt = mods.contains(KeyModifiers::ALT);
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         match code {
             KeyCode::Char('b') if alt && !ctrl => self.word_left(),
             KeyCode::Char('f') if alt && !ctrl => self.word_right(),

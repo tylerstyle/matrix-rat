@@ -641,7 +641,11 @@ fn kind(content: &TimelineItemContent) -> Option<&'static str> {
     let TimelineItemContent::MsgLike(content) = content else {
         return None;
     };
-    Some(match &content.kind {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign matrix_sdk_ui MsgLikeKind and ruma MessageType"
+    )]
+    let label = match &content.kind {
         MsgLikeKind::Message(message) => match message.msgtype() {
             MessageType::Text(_) => "text",
             MessageType::Notice(_) | MessageType::ServerNotice(_) => "notice",
@@ -659,7 +663,8 @@ fn kind(content: &TimelineItemContent) -> Option<&'static str> {
         MsgLikeKind::Redacted => "redacted",
         MsgLikeKind::UnableToDecrypt(_) => "undecryptable",
         _ => "other",
-    })
+    };
+    Some(label)
 }
 
 /// The word for a doubt about the sender.

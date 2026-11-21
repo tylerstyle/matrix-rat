@@ -101,6 +101,10 @@ impl App {
     }
 
     pub(super) fn perform_manage(&mut self, action: Action) {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "only called from App::perform for room-management actions"
+        )]
         match action {
             Action::NewRoom => self.open_new(Stage::Choose),
             Action::InviteUser => self.open_new(Stage::Invite),
@@ -374,6 +378,10 @@ impl App {
         }
         if popup.stage == Stage::Choose {
             let mut entered = false;
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "foreign crossterm::event::KeyCode"
+            )]
             match code {
                 KeyCode::Up | KeyCode::BackTab => popup.step(-1),
                 KeyCode::Down | KeyCode::Tab => popup.step(1),
@@ -394,6 +402,10 @@ impl App {
             return;
         }
         if popup.stage == Stage::Browse {
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "foreign crossterm::event::KeyCode"
+            )]
             match code {
                 KeyCode::Up => {
                     popup.step_dir(-1);
@@ -441,6 +453,10 @@ impl App {
             }
         }
         if popup.stage == Stage::Preview {
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "foreign crossterm::event::KeyCode"
+            )]
             match code {
                 KeyCode::Tab | KeyCode::Down => {
                     popup.step(1);
@@ -478,6 +494,10 @@ impl App {
         }
         let search_stage = matches!(popup.stage, Stage::Direct | Stage::Invite);
         if search_stage && !popup.user_results.is_empty() {
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "foreign crossterm::event::KeyCode"
+            )]
             match code {
                 KeyCode::Down => {
                     popup.step_user_search(1);
@@ -496,6 +516,10 @@ impl App {
                 _ => {}
             }
         }
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         match code {
             KeyCode::Tab | KeyCode::Down => popup.step(1),
             KeyCode::BackTab | KeyCode::Up => popup.step(-1),
@@ -919,7 +943,11 @@ impl App {
                     "Asking to join…",
                 )
             }
-            _ => (
+            PreviewButton::Join
+            | PreviewButton::Open
+            | PreviewButton::Accept
+            | PreviewButton::Withdraw
+            | PreviewButton::Cancel => (
                 ManageCmd::Join {
                     request,
                     target,
@@ -1143,6 +1171,10 @@ impl App {
             return;
         }
         if let Some(chooser) = &mut info.role_chooser {
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "foreign crossterm::event::KeyCode"
+            )]
             match code {
                 KeyCode::Up => chooser.step(-1),
                 KeyCode::Char('k') if plain => chooser.step(-1),
@@ -1166,6 +1198,10 @@ impl App {
         // While the selected row is out of view for a filter that nobody matches,
         // the keys that would act on it edit the filter.
         let blind = info.typing_blind();
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         match code {
             KeyCode::F(4) if mods.is_empty() => self.close_manage(),
             KeyCode::Up | KeyCode::BackTab => info.step(-1),
@@ -1340,10 +1376,10 @@ impl App {
                     info.confirm = None;
                 }
                 info.blind = false;
-                match click {
-                    Click::Row(_) => self.info_activate(row, 0),
-                    Click::Step(_, step) => self.info_activate(row, step),
-                    _ => {}
+                if let Click::Row(_) = click {
+                    self.info_activate(row, 0);
+                } else if let Click::Step(_, step) = click {
+                    self.info_activate(row, step);
                 }
             }
             Click::MemberChat => {
@@ -1556,7 +1592,21 @@ impl App {
                     .map_or(String::new(), |details| match row {
                         InfoRow::Name => details.name.clone(),
                         InfoRow::OwnName => details.own_display_name.clone().unwrap_or_default(),
-                        _ => crate::text::sanitize_line(&details.topic),
+                        InfoRow::Topic
+                        | InfoRow::Favourite
+                        | InfoRow::LowPriority
+                        | InfoRow::Pinned
+                        | InfoRow::Notify
+                        | InfoRow::Invite
+                        | InfoRow::AddToSpace
+                        | InfoRow::RemoveFromSpace
+                        | InfoRow::Leave
+                        | InfoRow::KnockRequest(_)
+                        | InfoRow::AddChild
+                        | InfoRow::Child(_)
+                        | InfoRow::SettingsToggle
+                        | InfoRow::Setting(_)
+                        | InfoRow::Member(_) => crate::text::sanitize_line(&details.topic),
                     });
                 info.editing = Some((row, LineEdit::with_text(current).with_max_bytes(FIELD_MAX)));
                 return;
@@ -2039,7 +2089,21 @@ impl App {
                 crate::text::sanitize_line(details.own_display_name.as_deref().unwrap_or(""))
                     == text
             }
-            _ => crate::text::sanitize_line(&details.topic) == text,
+            InfoRow::Topic
+            | InfoRow::Favourite
+            | InfoRow::LowPriority
+            | InfoRow::Pinned
+            | InfoRow::Notify
+            | InfoRow::Invite
+            | InfoRow::AddToSpace
+            | InfoRow::RemoveFromSpace
+            | InfoRow::Leave
+            | InfoRow::KnockRequest(_)
+            | InfoRow::AddChild
+            | InfoRow::Child(_)
+            | InfoRow::SettingsToggle
+            | InfoRow::Setting(_)
+            | InfoRow::Member(_) => crate::text::sanitize_line(&details.topic) == text,
         });
         if unchanged {
             info.editing = None;
@@ -2146,7 +2210,10 @@ impl App {
                         .map(|r| match r.kind {
                             RoomKind::Invite => PreviewMembership::Invited,
                             RoomKind::Knock => PreviewMembership::Knocked,
-                            _ => PreviewMembership::Joined,
+                            RoomKind::Favourite
+                            | RoomKind::Person
+                            | RoomKind::Room
+                            | RoomKind::LowPriority => PreviewMembership::Joined,
                         })
                         .or(space.then_some(PreviewMembership::Joined));
                 }
@@ -2351,7 +2418,21 @@ impl App {
                             Change::Direct(_) if !done.is_empty() => {
                                 info.notice = Some(done.to_owned());
                             }
-                            _ => {}
+                            Change::Invite
+                            | Change::Kick
+                            | Change::Ban
+                            | Change::Unban
+                            | Change::SetRole
+                            | Change::AcceptKnock
+                            | Change::DeclineKnock
+                            | Change::BanKnock
+                            | Change::Name
+                            | Change::OwnName
+                            | Change::Topic
+                            | Change::Favourite(_)
+                            | Change::LowPriority(_)
+                            | Change::Notify
+                            | Change::Direct(_) => {}
                         }
                         if !done.is_empty() {
                             self.show_toast(done);
@@ -2602,6 +2683,10 @@ impl App {
         match &mut info.setting_view {
             Some(SettingSubview::JoinRule { selected }) => {
                 let len = RoomJoinRule::EDITABLE.len() as isize;
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
                         *selected = (*selected as isize - 1).rem_euclid(len) as usize;
@@ -2618,6 +2703,10 @@ impl App {
             }
             Some(SettingSubview::History { selected }) => {
                 let len = RoomHistory::ALL.len() as isize;
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
                         *selected = (*selected as isize - 1).rem_euclid(len) as usize;
@@ -2636,29 +2725,38 @@ impl App {
                 confirm,
                 focus,
                 error,
-            }) => match code {
-                KeyCode::Tab if mods.is_empty() => {
-                    *focus = step_focus(*focus, &[0, 1, 2], 1);
-                }
-                KeyCode::BackTab => {
-                    *focus = step_focus(*focus, &[0, 1, 2], -1);
-                }
-                KeyCode::Left | KeyCode::Right if *focus >= 1 && plain => {
-                    let step = if code == KeyCode::Left { -1 } else { 1 };
-                    *focus = step_focus(*focus, &[1, 2], step);
-                }
-                KeyCode::Enter if plain => {
-                    if *focus == 2 {
-                        info.setting_view = None;
-                    } else {
-                        self.submit_enable_encryption();
+            }) =>
+            {
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
+                match code {
+                    KeyCode::Tab if mods.is_empty() => {
+                        *focus = step_focus(*focus, &[0, 1, 2], 1);
                     }
+                    KeyCode::BackTab => {
+                        *focus = step_focus(*focus, &[0, 1, 2], -1);
+                    }
+                    KeyCode::Left | KeyCode::Right if *focus >= 1 && plain => {
+                        let step = if code == KeyCode::Left { -1 } else { 1 };
+                        *focus = step_focus(*focus, &[1, 2], step);
+                    }
+                    KeyCode::Enter if plain => {
+                        if *focus == 2 {
+                            info.setting_view = None;
+                        } else {
+                            self.submit_enable_encryption();
+                        }
+                    }
+                    _ if *focus == 0
+                        && confirm.handle_key(code, mods, EditKeys::FULL).changed() =>
+                    {
+                        *error = None;
+                    }
+                    _ => {}
                 }
-                _ if *focus == 0 && confirm.handle_key(code, mods, EditKeys::FULL).changed() => {
-                    *error = None;
-                }
-                _ => {}
-            },
+            }
             Some(SettingSubview::Picture {
                 path,
                 focus,
@@ -2671,6 +2769,10 @@ impl App {
                     &[0, 1, 3]
                 };
                 let btn_stops: &[usize] = if has_avatar { &[1, 2, 3] } else { &[1, 3] };
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Tab if mods.is_empty() && *focus == 0 && !path.is_empty() => {
                         self.complete_room_avatar_path();
@@ -2705,6 +2807,10 @@ impl App {
                 notice,
             }) => {
                 if !can_edit_addresses {
+                    #[expect(
+                        clippy::wildcard_enum_match_arm,
+                        reason = "foreign crossterm::event::KeyCode"
+                    )]
                     match code {
                         KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
                             *selected = selected.saturating_sub(1);
@@ -2724,6 +2830,10 @@ impl App {
                     &[0, 1, 2]
                 };
                 let btn_stops: &[usize] = if has_canonical { &[1, 2, 3] } else { &[1, 2] };
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Tab if mods.is_empty() => {
                         *focus = step_focus(*focus, stops, 1);
@@ -2792,6 +2902,10 @@ impl App {
                 }
                 let rows = PermAction::ALL.len();
                 let max_sel = rows + 1;
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
                         *selected = selected.saturating_sub(1);
@@ -3355,7 +3469,21 @@ pub(super) fn room_text_change(
             },
             Change::OwnName,
         )),
-        _ => Ok((
+        InfoRow::Topic
+        | InfoRow::Favourite
+        | InfoRow::LowPriority
+        | InfoRow::Pinned
+        | InfoRow::Notify
+        | InfoRow::Invite
+        | InfoRow::AddToSpace
+        | InfoRow::RemoveFromSpace
+        | InfoRow::Leave
+        | InfoRow::KnockRequest(_)
+        | InfoRow::AddChild
+        | InfoRow::Child(_)
+        | InfoRow::SettingsToggle
+        | InfoRow::Setting(_)
+        | InfoRow::Member(_) => Ok((
             ManageCmd::SetTopic {
                 room_id,
                 topic: text,

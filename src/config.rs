@@ -389,14 +389,18 @@ fn edit_item_type(item: &toml_edit::Item) -> &'static str {
 }
 
 fn parse_edit_key_value(item: &toml_edit::Item) -> RawKeyValue {
+    #[expect(clippy::wildcard_enum_match_arm, reason = "foreign toml_edit::Item")]
     match item {
         toml_edit::Item::Value(toml_edit::Value::String(s)) => RawKeyValue::Str(s.value().clone()),
         toml_edit::Item::Value(toml_edit::Value::Array(arr)) => {
             let items = arr
                 .iter()
-                .map(|elem| match elem {
-                    toml_edit::Value::String(s) => Ok(s.value().clone()),
-                    other => Err(format!("expected key string, got {other}")),
+                .map(|elem| {
+                    if let toml_edit::Value::String(s) = elem {
+                        Ok(s.value().clone())
+                    } else {
+                        Err(format!("expected key string, got {elem}"))
+                    }
                 })
                 .collect();
             RawKeyValue::List(items)
@@ -409,17 +413,21 @@ fn parse_edit_key_value(item: &toml_edit::Item) -> RawKeyValue {
 }
 
 fn parse_serde_key_value(val: &toml::Value) -> RawKeyValue {
+    #[expect(clippy::wildcard_enum_match_arm, reason = "foreign toml::Value")]
     match val {
         toml::Value::String(s) => RawKeyValue::Str(s.clone()),
         toml::Value::Array(arr) => {
             let items = arr
                 .iter()
-                .map(|elem| match elem {
-                    toml::Value::String(s) => Ok(s.clone()),
-                    other => Err(format!(
-                        "expected key string, got {}",
-                        toml_value_type(other)
-                    )),
+                .map(|elem| {
+                    if let toml::Value::String(s) = elem {
+                        Ok(s.clone())
+                    } else {
+                        Err(format!(
+                            "expected key string, got {}",
+                            toml_value_type(elem)
+                        ))
+                    }
                 })
                 .collect();
             RawKeyValue::List(items)

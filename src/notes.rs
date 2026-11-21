@@ -261,7 +261,7 @@ impl Notes {
                     hidden: note.hidden,
                     source: note.source,
                 }),
-                _ => None,
+                NoteState::Running | NoteState::Failed(_) => None,
             })
             .collect()
     }

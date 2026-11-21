@@ -66,7 +66,63 @@ fn snapshot_of(event: &MatrixEvent) -> Option<Snapshot<'_>> {
         MatrixEvent::Spaces(_) => Some(Snapshot::Spaces),
         MatrixEvent::Typing { generation, .. } => Some(Snapshot::Typing(*generation)),
         MatrixEvent::DetachedNew { generation, .. } => Some(Snapshot::DetachedNew(*generation)),
-        _ => None,
+        MatrixEvent::NeedLogin { .. }
+        | MatrixEvent::LoginFailed(_)
+        | MatrixEvent::BrowserLoginUrl(_)
+        | MatrixEvent::LoggedIn { .. }
+        | MatrixEvent::Sync(_)
+        | MatrixEvent::CaughtUp
+        | MatrixEvent::Recovery(_)
+        | MatrixEvent::RecoverResult(_)
+        | MatrixEvent::Paginated { .. }
+        | MatrixEvent::PaginatedForwards { .. }
+        | MatrixEvent::JumpFailed { .. }
+        | MatrixEvent::ActionFailed(_)
+        | MatrixEvent::Error(_)
+        | MatrixEvent::Image { .. }
+        | MatrixEvent::Security(_)
+        | MatrixEvent::Verification(_)
+        | MatrixEvent::CrossSigningSetUp(_)
+        | MatrixEvent::Notice(_)
+        | MatrixEvent::SuppressedNotice { .. }
+        | MatrixEvent::NoticeClicked { .. }
+        | MatrixEvent::FileSaved { .. }
+        | MatrixEvent::AudioFetched { .. }
+        | MatrixEvent::SpeechFetched { .. }
+        | MatrixEvent::LinkPreview { .. }
+        | MatrixEvent::Avatar { .. }
+        | MatrixEvent::EmotePicture { .. }
+        | MatrixEvent::UploadLimit(_)
+        | MatrixEvent::FilesNotSent { .. }
+        | MatrixEvent::FilesSent(_)
+        | MatrixEvent::RoomMembers { .. }
+        | MatrixEvent::Manage(_)
+        | MatrixEvent::NeedReauth { .. }
+        | MatrixEvent::SearchResults { .. }
+        | MatrixEvent::Draft { .. }
+        | MatrixEvent::IgnoredUsers(_)
+        | MatrixEvent::IgnoreResult { .. }
+        | MatrixEvent::ReportResult(_)
+        | MatrixEvent::UserSearchResults { .. }
+        | MatrixEvent::RoomPower { .. }
+        | MatrixEvent::PinnedEvents { .. }
+        | MatrixEvent::PinnedList { .. }
+        | MatrixEvent::ForwardResult { .. }
+        | MatrixEvent::Devices(_)
+        | MatrixEvent::Keywords(_)
+        | MatrixEvent::Saved(_)
+        | MatrixEvent::DecryptionRetried { .. }
+        | MatrixEvent::OwnProfile(_)
+        | MatrixEvent::OwnProfileResult { .. }
+        | MatrixEvent::Source { .. }
+        | MatrixEvent::UserProfile { .. }
+        | MatrixEvent::DirectoryResults(_)
+        | MatrixEvent::DirectoryError { .. }
+        | MatrixEvent::EmotePacks { .. }
+        | MatrixEvent::Threads(_)
+        | MatrixEvent::ThreadsFailed { .. }
+        | MatrixEvent::Agent(_)
+        | MatrixEvent::Collect(_) => None,
     }
 }
 

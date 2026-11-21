@@ -50,7 +50,7 @@ impl std::error::Error for BindError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
-            _ => None,
+            Self::NotPrivate | Self::TooLong | Self::InTheWay | Self::InUse => None,
         }
     }
 }
@@ -92,9 +92,12 @@ pub fn bind(path: &Path) -> Result<(UnixListener, SocketFile), BindError> {
         return Err(BindError::TooLong);
     }
     let folder = path.parent().ok_or(BindError::NotPrivate)?;
-    crate::audio::private_dir(folder).map_err(|err| match err.kind() {
-        io::ErrorKind::Other => BindError::NotPrivate,
-        _ => BindError::Io(err),
+    crate::audio::private_dir(folder).map_err(|err| {
+        if err.kind() == io::ErrorKind::Other {
+            BindError::NotPrivate
+        } else {
+            BindError::Io(err)
+        }
     })?;
     remove_stale(path)?;
     let listener = UnixListener::bind(path).map_err(BindError::Io)?;

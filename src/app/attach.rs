@@ -489,7 +489,7 @@ impl App {
                     .messages()
                     .get(i)
                     .map(|m| (m.sender.clone(), m.body.clone())),
-                _ => None,
+                ComposeMode::Normal | ComposeMode::Edit(_) => None,
             };
             for (n, file) in files.iter().enumerate() {
                 let mut body = match self.attach.voice(&file.path) {

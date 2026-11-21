@@ -409,9 +409,10 @@ impl KeyRequestWakes {
 
 /// The megolm session of an encrypted event, if it has one.
 fn megolm_session(content: &RoomEncryptedEventContent) -> Option<&str> {
-    match &content.scheme {
-        EncryptedEventScheme::MegolmV1AesSha2(megolm) => Some(&megolm.session_id),
-        _ => None,
+    if let EncryptedEventScheme::MegolmV1AesSha2(megolm) = &content.scheme {
+        Some(&megolm.session_id)
+    } else {
+        None
     }
 }
 
@@ -446,10 +447,7 @@ pub struct Verifier {
 /// An in-room verification request is for us only if it names us: in a room with
 /// several people, everyone sees requests meant for someone else.
 fn addressed_to(msgtype: &MessageType, own: Option<&UserId>) -> bool {
-    match msgtype {
-        MessageType::VerificationRequest(request) => Some(&*request.to) == own,
-        _ => false,
-    }
+    matches!(msgtype, MessageType::VerificationRequest(request) if Some(&*request.to) == own)
 }
 
 /// Whether this room event is a step of a verification taken by someone else just now
@@ -1213,23 +1211,22 @@ impl Flow {
                     self.show(VerifyStage::Ready);
                 }
             }
-            VerificationRequestState::Transitioned { verification } => match verification {
-                Verification::SasV1(new) => {
+            VerificationRequestState::Transitioned { verification } => {
+                if let Verification::SasV1(new) = verification {
                     // Subscribe first, then handle the current state.
                     *sas_changes = Some(Box::pin(new.changes()));
                     *sas = Some(new.clone());
                     let state = new.state();
                     self.on_sas(&new, state).await;
-                }
-                // Only emoji comparison is offered, so this does not happen.
-                _ => {
+                } else {
+                    // Only emoji comparison is offered, so this does not happen.
                     let _ = request.cancel().await;
                     self.show(VerifyStage::Cancelled {
                         reason: "The other device chose a method matrix-rat does not support"
                             .to_owned(),
                     });
                 }
-            },
+            }
             VerificationRequestState::Done => self.show(VerifyStage::Done),
             VerificationRequestState::Cancelled(info) => self.show(VerifyStage::Cancelled {
                 reason: cancel_reason(&info),
@@ -1458,6 +1455,7 @@ fn cancel_reason(info: &CancelInfo) -> String {
     } else {
         "The other side"
     };
+    #[expect(clippy::wildcard_enum_match_arm, reason = "foreign ruma CancelCode")]
     match info.cancel_code() {
         CancelCode::Timeout => "Timed out: nobody answered in time".to_owned(),
         CancelCode::User => format!("{by} cancelled the verification"),

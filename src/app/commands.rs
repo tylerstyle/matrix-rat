@@ -420,7 +420,10 @@ impl App {
                 {
                     Some(uri.clone())
                 }
-                _ => None,
+                MentionKind::User { .. }
+                | MentionKind::RoomNotification
+                | MentionKind::RoomLink { .. }
+                | MentionKind::Emoticon { .. } => None,
             });
         let address = picked.as_deref().unwrap_or(typed.arg);
         match parse_address(address)? {
@@ -450,7 +453,22 @@ impl App {
         if own == Some(person.user_id.as_str()) {
             return Err(match typed.command {
                 RoomCommand::Kick => "To go yourself, use /leave",
-                _ => "That is you",
+                RoomCommand::Ban
+                | RoomCommand::Unban
+                | RoomCommand::Join
+                | RoomCommand::Leave
+                | RoomCommand::Invite
+                | RoomCommand::Ignore
+                | RoomCommand::Unignore
+                | RoomCommand::Nick
+                | RoomCommand::RoomNick
+                | RoomCommand::Topic
+                | RoomCommand::RoomName
+                | RoomCommand::DirectChat
+                | RoomCommand::Whois
+                | RoomCommand::Archive
+                | RoomCommand::CatchUp
+                | RoomCommand::Help => "That is you",
             }
             .into());
         }
@@ -466,7 +484,21 @@ impl App {
                     power.can_ban_user(own, &person.user_id),
                     ReasonConfirmPopup::ban,
                 ),
-                _ => (
+                RoomCommand::Unban
+                | RoomCommand::Join
+                | RoomCommand::Leave
+                | RoomCommand::Invite
+                | RoomCommand::Ignore
+                | RoomCommand::Unignore
+                | RoomCommand::Nick
+                | RoomCommand::RoomNick
+                | RoomCommand::Topic
+                | RoomCommand::RoomName
+                | RoomCommand::DirectChat
+                | RoomCommand::Whois
+                | RoomCommand::Archive
+                | RoomCommand::CatchUp
+                | RoomCommand::Help => (
                     power.can_unban_user(own, &person.user_id),
                     ReasonConfirmPopup::unban,
                 ),
@@ -475,7 +507,21 @@ impl App {
             let what = match typed.command {
                 RoomCommand::Kick => "remove",
                 RoomCommand::Ban => "ban",
-                _ => "unban",
+                RoomCommand::Unban
+                | RoomCommand::Join
+                | RoomCommand::Leave
+                | RoomCommand::Invite
+                | RoomCommand::Ignore
+                | RoomCommand::Unignore
+                | RoomCommand::Nick
+                | RoomCommand::RoomNick
+                | RoomCommand::Topic
+                | RoomCommand::RoomName
+                | RoomCommand::DirectChat
+                | RoomCommand::Whois
+                | RoomCommand::Archive
+                | RoomCommand::CatchUp
+                | RoomCommand::Help => "unban",
             };
             return Err(format!("You are not allowed to {what} {label} here"));
         }
@@ -501,7 +547,21 @@ impl App {
             }
             RoomCommand::Topic => InfoRow::Topic,
             RoomCommand::RoomName => InfoRow::Name,
-            _ => InfoRow::OwnName,
+            RoomCommand::RoomNick
+            | RoomCommand::Join
+            | RoomCommand::Leave
+            | RoomCommand::Invite
+            | RoomCommand::Kick
+            | RoomCommand::Ban
+            | RoomCommand::Unban
+            | RoomCommand::Ignore
+            | RoomCommand::Unignore
+            | RoomCommand::Nick
+            | RoomCommand::DirectChat
+            | RoomCommand::Whois
+            | RoomCommand::Archive
+            | RoomCommand::CatchUp
+            | RoomCommand::Help => InfoRow::OwnName,
         };
         let text = clean_input(typed.arg);
         if text.is_empty() {
