@@ -2531,12 +2531,17 @@ fn start_loaded(items: &Vector<Arc<TimelineItem>>, thread: Option<&str>) -> bool
 /// the same way, and the UI, told the start for the error, would not ask for it.
 async fn page_back(timeline: &Timeline, live: bool) -> Result<bool, TimelineError> {
     let was_empty = live && timeline.items().await.is_empty();
-    match timeline.paginate_backwards(PAGE).await {
-        Ok(true) if live => timeline.paginate_backwards(PAGE).await,
+    let answer = match timeline.paginate_backwards(PAGE).await {
         Err(err) if was_empty => {
             tracing::debug!(why = %logsafe::kind(&err), "the first page failed, asked once more");
             timeline.paginate_backwards(PAGE).await
         }
+        answer => answer,
+    };
+    // The start, said of a live timeline, is asked once more, also after a retry: what
+    // came in meanwhile can still be hidden.
+    match answer {
+        Ok(true) if live => timeline.paginate_backwards(PAGE).await,
         answer => answer,
     }
 }
