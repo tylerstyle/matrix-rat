@@ -54,8 +54,8 @@ pub const AVATAR_PIXELS: (u32, u32) = (96, 96);
 /// all 512 at both. It grows with the pixels of a cell.
 const AVATAR_ENTRIES: usize = 512;
 /// Sizes a room picture is kept made for at once: it is drawn at two (see
-/// [`ImageStore::avatar`]), and one more is spare. A frame that draws it at more
-/// sizes keeps them all until a later frame draws fewer.
+/// [`ImageStore::avatar`]), and one more is spare. Frames that draw it at more sizes
+/// keep them all, until two frames in a row draw fewer.
 const AVATAR_SIZES: usize = 3;
 /// Custom emoji are fetched as thumbnails no larger than this.
 pub const EMOTE_PIXELS: (u32, u32) = (64, 64);
@@ -334,7 +334,7 @@ pub struct Encoded {
     pub shown: bool,
     bytes: usize,
     /// The frame it was last drawn in. A room picture keeps one for each size it is
-    /// drawn at; one drawn in the current frame is on the screen and stays.
+    /// drawn at; one drawn in the current frame or the one before stays.
     drawn: u64,
 }
 
@@ -988,11 +988,13 @@ impl ImageStore {
         encoded[at].drawn = frame;
         encoded[at..].rotate_left(1);
         // Over the limit, the sizes drawn at longest ago make room, but none drawn in
-        // this frame: that one is on the screen, and deleting it would blank it. As
-        // they are in the order drawn, once the first was drawn in this frame all
-        // were; then the picture keeps more for this frame, and a later frame that
-        // draws fewer of them lets the rest go.
-        while encoded.len() > AVATAR_SIZES && encoded[0].drawn != frame {
+        // this frame: that one is on the screen, and deleting it would blank it. Nor
+        // one drawn in the frame before, which this frame may not have come to yet:
+        // a picture drawn at more sizes every frame would otherwise make, send and
+        // delete them again each time. As they are in the order drawn, once the first
+        // must stay all must; then the picture keeps more, until two frames in a row
+        // draw fewer of them.
+        while encoded.len() > AVATAR_SIZES && encoded[0].drawn + 1 < frame {
             Self::discard(&mut self.garbage, Some(encoded.remove(0)));
         }
         encoded
@@ -2167,12 +2169,14 @@ mod tests {
         assert_eq!(store.avatar(url, (2, 1), false).unwrap().kitty_id, small);
         let large = store.avatar(url, (4, 2), false).unwrap().kitty_id;
 
-        // Three sizes are kept; a fourth pushes out the one drawn at longest ago.
+        // Three sizes are kept; a fourth pushes out the one drawn at longest ago, once
+        // neither this frame nor the one before drew it.
         store.begin_frame();
         store.avatar(url, (3, 1), false).unwrap();
         store.avatar(url, (2, 1), false).unwrap();
         store.avatar(url, (3, 1), false).unwrap();
         assert!(store.cleanup_sequence(false).is_empty());
+        store.begin_frame();
         store.avatar(url, (6, 3), false).unwrap();
         assert_eq!(store.cleanup_sequence(false), delete(large));
         assert_eq!(store.avatar(url, (2, 1), false).unwrap().kitty_id, small);
@@ -2200,7 +2204,21 @@ mod tests {
         }
         assert!(store.cleanup_sequence(false).is_empty());
 
-        // A frame that draws fewer lets the one drawn at longest ago go.
+        // The next frames draw all four again: none is made, sent or deleted again,
+        // though the first drawn in a frame finds the others drawn in the last.
+        for _ in 0..3 {
+            store.begin_frame();
+            for (&cells, &id) in sizes.iter().zip(&ids) {
+                assert_eq!(store.avatar(url, cells, false).unwrap().kitty_id, id);
+            }
+            assert!(store.cleanup_sequence(false).is_empty());
+        }
+
+        // A frame that draws fewer keeps the others, which the frame before drew; in
+        // the frame after, the one drawn at longest ago goes.
+        store.begin_frame();
+        store.avatar(url, (6, 3), false).unwrap();
+        assert!(store.cleanup_sequence(false).is_empty());
         store.begin_frame();
         store.avatar(url, (6, 3), false).unwrap();
         assert_eq!(store.cleanup_sequence(false), delete(ids[0]));
