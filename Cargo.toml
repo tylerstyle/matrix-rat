@@ -47,7 +47,7 @@ nucleo-matcher = "0.3.1"
 mime = "0.3"
 # Wipes passwords and passphrases from memory when they are dropped; the version the SDK uses.
 zeroize = "1"
-comrak = { version = "0.59.0", default-features = false }
+comrak = { version = "1.0.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 notify = "8"
 toml_edit = "0.25.19"
