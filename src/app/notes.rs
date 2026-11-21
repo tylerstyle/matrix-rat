@@ -42,6 +42,9 @@ pub struct NotesState {
     pub keep: bool,
     /// Where kept notes go; `None` in the demo and in tests: nothing is written.
     file: Option<PathBuf>,
+    /// Which account the kept notes belong to; set once logged in and cleared when the
+    /// session ends. Nothing is read or written without one.
+    owner: Option<String>,
     /// The private folder for the copies of sounds (the player's); set by the event
     /// loop.
     dir: Option<PathBuf>,
@@ -65,6 +68,7 @@ impl Default for NotesState {
             translate_language: notes::DEFAULT_LANGUAGE.to_owned(),
             keep: notes::KEEP_BY_DEFAULT,
             file: None,
+            owner: None,
             dir: None,
             next_id: 0,
             runs: Vec::new(),
@@ -82,6 +86,7 @@ impl fmt::Debug for NotesState {
             .field("translator", &self.translator)
             .field("keep", &self.keep)
             .field("file", &self.file.is_some())
+            .field("owner", &self.owner.is_some())
             .field("dir", &self.dir.is_some())
             .field("runs", &self.runs)
             .field("starts", &self.starts)
@@ -172,8 +177,8 @@ impl NotesState {
     }
 
     fn save(&self) -> std::io::Result<()> {
-        match (&self.file, self.keep) {
-            (Some(file), true) => self.notes.save(file),
+        match (&self.file, &self.owner, self.keep) {
+            (Some(file), Some(owner), true) => self.notes.save(file, owner),
             _ => Ok(()),
         }
     }
@@ -208,17 +213,29 @@ fn own_text(message: &Message) -> Option<String> {
 }
 
 impl App {
-    /// Where the copies of sounds go, and where notes are kept across restarts; the
-    /// kept ones are read now if the setting says so, and a file left from when it did
-    /// is removed if it does not.
+    /// Where the copies of sounds go, and where notes are kept across restarts.
+    /// Notes are read only once `LoggedIn` names the account (see [`Self::load_notes`]);
+    /// a file left from when `keep_notes` was on is removed if the setting is off.
     pub(super) fn set_note_paths(&mut self, dir: PathBuf, file: PathBuf) {
         self.notes.dir = Some(dir);
-        if self.notes.keep {
-            self.notes.notes.load(&file);
-        } else {
+        if !self.notes.keep {
             let _ = notes::remove_file(&file);
         }
         self.notes.file = Some(file);
+    }
+
+    /// Reads the kept notes for `owner` once the session is up. A file with no owner,
+    /// or another account's, is discarded.
+    pub(super) fn load_notes(&mut self, owner: &str) {
+        self.notes.notes.clear();
+        self.notes.owner = Some(owner.to_owned());
+        if let Some(file) = &self.notes.file {
+            if self.notes.keep {
+                self.notes.notes.load(file, owner);
+            } else {
+                let _ = notes::remove_file(file);
+            }
+        }
     }
 
     /// Programs for the event loop to start.
@@ -567,12 +584,20 @@ impl App {
         }
     }
 
-    /// The account goes (logout, or its session is reset): nothing of its messages
-    /// stays. What runs is stopped (a sound still on its way from the worker would
-    /// never come), the notes are forgotten, and the file of kept ones is removed.
+    /// The session goes (soft logout, logout, or reset): nothing of its messages stays
+    /// in memory. What runs is stopped (a sound still on its way from the worker would
+    /// never come), the in-memory notes are forgotten, and the owner is cleared. The
+    /// file on disk stays across a soft logout (`NeedReauth`) and is removed separately
+    /// on logout or `NeedLogin` ([`Self::remove_notes_file`]).
     pub(super) fn forget_notes(&mut self) {
         self.stop_notes();
         self.notes.notes.clear();
+        self.notes.owner = None;
+    }
+
+    /// Deletes the kept-notes file on disk (when logging out or when the profile has no
+    /// session).
+    pub(super) fn remove_notes_file(&mut self) {
         if let Some(file) = &self.notes.file
             && let Err(err) = notes::remove_file(file)
         {
@@ -1504,9 +1529,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = Dir::new("notes-keep");
         let file = dir.0.as_path().join("notes.json");
+        let owner = "@alice:example.org";
         let (mut app, _commands) = app_with(vec![text("t", "Guten Morgen")], &dir, true);
         assert!(!app.notes.keep, "session only unless asked");
         app.set_note_paths(dir.0.as_path().to_owned(), file.clone());
+        app.load_notes(owner);
         select(&mut app, 0);
         app.perform(Action::Translate);
         let request = app.take_note_starts().remove(0);
@@ -1524,10 +1551,17 @@ mod tests {
                 .contains("Good morning")
         );
 
-        // The next start reads it; a run that never ended is not in it.
+        // The next start reads it only after LoggedIn names the same owner.
         let (mut next, _commands) = app_with(vec![text("t", "Guten Morgen")], &dir, true);
         next.notes.keep = true;
         next.set_note_paths(dir.0.as_path().to_owned(), file.clone());
+        assert!(
+            next.notes().is_empty(),
+            "notes must not load before LoggedIn"
+        );
+        next.on_matrix(MatrixEvent::LoggedIn {
+            user_id: owner.to_owned(),
+        });
         assert_eq!(
             note(&next, "$t", NoteKind::Translation),
             Some(NoteState::Done("Good morning".into()))
@@ -1539,6 +1573,9 @@ mod tests {
         let (mut third, _commands) = app_with(vec![text("t", "Guten Morgen")], &dir, true);
         third.notes.keep = true;
         third.set_note_paths(dir.0.as_path().to_owned(), file.clone());
+        third.on_matrix(MatrixEvent::LoggedIn {
+            user_id: owner.to_owned(),
+        });
         select(&mut third, 0);
         assert_eq!(third.note_caps().translate, NoteOffer::Show);
 
@@ -1577,7 +1614,8 @@ mod tests {
         assert!(toast(&app).contains("your command"));
         app.set_transcribe_command(" AUTO ");
         assert_eq!(app.notes.transcribe_command, "auto");
-        // Debug output says nothing of the commands or the files.
+        // Debug output says nothing of the commands, owner, or files.
+        app.load_notes("@alice:example.org");
         app.set_translate_command("sh -c 'secret-key' /home/alice");
         app.set_transcribe_model("/home/alice/model.bin");
         let shown = format!("{:?}", app.notes);
@@ -1591,6 +1629,7 @@ mod tests {
     fn a_logout_stops_everything_forgets_the_notes_and_removes_their_file() {
         let dir = Dir::new("notes-logout");
         let file = dir.0.join("notes.json");
+        let owner = "@alice:example.org";
         let (mut app, mut commands) = app_with(
             vec![voice("v1"), text("t", "hallo"), text("u", "zwei")],
             &dir,
@@ -1598,6 +1637,7 @@ mod tests {
         );
         app.notes.keep = true;
         app.set_note_paths(dir.0.clone(), file.clone());
+        app.load_notes(owner);
         // One finished and kept, one whose sound is on its way, one whose program runs.
         select(&mut app, 2);
         app.perform(Action::Translate);
@@ -1611,7 +1651,18 @@ mod tests {
         let mut running = app.take_note_starts().remove(0);
         assert_eq!(app.notes.runs.len(), 2);
 
-        app.reset_session();
+        // Soft logout (NeedReauth): stops running programs and clears memory, but keeps
+        // notes.json on disk so the same account gets its kept notes back after reauth.
+        app.on_matrix(MatrixEvent::NeedReauth {
+            target: crate::matrix::ReauthTarget {
+                homeserver: "https://example.org".into(),
+                user_id: owner.into(),
+                device_id: "DEV1".into(),
+                kind: crate::matrix::ReauthKind::Password,
+                client_id: None,
+            },
+            reason: "session expired".into(),
+        });
         assert!(app.notes().is_empty());
         assert!(
             app.notes.runs.is_empty(),
@@ -1620,7 +1671,7 @@ mod tests {
         assert!(app.take_note_starts().is_empty());
         assert_eq!(running.cancel.try_recv(), Ok(()));
         assert!(asked(&mut commands).contains(&"CancelSpeech(run 2)".to_owned()));
-        assert!(!file.exists());
+        assert!(file.exists(), "soft logout keeps notes.json on disk");
         // Answers that come after all are for nobody.
         let late = TempAudio::create(dir.0.as_path(), None, b"x").unwrap();
         app.on_matrix(MatrixEvent::SpeechFetched {
@@ -1630,7 +1681,20 @@ mod tests {
         wrote(&mut app, 3, "too late");
         assert!(app.notes().is_empty());
         assert!(app.take_note_starts().is_empty());
-        assert!(!file.exists());
+
+        // Re-authenticating as the same account reloads kept notes.
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: owner.into(),
+        });
+        assert_eq!(
+            note(&app, "$u", NoteKind::Translation),
+            Some(NoteState::Done("two".into()))
+        );
+
+        // NeedLogin (full logout / no session): clears memory AND removes notes.json.
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert!(app.notes().is_empty());
+        assert!(!file.exists(), "NeedLogin removes notes.json");
     }
 
     #[test]
@@ -1642,6 +1706,7 @@ mod tests {
         let (mut app, _commands) = app_with(vec![captioned, text("t", "bleibt")], &dir, true);
         app.notes.keep = true;
         app.set_note_paths(dir.0.clone(), file.clone());
+        app.load_notes("@alice:example.org");
         select(&mut app, 0);
         app.perform(Action::Transcribe);
         fetched(&mut app, 1, &dir);

@@ -508,11 +508,10 @@ impl App {
             duration,
             waveform,
         };
-        self.attach.add_voice(scope, voice, size);
-        // Like a pasted picture, it answers an `/upload` command being typed.
-        if here && crate::upload::command_argument(self.composer.text()).is_some() {
-            self.restore_draft();
-        }
+        self.attach.add_voice(scope.clone(), voice, size);
+        // Like a pasted picture, it answers an `/upload` command being typed,
+        // even if the user switched rooms or threads while recording.
+        self.restore_draft_for(&scope);
         let said = if silent {
             "Only silence was recorded: is the microphone the right one?"
         } else if full {
@@ -1904,5 +1903,41 @@ mod tests {
         let (overflow, _) = render_chip(&app, 30, 1);
         assert!(overflow.contains("🎤 Voice message  +1 more"), "{overflow}");
         assert!(!overflow.contains("📎"), "{overflow}");
+    }
+
+    #[test]
+    fn recording_finishing_after_room_or_thread_switch_restores_stashed_draft() {
+        let dir = Bin::new("voice-switch-stash", &[]);
+        let mut app = offered();
+        // Room draft stashed by /upload, then switch to room 1 before recording finishes.
+        app.composer.set_text("voice caption");
+        app.perform(Action::Attach);
+        assert_eq!(app.composer.text(), "/upload ");
+        app.perform(Action::RecordVoice);
+        let _req = recording(&mut app);
+        app.open_room(1);
+        assert_eq!(app.rooms[0].draft, "/upload ");
+        let _path = done(&mut app, &dir, 4);
+        assert_eq!(app.rooms[0].draft, "voice caption");
+        app.open_room(0);
+        assert_eq!(app.composer.text(), "voice caption");
+
+        // Thread draft stashed by /upload, then close the thread before recording finishes.
+        let msg_idx = app
+            .messages()
+            .iter()
+            .position(|m| matches!(m.kind, crate::model::MsgKind::Text))
+            .unwrap();
+        app.open_thread(msg_idx);
+        assert!(app.thread_open());
+        app.composer.set_text("thread caption");
+        app.perform(Action::Attach);
+        assert_eq!(app.composer.text(), "/upload ");
+        app.perform(Action::RecordVoice);
+        let _req = recording(&mut app);
+        app.close_thread();
+        let _path = done(&mut app, &dir, 4);
+        app.open_thread(msg_idx);
+        assert_eq!(app.composer.text(), "thread caption");
     }
 }

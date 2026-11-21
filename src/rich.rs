@@ -673,6 +673,9 @@ impl Builder {
                 return;
             }
             "br" => {
+                if let Some(block) = self.block {
+                    self.rich.code_blocks[block].text.push('\n');
+                }
                 self.start_line();
                 self.end_line();
                 return;
@@ -1512,5 +1515,17 @@ mod tests {
         ] {
             assert_eq!(texts(&from_html(html)), [EMOTICON_PLACEHOLDER], "{html}");
         }
+    }
+
+    #[test]
+    fn br_inside_pre_adds_newline_to_copied_code_block() {
+        let rich = from_html("<pre><code>first<br>second<br/>third</code></pre>");
+        assert_eq!(texts(&rich), ["first", "second", "third"]);
+        assert_eq!(rich.code_blocks.len(), 1);
+        assert_eq!(rich.code_blocks[0].text, "first\nsecond\nthird");
+
+        // A trailing <br> before </pre> ends the block like a trailing '\n'.
+        let trailing = from_html("<pre><code>alpha<br>beta<br></code></pre>");
+        assert_eq!(trailing.code_blocks[0].text, "alpha\nbeta");
     }
 }

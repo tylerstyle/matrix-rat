@@ -56,6 +56,7 @@ pub fn is_thread(key: &str) -> bool {
 pub async fn open(room: &Room, root: &str) -> Result<Timeline> {
     let root_event_id = EventId::parse(root).map_err(|_| anyhow!("invalid event id"))?;
     room.timeline_builder()
+        .with_internal_id_prefix(super::next_timeline_prefix())
         .with_focus(TimelineFocus::Thread { root_event_id })
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
         .build()

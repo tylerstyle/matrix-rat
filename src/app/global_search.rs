@@ -578,8 +578,17 @@ impl App {
         timeline.selected = find_target_message(&messages, target_id, false, self.thread_open());
         timeline.reveal_selected = timeline.selected.is_some();
 
+        // Capture any active reply or edit target by event id before replacing the slice
+        // (cross-room or cross-thread switches above already reset `compose_mode`, and
+        // a detached slice is a brand-new timeline with different local item ids).
+        let compose_event = self.compose_target_event_id();
+
         // The room is the open one now, whatever was open (or not) before.
         self.rooms[room_index].messages = messages;
+        self.remap_compose_mode_by_event(compose_event.as_deref());
+        self.request_custom_reaction_emotes();
+        self.follow_room_emotes();
+        self.forget_notes_of_deleted();
         self.sync_pinned_flags(&room_id);
         self.sync_saved_flags(&room_id);
         self.timeline = timeline;
@@ -1510,5 +1519,319 @@ mod tests {
         assert_eq!(demo.active, thread_room);
         assert!(demo.thread_open());
         assert_eq!(demo.timeline.selected, Some(1));
+    }
+
+    #[test]
+    fn same_room_jump_remaps_or_cancels_compose_mode_and_syncs_emotes_and_notes() {
+        use crate::app::ComposeMode;
+
+        // 1. Same-room jump to a slice missing the message being edited cancels the edit
+        //    and restores the stashed draft instead of editing an unrelated index.
+        {
+            let (mut app, _rx, _h) = test_app_with_matrix();
+            app.rooms[0].messages.push(Message {
+                id: "$ev_a2".into(),
+                item: Some(ItemRef::Event("$ev_a2".into())),
+                sender: "me".into(),
+                own: true,
+                body: "my message".into(),
+                ..Message::default()
+            });
+            app.composer.set_text("unsent draft");
+            app.begin_edit(1, "my message");
+            assert_eq!(app.compose_mode, ComposeMode::Edit(1));
+
+            app.pending_jump = Some(PendingJump {
+                generation: 9,
+                room_id: "!a:example.org".into(),
+                event_id: "$ev_old".into(),
+                thread_root: None,
+            });
+            app.generation = 9;
+            app.on_jump_arrived(
+                9,
+                "!a:example.org".into(),
+                vec![
+                    Message {
+                        id: "$ev_older".into(),
+                        item: Some(ItemRef::Event("$ev_older".into())),
+                        sender: "bob".into(),
+                        body: "earlier".into(),
+                        ..Message::default()
+                    },
+                    Message {
+                        id: "$ev_old".into(),
+                        item: Some(ItemRef::Event("$ev_old".into())),
+                        sender: "bob".into(),
+                        body: "different message at index 1".into(),
+                        ..Message::default()
+                    },
+                ],
+                false,
+                Some(DetachedTimeline {
+                    target_event: "$ev_old".into(),
+                    reached_end: false,
+                    thread_root: None,
+                }),
+            );
+            assert_eq!(app.compose_mode, ComposeMode::Normal);
+            assert_eq!(app.composer.text(), "unsent draft");
+        }
+
+        // 2. Same-room jump where the replied-to message moved to a new index remaps it.
+        {
+            let (mut app, _rx, _h) = test_app_with_matrix();
+            app.compose_mode = ComposeMode::Reply(0);
+            app.pending_jump = Some(PendingJump {
+                generation: 10,
+                room_id: "!a:example.org".into(),
+                event_id: "$ev_before".into(),
+                thread_root: None,
+            });
+            app.generation = 10;
+            app.on_jump_arrived(
+                10,
+                "!a:example.org".into(),
+                vec![
+                    Message {
+                        id: "$ev_before".into(),
+                        item: Some(ItemRef::Event("$ev_before".into())),
+                        sender: "bob".into(),
+                        body: "before".into(),
+                        ..Message::default()
+                    },
+                    Message {
+                        id: "$ev_a1".into(),
+                        item: Some(ItemRef::Event("$ev_a1".into())),
+                        sender: "alice".into(),
+                        body: "first room hello".into(),
+                        ..Message::default()
+                    },
+                ],
+                false,
+                Some(DetachedTimeline {
+                    target_event: "$ev_before".into(),
+                    reached_end: true,
+                    thread_root: None,
+                }),
+            );
+            assert_eq!(app.compose_mode, ComposeMode::Reply(1));
+        }
+
+        // 3. Jump across rooms follows emote packs and drops notes of redacted messages.
+        {
+            let (mut app, mut rx, _h) = test_app_with_matrix();
+            app.want_emotes();
+            while rx.try_recv().is_ok() {}
+            app.notes.notes.set(
+                "$ev_del",
+                crate::notes::NoteKind::Translation,
+                crate::notes::NoteState::Done("cached".into()),
+            );
+
+            app.pending_jump = Some(PendingJump {
+                generation: 11,
+                room_id: "!b:example.org".into(),
+                event_id: "$ev_del".into(),
+                thread_root: None,
+            });
+            app.generation = 11;
+            app.on_jump_arrived(
+                11,
+                "!b:example.org".into(),
+                vec![Message {
+                    id: "$ev_del".into(),
+                    item: Some(ItemRef::Event("$ev_del".into())),
+                    kind: crate::model::MsgKind::Redacted,
+                    ..Message::default()
+                }],
+                true,
+                Some(DetachedTimeline {
+                    target_event: "$ev_del".into(),
+                    reached_end: true,
+                    thread_root: None,
+                }),
+            );
+            let mut asked_emotes = false;
+            while let Ok(cmd) = rx.try_recv() {
+                if matches!(
+                    cmd,
+                    MatrixCmd::EnsureEmotePacks {
+                        room_id: Some(ref id)
+                    } if id == "!b:example.org"
+                ) {
+                    asked_emotes = true;
+                }
+            }
+            assert!(
+                asked_emotes,
+                "jump to another room should follow emote packs"
+            );
+            assert!(
+                app.notes
+                    .notes
+                    .get("$ev_del", crate::notes::NoteKind::Translation)
+                    .is_none(),
+                "jump should forget notes of redacted messages"
+            );
+        }
+    }
+
+    #[test]
+    fn same_room_jump_remaps_compose_by_event_id_when_slice_ids_collide() {
+        use crate::app::ComposeMode;
+
+        // 1. Edit target has local timeline id "1" ($ev_mine); jump slice also starts at
+        //    id "0", "1" where "1" is an unrelated own message ($ev_other_own). Must cancel
+        //    the edit instead of silently editing the unrelated message.
+        {
+            let (mut app, _rx, _h) = test_app_with_matrix();
+            app.rooms[0].messages = vec![
+                Message {
+                    id: "0".into(),
+                    item: Some(ItemRef::Event("$ev_a1".into())),
+                    sender: "alice".into(),
+                    body: "hello".into(),
+                    ..Message::default()
+                },
+                Message {
+                    id: "1".into(),
+                    item: Some(ItemRef::Event("$ev_mine".into())),
+                    sender: "me".into(),
+                    own: true,
+                    body: "original".into(),
+                    ..Message::default()
+                },
+            ];
+            app.composer.set_text("unsent draft");
+            app.begin_edit(1, "original");
+            assert_eq!(app.compose_mode, ComposeMode::Edit(1));
+
+            app.pending_jump = Some(PendingJump {
+                generation: 12,
+                room_id: "!a:example.org".into(),
+                event_id: "$ev_other_own".into(),
+                thread_root: None,
+            });
+            app.generation = 12;
+            app.on_jump_arrived(
+                12,
+                "!a:example.org".into(),
+                vec![
+                    Message {
+                        id: "0".into(),
+                        item: Some(ItemRef::Event("$ev_older".into())),
+                        sender: "bob".into(),
+                        body: "older".into(),
+                        ..Message::default()
+                    },
+                    Message {
+                        id: "1".into(),
+                        item: Some(ItemRef::Event("$ev_other_own".into())),
+                        sender: "me".into(),
+                        own: true,
+                        body: "unrelated own message".into(),
+                        ..Message::default()
+                    },
+                ],
+                false,
+                Some(DetachedTimeline {
+                    target_event: "$ev_other_own".into(),
+                    reached_end: false,
+                    thread_root: None,
+                }),
+            );
+            assert_eq!(app.compose_mode, ComposeMode::Normal);
+            assert_eq!(app.composer.text(), "unsent draft");
+        }
+
+        // 2. Reply target is $ev_target (old id "0"); jump slice has an unrelated event
+        //    at id "0" and $ev_target at index 1 with a new timeline id "t2-1". Must remap
+        //    by event id to index 1, not stay at index 0.
+        {
+            let (mut app, _rx, _h) = test_app_with_matrix();
+            app.rooms[0].messages = vec![Message {
+                id: "0".into(),
+                item: Some(ItemRef::Event("$ev_target".into())),
+                sender: "alice".into(),
+                body: "target".into(),
+                ..Message::default()
+            }];
+            app.compose_mode = ComposeMode::Reply(0);
+            app.pending_jump = Some(PendingJump {
+                generation: 13,
+                room_id: "!a:example.org".into(),
+                event_id: "$ev_other".into(),
+                thread_root: None,
+            });
+            app.generation = 13;
+            app.on_jump_arrived(
+                13,
+                "!a:example.org".into(),
+                vec![
+                    Message {
+                        id: "0".into(),
+                        item: Some(ItemRef::Event("$ev_other".into())),
+                        sender: "bob".into(),
+                        body: "colliding id".into(),
+                        ..Message::default()
+                    },
+                    Message {
+                        id: "t2-1".into(),
+                        item: Some(ItemRef::Event("$ev_target".into())),
+                        sender: "alice".into(),
+                        body: "target".into(),
+                        ..Message::default()
+                    },
+                ],
+                false,
+                Some(DetachedTimeline {
+                    target_event: "$ev_other".into(),
+                    reached_end: true,
+                    thread_root: None,
+                }),
+            );
+            assert_eq!(app.compose_mode, ComposeMode::Reply(1));
+        }
+
+        // 3. Target with no event id (local echo) cannot be matched across timelines and
+        //    is cancelled even if the new slice reuses the same local id.
+        {
+            let (mut app, _rx, _h) = test_app_with_matrix();
+            app.rooms[0].messages = vec![Message {
+                id: "0".into(),
+                item: Some(ItemRef::Transaction("txn1".into())),
+                sender: "me".into(),
+                own: true,
+                body: "sending".into(),
+                ..Message::default()
+            }];
+            app.compose_mode = ComposeMode::Reply(0);
+            app.pending_jump = Some(PendingJump {
+                generation: 14,
+                room_id: "!a:example.org".into(),
+                event_id: "$ev_remote".into(),
+                thread_root: None,
+            });
+            app.generation = 14;
+            app.on_jump_arrived(
+                14,
+                "!a:example.org".into(),
+                vec![Message {
+                    id: "0".into(),
+                    item: Some(ItemRef::Event("$ev_remote".into())),
+                    sender: "bob".into(),
+                    body: "remote".into(),
+                    ..Message::default()
+                }],
+                true,
+                Some(DetachedTimeline {
+                    target_event: "$ev_remote".into(),
+                    reached_end: true,
+                    thread_root: None,
+                }),
+            );
+            assert_eq!(app.compose_mode, ComposeMode::Normal);
+        }
     }
 }

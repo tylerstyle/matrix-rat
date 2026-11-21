@@ -682,6 +682,7 @@ impl App {
     pub(super) fn scroll_dir_browse(&mut self, lines: isize) {
         if let Some(Modal::New(popup)) = &mut self.modal
             && popup.stage == Stage::Browse
+            && popup.busy.is_none()
         {
             popup.scroll_dir(lines);
             if lines > 0
@@ -6748,5 +6749,60 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         assert!(info(&app).setting_view.is_none());
         assert!(sent(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn wheel_in_browse_respects_busy() {
+        use crate::matrix::PublicRoom;
+
+        let (mut app, _terminal, mut commands) = connected();
+        let _ = all_commands(&mut commands);
+        app.open_new_with(Stage::Browse, |_| {});
+        let g = match all_commands(&mut commands).as_slice() {
+            [MatrixCmd::SearchDirectory { generation, .. }] => *generation,
+            other => panic!("expected SearchDirectory, got {other:?}"),
+        };
+        let rooms: Vec<PublicRoom> = (0..6)
+            .map(|i| PublicRoom {
+                room_id: format!("!r{i}:example.org"),
+                name: Some(format!("Room {i}")),
+                alias: None,
+                topic: None,
+                avatar: None,
+                joined_members: 1,
+                world_readable: false,
+                knock: false,
+                joined: false,
+            })
+            .collect();
+        app.on_matrix(MatrixEvent::DirectoryResults(DirectoryPage {
+            generation: g,
+            append: false,
+            rooms,
+            has_more: true,
+        }));
+        if let Some(Modal::New(popup)) = &mut app.modal {
+            popup.dir_page = 3;
+            popup.busy = Some("Joining…");
+        }
+        app.scroll_dir_browse(3);
+        if let Some(Modal::New(popup)) = &app.modal {
+            assert_eq!(popup.dir_scroll, 0, "busy browse popup must not scroll");
+            assert!(!popup.dir_loading_more);
+        }
+        assert!(
+            all_commands(&mut commands).is_empty(),
+            "busy browse popup must not request DirectoryNextPage"
+        );
+
+        // Once no longer busy, wheel scrolling near the end scrolls and loads the next page.
+        if let Some(Modal::New(popup)) = &mut app.modal {
+            popup.busy = None;
+        }
+        app.scroll_dir_browse(3);
+        assert!(matches!(
+            all_commands(&mut commands).as_slice(),
+            [MatrixCmd::DirectoryNextPage { generation }] if *generation == g
+        ));
     }
 }

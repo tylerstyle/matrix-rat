@@ -674,6 +674,7 @@ impl Timelines {
             };
             let outcome = room
                 .timeline_builder()
+                .with_internal_id_prefix(super::next_timeline_prefix())
                 .with_focus(TimelineFocus::Event {
                     target: parsed_event.clone(),
                     num_context_events: PAGE / 2,
@@ -2061,6 +2062,7 @@ fn content_without_relation(message: &Outgoing) -> Result<RoomMessageEventConten
 /// The timeline of a room as the app shows it.
 async fn room_timeline(room: &Room) -> Result<Timeline> {
     room.timeline_builder()
+        .with_internal_id_prefix(super::next_timeline_prefix())
         .with_focus(TimelineFocus::Live {
             // Replies in a thread are shown in the thread (see `threads`).
             hide_threaded_events: true,
@@ -4150,6 +4152,56 @@ mod tests {
         })
         .await
         .expect("jump forwarder stopped");
+        drop(server);
+    }
+
+    /// Every timeline built for a room gets its own internal id prefix, so item ids from
+    /// two timelines (such as a live timeline and a jump slice) never collide.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_built_timeline_gets_its_own_item_id_prefix() {
+        use std::collections::HashSet;
+
+        use crate::matrix::spaces::fake;
+        use serde_json::json;
+
+        let room_id = "!r:localhost";
+        let mut joined = fake::joined(false, vec![]);
+        joined["timeline"]["events"] = json!([{
+            "type": "m.room.message",
+            "room_id": room_id,
+            "event_id": "$m1:localhost",
+            "sender": fake::ME,
+            "origin_server_ts": 1_000,
+            "content": { "msgtype": "m.text", "body": "hello" }
+        }]);
+        let server = fake::Server::start(json!({ "join": { room_id: joined } })).await;
+        let client = fake_client_with_cache(&server.url).await;
+        let parsed = <&matrix_sdk::ruma::RoomId>::try_from(room_id).unwrap();
+        let room = client.get_room(parsed).expect("synced room");
+
+        let first = super::room_timeline(&room).await.unwrap();
+        let second = super::room_timeline(&room).await.unwrap();
+        let first_ids: HashSet<String> = first
+            .items()
+            .await
+            .iter()
+            .map(|item| item.unique_id().0.clone())
+            .collect();
+        let second_ids: HashSet<String> = second
+            .items()
+            .await
+            .iter()
+            .map(|item| item.unique_id().0.clone())
+            .collect();
+
+        assert!(!first_ids.is_empty());
+        assert!(!second_ids.is_empty());
+        assert!(first_ids.iter().all(|id| id.starts_with('t')));
+        assert!(second_ids.iter().all(|id| id.starts_with('t')));
+        assert!(
+            first_ids.is_disjoint(&second_ids),
+            "ids collided across timelines: {first_ids:?} vs {second_ids:?}"
+        );
         drop(server);
     }
 

@@ -18,6 +18,36 @@ use crate::model::RoomKind;
 const MAX_DIG: u8 = 15;
 
 #[derive(Clone, Default)]
+struct SearchCache {
+    /// Which version of the room's messages the stored matches belong to.
+    rev: u64,
+    messages_ptr: usize,
+    messages_len: usize,
+    /// The search text (trimmed and lowercased) those matches were found for.
+    query: String,
+    /// Positions of the matching messages, oldest first.
+    matches: Vec<usize>,
+    /// Reused while lowercasing each message so searching does not allocate per line.
+    scratch: String,
+    #[cfg(test)]
+    scans: u64,
+}
+
+fn contains_lowercase(haystack: &str, needle: &str, scratch: &mut String) -> bool {
+    if haystack.is_ascii() {
+        if needle.is_ascii() && haystack.len() < needle.len() {
+            return false;
+        }
+        scratch.clear();
+        scratch.push_str(haystack);
+        scratch.make_ascii_lowercase();
+        scratch.contains(needle)
+    } else {
+        haystack.to_lowercase().contains(needle)
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct SearchBar {
     pub query: LineEdit,
     /// Id of the message the search is at, if any matches.
@@ -38,6 +68,8 @@ pub struct SearchBar {
     origin: (Option<usize>, usize),
     /// The room the search is in; the bar closes if another one is shown.
     room: String,
+    /// Matching positions kept while the bar is open, so stepping does not rescan.
+    cache: SearchCache,
 }
 
 /// Hand-written: the message it is at and the room it is in are named by their ids
@@ -75,34 +107,86 @@ impl App {
         self.open_modal(Modal::Search(bar));
     }
 
-    /// Indexes of the messages that contain `needle`, oldest first.
-    fn search_matches(&self, needle: &str) -> Vec<usize> {
-        let needle = needle.trim().to_lowercase();
+    /// Brings the open search's matches up to date for the current text and messages,
+    /// reusing what was already found when neither changed (or narrowing it as the user
+    /// types more).
+    fn search_ensure_matches(&mut self) {
+        let Some(Modal::Search(bar)) = &mut self.modal else {
+            return;
+        };
+        let needle = bar.query.trim().to_lowercase();
+        let mut cache = std::mem::take(&mut bar.cache);
+        let rev = self.timeline_rev;
+        let messages = self.messages();
+        let ptr = messages.as_ptr() as usize;
+        let len = messages.len();
+
         if needle.is_empty() {
-            return Vec::new();
+            cache.matches.clear();
+            cache.query.clear();
+            cache.rev = rev;
+            cache.messages_ptr = ptr;
+            cache.messages_len = len;
+        } else {
+            let same_timeline =
+                cache.rev == rev && cache.messages_ptr == ptr && cache.messages_len == len;
+            if same_timeline && cache.query == needle {
+                // Exact hit: nothing to scan.
+            } else if same_timeline && !cache.query.is_empty() && needle.contains(&cache.query) {
+                let scratch = &mut cache.scratch;
+                cache.matches.retain(|&i| {
+                    let m = &messages[i];
+                    contains_lowercase(&m.body, &needle, scratch)
+                        || contains_lowercase(&m.sender, &needle, scratch)
+                });
+                cache.query = needle;
+                #[cfg(test)]
+                {
+                    cache.scans += 1;
+                }
+            } else {
+                cache.matches.clear();
+                let scratch = &mut cache.scratch;
+                for (i, m) in messages.iter().enumerate() {
+                    if matches!(m.kind, MsgKind::System | MsgKind::ReadMarker) {
+                        continue;
+                    }
+                    if contains_lowercase(&m.body, &needle, scratch)
+                        || contains_lowercase(&m.sender, &needle, scratch)
+                    {
+                        cache.matches.push(i);
+                    }
+                }
+                cache.rev = rev;
+                cache.messages_ptr = ptr;
+                cache.messages_len = len;
+                cache.query = needle;
+                #[cfg(test)]
+                {
+                    cache.scans += 1;
+                }
+            }
         }
-        self.messages()
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| !matches!(m.kind, MsgKind::System | MsgKind::ReadMarker))
-            .filter(|(_, m)| {
-                m.body.to_lowercase().contains(&needle) || m.sender.to_lowercase().contains(&needle)
-            })
-            .map(|(i, _)| i)
-            .collect()
+        if let Some(Modal::Search(bar)) = &mut self.modal {
+            bar.cache = cache;
+        }
     }
 
-    /// Puts the search on the match at `index` of `matches` and shows that message.
-    fn search_go(&mut self, matches: &[usize], index: usize) {
-        let message = matches[index];
+    /// Moves the search to the match at `index` and shows that message.
+    fn search_go(&mut self, index: usize) {
+        let Some(Modal::Search(bar)) = &self.modal else {
+            return;
+        };
+        let total = bar.cache.matches.len();
+        let message = bar.cache.matches[index];
         let id = self.messages().get(message).map(|m| m.id.clone());
         self.timeline.selected = Some(message);
         self.timeline.reveal_selected = true;
         if let Some(Modal::Search(bar)) = &mut self.modal {
             bar.hit = id;
             bar.at = message;
-            bar.total = matches.len();
-            bar.position = matches.len() - index;
+            bar.total = total;
+            bar.position = total - index;
             bar.digging = 0;
             bar.note = None;
         }
@@ -110,12 +194,16 @@ impl App {
 
     /// The query changed: go to the newest match.
     fn search_restart(&mut self) {
+        if !matches!(self.modal, Some(Modal::Search(_))) {
+            return;
+        }
+        self.search_ensure_matches();
         let Some(Modal::Search(bar)) = &self.modal else {
             return;
         };
-        let matches = self.search_matches(&bar.query);
-        if let Some(last) = matches.len().checked_sub(1) {
-            self.search_go(&matches, last);
+        let last = bar.cache.matches.len().checked_sub(1);
+        if let Some(last) = last {
+            self.search_go(last);
         } else if let Some(Modal::Search(bar)) = &mut self.modal {
             let empty = bar.query.trim().is_empty();
             bar.hit = None;
@@ -139,20 +227,26 @@ impl App {
         if bar.query.trim().is_empty() {
             return;
         }
-        let matches = self.search_matches(&bar.query);
-        // Where the search stands: the hit if it is still there, else the selection.
-        let at = bar
-            .hit
-            .as_ref()
-            .and_then(|id| self.messages().iter().position(|m| m.id == *id))
-            .or(self.timeline.selected);
-        let next = match (at, older) {
-            (Some(at), true) => matches.iter().rposition(|i| *i < at),
-            (Some(at), false) => matches.iter().position(|i| *i > at),
-            (None, _) => matches.len().checked_sub(1),
+        self.search_ensure_matches();
+        let next = {
+            let Some(Modal::Search(bar)) = &self.modal else {
+                return;
+            };
+            let matches = &bar.cache.matches;
+            // Where the search stands: the hit if it is still there, else the selection.
+            let at = bar
+                .hit
+                .as_ref()
+                .and_then(|id| self.messages().iter().position(|m| m.id == *id))
+                .or(self.timeline.selected);
+            match (at, older) {
+                (Some(at), true) => matches.iter().rposition(|i| *i < at),
+                (Some(at), false) => matches.iter().position(|i| *i > at),
+                (None, _) => matches.len().checked_sub(1),
+            }
         };
         if let Some(next) = next {
-            return self.search_go(&matches, next);
+            return self.search_go(next);
         }
         if older {
             self.search_dig(MAX_DIG);
@@ -210,43 +304,55 @@ impl App {
         if bar.query.trim().is_empty() {
             return;
         }
-        let matches = self.search_matches(&bar.query);
-        let at = bar
-            .hit
-            .as_ref()
-            .and_then(|id| self.messages().iter().position(|m| m.id == *id))
-            .and_then(|message| matches.iter().position(|i| *i == message));
-        let had_hit = bar.hit.is_some();
-        let was_at = bar.at;
-        match at {
-            // Still there: only the numbers may have changed.
-            Some(index) => {
-                let message = matches[index];
-                if let Some(Modal::Search(bar)) = &mut self.modal {
-                    bar.at = message;
-                    bar.total = matches.len();
-                    bar.position = matches.len() - index;
-                }
-            }
-            // The hit is gone, or there was none and now there are matches.
-            None if !matches.is_empty() && (had_hit || !self.timeline.loading_older) => {
-                // A hit that disappeared: the next older match from where it was, the
-                // way the search was heading. No hit before: the newest.
-                let index = if had_hit {
+        self.search_ensure_matches();
+        let (at, had_hit, total, fallback_index) = {
+            let Some(Modal::Search(bar)) = &self.modal else {
+                return;
+            };
+            let matches = &bar.cache.matches;
+            let at = bar
+                .hit
+                .as_ref()
+                .and_then(|id| self.messages().iter().position(|m| m.id == *id))
+                .and_then(|message| matches.iter().position(|i| *i == message));
+            let had_hit = bar.hit.is_some();
+            let was_at = bar.at;
+            let fallback_index = if matches.is_empty() {
+                None
+            } else if had_hit {
+                Some(
                     matches
                         .iter()
                         .rposition(|i| *i < was_at)
                         .or_else(|| matches.iter().position(|i| *i >= was_at))
-                        .unwrap_or(0)
-                } else {
-                    matches.len() - 1
-                };
-                self.search_go(&matches, index);
+                        .unwrap_or(0),
+                )
+            } else {
+                Some(matches.len() - 1)
+            };
+            (at, had_hit, matches.len(), fallback_index)
+        };
+        match at {
+            // Still there: only the numbers may have changed.
+            Some(index) => {
+                if let Some(Modal::Search(bar)) = &mut self.modal {
+                    bar.at = bar.cache.matches[index];
+                    bar.total = total;
+                    bar.position = total - index;
+                }
+            }
+            // The hit is gone, or there was none and now there are matches.
+            None if fallback_index.is_some() && (had_hit || !self.timeline.loading_older) => {
+                // A hit that disappeared: the next older match from where it was, the
+                // way the search was heading. No hit before: the newest.
+                if let Some(index) = fallback_index {
+                    self.search_go(index);
+                }
             }
             None => {
                 if let Some(Modal::Search(bar)) = &mut self.modal {
                     bar.hit = None;
-                    bar.total = matches.len();
+                    bar.total = total;
                     bar.position = 0;
                 }
             }
@@ -273,17 +379,23 @@ impl App {
             return;
         }
         let rounds = bar.digging - 1;
-        let matches = self.search_matches(&bar.query);
-        let at = bar
-            .hit
-            .as_ref()
-            .and_then(|id| self.messages().iter().position(|m| m.id == *id));
-        let older = match at {
-            Some(at) => matches.iter().rposition(|i| *i < at),
-            None => matches.len().checked_sub(1),
+        self.search_ensure_matches();
+        let older = {
+            let Some(Modal::Search(bar)) = &self.modal else {
+                return;
+            };
+            let matches = &bar.cache.matches;
+            let at = bar
+                .hit
+                .as_ref()
+                .and_then(|id| self.messages().iter().position(|m| m.id == *id));
+            match at {
+                Some(at) => matches.iter().rposition(|i| *i < at),
+                None => matches.len().checked_sub(1),
+            }
         };
         match older {
-            Some(older) => self.search_go(&matches, older),
+            Some(older) => self.search_go(older),
             None => self.search_dig(rounds),
         }
     }
@@ -698,5 +810,50 @@ mod tests {
         app.on_event(key(KeyCode::Char('!')));
         assert_eq!(bar(&app).query, "rat! alpha");
         assert_eq!(bar(&app).total, 0);
+    }
+
+    #[test]
+    fn search_reuses_cache_across_steps_and_refreshes_on_query_or_timeline_change() {
+        let (mut app, _commands) = app_with(&["Rat one", "Übung", "rats two", "rat three"]);
+        app.timeline.reached_start = true;
+        app.perform(Action::Search);
+
+        type_text(&mut app, "rat");
+        assert_eq!(bar(&app).total, 3);
+        let after_query = bar(&app).cache.scans;
+        assert_eq!(after_query, 3);
+
+        // Stepping through matches reuses cached hits without rescanning messages.
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Down));
+        assert_eq!(bar(&app).cache.scans, after_query);
+
+        // Narrowing ("rats") and loosening ("rat") stay exact.
+        type_text(&mut app, "s");
+        assert_eq!(bar(&app).total, 1);
+        assert_eq!(app.timeline.selected, Some(2));
+        app.on_event(key(KeyCode::Backspace));
+        assert_eq!(bar(&app).total, 3);
+        assert_eq!(app.timeline.selected, Some(3));
+
+        // Timeline update refreshes the cache and picks up the new match.
+        let mut updated = app.rooms[0].messages.clone();
+        updated.push(message("new", "another RAT"));
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: app.generation,
+            messages: updated,
+            reached_start: true,
+            detached: None,
+        });
+        assert_eq!(bar(&app).total, 4);
+
+        // Unicode case-insensitive search matches accurately.
+        app.on_event(key(KeyCode::Esc));
+        app.perform(Action::Search);
+        type_text(&mut app, "üb");
+        assert_eq!(bar(&app).total, 1);
+        assert_eq!(app.timeline.selected, Some(1));
     }
 }

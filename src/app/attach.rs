@@ -313,6 +313,37 @@ impl App {
         self.composer.set_text(&draft);
     }
 
+    /// Puts back the draft that `/upload` set aside for `scope` (or clears `/upload `),
+    /// whether that conversation is still open or waiting in the background.
+    pub(super) fn restore_draft_for(&mut self, scope: &Scope) {
+        if self.attach_scope().as_ref() == Some(scope) {
+            if upload::command_argument(self.composer.text()).is_some() {
+                self.restore_draft();
+            }
+            return;
+        }
+        match &scope.1 {
+            None => {
+                let Some(index) = self.rooms.iter().position(|room| room.id == scope.0) else {
+                    return;
+                };
+                let open = self.open_index();
+                let is_upload =
+                    upload::command_argument(self.room_draft_mut(index, open)).is_some();
+                if is_upload {
+                    let restored = self.attach.stash.remove(scope).unwrap_or_default();
+                    *self.room_draft_mut(index, open) = restored;
+                }
+            }
+            Some(key) => {
+                let stash = &mut self.attach.stash;
+                self.threads.replace_draft_if_upload(&scope.0, key, || {
+                    stash.remove(scope).unwrap_or_default()
+                });
+            }
+        }
+    }
+
     /// Enter on an `/upload` command: the file joins the waiting ones (nothing is sent
     /// yet) and the draft comes back. False if the composer holds no such command.
     pub(super) fn upload_command(&mut self) -> bool {

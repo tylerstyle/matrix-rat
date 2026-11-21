@@ -174,16 +174,7 @@ impl App {
                             || matches!(&item, ItemRef::Event(id) if id == &m.id)
                     })
                 {
-                    if let Some(messages) = self.messages_mut() {
-                        messages.remove(idx);
-                    }
-                    self.timeline.selected = self
-                        .find_selectable(idx, false)
-                        .or_else(|| self.find_selectable(idx, true));
-                    self.timeline.reveal_selected = true;
-                    if self.timeline.selected.is_none() {
-                        self.set_focus(Pane::Composer);
-                    }
+                    self.remove_demo_message(idx);
                     self.show_toast("Message deleted");
                 }
             }
@@ -1367,5 +1358,41 @@ mod tests {
         assert_eq!(app.rooms[app.active].id, ROOM_B);
         assert!(app.space.is_none());
         assert!(app.threads.open.is_none());
+    }
+
+    #[test]
+    fn demo_redact_with_reason_remaps_and_cancels_compose_mode() {
+        use crate::app::ComposeMode;
+
+        let mut app = App::demo();
+        app.rooms[app.active].power.can_redact_other = true;
+        app.rooms[app.active].messages = vec![
+            sample_msg("e0", "bob", BOB, "first", false),
+            sample_msg("e1", "bob", BOB, "second", false),
+            sample_msg("e2", "alice", ALICE, "mine", true),
+        ];
+
+        // Editing index 2 while redacting index 0 shifts Edit(2) -> Edit(1).
+        app.composer.set_text("my draft");
+        app.timeline.selected = Some(2);
+        app.perform(Action::Edit);
+        assert_eq!(app.compose_mode, ComposeMode::Edit(2));
+        app.open_redact_confirm(0);
+        app.submit_reason_confirm();
+        assert_eq!(app.compose_mode, ComposeMode::Edit(1));
+        assert_eq!(app.messages()[1].id, "e2");
+
+        // Redacting the exact message being edited cancels Edit and restores the stashed draft.
+        app.open_redact_confirm(1);
+        app.submit_reason_confirm();
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.composer.text(), "my draft");
+
+        // Replying to index 0 while redacting index 0 cancels Reply.
+        app.compose_mode = ComposeMode::Reply(0);
+        app.open_redact_confirm(0);
+        app.submit_reason_confirm();
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(app.messages().is_empty());
     }
 }

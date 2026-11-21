@@ -762,32 +762,49 @@ impl App {
 
     /// Rooms that pass the filter, in the order the sidebar shows them.
     pub fn visible_rooms(&self) -> Vec<usize> {
-        let needle = self.sidebar.filter.to_lowercase();
+        let needle = (!self.sidebar.filter.is_empty()).then(|| self.sidebar.filter.to_lowercase());
         let open = self.open_index();
-        RoomKind::SECTIONS
-            .iter()
-            .flat_map(|kind| {
-                self.rooms
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, room)| room.kind == *kind)
-                    // Invitations and pending knocks are shown in every space: they belong to none yet.
-                    .filter(|(_, room)| {
-                        self.space.is_none()
-                            || room.is_pending()
-                            || self.space_rooms.contains(&room.id)
-                    })
-                    // The open room stays in the list whatever the quick filters say.
-                    .filter(|(i, room)| {
-                        Some(*i) == open
-                            || ((!self.sidebar.unread_only || room.shows_unread())
-                                && (!self.sidebar.people_only || room.direct))
-                    })
-                    .filter(|(_, room)| room.name.to_lowercase().contains(&needle))
-                    .map(|(i, _)| i)
-                    .collect::<Vec<_>>()
-            })
-            .collect()
+        let mut out = Vec::with_capacity(if needle.is_none() {
+            self.rooms.len()
+        } else {
+            0
+        });
+        let mut lower_buf = String::new();
+        for kind in RoomKind::SECTIONS {
+            for (i, room) in self.rooms.iter().enumerate() {
+                if room.kind != kind {
+                    continue;
+                }
+                // Invitations and pending knocks are shown in every space: they belong to none yet.
+                if self.space.is_some()
+                    && !room.is_pending()
+                    && !self.space_rooms.contains(&room.id)
+                {
+                    continue;
+                }
+                // The open room stays in the list whatever the quick filters say.
+                if Some(i) != open
+                    && ((self.sidebar.unread_only && !room.shows_unread())
+                        || (self.sidebar.people_only && !room.direct))
+                {
+                    continue;
+                }
+                if let Some(needle) = &needle {
+                    lower_buf.clear();
+                    if room.name.is_ascii() {
+                        lower_buf.push_str(&room.name);
+                        lower_buf.make_ascii_lowercase();
+                    } else {
+                        lower_buf.push_str(&room.name.to_lowercase());
+                    }
+                    if !lower_buf.contains(needle.as_str()) {
+                        continue;
+                    }
+                }
+                out.push(i);
+            }
+        }
+        out
     }
 
     pub fn sidebar_rows(&self) -> Vec<SideRow> {
@@ -1321,6 +1338,7 @@ impl App {
                     self.send_matrix(MatrixCmd::Logout);
                     // Nothing may be sent for the old session from here on.
                     self.reset_session();
+                    self.remove_notes_file();
                     self.show_toast("Logging out…");
                 } else {
                     menu.confirm_logout = true;
@@ -2545,42 +2563,47 @@ impl App {
         }
     }
 
-    /// Replaces the open room's messages with the worker's current list, keeping the
-    /// selection and a pending reply or edit on the same messages.
-    fn apply_timeline(&mut self, messages: Vec<Message>) {
-        let id_at = |i: usize| self.messages().get(i).map(|m| m.id.clone());
-        let selected_id = self.timeline.selected.and_then(id_at);
-        let compose_id = match self.compose_mode {
-            ComposeMode::Reply(i) | ComposeMode::Edit(i) => id_at(i),
-            ComposeMode::Normal => None,
-        };
-        // A reaction with a custom emoji can only be named once the packs are known.
-        let custom_reaction = messages.iter().any(|m| {
-            m.reactions.iter().any(|r| {
-                r.key
-                    .get(..6)
-                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mxc://"))
-            })
-        });
-        if let Some(target) = self.messages_mut() {
-            *target = messages;
-        }
-        if custom_reaction {
-            self.want_emotes();
-        }
-        let find = |messages: &[Message], id: Option<String>| {
-            id.and_then(|id| messages.iter().position(|m| m.id == id))
-        };
-        let selected_at = find(self.messages(), selected_id);
-        let compose_at = find(self.messages(), compose_id);
-
-        if self.timeline.selected.is_some() {
-            self.timeline.selected =
-                selected_at.or_else(|| self.find_selectable(usize::MAX, false));
-            if self.timeline.selected.is_none() && self.focus == Pane::Timeline {
-                self.set_focus(Pane::Composer);
+    /// The timeline id of the message a pending reply or edit points at, before the list
+    /// is replaced.
+    pub(super) fn compose_target_id(&self) -> Option<String> {
+        match self.compose_mode {
+            ComposeMode::Reply(i) | ComposeMode::Edit(i) => {
+                self.messages().get(i).map(|m| m.id.clone())
             }
+            ComposeMode::Normal => None,
         }
+    }
+
+    /// The event id of the message a pending reply or edit points at, if it has one.
+    pub(super) fn compose_target_event_id(&self) -> Option<String> {
+        match self.compose_mode {
+            ComposeMode::Reply(i) | ComposeMode::Edit(i) => self
+                .messages()
+                .get(i)
+                .and_then(|m| m.event_id().map(str::to_owned)),
+            ComposeMode::Normal => None,
+        }
+    }
+
+    /// Keeps a pending reply or edit on the same message after the list changes, or
+    /// cancels it if that message is gone.
+    pub(super) fn remap_compose_mode(&mut self, compose_id: Option<String>) {
+        let compose_at = compose_id.and_then(|id| self.messages().iter().position(|m| m.id == id));
+        self.apply_remapped_compose(compose_at);
+    }
+
+    /// Keeps a pending reply or edit on the message with `event_id` after switching to
+    /// another timeline, or cancels it if that event is not shown (or had none).
+    pub(super) fn remap_compose_mode_by_event(&mut self, event_id: Option<&str>) {
+        let compose_at = event_id.and_then(|ev| {
+            self.messages()
+                .iter()
+                .position(|m| m.event_id() == Some(ev))
+        });
+        self.apply_remapped_compose(compose_at);
+    }
+
+    fn apply_remapped_compose(&mut self, compose_at: Option<usize>) {
         self.compose_mode = match (self.compose_mode, compose_at) {
             (ComposeMode::Reply(_), Some(i)) => ComposeMode::Reply(i),
             (ComposeMode::Edit(_), Some(i)) => ComposeMode::Edit(i),
@@ -2591,6 +2614,45 @@ impl App {
             }
             _ => ComposeMode::Normal,
         };
+    }
+
+    /// Asks for image packs if any shown message has a custom emoji reaction.
+    pub(super) fn request_custom_reaction_emotes(&mut self) {
+        let custom_reaction = self.messages().iter().any(|m| {
+            m.reactions.iter().any(|r| {
+                r.key
+                    .get(..6)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mxc://"))
+            })
+        });
+        if custom_reaction {
+            self.want_emotes();
+        }
+    }
+
+    /// Replaces the open room's messages with the worker's current list, keeping the
+    /// selection and a pending reply or edit on the same messages.
+    fn apply_timeline(&mut self, messages: Vec<Message>) {
+        let selected_id = self
+            .timeline
+            .selected
+            .and_then(|i| self.messages().get(i).map(|m| m.id.clone()));
+        let compose_id = self.compose_target_id();
+        if let Some(target) = self.messages_mut() {
+            *target = messages;
+        }
+        self.request_custom_reaction_emotes();
+        let selected_at =
+            selected_id.and_then(|id| self.messages().iter().position(|m| m.id == id));
+
+        if self.timeline.selected.is_some() {
+            self.timeline.selected =
+                selected_at.or_else(|| self.find_selectable(usize::MAX, false));
+            if self.timeline.selected.is_none() && self.focus == Pane::Timeline {
+                self.set_focus(Pane::Composer);
+            }
+        }
+        self.remap_compose_mode(compose_id);
     }
 
     /// The user's own latest message that can be edited, if the composer is free for
@@ -2744,6 +2806,12 @@ impl App {
             }
             return;
         }
+        self.remove_demo_message(index);
+    }
+
+    /// Drops the message at `index` from the demo list, keeping the selection and any
+    /// pending reply or edit on the remaining messages.
+    pub(super) fn remove_demo_message(&mut self, index: usize) {
         if let Some(messages) = self.messages_mut() {
             messages.remove(index);
         }
@@ -2760,6 +2828,7 @@ impl App {
             other @ (ComposeMode::Normal | ComposeMode::Reply(_) | ComposeMode::Edit(_)) => other,
         };
         if self.messages().is_empty() {
+            self.timeline.selected = None;
             self.set_focus(Pane::Composer);
         } else {
             self.timeline.selected = self
@@ -3604,9 +3673,11 @@ impl App {
         match event {
             MatrixEvent::NeedLogin { reason } => {
                 self.reset_session();
+                self.remove_notes_file();
                 self.open_modal(Modal::Login(LoginForm::new(reason)));
             }
             MatrixEvent::NeedReauth { target, reason } => {
+                // Soft logout: keep notes.json on disk until reauth, as with saved.json.
                 self.reset_session();
                 self.open_modal(Modal::Login(LoginForm::reauth(target, reason)));
             }
@@ -3630,6 +3701,7 @@ impl App {
                 if let Some(file) = self.bookmarks.file.clone() {
                     self.load_saved(file, &user_id);
                 }
+                self.load_notes(&user_id);
                 self.user_id = Some(user_id);
                 self.send_matrix(MatrixCmd::Previews(self.room_previews));
                 self.logged_out = false;
@@ -3925,8 +3997,10 @@ impl App {
             .map(|room| room.id.clone());
         // Rooms arrive in batches. If all we could show so far was a pending invite or
         // knock, look again: a real conversation is the better default.
+        let mut switched_from_pending = false;
         if self.auto_opened && self.room().is_some_and(|room| room.is_pending()) {
             open_id = None;
+            switched_from_pending = true;
         }
         let cursor_id = self
             .cursor_room()
@@ -4069,6 +4143,25 @@ impl App {
                         self.restore_room_marks(&id);
                     } else {
                         self.clear_completion_marks();
+                    }
+                } else if switched_from_pending {
+                    // Auto-switched off a pending invite or knock: restore the newly
+                    // opened room's draft when nothing was typed yet, never silently
+                    // drop early-typed text (leave both the composer and `room.draft`
+                    // intact if both are non-empty), and clear the composer when no
+                    // rooms remain.
+                    match self.rooms.get_mut(self.active) {
+                        Some(room) if self.composer.is_empty() => {
+                            let draft = std::mem::take(&mut room.draft);
+                            let id = room.id.clone();
+                            self.composer.set_text(&draft);
+                            self.restore_room_marks(&id);
+                        }
+                        Some(_) => {}
+                        None => {
+                            self.composer.set_text("");
+                            self.clear_completion_marks();
+                        }
                     }
                 }
                 self.begin_unread_line();
@@ -7754,6 +7847,67 @@ mod tests {
     }
 
     #[test]
+    fn auto_switch_from_pending_restores_draft_and_clears_when_empty() {
+        let (mut app, _terminal) = drawn();
+        let (handle, _commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        // Two pending rooms arrive; the first is auto-opened.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!i");
+        // If the second room has a draft and becomes joined, auto-switching to it
+        // restores that draft instead of leaving it stranded on Room::draft.
+        app.rooms[1].draft = "for k".to_owned();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!k");
+        assert_eq!(app.composer.text(), "for k");
+        assert!(app.rooms[app.active].draft.is_empty());
+
+        // When early text was typed AND the auto-opened room already has its own draft,
+        // keep the typed text in the composer and keep the room's draft intact.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!i");
+        type_text(&mut app, "typed early");
+        app.rooms[1].draft = "for k".to_owned();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!k");
+        assert_eq!(app.composer.text(), "typed early");
+        assert_eq!(app.rooms[app.active].draft, "for k");
+
+        // If the sole auto-opened pending invite vanishes, stale composer text is cleared.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!i",
+            "Invited",
+            RoomCategory::Invite,
+            0,
+        )]));
+        assert_eq!(app.rooms[app.active].id, "!i");
+        type_text(&mut app, "stale text");
+        app.on_matrix(MatrixEvent::Rooms(vec![]));
+        assert!(app.rooms.is_empty());
+        assert!(
+            app.composer.is_empty(),
+            "vanishing auto-opened pending room must clear the composer"
+        );
+    }
+
+    #[test]
     fn theme_file_changes_are_picked_up() {
         let dir = std::env::temp_dir().join(format!("matrix-rat-themes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -9916,6 +10070,17 @@ mod tests {
         assert!(app.sidebar.filter.is_empty());
         assert!(!app.sidebar.unread_only);
         assert!(!app.sidebar.people_only);
+
+        // Unicode room names still filter case-insensitively and empty filter returns full order.
+        app.select_space(None);
+        app.rooms[0].name = "Übung".to_owned();
+        app.sidebar.filter.set("üb");
+        assert_eq!(names(&app), ["Übung"]);
+        app.sidebar.filter.clear();
+        assert_eq!(
+            names(&app),
+            ["Übung", "Dan", "OpenChannel", "Rust", "LowNews"]
+        );
 
         // Session-only: reset_session clears quick filters, and Config ignores them.
         app.perform(Action::FilterUnread);

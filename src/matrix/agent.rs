@@ -365,6 +365,7 @@ pub(super) fn joined_room(
 async fn open(room: &Room) -> Result<Timeline> {
     let build = room
         .timeline_builder()
+        .with_internal_id_prefix(super::next_timeline_prefix())
         .with_focus(TimelineFocus::Live {
             // A reply in a thread is an answer like any other.
             hide_threaded_events: false,

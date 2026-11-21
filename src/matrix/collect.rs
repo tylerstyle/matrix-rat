@@ -365,6 +365,7 @@ impl<'a> Progress<'a> {
 async fn open(room: &Room) -> Result<Timeline> {
     let build = room
         .timeline_builder()
+        .with_internal_id_prefix(super::next_timeline_prefix())
         .with_focus(TimelineFocus::Live {
             hide_threaded_events: false,
         })

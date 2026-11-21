@@ -109,9 +109,11 @@ pub fn display(path: &Path) -> String {
 
 /// Writes `bytes` into `dir` under `name`, or `name (1)`, `name (2)`… if that exists:
 /// nothing is ever overwritten, no link is followed, and the file appears under its
-/// name only when it is complete.
+/// name only when it is complete. Only the user may read it (mode 0600), like
+/// [`NewFile`], since saved attachments may come from encrypted rooms.
 pub fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     use std::io::ErrorKind::AlreadyExists;
+    use std::os::unix::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir)?;
     let name = safe_name(name);
     // The data goes into a new hidden file first (never an existing one).
@@ -127,6 +129,7 @@ pub fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBu
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&path)
         {
             Ok(file) => {
@@ -223,6 +226,7 @@ impl Drop for NewFile {
 /// anything, links included) and never shows a half-written file.
 fn publish(dir: &Path, name: &str, partial: &Path) -> std::io::Result<PathBuf> {
     use std::io::ErrorKind::AlreadyExists;
+    use std::os::unix::fs::OpenOptionsExt;
     let (stem, extension) = match name.rfind('.') {
         Some(dot) if dot > 0 => name.split_at(dot),
         _ => (name, ""),
@@ -243,6 +247,7 @@ fn publish(dir: &Path, name: &str, partial: &Path) -> std::io::Result<PathBuf> {
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&candidate)
         {
             Ok(_) => {}
@@ -292,6 +297,7 @@ mod tests {
 
     #[test]
     fn nothing_is_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("matrix-rat-files-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let first = write_new(&dir, "note.txt", b"one").unwrap();
@@ -302,6 +308,14 @@ mod tests {
         assert_eq!(third, dir.join("note (2).txt"));
         assert_eq!(std::fs::read(&first).unwrap(), b"one");
         assert_eq!(std::fs::read(&third).unwrap(), b"three");
+        assert_eq!(
+            std::fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&second).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert_eq!(write_new(&dir, "README", b"x").unwrap(), dir.join("README"));
         assert_eq!(
             write_new(&dir, "README", b"x").unwrap(),
