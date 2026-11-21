@@ -46,10 +46,16 @@ const CACHE_ENTRIES: usize = 256;
 /// Room pictures are kept as squares of this size; they are shown in two cells (four
 /// by two in the room list with room previews), which is some 20 to 80 pixels each way.
 pub const AVATAR_PIXELS: (u32, u32) = (96, 96);
-/// Room pictures kept; at 96x96 each that is some 20 MB at the very most.
+/// Room pictures kept; at 96x96 each that is some 20 MB at the very most. On top of
+/// that each keeps, for each size it is drawn at, what the terminal is sent: kitty's
+/// base64 of the pixels of those cells, which is a third more than their four bytes
+/// each. That is at most [`AVATAR_SIZES`] for each, so 512 x 3 in all; with cells of
+/// 10 by 20 pixels, some 2 KB for two cells and 9 KB for four by two, some 6 MB for
+/// all 512 at both. It grows with the pixels of a cell.
 const AVATAR_ENTRIES: usize = 512;
 /// Sizes a room picture is kept made for at once: it is drawn at two (see
-/// [`ImageStore::avatar`]), and one more is spare.
+/// [`ImageStore::avatar`]), and one more is spare. A frame that draws it at more
+/// sizes keeps them all until a later frame draws fewer.
 const AVATAR_SIZES: usize = 3;
 /// Custom emoji are fetched as thumbnails no larger than this.
 pub const EMOTE_PIXELS: (u32, u32) = (64, 64);
@@ -327,6 +333,9 @@ pub struct Encoded {
     /// cell it is drawn into, and is lost if something else is drawn over that cell.
     pub shown: bool,
     bytes: usize,
+    /// The frame it was last drawn in. A room picture keeps one for each size it is
+    /// drawn at; one drawn in the current frame is on the screen and stays.
+    drawn: u64,
 }
 
 /// Turns pixels into what the terminal draws. `None` if pictures are off or the
@@ -352,6 +361,7 @@ fn encode(
                 kitty_id: Some(kitty_id),
                 shown: false,
                 bytes,
+                drawn: 0,
             })
         }
         Protocol::Halfblocks => {
@@ -363,13 +373,15 @@ fn encode(
                 // Half blocks are plain cells; there is nothing to transmit.
                 shown: true,
                 bytes: usize::from(size.0) * usize::from(size.1) * 16,
+                drawn: 0,
             })
         }
     }
 }
 
-/// A room picture for its two cells in the room list: cut to the shape of those cells
-/// around its middle, so that it fills them without being squeezed.
+/// A room picture for `cells`, whichever size it is drawn at: cut to the shape of
+/// those cells around its middle, so that it fills them without being squeezed.
+/// `None` if pictures are not sent to the terminal, or for no cells at all.
 fn encode_avatar(
     pixels: &DynamicImage,
     graphics: Graphics,
@@ -380,6 +392,9 @@ fn encode_avatar(
         return None;
     };
     let (cols, rows) = cells;
+    if cols == 0 || rows == 0 {
+        return None;
+    }
     let width = u32::from(cols) * u32::from(graphics.font.0.max(1));
     let height = u32::from(rows) * u32::from(graphics.font.1.max(1));
     let (crop_width, crop_height) = cover_crop((pixels.width(), pixels.height()), (width, height));
@@ -399,6 +414,7 @@ fn encode_avatar(
         kitty_id: Some(kitty_id),
         shown: false,
         bytes,
+        drawn: 0,
     })
 }
 
@@ -454,6 +470,7 @@ fn encode_emote(
         kitty_id: Some(kitty_id),
         shown: false,
         bytes,
+        drawn: 0,
     })
 }
 
@@ -963,14 +980,21 @@ impl ImageStore {
             if covered {
                 return None;
             }
-            if encoded.len() >= AVATAR_SIZES {
-                // The size drawn at longest ago makes room.
-                Self::discard(&mut self.garbage, Some(encoded.remove(0)));
-            }
-            encoded.extend(encode_avatar(pixels, graphics, id, cells));
+            // Made before any other makes room: a size that cannot be made pushes
+            // out none.
+            encoded.push(encode_avatar(pixels, graphics, id, cells)?);
         }
         let at = encoded.iter().position(|e| e.size == cells)?;
+        encoded[at].drawn = frame;
         encoded[at..].rotate_left(1);
+        // Over the limit, the sizes drawn at longest ago make room, but none drawn in
+        // this frame: that one is on the screen, and deleting it would blank it. As
+        // they are in the order drawn, once the first was drawn in this frame all
+        // were; then the picture keeps more for this frame, and a later frame that
+        // draws fewer of them lets the rest go.
+        while encoded.len() > AVATAR_SIZES && encoded[0].drawn != frame {
+            Self::discard(&mut self.garbage, Some(encoded.remove(0)));
+        }
         encoded
             .last_mut()
             .filter(|encoded| encoded.shown || !covered)
@@ -2144,6 +2168,7 @@ mod tests {
         let large = store.avatar(url, (4, 2), false).unwrap().kitty_id;
 
         // Three sizes are kept; a fourth pushes out the one drawn at longest ago.
+        store.begin_frame();
         store.avatar(url, (3, 1), false).unwrap();
         store.avatar(url, (2, 1), false).unwrap();
         store.avatar(url, (3, 1), false).unwrap();
@@ -2151,6 +2176,62 @@ mod tests {
         store.avatar(url, (6, 3), false).unwrap();
         assert_eq!(store.cleanup_sequence(false), delete(large));
         assert_eq!(store.avatar(url, (2, 1), false).unwrap().kitty_id, small);
+    }
+
+    #[test]
+    fn a_room_picture_on_the_screen_is_not_pushed_out_by_another_size() {
+        let mut store = ImageStore::new(kitty());
+        let url = "mxc://x/face";
+        let delete = |id: Option<u32>| format!("\x1b_Ga=d,d=I,i={},q=2\x1b\\", id.unwrap());
+        store.begin_frame();
+        assert!(store.avatar(url, (2, 1), false).is_none());
+        store.on_avatar(url, Ok(decoded(96, 96)));
+
+        // Four sizes in one frame, one more than are kept: all four are on the
+        // screen, so none is deleted, and each keeps the one made for it.
+        store.begin_frame();
+        let sizes = [(2, 1), (4, 2), (3, 1), (6, 3)];
+        let ids: Vec<_> = sizes
+            .iter()
+            .map(|&cells| store.avatar(url, cells, false).unwrap().kitty_id)
+            .collect();
+        for (&cells, &id) in sizes.iter().zip(&ids) {
+            assert_eq!(store.avatar(url, cells, false).unwrap().kitty_id, id);
+        }
+        assert!(store.cleanup_sequence(false).is_empty());
+
+        // A frame that draws fewer lets the one drawn at longest ago go.
+        store.begin_frame();
+        store.avatar(url, (6, 3), false).unwrap();
+        assert_eq!(store.cleanup_sequence(false), delete(ids[0]));
+        for (&cells, &id) in sizes.iter().zip(&ids).skip(1) {
+            assert_eq!(store.avatar(url, cells, false).unwrap().kitty_id, id);
+        }
+        assert!(store.cleanup_sequence(false).is_empty());
+    }
+
+    #[test]
+    fn a_size_of_a_room_picture_that_cannot_be_made_pushes_out_none() {
+        let mut store = ImageStore::new(kitty());
+        let url = "mxc://x/face";
+        store.begin_frame();
+        assert!(store.avatar(url, (2, 1), false).is_none());
+        store.on_avatar(url, Ok(decoded(96, 96)));
+        let sizes = [(2, 1), (4, 2), (3, 1)];
+        let ids: Vec<_> = sizes
+            .iter()
+            .map(|&cells| store.avatar(url, cells, false).unwrap().kitty_id)
+            .collect();
+
+        // As many sizes as are kept, and in a later frame one that is not made (no
+        // cells at all): none of the three is deleted for it.
+        store.begin_frame();
+        assert!(store.avatar(url, (0, 1), false).is_none());
+        assert!(store.cleanup_sequence(false).is_empty());
+        for (&cells, &id) in sizes.iter().zip(&ids) {
+            assert_eq!(store.avatar(url, cells, false).unwrap().kitty_id, id);
+        }
+        assert!(store.cleanup_sequence(false).is_empty());
     }
 
     #[test]
