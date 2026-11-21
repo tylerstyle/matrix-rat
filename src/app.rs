@@ -2545,42 +2545,47 @@ impl App {
         }
     }
 
-    /// Replaces the open room's messages with the worker's current list, keeping the
-    /// selection and a pending reply or edit on the same messages.
-    fn apply_timeline(&mut self, messages: Vec<Message>) {
-        let id_at = |i: usize| self.messages().get(i).map(|m| m.id.clone());
-        let selected_id = self.timeline.selected.and_then(id_at);
-        let compose_id = match self.compose_mode {
-            ComposeMode::Reply(i) | ComposeMode::Edit(i) => id_at(i),
-            ComposeMode::Normal => None,
-        };
-        // A reaction with a custom emoji can only be named once the packs are known.
-        let custom_reaction = messages.iter().any(|m| {
-            m.reactions.iter().any(|r| {
-                r.key
-                    .get(..6)
-                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mxc://"))
-            })
-        });
-        if let Some(target) = self.messages_mut() {
-            *target = messages;
-        }
-        if custom_reaction {
-            self.want_emotes();
-        }
-        let find = |messages: &[Message], id: Option<String>| {
-            id.and_then(|id| messages.iter().position(|m| m.id == id))
-        };
-        let selected_at = find(self.messages(), selected_id);
-        let compose_at = find(self.messages(), compose_id);
-
-        if self.timeline.selected.is_some() {
-            self.timeline.selected =
-                selected_at.or_else(|| self.find_selectable(usize::MAX, false));
-            if self.timeline.selected.is_none() && self.focus == Pane::Timeline {
-                self.set_focus(Pane::Composer);
+    /// The timeline id of the message a pending reply or edit points at, before the list
+    /// is replaced.
+    pub(super) fn compose_target_id(&self) -> Option<String> {
+        match self.compose_mode {
+            ComposeMode::Reply(i) | ComposeMode::Edit(i) => {
+                self.messages().get(i).map(|m| m.id.clone())
             }
+            ComposeMode::Normal => None,
         }
+    }
+
+    /// The event id of the message a pending reply or edit points at, if it has one.
+    pub(super) fn compose_target_event_id(&self) -> Option<String> {
+        match self.compose_mode {
+            ComposeMode::Reply(i) | ComposeMode::Edit(i) => self
+                .messages()
+                .get(i)
+                .and_then(|m| m.event_id().map(str::to_owned)),
+            ComposeMode::Normal => None,
+        }
+    }
+
+    /// Keeps a pending reply or edit on the same message after the list changes, or
+    /// cancels it if that message is gone.
+    pub(super) fn remap_compose_mode(&mut self, compose_id: Option<String>) {
+        let compose_at = compose_id.and_then(|id| self.messages().iter().position(|m| m.id == id));
+        self.apply_remapped_compose(compose_at);
+    }
+
+    /// Keeps a pending reply or edit on the message with `event_id` after switching to
+    /// another timeline, or cancels it if that event is not shown (or had none).
+    pub(super) fn remap_compose_mode_by_event(&mut self, event_id: Option<&str>) {
+        let compose_at = event_id.and_then(|ev| {
+            self.messages()
+                .iter()
+                .position(|m| m.event_id() == Some(ev))
+        });
+        self.apply_remapped_compose(compose_at);
+    }
+
+    fn apply_remapped_compose(&mut self, compose_at: Option<usize>) {
         self.compose_mode = match (self.compose_mode, compose_at) {
             (ComposeMode::Reply(_), Some(i)) => ComposeMode::Reply(i),
             (ComposeMode::Edit(_), Some(i)) => ComposeMode::Edit(i),
@@ -2591,6 +2596,45 @@ impl App {
             }
             _ => ComposeMode::Normal,
         };
+    }
+
+    /// Asks for image packs if any shown message has a custom emoji reaction.
+    pub(super) fn request_custom_reaction_emotes(&mut self) {
+        let custom_reaction = self.messages().iter().any(|m| {
+            m.reactions.iter().any(|r| {
+                r.key
+                    .get(..6)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("mxc://"))
+            })
+        });
+        if custom_reaction {
+            self.want_emotes();
+        }
+    }
+
+    /// Replaces the open room's messages with the worker's current list, keeping the
+    /// selection and a pending reply or edit on the same messages.
+    fn apply_timeline(&mut self, messages: Vec<Message>) {
+        let selected_id = self
+            .timeline
+            .selected
+            .and_then(|i| self.messages().get(i).map(|m| m.id.clone()));
+        let compose_id = self.compose_target_id();
+        if let Some(target) = self.messages_mut() {
+            *target = messages;
+        }
+        self.request_custom_reaction_emotes();
+        let selected_at =
+            selected_id.and_then(|id| self.messages().iter().position(|m| m.id == id));
+
+        if self.timeline.selected.is_some() {
+            self.timeline.selected =
+                selected_at.or_else(|| self.find_selectable(usize::MAX, false));
+            if self.timeline.selected.is_none() && self.focus == Pane::Timeline {
+                self.set_focus(Pane::Composer);
+            }
+        }
+        self.remap_compose_mode(compose_id);
     }
 
     /// The user's own latest message that can be edited, if the composer is free for

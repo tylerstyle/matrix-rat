@@ -1400,6 +1400,13 @@ pub fn spawn(paths: Paths) -> (MatrixHandle, UnboundedReceiver<MatrixEvent>) {
     spawn_with(paths, SecretStoreMode::Auto)
 }
 
+/// Unique prefix for a newly built SDK timeline so item ids never repeat across timelines.
+pub(super) fn next_timeline_prefix() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("t{n}-")
+}
+
 /// Starts the worker on the current tokio runtime with the configured `secret_store` policy.
 pub fn spawn_with(
     paths: Paths,
