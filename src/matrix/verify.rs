@@ -1443,9 +1443,11 @@ async fn own_devices(client: &Client) -> (usize, bool) {
 }
 
 fn device_label(name: Option<&str>, device: &DeviceId) -> String {
+    // The id is the other side's to choose too: any string the server passes on.
+    let device = sanitize_line(device.as_str());
     match name.map(sanitize_line).filter(|n| !n.trim().is_empty()) {
         Some(name) => format!("{name} ({device})"),
-        None => device.to_string(),
+        None => device,
     }
 }
 
@@ -1628,6 +1630,19 @@ pub(super) mod tests {
     use super::*;
     use crate::matrix::{MatrixCmd, MatrixHandle, spawn};
     use crate::paths::Paths;
+
+    /// A device's id is the other side's to choose, like its name: made safe to show.
+    #[test]
+    fn a_device_is_named_safely() {
+        let device: &DeviceId = "DEV\u{1b}[2J\nICE\u{202e}".into();
+        assert_eq!(device_label(None, device), "DEV[2J ICE");
+        assert_eq!(
+            device_label(Some("Phone\u{7}"), device),
+            "Phone (DEV[2J ICE)"
+        );
+        let plain: &DeviceId = "ABCDEF".into();
+        assert_eq!(device_label(Some("  "), plain), "ABCDEF");
+    }
 
     #[test]
     fn only_requests_addressed_to_us_count() {

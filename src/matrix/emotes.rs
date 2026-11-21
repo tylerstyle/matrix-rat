@@ -16,6 +16,7 @@ use serde_json::Value;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 
 use super::MatrixEvent;
+use super::left::LeftRooms;
 use crate::text::{is_blank, sanitize_line, truncate};
 
 /// Pack rooms named in the account data that are read; the rest are ignored.
@@ -391,7 +392,7 @@ pub(super) struct EmoteManager {
 }
 
 impl EmoteManager {
-    pub fn new(client: Client, events: UnboundedSender<MatrixEvent>) -> Self {
+    pub fn new(client: Client, events: UnboundedSender<MatrixEvent>, left: LeftRooms) -> Self {
         let state = Arc::new(Mutex::new(CacheState::default()));
         let poke = Arc::new(Notify::new());
         let task_state = state.clone();
@@ -406,7 +407,8 @@ impl EmoteManager {
                 if !requested {
                     continue;
                 }
-                let catalog = load_catalog(&client, &task_state, active_room.as_deref()).await;
+                let catalog =
+                    load_catalog(&client, &left, &task_state, active_room.as_deref()).await;
                 // Tagged with the room: the UI drops it if another room was opened
                 // while it was being loaded.
                 let _ = events.send(MatrixEvent::EmotePacks {
@@ -518,6 +520,7 @@ async fn fetch_global_json(client: &Client, event_type: &str) -> Option<Value> {
 /// state of a big room would be megabytes.
 async fn load_room_packs(
     client: &Client,
+    left: &LeftRooms,
     room_id: &str,
     listed: &[String],
 ) -> Vec<(String, EmotePack)> {
@@ -527,8 +530,9 @@ async fn load_room_packs(
     let Some(room) = client.get_room(&room_id) else {
         return Vec::new();
     };
-    // A room the account is not in (any more) is not asked about.
-    if room.state() != matrix_sdk::RoomState::Joined {
+    // A room the account is not in (any more) is not asked about. One left in this
+    // session can still look joined, until the server's word on it arrives.
+    if room.state() != matrix_sdk::RoomState::Joined || left.gone(&room) {
         return Vec::new();
     }
     let room_name = room.name().unwrap_or_default();
@@ -595,6 +599,7 @@ async fn load_room_packs(
 
 async fn load_catalog(
     client: &Client,
+    left: &LeftRooms,
     state: &Mutex<CacheState>,
     active_room: Option<&str>,
 ) -> EmoteCatalog {
@@ -644,7 +649,7 @@ async fn load_catalog(
     }
     for (rid, listed) in &targets {
         if !lock(state).room_packs.contains_key(rid) {
-            let loaded = load_room_packs(client, rid, listed).await;
+            let loaded = load_room_packs(client, left, rid, listed).await;
             lock(state).room_packs.insert(rid.clone(), loaded);
         }
     }
@@ -913,5 +918,36 @@ mod tests {
             .map(|s| s.pack_name.as_str())
             .collect();
         assert_eq!(stickers, ["mine", "room"]);
+    }
+
+    /// A room left in this session can look joined again (a sync answer that was on its
+    /// way brings it back so; see `super::left`): its packs are not asked for.
+    #[tokio::test]
+    async fn the_packs_of_a_room_left_here_are_not_asked_for() {
+        use crate::matrix::left::testing::Server;
+        use matrix_sdk::ruma::room_id;
+
+        let room = room_id!("!packs:localhost");
+        let server = Server {
+            joined: vec![room.as_str()],
+            ..Server::default()
+        };
+        let seen = server.seen.clone();
+        let client = server.client().await;
+        let asked = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.contains("/state/"))
+        };
+        let left = LeftRooms::default();
+        left.mark(room);
+        seen.lock().unwrap().clear();
+        let packs = load_room_packs(&client, &left, room.as_str(), &[]).await;
+        assert!(packs.is_empty());
+        assert!(!asked(), "nothing is asked about a room left here");
+        // Not left: the usual pack is asked for.
+        load_room_packs(&client, &LeftRooms::default(), room.as_str(), &[]).await;
+        assert!(asked());
     }
 }

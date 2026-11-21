@@ -9,9 +9,9 @@ use anyhow::{Context, Result, anyhow};
 use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::room::ListThreadsOptions;
 use matrix_sdk::ruma::api::client::threads::get_threads::v1::IncludeThreads;
-use matrix_sdk::ruma::events::receipt::{ReceiptThread, ReceiptType};
+use matrix_sdk::ruma::events::receipt::{Receipt, ReceiptThread, ReceiptType};
 use matrix_sdk::ruma::{
-    EventId, MilliSecondsSinceUnixEpoch, OwnedRoomId, OwnedUserId, UInt, UserId,
+    EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId, UInt, UserId,
 };
 use matrix_sdk::{Room, ThreadingSupport};
 use matrix_sdk_ui::eyeball_im::Vector;
@@ -65,14 +65,17 @@ pub async fn open(room: &Room, root: &str) -> Result<Timeline> {
 }
 
 /// What to show under a message that started a thread. Text from other people is
-/// made safe for the terminal here.
-pub fn summary(content: &MsgLikeContent) -> Option<ThreadSummary> {
+/// made safe for the terminal here. A newest reply by someone `ignored` is not
+/// previewed (the number of replies is the server's, and still counts it).
+pub fn summary(content: &MsgLikeContent, ignored: &HashSet<OwnedUserId>) -> Option<ThreadSummary> {
     let summary = content.thread_summary.as_ref()?;
     // Every reply was deleted: nothing to announce.
     if summary.num_replies == 0 {
         return None;
     }
-    let latest = if let TimelineDetails::Ready(event) = &summary.latest_event {
+    let latest = if let TimelineDetails::Ready(event) = &summary.latest_event
+        && !ignored.contains(&event.sender)
+    {
         let text = match event.content.as_message() {
             Some(message) => sanitize_line(message.body()),
             None => "a message".to_owned(),
@@ -170,14 +173,16 @@ pub async fn newest_reply(timeline: &Timeline) -> Vec<String> {
 }
 
 /// Event ids of the messages in `items` whose threads have a newest reply the user
-/// has not read (see [`reply_unread`]). Only looks at what is stored; nothing is
-/// loaded or kept per thread.
+/// has not read (see [`reply_unread`]). A reply by someone `ignored` is not one to
+/// read. Only looks at what is stored; nothing is loaded or kept per thread.
 pub async fn unread(
     room: &Room,
     items: &Vector<Arc<TimelineItem>>,
     read: &ReadMarks,
+    ignored: &HashSet<OwnedUserId>,
 ) -> HashSet<String> {
     let mut unread = HashSet::new();
+    let mut room_wide = RoomWideReceipts::default();
     for event in items.iter().filter_map(|item| item.as_event()) {
         let Some(root) = event.event_id() else {
             continue;
@@ -192,6 +197,9 @@ pub async fn unread(
         let TimelineEventItemId::EventId(newest_id) = &newest.identifier else {
             continue;
         };
+        if ignored.contains(&newest.sender) {
+            continue;
+        }
         if reply_unread(
             room,
             root,
@@ -199,6 +207,7 @@ pub async fn unread(
             &newest.sender,
             newest.timestamp,
             read,
+            &mut room_wide,
         )
         .await
         {
@@ -218,6 +227,7 @@ async fn reply_unread(
     sender: &UserId,
     at: MilliSecondsSinceUnixEpoch,
     read: &ReadMarks,
+    room_wide: &mut RoomWideReceipts,
 ) -> bool {
     let own = room.own_user_id();
     if sender == own
@@ -228,21 +238,67 @@ async fn reply_unread(
     {
         return false;
     }
+    let covers = |seen_at: &EventId, receipt: &Receipt| {
+        seen_at.as_str() == newest.as_str() || receipt.ts.is_some_and(|ts| ts >= at)
+    };
     // A receipt for the thread, or one for the whole room as clients without
     // threads send it. The room's own ("main") receipt says nothing about threads.
-    for thread in [
-        ReceiptThread::Thread(root.to_owned()),
-        ReceiptThread::Unthreaded,
-    ] {
-        for kind in [ReceiptType::Read, ReceiptType::ReadPrivate] {
-            if let Ok(Some((seen_at, receipt))) = room.load_user_receipt(kind, &thread, own).await
-                && (seen_at.as_str() == newest.as_str() || receipt.ts.is_some_and(|ts| ts >= at))
-            {
-                return false;
-            }
+    let thread = ReceiptThread::Thread(root.to_owned());
+    for kind in [ReceiptType::Read, ReceiptType::ReadPrivate] {
+        #[cfg(test)]
+        count_load(room);
+        if let Ok(Some((seen_at, receipt))) = room.load_user_receipt(kind, &thread, own).await
+            && covers(&seen_at, &receipt)
+        {
+            return false;
         }
     }
-    true
+    !room_wide
+        .get(room)
+        .await
+        .iter()
+        .any(|(seen_at, receipt)| covers(seen_at, receipt))
+}
+
+/// The user's read receipts for the whole room, as clients without threads send
+/// them. They are the same for every thread: loaded from the store once for all the
+/// threads looked at together (a room's timeline can hold many), and only when one
+/// of them needs them.
+#[derive(Default)]
+struct RoomWideReceipts(Option<Vec<(OwnedEventId, Receipt)>>);
+
+impl RoomWideReceipts {
+    async fn get(&mut self, room: &Room) -> &[(OwnedEventId, Receipt)] {
+        if self.0.is_none() {
+            let mut loaded = Vec::new();
+            for kind in [ReceiptType::Read, ReceiptType::ReadPrivate] {
+                #[cfg(test)]
+                count_load(room);
+                if let Ok(Some(receipt)) = room
+                    .load_user_receipt(kind, &ReceiptThread::Unthreaded, room.own_user_id())
+                    .await
+                {
+                    loaded.push(receipt);
+                }
+            }
+            self.0 = Some(loaded);
+        }
+        self.0.as_deref().unwrap_or_default()
+    }
+}
+
+/// The receipts loaded from the store so far, by room: tests count them.
+#[cfg(test)]
+pub(super) static RECEIPT_LOADS: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(test)]
+fn count_load(room: &Room) {
+    *RECEIPT_LOADS
+        .lock()
+        .unwrap()
+        .entry(room.room_id().to_string())
+        .or_default() += 1;
 }
 
 /// Threads asked for at a time; more of a page than this is not looked at.
@@ -314,9 +370,11 @@ pub async fn list(
         }
     };
     let mut names = HashMap::new();
+    let mut room_wide = RoomWideReceipts::default();
     let mut threads = Vec::new();
     for root in roots.chunk.into_iter().take(LIST_PAGE as usize) {
-        if let Some(thread) = describe(room, root, read, ignored, &mut names).await {
+        if let Some(thread) = describe(room, root, read, ignored, &mut names, &mut room_wide).await
+        {
             threads.push(thread);
         }
     }
@@ -333,6 +391,7 @@ async fn describe(
     read: &ReadMarks,
     ignored: &IgnoredSet,
     names: &mut HashMap<(OwnedRoomId, OwnedUserId), String>,
+    room_wide: &mut RoomWideReceipts,
 ) -> Option<ThreadInfo> {
     let root_id = root.event_id()?.to_owned();
     let sender = root.sender()?;
@@ -356,7 +415,7 @@ async fn describe(
         let at = newest.timestamp_raw();
         thread.latest_when = at.and_then(when);
         if let (Some(id), Some(at)) = (newest.event_id(), at) {
-            thread.unread = reply_unread(room, &root_id, id, &who, at, read).await;
+            thread.unread = reply_unread(room, &root_id, id, &who, at, read, room_wide).await;
         }
         thread.latest_sender = Some(short_name(room, &who, names).await);
     }

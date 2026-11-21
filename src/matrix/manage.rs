@@ -823,6 +823,9 @@ pub struct Manager {
     notify: NotificationSettings,
     /// Has the session make the room list again.
     relist: Arc<Notify>,
+    /// The commands still running (see `handle`). They hold the session's client: given
+    /// up with the session (see `stop`).
+    tasks: tokio::task::JoinSet<()>,
 }
 
 /// Wakes the open room info watcher when the watched room changes.
@@ -890,6 +893,7 @@ impl Manager {
             left,
             notify,
             relist,
+            tasks: tokio::task::JoinSet::new(),
         }
     }
 
@@ -897,11 +901,26 @@ impl Manager {
         self.refresh.clone()
     }
 
+    /// At the end of the session: the room info view stops being kept current, and
+    /// the commands still running are given up.
     pub fn stop(&mut self) {
+        self.stop_info();
+        self.tasks.abort_all();
+    }
+
+    /// The room info view is closed, or another is opened: it stops being kept current.
+    /// What a command started on the server carries on.
+    fn stop_info(&mut self) {
         self.refresh.clear();
         if let Some(watcher) = self.watcher.take() {
             watcher.abort();
         }
+    }
+
+    /// Starts `work` among [`Self::tasks`], letting go of those that are done.
+    fn spawn_task(&mut self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+        while self.tasks.try_join_next().is_some() {}
+        self.tasks.spawn(work);
     }
 
     /// Every command runs in a task of its own: none of them may hold up the session.
@@ -919,7 +938,7 @@ impl Manager {
                 via,
             } => {
                 let left = self.left.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = join(&client, &left, &target, &via).await;
                     // Joined (again): no longer a room that was left.
                     if let Ok(room_id) = &result
@@ -936,7 +955,7 @@ impl Manager {
                 create,
             } => {
                 let left = self.left.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     emit(match direct_chat(&client, &left, &user_id, create).await {
                         Ok(Some(room_id)) => ManageEvent::Opened {
                             request,
@@ -957,14 +976,14 @@ impl Manager {
                 alias,
                 encrypted,
             } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = create(&client, name, topic, alias, encrypted).await;
                     emit(ManageEvent::Opened { request, result });
                 });
             }
             ManageCmd::Leave { room_id } => {
                 let left = self.left.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = leave(&client, &room_id).await;
                     // Remembered, so that a sync answer that was on its way cannot
                     // bring the room back as one the user is in.
@@ -982,7 +1001,7 @@ impl Manager {
                 via,
             } => {
                 let left = self.left.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = super::directory::fetch_preview(&client, &left, &target, via)
                         .await
                         .map(Box::new);
@@ -995,13 +1014,13 @@ impl Manager {
                 via,
                 reason,
             } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = super::directory::knock(&client, &target, via, reason).await;
                     emit(ManageEvent::Knocked { request, result });
                 });
             }
             ManageCmd::Info { room_id } => {
-                self.stop();
+                self.stop_info();
                 // Left in this session: whatever is still known of it here is stale. (An
                 // invitation or a knock since is news, and can be looked at.)
                 let gone = <&RoomId>::try_from(room_id.as_str())
@@ -1029,9 +1048,9 @@ impl Manager {
                     self.left.clone(),
                 )));
             }
-            ManageCmd::StopInfo => self.stop(),
+            ManageCmd::StopInfo => self.stop_info(),
             ManageCmd::Invite { room_id, user_id } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result =
                         with_member(&client, &room_id, &user_id, "invite", async |room, user| {
                             room.invite_user_by_id(user).await
@@ -1125,7 +1144,7 @@ impl Manager {
             } => {
                 let refresh = self.refresh.clone();
                 let events_tx = self.events.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = match Int::new(level) {
                         None => Err("Could not change role: power level out of range.".to_owned()),
                         Some(lvl) => {
@@ -1159,7 +1178,7 @@ impl Manager {
                 });
             }
             ManageCmd::SetName { room_id, name } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = match room(&client, &room_id) {
                         Ok(room) => room
                             .set_name(sanitize_line(&name))
@@ -1180,7 +1199,7 @@ impl Manager {
                 let own_room_names = self.own_room_names.clone();
                 let people_poke = self.people_poke.clone();
                 let own_refresh = self.own_refresh.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result =
                         match super::people::set_room_display_name(&client, &room_id, name).await {
                             Ok(applied) => {
@@ -1200,7 +1219,7 @@ impl Manager {
                 });
             }
             ManageCmd::SetTopic { room_id, topic } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = match room(&client, &room_id) {
                         Ok(room) => room
                             .set_room_topic(&sanitize(&topic))
@@ -1235,7 +1254,7 @@ impl Manager {
             ManageCmd::SetNotify { room_id, level } => {
                 let settings = self.notify.clone();
                 let relist = self.relist.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = set_notify(&settings, &client, &room_id, level).await;
                     // The room list shows whether a room is muted. `settings` knows the
                     // change at once, but says nothing of it: only a change that comes
@@ -1386,7 +1405,7 @@ impl Manager {
                 let events = self.events.clone();
                 let refresh = self.refresh.clone();
                 let client = self.client.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = match room(&client, &room_id) {
                         Ok(room) => {
                             let res = set_room_permissions(&room, &permissions).await;
@@ -1411,7 +1430,7 @@ impl Manager {
                 topic,
                 alias,
             } => {
-                tokio::spawn(super::spaces::answer_create(
+                self.spawn_task(super::spaces::answer_create(
                     self.client.clone(),
                     self.events.clone(),
                     request,
@@ -1426,7 +1445,7 @@ impl Manager {
                 child_id,
                 edit,
             } => {
-                tokio::spawn(super::spaces::answer_edit(
+                self.spawn_task(super::spaces::answer_edit(
                     self.client.clone(),
                     self.left.clone(),
                     self.events.clone(),
@@ -1439,7 +1458,7 @@ impl Manager {
         }
     }
 
-    fn spawn_setting<F, Fut>(&self, room_id: String, change: Change, work: F)
+    fn spawn_setting<F, Fut>(&mut self, room_id: String, change: Change, work: F)
     where
         F: FnOnce(Client, Room) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), String>> + Send,
@@ -1447,7 +1466,7 @@ impl Manager {
         let client = self.client.clone();
         let events = self.events.clone();
         let refresh = self.refresh.clone();
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             let result = match room(&client, &room_id) {
                 Ok(room) => work(client, room).await,
                 Err(err) => Err(err),
@@ -1463,14 +1482,14 @@ impl Manager {
         });
     }
 
-    fn spawn_tag<F, Fut>(&self, room_id: String, what: &'static str, change: Change, work: F)
+    fn spawn_tag<F, Fut>(&mut self, room_id: String, what: &'static str, change: Change, work: F)
     where
         F: FnOnce(Room) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = matrix_sdk::Result<()>> + Send,
     {
         let client = self.client.clone();
         let events = self.events.clone();
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             let result = match room(&client, &room_id) {
                 Ok(room) => work(room).await.map_err(|err| failed(what, &err)),
                 Err(err) => Err(err),
@@ -1484,7 +1503,7 @@ impl Manager {
     }
 
     fn spawn_member_action<F, Fut>(
-        &self,
+        &mut self,
         room_id: String,
         user_id: String,
         what: &'static str,
@@ -1497,7 +1516,7 @@ impl Manager {
         let client = self.client.clone();
         let events = self.events.clone();
         let refresh = self.refresh.clone();
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             let result = with_member(&client, &room_id, &user_id, what, async |room, user| {
                 work(room.clone(), user.to_owned()).await
             })
@@ -1813,9 +1832,29 @@ where
 /// A change made here is known to `settings` at once, but reaches the store only when
 /// the server sends the rules back, which can take a while (and against one server did
 /// not happen within a minute): a room just muted would go on showing as not muted.
+///
+/// Whether the room is encrypted (the account's defaults can differ for such rooms) is
+/// what the store has: the room list asks this of every room, every time it is made,
+/// and must not wait for the server. The sync brings every room's encryption along; a
+/// room it has not told of yet counts as encrypted until it does, as the room list
+/// shows it.
 pub(super) async fn notification_mode(
     settings: &NotificationSettings,
     room: &Room,
+) -> Option<RoomNotificationMode> {
+    let encrypted = !matches!(
+        room.encryption_state(),
+        matrix_sdk::EncryptionState::NotEncrypted
+    );
+    notification_mode_as(settings, room, Some(encrypted)).await
+}
+
+/// [`notification_mode`] for a room that `encrypted` says is encrypted or not (`None`:
+/// not known, and then only a level chosen for the room itself is known).
+async fn notification_mode_as(
+    settings: &NotificationSettings,
+    room: &Room,
+    encrypted: Option<bool>,
 ) -> Option<RoomNotificationMode> {
     if room.state() != RoomState::Joined {
         return None;
@@ -1828,7 +1867,7 @@ pub(super) async fn notification_mode(
     }
     // Not chosen for this room: what the account's defaults say for a room of its kind
     // (for these rules a chat between exactly two people is one-to-one).
-    let encrypted = room.latest_encryption_state().await.ok()?.is_encrypted();
+    let encrypted = encrypted?;
     let one_to_one = room.active_members_count() == 2;
     Some(
         settings
@@ -1943,9 +1982,10 @@ struct MemberList {
     gave_up: Option<(u64, u64)>,
     asked: Option<Instant>,
     error: Option<String>,
-    /// `entries` with roles, sorted, and what it was made from.
-    shown: Vec<RoomMember>,
-    shown_from: Option<(Vec<Entry>, String)>,
+    /// `entries` with roles, sorted, and what it was made from. Made again, it is a new
+    /// `Arc`: the same one means the same list, without comparing the people.
+    shown: Arc<Vec<RoomMember>>,
+    shown_from: Option<(Vec<Entry>, Option<RoomPowerLevels>)>,
 }
 
 impl MemberList {
@@ -1962,8 +2002,9 @@ impl MemberList {
                 .any(|entry| entry.user == own && entry.status == EntryStatus::Joined)
     }
 
-    /// Fills the details' member list, admin count, error, and (once the list is
-    /// complete) counts so the header never disagrees with the people shown.
+    /// Fills the details' admin count, error, and (once the list is complete) counts so
+    /// the header never disagrees with the people shown. The people themselves are
+    /// [`Self::shown`], which goes with the details when they are sent (see `Sent`).
     fn apply(
         &mut self,
         current: &mut RoomDetails,
@@ -1979,9 +2020,8 @@ impl MemberList {
                 }
             }
         }
-        current.members = self.present(levels, own);
-        current.admin_count = current
-            .members
+        current.admin_count = self
+            .present(levels, own)
             .iter()
             .filter(|m| !m.invited && !m.banned && m.role >= MemberRole::Admin)
             .count();
@@ -1992,16 +2032,68 @@ impl MemberList {
     }
 
     /// The list for the screen. Roles and sorting are only redone when the people or
-    /// the power levels changed.
-    fn present(&mut self, levels: Option<&RoomPowerLevels>, own: &UserId) -> Vec<RoomMember> {
-        let key = format!("{levels:?}");
-        let fresh =
-            matches!(&self.shown_from, Some((entries, k)) if *entries == self.entries && *k == key);
+    /// the power levels changed (the room is looked at again on every change of it).
+    fn present(&mut self, levels: Option<&RoomPowerLevels>, own: &UserId) -> &Arc<Vec<RoomMember>> {
+        let fresh = matches!(&self.shown_from, Some((entries, made_with))
+            if *entries == self.entries && same_levels(made_with.as_ref(), levels));
         if !fresh {
-            self.shown = present(&self.entries, levels, own);
-            self.shown_from = Some((self.entries.clone(), key));
+            self.shown = Arc::new(present(&self.entries, levels, own));
+            self.shown_from = Some((self.entries.clone(), levels.cloned()));
         }
-        self.shown.clone()
+        &self.shown
+    }
+}
+
+/// Whether two sets of power levels give everyone the same role and the same rights
+/// over the others, which is what the member list shows. (`RoomPowerLevels` cannot be
+/// compared as a whole. The notification levels are left out: no member's entry
+/// depends on them.)
+fn same_levels(a: Option<&RoomPowerLevels>, b: Option<&RoomPowerLevels>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.ban == b.ban
+                && a.kick == b.kick
+                && a.invite == b.invite
+                && a.redact == b.redact
+                && a.events == b.events
+                && a.events_default == b.events_default
+                && a.state_default == b.state_default
+                && a.users == b.users
+                && a.users_default == b.users_default
+                && a.rules.privileged_creators == b.rules.privileged_creators
+        }
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+/// What the details watcher last sent: the details without their member list, and
+/// the list apart, as [`MemberList::shown`] was then. While neither changes, nothing
+/// is sent, and telling so takes no copy and no comparison of the people.
+#[derive(Default)]
+struct Sent {
+    details: Option<RoomDetails>,
+    members: Option<Arc<Vec<RoomMember>>>,
+}
+
+impl Sent {
+    /// Whether `current` (without members) and `members` differ from what was sent.
+    fn differs(&self, current: &RoomDetails, members: &Arc<Vec<RoomMember>>) -> bool {
+        self.details.as_ref() != Some(current)
+            || !self
+                .members
+                .as_ref()
+                .is_some_and(|sent| Arc::ptr_eq(sent, members) || sent == members)
+    }
+
+    /// The details to send, with their members; remembers them as sent.
+    fn take(&mut self, current: &RoomDetails, members: &Arc<Vec<RoomMember>>) -> RoomDetails {
+        self.details = Some(current.clone());
+        self.members = Some(members.clone());
+        RoomDetails {
+            members: members.to_vec(),
+            ..current.clone()
+        }
     }
 }
 
@@ -2307,7 +2399,8 @@ async fn head(
     } else {
         None
     };
-    let notify = match notification_mode(notify_settings, room).await {
+    // With the encryption just looked up (from the server, if the store did not know it).
+    let notify = match notification_mode_as(notify_settings, room, encrypted).await {
         Some(RoomNotificationMode::AllMessages) => Some(NotifyLevel::All),
         Some(RoomNotificationMode::MentionsAndKeywordsOnly) => Some(NotifyLevel::Mentions),
         Some(RoomNotificationMode::Mute) => Some(NotifyLevel::Mute),
@@ -2565,7 +2658,7 @@ async fn watch(
     let mut knocks_loaded = false;
     let mut force_knocks = false;
     let mut raw_knocks: Vec<RawKnock> = Vec::new();
-    let mut sent: Option<RoomDetails> = None;
+    let mut sent = Sent::default();
     let mut force_refresh = false;
     let mut local_aliases: Vec<String> = Vec::new();
     let mut local_aliases_error: Option<String> = None;
@@ -2696,11 +2789,8 @@ async fn watch(
         force_knocks = false;
         force_aliases = false;
         force_space_names = false;
-        if sent.as_ref() != Some(&current) {
-            if !emit(Ok(current.clone())) {
-                return;
-            }
-            sent = Some(current.clone());
+        if sent.differs(&current, &list.shown) && !emit(Ok(sent.take(&current, &list.shown))) {
+            return;
         }
         if ask || ask_knocks || ask_aliases || ask_space_names {
             if ask {
@@ -2759,10 +2849,9 @@ async fn watch(
                 current.space =
                     Some(super::spaces::space_details(&client, &room, &space_names, &left).await);
             }
-            if !emit(Ok(current.clone())) {
+            if !emit(Ok(sent.take(&current, &list.shown))) {
                 return;
             }
-            sent = Some(current);
         }
         // Until the room changes, a moderation event or knock arrives, or a postponed fetch is due.
         let deadline = wait.map(|time| tokio::time::Instant::now() + time);
@@ -2824,6 +2913,80 @@ mod tests {
     use matrix_sdk::config::SyncSettings;
     use matrix_sdk::ruma::room_id;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    /// What a command left running holds the session's client: it is given up when the
+    /// session ends, so that nothing of the session outlives it.
+    #[tokio::test]
+    async fn commands_left_running_end_with_the_session() {
+        let client = Server::default().client().await;
+        let settings = client.notification_settings().await;
+        let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = Manager::new(
+            client,
+            events,
+            crate::matrix::people::OwnRoomNames::default(),
+            Arc::new(Notify::new()),
+            Arc::new(watch::Sender::new(0)),
+            LeftRooms::default(),
+            settings,
+            Arc::new(Notify::new()),
+        );
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        manager.spawn_task(async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+        });
+        // Opening and closing the room info view leave it running: what was started on
+        // the server carries on (a leave, a kick, a new name).
+        manager.handle(ManageCmd::Info {
+            room_id: "!elsewhere:localhost".to_owned(),
+        });
+        manager.handle(ManageCmd::StopInfo);
+        // Time for an abort, had there been one, to take effect.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut released = released;
+        assert!(
+            matches!(
+                released.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "given up with the room info view"
+        );
+        manager.stop();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), released)
+            .await
+            .expect("the work was given up");
+        assert!(outcome.is_err(), "it ended without finishing");
+    }
+
+    /// The room list's notification levels come from what the store has. A room whose
+    /// encryption the sync has not told (`Unknown`) would have the server asked about it
+    /// by `latest_encryption_state`: in the session's loop, for every such room, every
+    /// time the list is made.
+    #[tokio::test]
+    async fn the_room_list_asks_the_server_nothing_for_a_notification_level() {
+        let room = room_id!("!quiet:localhost");
+        let server = Server {
+            joined: vec![room.as_str()],
+            ..Server::default()
+        };
+        let seen = server.seen.clone();
+        let client = server.client().await;
+        let settings = client.notification_settings().await;
+        let room = client.get_room(room).unwrap();
+        assert!(matches!(
+            room.encryption_state(),
+            matrix_sdk::EncryptionState::Unknown
+        ));
+        seen.lock().unwrap().clear();
+        let level = notification_mode(&settings, &room).await;
+        assert!(level.is_some());
+        let asked = seen.lock().unwrap().clone();
+        assert!(
+            !asked.iter().any(|path| path.contains("m.room.encryption")),
+            "{asked:?}"
+        );
+    }
 
     #[tokio::test]
     async fn muting_a_room_has_the_room_list_made_again_at_once() {
@@ -3828,8 +3991,8 @@ mod tests {
             entries,
             ..MemberList::default()
         };
-        assert!(list.present(None, &own) == shown);
-        list.shown[0].name = "kept".into();
+        assert!(**list.present(None, &own) == shown);
+        Arc::make_mut(&mut list.shown)[0].name = "kept".into();
         assert_eq!(list.present(None, &own)[0].name, "kept");
         list.entries.pop();
         assert_eq!(list.present(None, &own).len(), 3);
@@ -3838,6 +4001,64 @@ mod tests {
         list.entries.push(entry("Me", false));
         assert!(list.agrees((3, 1), &own));
         assert!(!list.agrees((2, 1), &own));
+    }
+
+    /// The member list is made again only when what it shows can differ. Power levels
+    /// read anew but the same are the same (they are compared as values, not by their
+    /// debug text made on every look at the room), and while the list stays, the
+    /// details watcher neither copies nor compares the people to tell it.
+    #[test]
+    fn the_member_list_is_made_again_only_for_other_power_levels() {
+        use matrix_sdk::ruma::events::room::power_levels::RoomPowerLevelsSource;
+        use matrix_sdk::ruma::room_version_rules::AuthorizationRules;
+        use std::collections::BTreeMap;
+
+        let own = UserId::parse("@me:example.org").unwrap();
+        let bob = UserId::parse("@bob:example.org").unwrap();
+        let levels = |bobs: i32| {
+            let mut content = RoomPowerLevelsEventContent::new(&AuthorizationRules::V11);
+            content.users = BTreeMap::from([(bob.clone(), Int::from(bobs))]);
+            RoomPowerLevels::new(
+                RoomPowerLevelsSource::Original(content),
+                &AuthorizationRules::V11,
+                [],
+            )
+        };
+        let mut list = MemberList {
+            entries: vec![entry("bob", false), entry("Me", false)],
+            ..MemberList::default()
+        };
+        let first = list.present(Some(&levels(50)), &own).clone();
+        let again = list.present(Some(&levels(50)), &own).clone();
+        assert!(
+            Arc::ptr_eq(&first, &again),
+            "the same levels: not made again"
+        );
+        let promoted = list.present(Some(&levels(100)), &own).clone();
+        assert!(!Arc::ptr_eq(&first, &promoted));
+        assert!(
+            promoted
+                .iter()
+                .any(|m| m.name == "bob" && m.role == MemberRole::Admin)
+        );
+        let unknown = list.present(None, &own).clone();
+        assert!(!Arc::ptr_eq(&promoted, &unknown));
+
+        // What was sent stays sent while nothing changed; the list goes with it.
+        let mut sent = Sent::default();
+        let details = RoomDetails::default();
+        assert!(sent.differs(&details, &unknown));
+        assert!(sent.take(&details, &unknown).members == *unknown);
+        assert!(!sent.differs(&details, &unknown));
+        // The same people made again: nothing new to tell either.
+        let remade = Arc::new(unknown.to_vec());
+        assert!(!sent.differs(&details, &remade));
+        assert!(sent.differs(&details, &promoted));
+        let renamed = RoomDetails {
+            name: "renamed".into(),
+            ..RoomDetails::default()
+        };
+        assert!(sent.differs(&renamed, &unknown));
     }
 
     #[test]

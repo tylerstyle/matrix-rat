@@ -455,7 +455,8 @@ impl Forward {
             })
             .count();
         std::hint::black_box(unavailable);
-        let unread = super::super::threads::unread(room, items, &self.read_marks).await;
+        let ignored = super::IgnoredSet::clone(&self.ignored.borrow());
+        let unread = super::super::threads::unread(room, items, &self.read_marks, &ignored).await;
         let mut messages = self.prepare(room, items).await;
         super::super::threads::annotate(&mut messages, false, &unread);
         let start = items.iter().any(|item| item.is_timeline_start());

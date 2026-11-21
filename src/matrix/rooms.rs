@@ -40,6 +40,11 @@ const KEEP_TIMELINES: usize = 6;
 /// stay in the store; opened again, it starts from its latest ones and pages back.
 const IDLE_TIMELINE: Duration = Duration::from_secs(20 * 60);
 const PAGE: u16 = 40;
+/// At a shutdown, the changes commands left running (a message on its way to the send
+/// queue, a reaction) are waited for this long at most. Stopping the sync (up to two
+/// seconds) and saving the session come after it, and all of it must end within the
+/// three seconds the app waits for the worker when no file is being sent.
+const ACTIONS_WAIT: Duration = Duration::from_millis(750);
 
 /// A timeline kept for a room (or the open thread), and when it was last used.
 struct Cached {
@@ -108,8 +113,8 @@ pub struct Timelines {
     shown: Vec<String>,
     /// Forwards the open room's timeline to the UI.
     forwarder: Option<JoinHandle<()>>,
-    /// The running request for older messages, if any.
-    paginator: Option<JoinHandle<()>>,
+    /// The running request for older messages, if any, and the generation it answers.
+    paginator: Option<(u64, JoinHandle<()>)>,
     /// The running request for newer messages on a detached timeline, if any.
     forward_paginator: Option<JoinHandle<()>>,
     /// What `forwarder` is currently streaming (`None` when no room is open).
@@ -144,6 +149,14 @@ pub struct Timelines {
     saved_limit: Arc<tokio::sync::Semaphore>,
     /// The running request for a page of a room's threads, if any.
     thread_lister: Option<JoinHandle<()>>,
+    /// What commands left running that changes something (a send, a reaction, a read
+    /// receipt). It holds the session's client and timelines, so it ends with the
+    /// session (see `stop`); at a shutdown it is given a moment first.
+    actions: tokio::task::JoinSet<()>,
+    /// What commands left running that only looks something up or says something
+    /// passing (pinned and saved messages, a source, a retried decryption, typing).
+    /// Ends with the session too, and is not waited for.
+    lookups: tokio::task::JoinSet<()>,
     /// Rooms left in this session (see [`super::left`]).
     left: super::left::LeftRooms,
 }
@@ -185,14 +198,11 @@ impl Timelines {
             pinned_cache: Arc::default(),
             saved_limit: Arc::new(tokio::sync::Semaphore::new(super::saved::CONCURRENCY)),
             thread_lister: None,
+            actions: tokio::task::JoinSet::new(),
+            lookups: tokio::task::JoinSet::new(),
             left,
             events,
         }
-    }
-
-    /// Drops cached live timelines so the next room open reflects a changed ignore list.
-    pub fn clear_cache(&mut self) {
-        self.cache.clear();
     }
 
     pub(super) async fn next_opened(&mut self) -> Option<OpenedTimeline> {
@@ -219,7 +229,7 @@ impl Timelines {
         }
         for task in [
             self.forwarder.take(),
-            self.paginator.take(),
+            self.paginator.take().map(|(_, task)| task),
             self.forward_paginator.take(),
         ]
         .into_iter()
@@ -232,25 +242,49 @@ impl Timelines {
         // and files the answer under its room.
     }
 
-    /// Waits briefly on shutdown for in-flight file sends to reach the SDK's send queue.
+    /// Waits briefly on shutdown for in-flight file sends to reach the SDK's send queue,
+    /// and for the changes commands left running (a message on its way to the queue)
+    /// to end: within `wait` in all, and those at most [`ACTIONS_WAIT`]. Lookups are
+    /// not waited for.
     pub async fn finish_uploads(&mut self, wait: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + wait;
         self.uploads.finish(wait).await;
+        let deadline = deadline.min(tokio::time::Instant::now() + ACTIONS_WAIT);
+        let actions = async { while self.actions.join_next().await.is_some() {} };
+        let _ = tokio::time::timeout_at(deadline, actions).await;
     }
 
     /// At the end of the session: closes the timelines, and stops a request for the
-    /// threads popup too (which, unlike them, is not bound to the open room).
+    /// threads popup too (which, unlike them, is not bound to the open room), what
+    /// commands left running, and the unread marks still to be sent. Nothing of the
+    /// session goes on after it: a logout clears its stores right after.
     pub fn stop(&mut self) {
         self.close();
         self.member_fetches.abort_all();
         if let Some(task) = self.thread_lister.take() {
             task.abort();
         }
+        self.actions.abort_all();
+        self.lookups.abort_all();
+        self.unread_flags.stop();
+    }
+
+    /// Starts `work` among [`Self::actions`], letting go of those that are done.
+    fn spawn_action(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+        while self.actions.try_join_next().is_some() {}
+        self.actions.spawn(work);
+    }
+
+    /// Starts `work` among [`Self::lookups`], letting go of those that are done.
+    fn spawn_lookup(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+        while self.lookups.try_join_next().is_some() {}
+        self.lookups.spawn(work);
     }
 
     /// Message keys arrived from outside the usual ways (a key file): has every open
     /// timeline try again what it could not decrypt. (The SDK retries by itself for
     /// keys it sees arrive; this covers what that may have missed.)
-    pub async fn retry_decryption(&self) {
+    pub async fn retry_decryption(&mut self) {
         let mut timelines: Vec<Arc<Timeline>> = self
             .cache
             .iter()
@@ -263,7 +297,7 @@ impl Timelines {
         {
             timelines.push(timeline.clone());
         }
-        tokio::spawn(async move {
+        self.spawn_lookup(async move {
             for timeline in timelines {
                 // Which sessions does not matter: matrix-sdk-ui 0.19.1 retries
                 // everything the timeline shows as undecryptable.
@@ -437,7 +471,7 @@ impl Timelines {
         generation: u64,
     ) {
         let events = self.events.clone();
-        self.paginator = Some(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let reached_start = match timeline.paginate_backwards(PAGE).await {
                 Ok(reached_start) => reached_start,
                 Err(err) => {
@@ -453,7 +487,11 @@ impl Timelines {
                 generation,
                 reached_start,
             });
-        }));
+        });
+        // One of an older generation would never answer this one: nobody waits for it.
+        if let Some((_, older)) = self.paginator.replace((generation, task)) {
+            older.abort();
+        }
     }
 
     /// Tells the UI the stored draft of a room (or of the thread a command is being
@@ -501,12 +539,12 @@ impl Timelines {
     }
 
     /// Runs `work` in the background and reports a failure to the user.
-    fn spawn<F>(&self, what: &'static str, work: F)
+    fn spawn<F>(&mut self, what: &'static str, work: F)
     where
         F: Future<Output = Result<()>> + Send + 'static,
     {
         let events = self.events.clone();
-        tokio::spawn(async move {
+        self.spawn_action(async move {
             if let Err(err) = work.await {
                 tracing::warn!(why = %logsafe::kind_any(&err), "{what}");
                 let _ = events.send(MatrixEvent::ActionFailed(format!("{what}: {err:#}")));
@@ -1051,11 +1089,29 @@ impl Timelines {
                 {
                     self.before_jump = None;
                 }
-                // One request at a time per open room.
+                // Asked for a view that is not the one shown (the UI had not yet heard
+                // that it changed): nothing is loaded for it, and it is answered at
+                // once, as done, so that nothing asks again. Paged, it would take the
+                // place of the shown view's own request, which would then never be
+                // answered and leave the UI waiting for older messages for good.
+                let shown = self.active.as_ref().is_some_and(|active| {
+                    active.room_id == room_id
+                        && active.thread == self.thread
+                        && active.generation == generation
+                });
+                if !shown {
+                    let _ = self.events.send(MatrixEvent::Paginated {
+                        generation,
+                        reached_start: true,
+                    });
+                    return;
+                }
+                // One request at a time per open room: the one running answers this
+                // one too. (One of another generation is replaced: see `spawn_paginate`.)
                 if self
                     .paginator
                     .as_ref()
-                    .is_some_and(|task| !task.is_finished())
+                    .is_some_and(|(running, task)| *running == generation && !task.is_finished())
                 {
                     return;
                 }
@@ -1222,7 +1278,7 @@ impl Timelines {
                 };
                 let events = self.events.clone();
                 let cache = self.pinned_cache.clone();
-                tokio::spawn(async move {
+                self.spawn_action(async move {
                     match super::moderation::pin(&room, &event_id, pinned, &cache).await {
                         Ok(ids) => {
                             let _ = events.send(MatrixEvent::PinnedEvents { room_id, ids });
@@ -1248,7 +1304,7 @@ impl Timelines {
                 let events = self.events.clone();
                 let cache = self.pinned_cache.clone();
                 let ignored = self.ignored.borrow().clone();
-                tokio::spawn(async move {
+                self.spawn_lookup(async move {
                     let (items, error) =
                         super::moderation::fetch_pinned(&room, &cache, &ignored).await;
                     let _ = events.send(MatrixEvent::PinnedList {
@@ -1286,13 +1342,14 @@ impl Timelines {
                         (room_id, event_id, place)
                     })
                     .collect();
-                tokio::spawn(super::saved::fetch(
+                let fetch = super::saved::fetch(
                     request,
                     wanted,
                     self.pinned_cache.clone(),
                     self.saved_limit.clone(),
                     self.events.clone(),
-                ));
+                );
+                self.spawn_lookup(fetch);
             }
             MatrixCmd::Forward {
                 from_room_id,
@@ -1323,7 +1380,7 @@ impl Timelines {
                 };
                 let client = self.client.clone();
                 let events = self.events.clone();
-                tokio::spawn(async move {
+                self.spawn_action(async move {
                     let raw_name = match to_room.cached_display_name() {
                         Some(name) => name.to_string(),
                         None => to_room
@@ -1374,7 +1431,7 @@ impl Timelines {
                 };
                 match timeline {
                     Ok((timeline, _)) => {
-                        tokio::spawn(async move {
+                        self.spawn_lookup(async move {
                             let result = decrypt_again(&timeline, &event_id).await;
                             if let Err(err) = &result {
                                 tracing::warn!(why = %logsafe::kind_any(err), "could not retry decryption");
@@ -1399,7 +1456,7 @@ impl Timelines {
                 };
                 match self.active_timeline(&room_id).await {
                     Ok((timeline, _)) => {
-                        tokio::spawn(async move {
+                        self.spawn_lookup(async move {
                             answer(super::source::fetch(&timeline, &item).await);
                         });
                     }
@@ -1408,7 +1465,7 @@ impl Timelines {
             }
             MatrixCmd::Typing { room_id, typing } => {
                 if let Ok(room) = self.room(&room_id) {
-                    tokio::spawn(async move {
+                    self.spawn_lookup(async move {
                         if let Err(err) = room.typing_notice(typing).await {
                             tracing::debug!(why = %logsafe::kind(&err), "could not send typing notice");
                         }
@@ -1435,7 +1492,7 @@ impl Timelines {
                     };
                     let marks = self.read_marks.clone();
                     let flags = self.unread_flags.clone();
-                    tokio::spawn(async move {
+                    self.spawn_action(async move {
                         let Some((key, ticket, newest)) = mark else {
                             // The room itself: the read marker follows the receipt.
                             if let Err(err) = mark_room_read(&timeline, receipt, &flags).await {
@@ -2160,17 +2217,21 @@ async fn fallback_latest_event_id(room: &Room) -> Option<matrix_sdk::ruma::Owned
 /// while as a second witness, and a request is only skipped when nothing speaks
 /// against the room being that way already.
 #[derive(Clone)]
-struct UnreadFlags(UnboundedSender<(Room, bool)>);
+struct UnreadFlags {
+    queue: UnboundedSender<(Room, bool)>,
+    /// The task that sends them; stopped with the session.
+    task: tokio::task::AbortHandle,
+}
 
 impl UnreadFlags {
     /// For this long what we sent is remembered next to what the last sync said.
     const TRUST_SENT: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// Ends when the last copy of the handle is dropped.
+    /// Ends when the last copy of the handle is dropped, or at [`Self::stop`].
     fn start(events: UnboundedSender<MatrixEvent>) -> Self {
         use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
         let (queue, mut wanted) = tokio::sync::mpsc::unbounded_channel::<(Room, bool)>();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut sent: std::collections::HashMap<
                 matrix_sdk::ruma::OwnedRoomId,
                 (bool, std::time::Instant),
@@ -2210,11 +2271,19 @@ impl UnreadFlags {
                 }
             }
         });
-        Self(queue)
+        Self {
+            queue,
+            task: task.abort_handle(),
+        }
     }
 
     fn set(&self, room: Room, unread: bool) {
-        let _ = self.0.send((room, unread));
+        let _ = self.queue.send((room, unread));
+    }
+
+    /// At the end of the session: the marks not sent yet are not sent any more.
+    fn stop(&self) {
+        self.task.abort();
     }
 
     /// Whether asking for `wanted` changes anything, given what the last sync said
@@ -2381,7 +2450,9 @@ async fn prepare_messages(
     let mut messages = reuse.convert(items, own, &ignored);
     let own_name = super::people::room_own_display_name(room, own_room_names).await;
     super::convert::apply_own_display_name(&mut messages, own_name.as_deref());
-    readers.annotate(room, &mut messages, items, own).await;
+    readers
+        .annotate(room, &mut messages, items, own, &ignored)
+        .await;
     dedup.dedup(&mut messages);
     messages
 }
@@ -2487,18 +2558,24 @@ async fn forward(
             }),
         }
     };
-    // Which threads have unread replies; nothing to look up inside a thread.
-    let unread = async |items: &Vector<Arc<TimelineItem>>| {
+    // Which threads have unread replies; nothing to look up inside a thread. (The
+    // ignored set is taken out of the channel first, as in `prepare_messages`.)
+    let unread = async |items: &Vector<Arc<TimelineItem>>,
+                        ignored: &watch::Receiver<IgnoredSet>| {
         if in_thread {
             HashSet::new()
         } else {
-            threads::unread(&room, items, &read_marks).await
+            let ignored = IgnoredSet::clone(&ignored.borrow());
+            threads::unread(&room, items, &read_marks, &ignored).await
         }
     };
     // Replies to messages that are not loaded only say "an earlier message" until the
-    // original is fetched. Ask once per reply.
+    // original is fetched. Ask once per reply. The requests end with this forwarder,
+    // when the room is closed or the session ends.
     let mut asked: HashSet<OwnedEventId> = HashSet::new();
+    let mut reply_fetches = tokio::task::JoinSet::new();
     let mut fetch_replies = |items: &Vector<Arc<TimelineItem>>| {
+        while reply_fetches.try_join_next().is_some() {}
         for event in items.iter().filter_map(|item| item.as_event()) {
             let unavailable = event
                 .content()
@@ -2510,7 +2587,7 @@ async fn forward(
             {
                 let timeline = timeline.clone();
                 let event_id = event_id.to_owned();
-                tokio::spawn(async move {
+                reply_fetches.spawn(async move {
                     if let Err(err) = timeline.fetch_details_for_event(&event_id).await {
                         tracing::debug!(why = %logsafe::kind(&err), "could not fetch the replied-to message");
                     }
@@ -2519,7 +2596,7 @@ async fn forward(
         }
     };
     fetch_replies(&items);
-    let marks = unread(&items).await;
+    let marks = unread(&items, &ignored).await;
     let messages = prepare_messages(
         &room,
         &items,
@@ -2624,7 +2701,7 @@ async fn forward(
                     reuse.forget();
                 }
                 fetch_replies(&items);
-                let marks = unread(&items).await;
+                let marks = unread(&items, &ignored).await;
                 let messages = prepare_messages(
                     &room,
                     &items,
@@ -2644,7 +2721,7 @@ async fn forward(
                 if changed.is_err() {
                     return;
                 }
-                let marks = unread(&items).await;
+                let marks = unread(&items, &ignored).await;
                 let messages = prepare_messages(
                     &room,
                     &items,
@@ -2675,7 +2752,7 @@ async fn forward(
                 if changed.is_err() {
                     return;
                 }
-                let marks = unread(&items).await;
+                let marks = unread(&items, &ignored).await;
                 let messages = prepare_messages(
                     &room,
                     &items,
@@ -4461,6 +4538,442 @@ mod tests {
         client.sync_once(SyncSettings::default()).await.unwrap();
         wait_for_timeline(&mut events, room_a, 3, "later in a").await;
         drop(server);
+    }
+
+    /// A message of the stand-in server's rooms: `sender` said `body` in `room`;
+    /// `thread`: as a reply in the thread that starts at that event.
+    fn said(
+        room: &str,
+        id: &str,
+        sender: &str,
+        body: &str,
+        thread: Option<&str>,
+    ) -> serde_json::Value {
+        let mut content = serde_json::json!({ "msgtype": "m.text", "body": body });
+        if let Some(root) = thread {
+            content["m.relates_to"] = serde_json::json!({
+                "rel_type": "m.thread", "event_id": root, "is_falling_back": true,
+                "m.in_reply_to": { "event_id": root },
+            });
+        }
+        serde_json::json!({
+            "type": "m.room.message", "room_id": room, "event_id": id,
+            "sender": sender, "origin_server_ts": 1_000, "content": content,
+        })
+    }
+
+    /// The timelines of a client of a stand-in server whose one sync brings `rooms`
+    /// (as the `join` of a sync); and the server, to be kept while they are used.
+    async fn opened_with(
+        rooms: serde_json::Value,
+    ) -> (
+        crate::matrix::spaces::fake::Server,
+        matrix_sdk::Client,
+        super::Timelines,
+        tokio::sync::mpsc::UnboundedReceiver<crate::matrix::MatrixEvent>,
+        (
+            tokio::sync::watch::Sender<super::IgnoredSet>,
+            tokio::sync::watch::Sender<u64>,
+        ),
+    ) {
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+
+        let server = fake::Server::start(serde_json::json!({ "join": rooms })).await;
+        let client = fake_client_with_cache(&server.url).await;
+        let (timelines, events, watches) = live_timelines_of(client.clone(), &LeftRooms::default());
+        (server, client, timelines, events, watches)
+    }
+
+    /// The first timeline of `room` under `generation` that `ready` accepts.
+    async fn timeline_where(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<crate::matrix::MatrixEvent>,
+        room: &str,
+        generation: u64,
+        ready: impl Fn(&[crate::model::Message]) -> bool,
+    ) -> Vec<crate::model::Message> {
+        use crate::matrix::MatrixEvent;
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match events.recv().await {
+                    Some(MatrixEvent::Timeline {
+                        room_id,
+                        generation: shown,
+                        messages,
+                        ..
+                    }) if room_id == room && shown == generation && ready(&messages) => {
+                        return messages;
+                    }
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for the timeline")
+    }
+
+    fn message_of<'a>(
+        messages: &'a [crate::model::Message],
+        event: &str,
+    ) -> Option<&'a crate::model::Message> {
+        use crate::model::ItemRef;
+        messages
+            .iter()
+            .find(|message| message.item == Some(ItemRef::Event(event.to_owned())))
+    }
+
+    /// Ignoring or unignoring someone has the SDK clear every room's event cache in place
+    /// (`EventCache::clear_all_rooms`, from its task that watches the ignore list). The
+    /// timelines on it, shown or kept, start over from the same empty cache a new one
+    /// would, so the session keeps them; the shown one is told to start over.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cleared_event_cache_starts_the_timelines_over_in_place() {
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+
+        let (kept, shown) = ("!kept:localhost", "!shown:localhost");
+        let mut joined_kept = fake::joined(false, vec![]);
+        joined_kept["timeline"]["events"] =
+            serde_json::json!([said(kept, "$k:localhost", fake::ME, "in kept", None)]);
+        let mut joined_shown = fake::joined(false, vec![]);
+        joined_shown["timeline"]["events"] =
+            serde_json::json!([said(shown, "$s:localhost", fake::ME, "in shown", None)]);
+        let (server, client, mut timelines, mut events, _watches) =
+            opened_with(serde_json::json!({ kept: joined_kept, shown: joined_shown })).await;
+        for (room, generation, body) in [(kept, 1, "in kept"), (shown, 2, "in shown")] {
+            timelines
+                .handle(MatrixCmd::OpenRoom {
+                    room_id: room.to_owned(),
+                    generation,
+                })
+                .await;
+            wait_for_timeline(&mut events, room, generation, body).await;
+        }
+        let kept_key = super::threads::key(kept, None);
+        let shown_key = super::threads::key(shown, None);
+        let before = [&kept_key, &shown_key].map(|key| timelines.cached(key).unwrap());
+
+        client.event_cache().clear_all_rooms().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Some(MatrixEvent::TimelineReset {
+                        room_id,
+                        generation: 2,
+                    }) if room_id == shown => return,
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .expect("the shown timeline was told to start over");
+        let after = [&kept_key, &shown_key].map(|key| timelines.cached(key).unwrap());
+        for (before, after) in before.iter().zip(&after) {
+            assert!(
+                std::sync::Arc::ptr_eq(before, after),
+                "the same timeline, kept"
+            );
+            // What the cache had is gone from it too (the stand-in server has nothing
+            // older to page back to).
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while after.items().await.iter().any(|item| {
+                    item.as_event()
+                        .and_then(|event| event.content().as_message())
+                        .is_some_and(|message| message.body().starts_with("in "))
+                }) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the timeline started over");
+        }
+        drop(server);
+    }
+
+    /// A page asked for under a generation that is not shown any more (the UI asked
+    /// before it heard of the switch) loads nothing and is answered at once. Paged, it
+    /// would hold the paginator, and the shown view's own request, coming next, would
+    /// never be answered: the UI would wait for older messages for good.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_page_asked_for_a_view_no_longer_shown_is_answered_at_once() {
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+
+        let (a, b) = ("!pagea:localhost", "!pageb:localhost");
+        let mut joined_a = fake::joined(false, vec![]);
+        joined_a["timeline"]["events"] =
+            serde_json::json!([said(a, "$a:localhost", fake::ME, "in a", None)]);
+        let mut joined_b = fake::joined(false, vec![]);
+        joined_b["timeline"]["events"] =
+            serde_json::json!([said(b, "$b:localhost", fake::ME, "in b", None)]);
+        let (server, _client, mut timelines, mut events, _watches) =
+            opened_with(serde_json::json!({ a: joined_a, b: joined_b })).await;
+        for (room, generation, body) in [(a, 1, "in a"), (b, 2, "in b")] {
+            timelines
+                .handle(MatrixCmd::OpenRoom {
+                    room_id: room.to_owned(),
+                    generation,
+                })
+                .await;
+            wait_for_timeline(&mut events, room, generation, body).await;
+        }
+        // Room A's page, asked for while it was shown, arrives after the switch to B.
+        timelines
+            .handle(MatrixCmd::Paginate {
+                room_id: a.to_owned(),
+                generation: 1,
+            })
+            .await;
+        assert!(timelines.paginator.is_none(), "nothing is paged for it");
+        let answered = std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, MatrixEvent::Paginated { generation: 1, .. }));
+        assert!(answered, "answered at once, with nothing loaded");
+
+        // A page for the view shown before, still on its way when the switch came, is
+        // given up for one of the view shown now: that one is answered.
+        let earlier = tokio::spawn(std::future::pending::<()>());
+        let earlier_ended = earlier.abort_handle();
+        timelines.paginator = Some((1, earlier));
+        timelines
+            .handle(MatrixCmd::Paginate {
+                room_id: b.to_owned(),
+                generation: 2,
+            })
+            .await;
+        assert!(matches!(timelines.paginator, Some((2, _))));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !earlier_ended.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            loop {
+                match events.recv().await {
+                    Some(MatrixEvent::Paginated { generation: 2, .. }) => return,
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .expect("the earlier page was given up, and this one answered");
+        drop(server);
+    }
+
+    /// The newest reply of a thread that an ignored user wrote is not previewed under
+    /// the thread's first message, and does not make the thread unread (the number of
+    /// replies still counts it: the summary is the server's).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ignored_users_reply_neither_shows_nor_marks_a_thread_unread() {
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::spaces::fake;
+
+        let room = "!threads:localhost";
+        let (bob, mallory) = ("@bob:localhost", "@mallory:localhost");
+        let mut joined = fake::joined(false, vec![]);
+        joined["timeline"]["events"] = serde_json::json!([
+            said(room, "$root1:localhost", bob, "first thread", None),
+            said(room, "$root2:localhost", bob, "second thread", None),
+            said(
+                room,
+                "$r1:localhost",
+                bob,
+                "bob answers",
+                Some("$root1:localhost")
+            ),
+            said(
+                room,
+                "$r2:localhost",
+                mallory,
+                "mallory answers",
+                Some("$root2:localhost")
+            ),
+        ]);
+        let (server, _client, mut timelines, mut events, (ignored_tx, _own)) =
+            opened_with(serde_json::json!({ room: joined })).await;
+        ignored_tx.send_replace(std::sync::Arc::new(
+            [matrix_sdk::ruma::OwnedUserId::try_from(mallory).unwrap()].into(),
+        ));
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room.to_owned(),
+                generation: 1,
+            })
+            .await;
+        // Once the other thread's newest reply is known, this one's is too.
+        let messages = timeline_where(&mut events, room, 1, |messages| {
+            let thread = |id| message_of(messages, id).and_then(|m| m.thread.as_ref());
+            thread("$root1:localhost").is_some_and(|t| t.latest.is_some())
+                && thread("$root2:localhost").is_some()
+        })
+        .await;
+        let first = message_of(&messages, "$root1:localhost").unwrap();
+        let first = first.thread.as_ref().unwrap();
+        assert!(first.unread, "nothing of the first thread was read");
+        let second = message_of(&messages, "$root2:localhost").unwrap();
+        let second = second.thread.as_ref().unwrap();
+        assert_eq!(second.replies, 1);
+        assert_eq!(second.latest, None, "no preview of what mallory wrote");
+        assert!(!second.unread, "mallory's reply does not make it unread");
+        drop(server);
+    }
+
+    /// Which threads have unread replies is looked at on every change of the room's
+    /// timeline. The user's receipts for the whole room (as clients without threads send
+    /// them) are the same for every thread: loaded once per look, besides each thread's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_room_wide_receipts_are_loaded_once_for_all_threads() {
+        use crate::matrix::spaces::fake;
+        use matrix_sdk_ui::timeline::TimelineDetails;
+
+        let room_id = "!counted:localhost";
+        let bob = "@bob:localhost";
+        let roots = ["$t1:localhost", "$t2:localhost", "$t3:localhost"];
+        let mut events = Vec::new();
+        for (n, root) in roots.into_iter().enumerate() {
+            events.push(said(room_id, root, bob, "a thread", None));
+            let reply = format!("$reply{n}:localhost");
+            events.push(said(room_id, &reply, bob, "an answer", Some(root)));
+        }
+        let mut joined = fake::joined(false, vec![]);
+        joined["timeline"]["events"] = serde_json::Value::Array(events);
+        let (server, client, _timelines, _events, _watches) =
+            opened_with(serde_json::json!({ room_id: joined })).await;
+        let room = client
+            .get_room(<&matrix_sdk::ruma::RoomId>::try_from(room_id).unwrap())
+            .unwrap();
+        let timeline = super::room_timeline(&room).await.unwrap();
+        // Each thread's newest reply known.
+        let items = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let items = timeline.items().await;
+                let known = items
+                    .iter()
+                    .filter_map(|item| item.as_event()?.content().thread_summary())
+                    .filter(|summary| matches!(summary.latest_event, TimelineDetails::Ready(_)))
+                    .count();
+                if known == roots.len() {
+                    return items;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the threads' newest replies are known");
+        let loads = || {
+            super::threads::RECEIPT_LOADS
+                .lock()
+                .unwrap()
+                .get(room_id)
+                .copied()
+                .unwrap_or(0)
+        };
+        let before = loads();
+        let unread =
+            super::threads::unread(&room, &items, &Default::default(), &Default::default()).await;
+        assert_eq!(unread.len(), roots.len(), "no thread was read");
+        // Read and private receipts: of each thread, and once of the whole room.
+        assert_eq!(loads() - before, 2 * roots.len() + 2);
+        drop(server);
+    }
+
+    /// Who has read a message: not someone ignored.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ignored_users_read_receipt_is_not_shown() {
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::spaces::fake;
+
+        let room = "!receipts:localhost";
+        let (bob, carol, mallory) = ("@bob:localhost", "@carol:localhost", "@mallory:localhost");
+        let mut joined = fake::joined(false, vec![]);
+        joined["timeline"]["events"] =
+            serde_json::json!([said(room, "$read:localhost", bob, "read by some", None)]);
+        joined["ephemeral"] = serde_json::json!({ "events": [{
+            "type": "m.receipt",
+            "content": { "$read:localhost": { "m.read": {
+                carol: { "ts": 2_000 },
+                mallory: { "ts": 2_000 },
+            } } },
+        }] });
+        let (server, _client, mut timelines, mut events, (ignored_tx, _own)) =
+            opened_with(serde_json::json!({ room: joined })).await;
+        ignored_tx.send_replace(std::sync::Arc::new(
+            [matrix_sdk::ruma::OwnedUserId::try_from(mallory).unwrap()].into(),
+        ));
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room.to_owned(),
+                generation: 1,
+            })
+            .await;
+        let messages = timeline_where(&mut events, room, 1, |messages| {
+            message_of(messages, "$read:localhost").is_some_and(|m| m.read_by.total > 0)
+        })
+        .await;
+        let read_by = &message_of(&messages, "$read:localhost").unwrap().read_by;
+        let names: Vec<&str> = read_by.readers.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["carol"]);
+        assert_eq!(read_by.total, 1);
+        drop(server);
+    }
+
+    /// What a command left running (a send, a reaction, a lookup) holds the session's
+    /// client: it is given up when the session ends, so that nothing of the session
+    /// outlives it (a logout clears its stores right after).
+    #[tokio::test]
+    async fn work_left_running_ends_with_the_session() {
+        use crate::matrix::left::{LeftRooms, testing::Server};
+
+        let client = Server::default().client().await;
+        let (mut timelines, _events) = timelines_of(client, &LeftRooms::default());
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        timelines.spawn("never done", async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        timelines.stop();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), released)
+            .await
+            .expect("the work was given up");
+        assert!(outcome.is_err(), "it ended without finishing");
+    }
+
+    /// At a shutdown, a change on its way is given a moment, and a lookup none: after
+    /// them the sync is stopped and the session saved, all within the three seconds the
+    /// app waits for the worker.
+    #[tokio::test]
+    async fn a_shutdown_waits_briefly_for_changes_and_not_for_lookups() {
+        use crate::matrix::left::{LeftRooms, testing::Server};
+
+        let client = Server::default().client().await;
+        let (mut timelines, _events) = timelines_of(client, &LeftRooms::default());
+        timelines.spawn_lookup(std::future::pending());
+        let started = tokio::time::Instant::now();
+        timelines
+            .finish_uploads(crate::matrix::upload::SHUTDOWN_WAIT)
+            .await;
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_millis(500),
+            "waited for a lookup: {waited:?}"
+        );
+        timelines.spawn("never done", std::future::pending());
+        let started = tokio::time::Instant::now();
+        timelines
+            .finish_uploads(crate::matrix::upload::SHUTDOWN_WAIT)
+            .await;
+        let waited = started.elapsed();
+        assert!(
+            waited >= super::ACTIONS_WAIT,
+            "gave a change no time: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "waited too long: {waited:?}"
+        );
+        timelines.stop();
     }
 
     #[test]

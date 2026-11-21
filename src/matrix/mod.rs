@@ -1542,7 +1542,7 @@ impl Worker {
             Ok(SessionEnd::Shutdown) => {
                 let joined = search::joined_room_ids(&active.client, &left);
                 drop(active);
-                search::prune_search_dir(&self.paths.search_dir(), &joined);
+                search::prune_search_dir_off_loop(&self.paths.search_dir(), joined).await;
                 return false;
             }
             Ok(SessionEnd::SoftLogout) => {
@@ -1554,7 +1554,7 @@ impl Worker {
                 }
                 let joined = search::joined_room_ids(&active.client, &left);
                 drop(active);
-                search::prune_search_dir(&self.paths.search_dir(), &joined);
+                search::prune_search_dir_off_loop(&self.paths.search_dir(), joined).await;
                 *pending = Some(PendingAuth::Reauth {
                     target,
                     passphrase,
@@ -1830,11 +1830,14 @@ impl Worker {
         let _notices =
             notify::watch(client, self.events.clone(), ignored.clone(), left.clone()).await;
         let mut session_changes = client.subscribe_to_session_changes();
-        let token_saver = {
+        // In a set, which aborts it when dropped: it holds the client, and a session
+        // that fails to start (an early return below) must not leave it running.
+        let mut token_saver = tokio::task::JoinSet::new();
+        {
             let mut changes = client.subscribe_to_session_changes();
             let (paths, client, passphrase) =
                 (self.paths.clone(), client.clone(), passphrase.to_owned());
-            tokio::spawn(async move {
+            token_saver.spawn(async move {
                 use tokio::sync::broadcast::error::RecvError;
                 loop {
                     match changes.recv().await {
@@ -1853,8 +1856,8 @@ impl Worker {
                         Err(RecvError::Closed) => break,
                     }
                 }
-            })
-        };
+            });
+        }
 
         // Offline mode: the service notices a lost connection, reports `Offline` and
         // resumes by itself when the server is reachable again.
@@ -1982,7 +1985,8 @@ impl Worker {
             ignored.clone(),
             left.clone(),
         );
-        let mut emote_mgr = emotes::EmoteManager::new(client.clone(), self.events.clone());
+        let mut emote_mgr =
+            emotes::EmoteManager::new(client.clone(), self.events.clone(), left.clone());
         let emote_handlers = emote_mgr.register_handlers(client);
         let power_events = self.events.clone();
         let manage_refresh = manager.refresh_signal();
@@ -2034,15 +2038,17 @@ impl Worker {
                 let own_room_names = member_own_room_names.clone();
                 async move {
                     manage::bump_refresh(&refresh, room.room_id().as_str());
+                    // Only a change of the user's own name or picture in the room is
+                    // worth showing their messages anew and looking at the profile.
                     if own_id
                         .as_ref()
                         .is_some_and(|own| ev.state_key() == own.as_str())
-                    {
-                        people::record_own_member_event(
+                        && people::record_own_member_event(
                             &own_room_names,
                             room.room_id().as_str(),
                             &ev,
-                        );
+                        )
+                    {
                         own_timeline_refresh.send_modify(|n| *n = n.wrapping_add(1));
                         people_poke.notify_one();
                     }
@@ -2077,6 +2083,9 @@ impl Worker {
                 &manager.refresh_signal(),
             ),
         ];
+        // What a command started and left running here (a recovery, a report): it
+        // holds the client, so it ends with the session.
+        let mut session_tasks = tokio::task::JoinSet::new();
         let end = loop {
             // A room's timeline left unused for long goes (see `rooms::IDLE_TIMELINE`).
             let timelines_idle = timelines.idle_due();
@@ -2142,9 +2151,12 @@ impl Worker {
                         summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                     ));
                 }
+                // The timelines stay: the SDK clears every room's event cache in place
+                // when the list changes (each timeline, shown or kept, starts over from
+                // the same empty cache a new one would), and their forwarders, and any
+                // opened later, leave out who is ignored now.
                 Ok(()) = ignored.changed() => {
                     previews.lines.clear();
-                    timelines.clear_cache();
                     self.emit(MatrixEvent::Rooms(
                         summarize(&rooms, &mut previews, &ignored, left, &notification_settings).await,
                     ));
@@ -2184,7 +2196,8 @@ impl Worker {
                         // Can take a while (downloads keys); must not block the loop.
                         let recovery = client.encryption().recovery();
                         let events = self.events.clone();
-                        tokio::spawn(async move {
+                        while session_tasks.try_join_next().is_some() {}
+                        session_tasks.spawn(async move {
                             let result = recovery
                                 .recover(key.trim())
                                 .await
@@ -2224,7 +2237,8 @@ impl Worker {
                     }) => {
                         let client = client.clone();
                         let events = self.events.clone();
-                        tokio::spawn(async move {
+                        while session_tasks.try_join_next().is_some() {}
+                        session_tasks.spawn(async move {
                             safety::report_content(client, events, room_id, event_id, reason)
                                 .await;
                         });
@@ -2282,6 +2296,8 @@ impl Worker {
         user_searcher.stop();
         dir_searcher.stop();
         ignore_tracker.stop();
+        session_tasks.abort_all();
+        left.stop();
         if matches!(end, SessionEnd::Shutdown) {
             // Give files sent right before quitting a moment to reach the send queue's
             // persistent store before tearing timelines down.
@@ -2290,10 +2306,10 @@ impl Worker {
         timelines.stop();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
-        token_saver.abort();
+        token_saver.abort_all();
         // Waited for: a save that is running must not write the session file again
         // after the session was forgotten.
-        let _ = token_saver.await;
+        while token_saver.join_next().await.is_some() {}
         // Once more on the way out, in case a refresh happened during the shutdown.
         if matches!(end, SessionEnd::Shutdown)
             && let Err(err) = session::save_tokens(&self.paths, client, passphrase, in_keyring)

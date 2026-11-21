@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use matrix_sdk::ruma::UserId;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName, get_profile};
 use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::api::error::ErrorKind;
@@ -16,6 +15,7 @@ use matrix_sdk::ruma::events::room::member::{
     MembershipState, RoomMemberEventContent, SyncRoomMemberEvent,
 };
 use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
+use matrix_sdk::ruma::{OwnedMxcUri, UserId};
 use matrix_sdk::{Client, Room, RoomMemberships, RoomState};
 use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
 use tokio::task::JoinSet;
@@ -199,21 +199,39 @@ impl fmt::Debug for UserProfile {
 /// Sliding sync updates room member stores from `required_state` rather than `timeline`, so
 /// reading only `room.get_member_no_sync(own)` misses live per-room display name edits until reconnect.
 #[derive(Clone, Default)]
-pub struct OwnRoomNames(Arc<Mutex<BTreeMap<String, Option<String>>>>);
+pub struct OwnRoomNames(Arc<Mutex<BTreeMap<String, OwnInRoom>>>);
+
+/// The user's name and picture in one room, as the last member event said.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct OwnInRoom {
+    name: Option<String>,
+    /// Kept only to tell whether a member event changed anything.
+    avatar: Option<OwnedMxcUri>,
+}
 
 impl OwnRoomNames {
     pub fn set(&self, room_id: &str, name: Option<String>) {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(room_id.to_owned(), clean_name(name.as_deref()));
+            .entry(room_id.to_owned())
+            .or_default()
+            .name = clean_name(name.as_deref());
     }
 
-    pub fn remove(&self, room_id: &str) {
+    /// Takes what a member event says of the user in a room; whether that is news.
+    fn record(&self, room_id: &str, now: OwnInRoom) -> bool {
+        let mut rooms = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        rooms.insert(room_id.to_owned(), now.clone()) != Some(now)
+    }
+
+    /// Whether the room was known.
+    pub fn remove(&self, room_id: &str) -> bool {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(room_id);
+            .remove(room_id)
+            .is_some()
     }
 
     pub fn get(&self, room_id: &str) -> Option<Option<String>> {
@@ -221,31 +239,36 @@ impl OwnRoomNames {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(room_id)
-            .cloned()
+            .map(|own| own.name.clone())
     }
 }
 
 /// Records an incoming `m.room.member` event for the signed-in user into `own_room_names`.
+/// Whether the user's name or picture in the room changed by it: the same event can
+/// come again (a sync sends a room's state along again), and only a change is worth
+/// showing the user's messages anew.
 pub(super) fn record_own_member_event(
     own_room_names: &OwnRoomNames,
     room_id: &str,
     ev: &SyncRoomMemberEvent,
-) {
+) -> bool {
     #[expect(
         clippy::wildcard_enum_match_arm,
         reason = "foreign ruma MembershipState"
     )]
     match ev.membership() {
         MembershipState::Join | MembershipState::Knock => {
-            let name = ev
-                .as_original()
-                .and_then(|original| clean_name(original.content.displayname.as_deref()));
-            own_room_names.set(room_id, name);
+            let content = ev.as_original().map(|original| &original.content);
+            own_room_names.record(
+                room_id,
+                OwnInRoom {
+                    name: content.and_then(|c| clean_name(c.displayname.as_deref())),
+                    avatar: content.and_then(|c| c.avatar_url.clone()),
+                },
+            )
         }
-        MembershipState::Leave | MembershipState::Ban => {
-            own_room_names.remove(room_id);
-        }
-        _ => {}
+        MembershipState::Leave | MembershipState::Ban => own_room_names.remove(room_id),
+        _ => false,
     }
 }
 
@@ -1369,8 +1392,26 @@ mod tests {
             }
         }))
         .expect("parse named join member event");
-        record_own_member_event(&names, "!r:hs", &join_named);
+        assert!(record_own_member_event(&names, "!r:hs", &join_named));
         assert_eq!(names.get("!r:hs"), Some(Some("Room  Alice".to_owned())));
+        // The same again (a sync sends it along with the room again): no news.
+        assert!(!record_own_member_event(&names, "!r:hs", &join_named));
+        // A new picture is, with the same name.
+        let pictured: SyncRoomMemberEvent = serde_json::from_value(serde_json::json!({
+            "type": "m.room.member",
+            "event_id": "$ev1b",
+            "sender": "@alice:hs",
+            "state_key": "@alice:hs",
+            "origin_server_ts": 1500,
+            "content": {
+                "membership": "join",
+                "displayname": "Room\n\x07 Alice  ",
+                "avatar_url": "mxc://hs/picture"
+            }
+        }))
+        .expect("parse member event with a picture");
+        assert!(record_own_member_event(&names, "!r:hs", &pictured));
+        assert!(!record_own_member_event(&names, "!r:hs", &pictured));
 
         let join_bare: SyncRoomMemberEvent = serde_json::from_value(serde_json::json!({
             "type": "m.room.member",
@@ -1384,7 +1425,7 @@ mod tests {
             }
         }))
         .expect("parse cleared join member event");
-        record_own_member_event(&names, "!r:hs", &join_bare);
+        assert!(record_own_member_event(&names, "!r:hs", &join_bare));
         assert_eq!(names.get("!r:hs"), Some(None));
 
         let leave: SyncRoomMemberEvent = serde_json::from_value(serde_json::json!({
@@ -1398,8 +1439,9 @@ mod tests {
             }
         }))
         .expect("parse leave member event");
-        record_own_member_event(&names, "!r:hs", &leave);
+        assert!(record_own_member_event(&names, "!r:hs", &leave));
         assert_eq!(names.get("!r:hs"), None);
+        assert!(!record_own_member_event(&names, "!r:hs", &leave));
     }
 
     #[test]

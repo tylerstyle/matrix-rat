@@ -376,6 +376,15 @@ fn dedup_with_latest(messages: &mut Vec<Message>) {
             let (head, tail) = messages.split_at_mut(i);
             let first = &mut head[target];
             let later = &mut tail[0];
+            // The SDK decrypts whichever copy it finds by position (keys imported from a
+            // file, say), often the first: see `takes_over`.
+            if !takes_over(
+                first.kind == MsgKind::Undecryptable,
+                later.kind == MsgKind::Undecryptable,
+                true,
+            ) {
+                continue;
+            }
             std::mem::swap(first, later);
             std::mem::swap(&mut first.id, &mut later.id);
         }
@@ -408,6 +417,19 @@ fn dedup_with_latest(messages: &mut Vec<Message>) {
         if insert_at < rm_at {
             messages[insert_at..=rm_at].rotate_right(1);
         }
+    }
+}
+
+/// Of two copies of one event that the SDK's timeline holds (see [`EventDedup`]),
+/// whether `other` is the one to show in place of `shown`; `otherwise` says which it
+/// would be were both locked or both readable. Decryption goes one way only, so a copy
+/// still locked never stands in for one that was decrypted, and one decrypted always
+/// does for one still locked.
+pub(super) fn takes_over(shown_locked: bool, other_locked: bool, otherwise: bool) -> bool {
+    if shown_locked == other_locked {
+        otherwise
+    } else {
+        shown_locked
     }
 }
 
@@ -557,7 +579,7 @@ pub(super) fn event_message(
     )]
     match event.content() {
         TimelineItemContent::MsgLike(content) => {
-            message.thread = super::threads::summary(content);
+            message.thread = super::threads::summary(content, ignored);
             message.reactions = content
                 .reactions
                 .iter()
@@ -1681,6 +1703,37 @@ mod tests {
         assert!(messages[1].read_by.is_empty());
         assert_eq!(messages[2].read_by, fresh_reader);
         assert_eq!(messages[3].kind, MsgKind::Redacted);
+    }
+
+    /// Of an event held twice, the SDK decrypts the copy it finds by position when keys
+    /// come in from a key file, which can be the first: the second, still locked, does
+    /// not hide it. Decrypted last, the last copy wins as before.
+    #[test]
+    fn dedup_keeps_the_decrypted_copy_of_an_event() {
+        let locked = |id: &str, event: &str| {
+            let mut message = test_event(id, event, "Unable to decrypt");
+            message.kind = MsgKind::Undecryptable;
+            message
+        };
+        let mut messages = vec![
+            test_event("u1", "$1", "readable now"),
+            locked("u2", "$2"),
+            locked("u3", "$1"),
+            test_event("u4", "$2", "readable too"),
+        ];
+        EventDedup::default().dedup(&mut messages);
+        assert_eq!(
+            summary(&messages),
+            vec![
+                ("u1", Some("$1"), "readable now"),
+                ("u2", Some("$2"), "readable too"),
+            ]
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.kind != MsgKind::Undecryptable)
+        );
     }
 
     #[test]
