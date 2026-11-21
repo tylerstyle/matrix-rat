@@ -762,32 +762,49 @@ impl App {
 
     /// Rooms that pass the filter, in the order the sidebar shows them.
     pub fn visible_rooms(&self) -> Vec<usize> {
-        let needle = self.sidebar.filter.to_lowercase();
+        let needle = (!self.sidebar.filter.is_empty()).then(|| self.sidebar.filter.to_lowercase());
         let open = self.open_index();
-        RoomKind::SECTIONS
-            .iter()
-            .flat_map(|kind| {
-                self.rooms
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, room)| room.kind == *kind)
-                    // Invitations and pending knocks are shown in every space: they belong to none yet.
-                    .filter(|(_, room)| {
-                        self.space.is_none()
-                            || room.is_pending()
-                            || self.space_rooms.contains(&room.id)
-                    })
-                    // The open room stays in the list whatever the quick filters say.
-                    .filter(|(i, room)| {
-                        Some(*i) == open
-                            || ((!self.sidebar.unread_only || room.shows_unread())
-                                && (!self.sidebar.people_only || room.direct))
-                    })
-                    .filter(|(_, room)| room.name.to_lowercase().contains(&needle))
-                    .map(|(i, _)| i)
-                    .collect::<Vec<_>>()
-            })
-            .collect()
+        let mut out = Vec::with_capacity(if needle.is_none() {
+            self.rooms.len()
+        } else {
+            0
+        });
+        let mut lower_buf = String::new();
+        for kind in RoomKind::SECTIONS {
+            for (i, room) in self.rooms.iter().enumerate() {
+                if room.kind != kind {
+                    continue;
+                }
+                // Invitations and pending knocks are shown in every space: they belong to none yet.
+                if self.space.is_some()
+                    && !room.is_pending()
+                    && !self.space_rooms.contains(&room.id)
+                {
+                    continue;
+                }
+                // The open room stays in the list whatever the quick filters say.
+                if Some(i) != open
+                    && ((self.sidebar.unread_only && !room.shows_unread())
+                        || (self.sidebar.people_only && !room.direct))
+                {
+                    continue;
+                }
+                if let Some(needle) = &needle {
+                    lower_buf.clear();
+                    if room.name.is_ascii() {
+                        lower_buf.push_str(&room.name);
+                        lower_buf.make_ascii_lowercase();
+                    } else {
+                        lower_buf.push_str(&room.name.to_lowercase());
+                    }
+                    if !lower_buf.contains(needle.as_str()) {
+                        continue;
+                    }
+                }
+                out.push(i);
+            }
+        }
+        out
     }
 
     pub fn sidebar_rows(&self) -> Vec<SideRow> {
@@ -10053,6 +10070,17 @@ mod tests {
         assert!(app.sidebar.filter.is_empty());
         assert!(!app.sidebar.unread_only);
         assert!(!app.sidebar.people_only);
+
+        // Unicode room names still filter case-insensitively and empty filter returns full order.
+        app.select_space(None);
+        app.rooms[0].name = "Übung".to_owned();
+        app.sidebar.filter.set("üb");
+        assert_eq!(names(&app), ["Übung"]);
+        app.sidebar.filter.clear();
+        assert_eq!(
+            names(&app),
+            ["Übung", "Dan", "OpenChannel", "Rust", "LowNews"]
+        );
 
         // Session-only: reset_session clears quick filters, and Config ignores them.
         app.perform(Action::FilterUnread);
