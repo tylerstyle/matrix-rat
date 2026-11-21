@@ -2789,6 +2789,12 @@ impl App {
             }
             return;
         }
+        self.remove_demo_message(index);
+    }
+
+    /// Drops the message at `index` from the demo list, keeping the selection and any
+    /// pending reply or edit on the remaining messages.
+    pub(super) fn remove_demo_message(&mut self, index: usize) {
         if let Some(messages) = self.messages_mut() {
             messages.remove(index);
         }
@@ -2805,6 +2811,7 @@ impl App {
             other @ (ComposeMode::Normal | ComposeMode::Reply(_) | ComposeMode::Edit(_)) => other,
         };
         if self.messages().is_empty() {
+            self.timeline.selected = None;
             self.set_focus(Pane::Composer);
         } else {
             self.timeline.selected = self
