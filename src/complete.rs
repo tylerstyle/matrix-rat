@@ -594,6 +594,30 @@ fn standard_emoji(query: &str, max: usize) -> impl Iterator<Item = Candidate> {
         })
 }
 
+enum MentionEntry<'a> {
+    Member(&'a Member),
+    Room,
+}
+
+impl MentionEntry<'_> {
+    fn sort_name(&self, empty_query: bool) -> &str {
+        match self {
+            Self::Member(member) => &member.display_name,
+            // Keep `@room` below regular members on an empty query so hitting Enter
+            // accidentally after `@` does not ping the whole room.
+            Self::Room if empty_query => "\u{10ffff}room",
+            Self::Room => "@room",
+        }
+    }
+
+    fn into_candidate(self) -> Candidate {
+        match self {
+            Self::Member(member) => member_candidate(member),
+            Self::Room => room_mention_candidate(),
+        }
+    }
+}
+
 fn match_mentions(query: &str, ctx: &Context<'_>) -> Vec<Candidate> {
     let recency = |name: &str, uid: &str| -> usize {
         ctx.recent_speakers
@@ -603,35 +627,33 @@ fn match_mentions(query: &str, ctx: &Context<'_>) -> Vec<Candidate> {
     };
 
     if query.is_empty() {
-        let mut ranked: Vec<(usize, String, Candidate)> = Vec::with_capacity(
-            ctx.members.len().min(MAX_CANDIDATES * 4) + usize::from(ctx.can_mention_room),
-        );
-        // For huge rooms, collect recent speakers first without scanning more than needed,
-        // still respecting alphabetical fallback among remaining members.
+        let mut ranked: Vec<(usize, MentionEntry<'_>)> = Vec::with_capacity(MAX_CANDIDATES);
+        let cmp = |a: &(usize, MentionEntry<'_>), b: &(usize, MentionEntry<'_>)| {
+            a.0.cmp(&b.0)
+                .then_with(|| cmp_lowercase(a.1.sort_name(true), b.1.sort_name(true)))
+        };
+        // Rank without allocating candidates or lowercase copies; build only the top 10.
         for member in ctx.members {
             let r = recency(&member.display_name, &member.user_id);
-            let sort_key = member.display_name.to_lowercase();
-            let candidate = member_candidate(member);
             push_top_k(
                 &mut ranked,
                 MAX_CANDIDATES,
-                (r, sort_key, candidate),
-                |a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)),
+                (r, MentionEntry::Member(member)),
+                cmp,
             );
         }
         if ctx.can_mention_room {
-            // Keep `@room` below regular members on an empty query so hitting Enter
-            // accidentally after `@` does not ping the whole room.
-            let room_item = (
-                usize::MAX,
-                "\u{10ffff}room".to_owned(),
-                room_mention_candidate(),
+            push_top_k(
+                &mut ranked,
+                MAX_CANDIDATES,
+                (usize::MAX, MentionEntry::Room),
+                cmp,
             );
-            push_top_k(&mut ranked, MAX_CANDIDATES, room_item, |a, b| {
-                a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
-            });
         }
-        return ranked.into_iter().map(|(_, _, c)| c).collect();
+        return ranked
+            .into_iter()
+            .map(|(_, entry)| entry.into_candidate())
+            .collect();
     }
 
     let mut matcher = Matcher::new(Config::DEFAULT);
@@ -642,48 +664,68 @@ fn match_mentions(query: &str, ctx: &Context<'_>) -> Vec<Candidate> {
         AtomKind::Fuzzy,
     );
     let mut buf = Vec::new();
+    let mut lower_buf = String::new();
     let lowered = query.to_lowercase();
-    let mut top: Vec<(u32, usize, String, Candidate)> = Vec::with_capacity(MAX_CANDIDATES);
+    let mut top: Vec<(u32, usize, MentionEntry<'_>)> = Vec::with_capacity(MAX_CANDIDATES);
+    let cmp = |a: &(u32, usize, MentionEntry<'_>), b: &(u32, usize, MentionEntry<'_>)| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| cmp_lowercase(a.2.sort_name(false), b.2.sort_name(false)))
+    };
 
     for member in ctx.members {
         let name_score = score_field(
             &pattern,
             &mut matcher,
             &mut buf,
+            &mut lower_buf,
             &member.display_name,
             &lowered,
         );
-        let id_score = score_field(&pattern, &mut matcher, &mut buf, &member.user_id, &lowered);
+        let id_score = score_field(
+            &pattern,
+            &mut matcher,
+            &mut buf,
+            &mut lower_buf,
+            &member.user_id,
+            &lowered,
+        );
         let Some(score) = name_score.into_iter().chain(id_score).max() else {
             continue;
         };
+        if top.len() == MAX_CANDIDATES && score < top[MAX_CANDIDATES - 1].0 {
+            continue;
+        }
         let r = recency(&member.display_name, &member.user_id);
-        let key = member.display_name.to_lowercase();
-        let entry = (score, r, key, member_candidate(member));
-        push_top_k(&mut top, MAX_CANDIDATES, entry, |a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.cmp(&b.2))
-        });
+        push_top_k(
+            &mut top,
+            MAX_CANDIDATES,
+            (score, r, MentionEntry::Member(member)),
+            cmp,
+        );
     }
 
     if ctx.can_mention_room
-        && let Some(score) = score_field(&pattern, &mut matcher, &mut buf, "room", &lowered)
+        && let Some(score) = score_field(
+            &pattern,
+            &mut matcher,
+            &mut buf,
+            &mut lower_buf,
+            "room",
+            &lowered,
+        )
     {
-        let entry = (
-            score,
-            usize::MAX,
-            "@room".to_owned(),
-            room_mention_candidate(),
+        push_top_k(
+            &mut top,
+            MAX_CANDIDATES,
+            (score, usize::MAX, MentionEntry::Room),
+            cmp,
         );
-        push_top_k(&mut top, MAX_CANDIDATES, entry, |a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.cmp(&b.2))
-        });
     }
 
-    top.into_iter().map(|(_, _, _, c)| c).collect()
+    top.into_iter()
+        .map(|(_, _, entry)| entry.into_candidate())
+        .collect()
 }
 
 fn member_candidate(member: &Member) -> Candidate {
@@ -724,28 +766,45 @@ fn match_rooms(query: &str, rooms: &[RoomTarget]) -> Vec<Candidate> {
         AtomKind::Fuzzy,
     );
     let mut buf = Vec::new();
+    let mut lower_buf = String::new();
     let lowered = query.to_lowercase();
-    let mut top: Vec<(u32, String, Candidate)> = Vec::with_capacity(MAX_CANDIDATES);
+    let mut top: Vec<(u32, &RoomTarget)> = Vec::with_capacity(MAX_CANDIDATES);
 
     for room in rooms {
-        let alias_score = room
-            .alias
-            .as_deref()
-            .and_then(|a| score_field(&pattern, &mut matcher, &mut buf, a, &lowered));
-        let name_score = score_field(&pattern, &mut matcher, &mut buf, &room.name, &lowered);
+        let alias_score = room.alias.as_deref().and_then(|a| {
+            score_field(
+                &pattern,
+                &mut matcher,
+                &mut buf,
+                &mut lower_buf,
+                a,
+                &lowered,
+            )
+        });
+        let name_score = score_field(
+            &pattern,
+            &mut matcher,
+            &mut buf,
+            &mut lower_buf,
+            &room.name,
+            &lowered,
+        );
         let Some(score) = alias_score.into_iter().chain(name_score).max() else {
             continue;
         };
-        let key = room.alias.as_deref().unwrap_or(&room.name).to_lowercase();
-        push_top_k(
-            &mut top,
-            MAX_CANDIDATES,
-            (score, key, room_candidate(room)),
-            |a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)),
-        );
+        push_top_k(&mut top, MAX_CANDIDATES, (score, room), |a, b| {
+            b.0.cmp(&a.0).then_with(|| {
+                cmp_lowercase(
+                    a.1.alias.as_deref().unwrap_or(&a.1.name),
+                    b.1.alias.as_deref().unwrap_or(&b.1.name),
+                )
+            })
+        });
     }
 
-    top.into_iter().map(|(_, _, c)| c).collect()
+    top.into_iter()
+        .map(|(_, room)| room_candidate(room))
+        .collect()
 }
 
 fn room_candidate(room: &RoomTarget) -> Candidate {
@@ -780,20 +839,40 @@ pub fn room_matrix_to_uri(alias: Option<&str>, room_id: &str) -> String {
     }
 }
 
+fn cmp_lowercase(a: &str, b: &str) -> std::cmp::Ordering {
+    if a.is_ascii() && b.is_ascii() {
+        return a
+            .bytes()
+            .map(|byte| byte.to_ascii_lowercase())
+            .cmp(b.bytes().map(|byte| byte.to_ascii_lowercase()));
+    }
+    a.to_lowercase().cmp(&b.to_lowercase())
+}
+
 fn score_field(
     pattern: &Pattern,
     matcher: &mut Matcher,
     buf: &mut Vec<char>,
+    lower_buf: &mut String,
     field: &str,
     lowered_query: &str,
 ) -> Option<u32> {
     let fuzzy = pattern.score(Utf32Str::new(field, buf), matcher)?;
-    let lower = field.to_lowercase();
-    let boost = if lower == lowered_query {
+    let owned;
+    let lowered = if field.is_ascii() {
+        lower_buf.clear();
+        lower_buf.push_str(field);
+        lower_buf.make_ascii_lowercase();
+        lower_buf.as_str()
+    } else {
+        owned = field.to_lowercase();
+        owned.as_str()
+    };
+    let boost = if lowered == lowered_query {
         30_000
-    } else if lower.starts_with(lowered_query) {
+    } else if lowered.starts_with(lowered_query) {
         20_000
-    } else if lower.contains(lowered_query) {
+    } else if lowered.contains(lowered_query) {
         10_000
     } else {
         0
@@ -805,6 +884,9 @@ fn push_top_k<T, F>(top: &mut Vec<T>, k: usize, item: T, cmp: F)
 where
     F: Fn(&T, &T) -> std::cmp::Ordering,
 {
+    if top.len() == k && cmp(&top[k - 1], &item) == std::cmp::Ordering::Less {
+        return;
+    }
     let pos = top
         .binary_search_by(|existing| cmp(existing, &item))
         .unwrap_or_else(|e| e);
@@ -1630,6 +1712,85 @@ mod tests {
                     "Bob".to_owned(),
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn mention_completion_ranks_case_insensitively_with_unicode_and_room_order() {
+        let members = vec![
+            member("@b:hs", "beta"),
+            member("@a:hs", "Alpha"),
+            member("@c:hs", "Ärger"),
+            member("@d:hs", "ärger2"),
+            member("@e:hs", "charlie"),
+        ];
+        let ctx = Context {
+            members: &members,
+            recent_speakers: &["charlie".to_owned()],
+            can_mention_room: true,
+            rooms: &[],
+            emotes: &NO_EMOTES,
+        };
+        // Empty query: recent speaker first, then case-insensitive alphabetical, then @room last.
+        let empty = find("@", 1, &ctx).unwrap();
+        let names: Vec<&str> = empty.items.iter().map(|i| i.primary.as_str()).collect();
+        assert_eq!(
+            names,
+            ["charlie", "Alpha", "beta", "Ärger", "ärger2", "@room"]
+        );
+
+        // Non-empty query matches Unicode case-insensitively and preserves tie-break order.
+        let query = "@ärg";
+        let umlaut = find(query, query.len(), &ctx).unwrap();
+        let umlaut_names: Vec<&str> = umlaut.items.iter().map(|i| i.primary.as_str()).collect();
+        assert_eq!(umlaut_names, ["Ärger", "ärger2"]);
+    }
+
+    #[test]
+    fn mention_completion_matches_greek_final_sigma_like_str_to_lowercase() {
+        let members = vec![
+            member("@prefix:hs", "ος1"),
+            member("@exact:hs", "ΟΣ"),
+            member("@medial:hs", "οσ"),
+        ];
+        let ctx = Context {
+            members: &members,
+            recent_speakers: &[],
+            can_mention_room: false,
+            rooms: &[],
+            emotes: &NO_EMOTES,
+        };
+        // `str::to_lowercase("ΟΣ")` is `"ος"` (final sigma), so `"ΟΣ"` gets the exact
+        // boost and ranks ahead of `"ος1"` (prefix boost only).
+        let query = "@ος";
+        let result = find(query, query.len(), &ctx).unwrap();
+        assert_eq!(result.items[0].primary, "ΟΣ");
+
+        // Empty query orders by `str::to_lowercase`: `"ος"` (U+03C2) comes before
+        // `"οσ"` (U+03C3).
+        let empty = find("@", 1, &ctx).unwrap();
+        let names: Vec<&str> = empty.items.iter().map(|i| i.primary.as_str()).collect();
+        assert_eq!(names, ["ΟΣ", "ος1", "οσ"]);
+    }
+
+    #[test]
+    fn mention_completion_keeps_tie_replacement_rule_past_ten_entries() {
+        let members: Vec<Member> = (0..12)
+            .map(|i| member(&format!("@sam{i:02}:hs"), "Sam"))
+            .collect();
+        let ctx = Context {
+            members: &members,
+            recent_speakers: &[],
+            can_mention_room: false,
+            rooms: &[],
+            emotes: &NO_EMOTES,
+        };
+        let empty = find("@", 1, &ctx).unwrap();
+        assert_eq!(empty.items.len(), MAX_CANDIDATES);
+        let ids: Vec<&str> = empty.items.iter().map(|i| i.secondary.as_str()).collect();
+        assert!(
+            ids.contains(&"@sam11:hs"),
+            "tied entry beyond top 10 should still replace as before: {ids:?}"
         );
     }
 }
