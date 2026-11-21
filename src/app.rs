@@ -4180,18 +4180,32 @@ impl App {
                     }
                 } else if switched_from_pending {
                     // Auto-switched off a pending invite or knock: restore the newly
-                    // opened room's draft when nothing was typed yet, never silently
-                    // drop early-typed text (leave both the composer and `room.draft`
-                    // intact if both are non-empty), and clear the composer when no
-                    // rooms remain.
+                    // opened room's draft when nothing was typed yet; if both early
+                    // typing and a saved room draft exist, merge them (saved draft,
+                    // blank line, typed text) so the cursor stays at the end of what
+                    // was just typed and neither text is lost on leaving the room;
+                    // clear the composer when no rooms remain.
                     match self.rooms.get_mut(self.active) {
-                        Some(room) if self.composer.is_empty() => {
+                        Some(room) => {
                             let draft = std::mem::take(&mut room.draft);
                             let id = room.id.clone();
-                            self.composer.set_text(&draft);
-                            self.restore_room_marks(&id);
+                            if self.composer.is_empty() {
+                                self.composer.set_text(&draft);
+                                self.restore_room_marks(&id);
+                            } else if !draft.is_empty() {
+                                let typed = self.composer.text().to_owned();
+                                let offset = draft.len() + 2;
+                                let mut typed_marks = std::mem::take(&mut self.complete.marks);
+                                for mark in &mut typed_marks {
+                                    if let Some(at) = &mut mark.at {
+                                        *at += offset;
+                                    }
+                                }
+                                self.composer.set_text(&format!("{draft}\n\n{typed}"));
+                                self.restore_room_marks(&id);
+                                self.complete.marks.extend(typed_marks);
+                            }
                         }
-                        Some(_) => {}
                         None => {
                             self.composer.set_text("");
                             self.clear_completion_marks();
@@ -7904,7 +7918,8 @@ mod tests {
         assert!(app.rooms[app.active].draft.is_empty());
 
         // When early text was typed AND the auto-opened room already has its own draft,
-        // keep the typed text in the composer and keep the room's draft intact.
+        // both are merged into the composer (existing draft first, blank line, typed text)
+        // so leaving and returning to the room loses neither.
         app.rooms.clear();
         app.composer.set_text("");
         app.on_matrix(MatrixEvent::Rooms(vec![
@@ -7917,10 +7932,17 @@ mod tests {
         app.on_matrix(MatrixEvent::Rooms(vec![
             summary("!i", "Invited", RoomCategory::Invite, 0),
             summary("!k", "Knocked", RoomCategory::Room, 0),
+            summary("!other", "Other", RoomCategory::Room, 0),
         ]));
         assert_eq!(app.rooms[app.active].id, "!k");
-        assert_eq!(app.composer.text(), "typed early");
-        assert_eq!(app.rooms[app.active].draft, "for k");
+        assert_eq!(app.composer.text(), "for k\n\ntyped early");
+        assert!(app.rooms[app.active].draft.is_empty());
+        // Leaving `!k` and coming back preserves both texts.
+        app.open_room(2);
+        assert_eq!(app.rooms[app.active].id, "!other");
+        assert_eq!(app.rooms[1].draft, "for k\n\ntyped early");
+        app.open_room(1);
+        assert_eq!(app.composer.text(), "for k\n\ntyped early");
 
         // If the sole auto-opened pending invite vanishes, stale composer text is cleared.
         app.rooms.clear();
