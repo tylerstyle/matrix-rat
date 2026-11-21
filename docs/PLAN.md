@@ -141,6 +141,10 @@ Rust 1.96 or newer.
 | 2026-11-20 | Voice and video calls wait until after 1.0.0 and until the SDK can join calls itself. |
 | 2026-11-20 | No plugin system. What is wanted of it is built in: transcription, translation, catching up, saved messages with reminders, archiving a room as text. |
 | 2026-11-20 | Not wanted: sticker packs, an image generator, a lock screen, popping out a chat, feeds or Home Assistant posting into rooms (a server's job). Several accounts are run as several profiles. Other languages wait; AUR and `.deb` later. |
+| 2026-11-20 | Nothing of the 1.0 work is pushed before 1.0 is tested and ready; `main` was put back to `de90ba8` on GitHub. |
+| 2026-11-20 | Composer symbols: the emoji for now; a monochrome look later. |
+| 2026-11-20 | Rooms bar: counts in superscript, `(n)>` opens the room list, and the room icons win over the label (it shrinks to `☰`). |
+| 2026-11-21 | The memory and CPU pass is measured with the user's own account: the user runs a build of the 1.0 state for a day with `scripts/measure.sh` beside it, which reads only `/proc`. |
 
 ## 6. What comes next
 
@@ -155,7 +159,8 @@ Each piece is written by matrix-claude with helpers and reviewed by matrix-agy a
 State on 2026-11-20 (evening): 1, 2, 3, 4, 5, 6, 7 and 8 are merged into the local `main`, reviewed and
 checked (unit and server tests green), nothing of it pushed: 1.0 is published as a whole after the
 passes of 6.2. All of 1 is in, listening to a recording before it is sent included (the ▶ on the
-waiting note, `Alt-L`). 6 and 7 came as one branch (`archive`). The composer symbols are the emoji for now
+waiting note, `Alt-L`). On 2026-11-21 the user sent one from the 1.0 build with a real account: it
+plays with its waveform in matrix-rat and in Element on iOS. 6 and 7 came as one branch (`archive`). The composer symbols are the emoji for now
 (the user: a monochrome look can wait).
 
 1. **Sending voice notes.** A microphone symbol next to the clip and the smiley in the
@@ -282,8 +287,9 @@ numbers to hold its findings against.
   on a branch). A second run is the remedy; a fresh database for it may be worth trying.
 - **A block of messages twice in a loaded timeline**: once, in the archive's server test, four
   messages of a flood stood twice, right after themselves, while sync still brought the newest
-  ones. Archive and catch up now count an event once; where the repeat comes from (the SDK's
-  timeline or our copy of its changes) and whether the room view can show it too is open.
+  ones. Archive and catch up count an event once. `matrix-agy` traced it to matrix-sdk-ui 0.19.1:
+  a live timeline built while sync brings a batch gets that batch twice. The room view can show it
+  too; being fixed on our side (`dup-block`), with a draft of an upstream issue for the user.
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.
