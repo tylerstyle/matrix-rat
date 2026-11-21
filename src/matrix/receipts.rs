@@ -13,7 +13,7 @@ use chrono::{DateTime, Local, TimeZone};
 use matrix_sdk::Room;
 use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedUserId, UserId};
 use matrix_sdk_ui::eyeball_im::Vector;
-use matrix_sdk_ui::timeline::{EventTimelineItem, TimelineItem};
+use matrix_sdk_ui::timeline::{EventTimelineItem, TimelineItem, TimelineItemContent};
 
 use super::convert::{ambiguous, day_label, display_name};
 use crate::model::{Message, ReadBy, Reader};
@@ -59,6 +59,10 @@ pub struct Names {
     /// made from.
     made: HashMap<String, ReadBy>,
     digest: Option<u64>,
+    /// A digest of the timeline's changes of membership and profile at the last pass.
+    /// A new one may have changed anyone's name, or who shares it: what was looked
+    /// up is looked up again, and those who wrote something are named anew.
+    members: Option<u64>,
     /// The member list was complete at the last pass.
     synced: bool,
     /// The last pass left names to look up.
@@ -77,11 +81,20 @@ impl Names {
         own: &UserId,
         ignored: &HashSet<OwnedUserId>,
     ) {
-        // One pass over the items for the receipts; names only if they changed.
+        // One pass over the items for the receipts, and for the changes of membership
+        // or profile that may have changed names; names only if either changed.
+        let mut members = std::collections::hash_map::DefaultHasher::new();
         let picked: Vec<Picked> = items
             .iter()
             .filter_map(|item| {
                 let event = item.as_event()?;
+                if matches!(
+                    event.content(),
+                    TimelineItemContent::MembershipChange(_)
+                        | TimelineItemContent::ProfileChange(_)
+                ) {
+                    item.unique_id().0.hash(&mut members);
+                }
                 let (readers, total) = pick(receipts(event), own, event.sender(), ignored);
                 (total > 0).then_some(Picked {
                     id: item.unique_id().0.as_str(),
@@ -90,7 +103,7 @@ impl Names {
                 })
             })
             .collect();
-        if let Some(needed) = self.plan(&picked, room.are_members_synced()) {
+        if let Some(needed) = self.plan(&picked, room.are_members_synced(), members.finish()) {
             // Whoever wrote something loaded is named by it, the newest first.
             let mut speakers: HashMap<&UserId, (String, bool)> = HashMap::new();
             for event in items.iter().rev().filter_map(|item| item.as_event()) {
@@ -122,9 +135,15 @@ impl Names {
         }
     }
 
-    /// Decides whether names have to be worked out: `None` if the receipts are the
-    /// ones of the last pass and nothing was left open; otherwise everyone to name.
-    fn plan<'a>(&mut self, picked: &[Picked<'a>], synced: bool) -> Option<HashSet<&'a UserId>> {
+    /// Decides whether names have to be worked out: `None` if the receipts and the
+    /// changes of membership (`members`, a digest) are the ones of the last pass and
+    /// nothing was left open; otherwise everyone to name.
+    fn plan<'a>(
+        &mut self,
+        picked: &[Picked<'a>],
+        synced: bool,
+        members: u64,
+    ) -> Option<HashSet<&'a UserId>> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for item in picked {
             item.id.hash(&mut hasher);
@@ -142,7 +161,15 @@ impl Names {
             self.known.retain(|_, known| known.found);
             self.order.retain(|user| self.known.contains_key(user));
         }
-        if self.digest == Some(digest) && !members_arrived && !self.unfinished {
+        // Someone joined, left or changed their name since: anyone's name may be
+        // another now, or someone else's too.
+        let renamed = self.members.is_some_and(|before| before != members);
+        self.members = Some(members);
+        if renamed {
+            self.known.clear();
+            self.order.clear();
+        }
+        if self.digest == Some(digest) && !members_arrived && !renamed && !self.unfinished {
             return None;
         }
         self.digest = Some(digest);
@@ -392,7 +419,19 @@ mod tests {
         members: &HashMap<&UserId, &str>,
         synced: bool,
     ) -> Option<usize> {
-        let needed = names.plan(items, synced)?;
+        pass_after(names, items, speakers, members, synced, 0)
+    }
+
+    /// [`pass`] with `changes` for the digest of the timeline's member changes.
+    fn pass_after(
+        names: &mut Names,
+        items: &[Picked],
+        speakers: &HashMap<&UserId, (String, bool)>,
+        members: &HashMap<&UserId, &str>,
+        synced: bool,
+        changes: u64,
+    ) -> Option<usize> {
+        let needed = names.plan(items, synced, changes)?;
         let wanted = names.wanted(&needed, speakers);
         for user in &wanted {
             names.learn(user, members.get(user).copied(), false);
@@ -442,7 +481,7 @@ mod tests {
         let speakers = HashMap::from([(here, ("samuelsson".to_owned(), true))]);
         let mut names = Names::default();
         let items = [picked("m1", &[here, there, bob])];
-        let needed = names.plan(&items, true).unwrap();
+        let needed = names.plan(&items, true, 0).unwrap();
         for user in names.wanted(&needed, &speakers) {
             names.learn(user, None, user != bob);
         }
@@ -459,6 +498,35 @@ mod tests {
         );
         let keys: Vec<&str> = readers.iter().map(Reader::key).collect();
         assert_eq!(keys, [here.as_str(), there.as_str(), bob.as_str()]);
+    }
+
+    /// A reader who changes their name, or takes one someone else has, is named
+    /// anew although no receipt moved: the change of their membership shows in the
+    /// timeline, and what was looked up is looked up again.
+    #[test]
+    fn readers_are_named_anew_after_a_change_of_membership() {
+        let bob = user_id!("@bob:example.org");
+        let nobody = HashMap::new();
+        let mut names = Names::default();
+        let items = [picked("m1", &[bob])];
+        let before = HashMap::from([(bob, "Bob")]);
+        assert_eq!(
+            pass_after(&mut names, &items, &nobody, &before, true, 1),
+            Some(1)
+        );
+        assert_eq!(named(&names, "m1"), ["Bob"]);
+        // The same receipts, the same changes: nothing is redone.
+        let after = HashMap::from([(bob, "Robert")]);
+        assert_eq!(
+            pass_after(&mut names, &items, &nobody, &after, true, 1),
+            None
+        );
+        // A new change of membership: looked up again.
+        assert_eq!(
+            pass_after(&mut names, &items, &nobody, &after, true, 2),
+            Some(1)
+        );
+        assert_eq!(named(&names, "m1"), ["Robert"]);
     }
 
     #[test]

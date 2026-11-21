@@ -44,10 +44,12 @@ const UNAVAILABLE: &str = "[message unavailable]";
 /// What stands for an event that has no text to show.
 const UNSUPPORTED: &str = "[unsupported pinned item]";
 
+/// What is kept of a pinned event. Not its sender's name: that is looked up each
+/// time the list is made, so that a new name or a namesake shows (see
+/// `search::member_name`).
 #[derive(Clone)]
 struct CachedPinned {
     sender_id: Option<String>,
-    sender: String,
     day: String,
     time: String,
     snippet: String,
@@ -159,8 +161,7 @@ pub(super) async fn fetch_pinned(
     let total = ids.len();
     // Show newest pinned events first while keeping fetch cost bounded.
     let wanted: Vec<OwnedEventId> = ids.into_iter().rev().take(MAX_PINNED_FETCH).collect();
-    let mut name_cache: HashMap<String, String> = HashMap::new();
-    let results: Vec<PinnedMessage> = futures::stream::iter(wanted)
+    let loaded = futures::stream::iter(wanted)
         .map(|eid| {
             let room = room.clone();
             let room_id = room_id.clone();
@@ -169,17 +170,24 @@ pub(super) async fn fetch_pinned(
         })
         .buffered(PINNED_CONCURRENCY)
         .collect::<Vec<_>>()
-        .await
+        .await;
+    // Each sender's name as the member list has it now, looked up once.
+    let mut names: HashMap<String, String> = HashMap::new();
+    for (_, cached) in &loaded {
+        if let Some(uid) = &cached.sender_id
+            && !names.contains_key(uid)
+        {
+            names.insert(uid.clone(), sender_name(room, uid).await);
+        }
+    }
+    let results: Vec<PinnedMessage> = loaded
         .into_iter()
-        .map(|(eid, mut cached)| {
-            // Check local member display name synchronously/cached in-memory if needed.
-            if let Some(uid) = &cached.sender_id
-                && let Some(cached_name) = name_cache.get(uid)
-            {
-                cached.sender.clone_from(cached_name);
-            } else if let Some(uid) = &cached.sender_id {
-                name_cache.insert(uid.clone(), cached.sender.clone());
-            }
+        .map(|(eid, cached)| {
+            let sender = cached
+                .sender_id
+                .as_ref()
+                .and_then(|uid| names.get(uid).cloned())
+                .unwrap_or_default();
             let is_ignored = cached
                 .sender_id
                 .as_deref()
@@ -199,7 +207,7 @@ pub(super) async fn fetch_pinned(
             } else {
                 PinnedMessage {
                     event_id: eid,
-                    sender: cached.sender,
+                    sender,
                     sender_id: cached.sender_id,
                     day: cached.day,
                     time: cached.time,
@@ -248,8 +256,12 @@ pub(super) async fn summarize_event(
     let Some(found) = load_event(room, room.room_id().as_str(), &eid, cache).await else {
         return EventSummary::Unavailable;
     };
+    let sender = match &found.sender_id {
+        Some(uid) => sender_name(room, uid).await,
+        None => String::new(),
+    };
     EventSummary::Found {
-        sender: found.sender,
+        sender,
         sender_id: found.sender_id,
         kind: if found.redacted {
             SummaryKind::Redacted
@@ -273,7 +285,6 @@ async fn load_one_pinned(
     let found = load_event(room, room_id, eid, cache).await;
     let found = found.unwrap_or_else(|| CachedPinned {
         sender_id: None,
-        sender: String::new(),
         day: String::new(),
         time: String::new(),
         snippet: UNAVAILABLE.to_owned(),
@@ -305,7 +316,7 @@ async fn load_event(
                 *edit = search::heal_utd_event(room, &event_cache, edit.clone()).await;
             }
         }
-        let parsed = build_cached_pinned(room, &ev, &edits).await;
+        let parsed = build_cached_pinned(&ev, &edits);
         if !parsed.undecryptable {
             cache.lock().expect("pinned cache poisoned").insert(
                 room_id.to_owned(),
@@ -326,7 +337,7 @@ async fn load_event(
     }
 
     let ev = room.load_or_fetch_event(eid, None).await.ok()?;
-    let parsed = build_cached_pinned(room, &ev, &[]).await;
+    let parsed = build_cached_pinned(&ev, &[]);
     if !parsed.undecryptable {
         cache.lock().expect("pinned cache poisoned").insert(
             room_id.to_owned(),
@@ -337,23 +348,13 @@ async fn load_event(
     Some(parsed)
 }
 
-async fn build_cached_pinned(
-    room: &Room,
-    event: &TimelineEvent,
-    relations: &[TimelineEvent],
-) -> CachedPinned {
+fn build_cached_pinned(event: &TimelineEvent, relations: &[TimelineEvent]) -> CachedPinned {
     let (day, time) = event.timestamp.map(format_day_time).unwrap_or_default();
-    let sender_owned = event.sender();
-    let sender_id = sender_owned.as_deref().map(|u| u.as_str().to_owned());
-    let sender = match sender_owned.as_deref() {
-        Some(uid) => sender_display_name(room, uid).await,
-        None => String::new(),
-    };
+    let sender_id = event.sender().map(|u| u.as_str().to_owned());
 
     if event.kind.is_utd() {
         return CachedPinned {
             sender_id,
-            sender,
             day,
             time,
             snippet: "Encrypted message (key unavailable)".to_owned(),
@@ -366,7 +367,6 @@ async fn build_cached_pinned(
     if is_event_redacted(event) {
         return CachedPinned {
             sender_id,
-            sender,
             day,
             time,
             snippet: "[message deleted]".to_owned(),
@@ -392,7 +392,6 @@ async fn build_cached_pinned(
 
     CachedPinned {
         sender_id,
-        sender,
         day,
         time,
         snippet,
@@ -413,9 +412,13 @@ pub(super) fn format_day_time(ts: MilliSecondsSinceUnixEpoch) -> (String, String
     (day_label(&when, &now), when.format("%H:%M").to_string())
 }
 
-async fn sender_display_name(room: &Room, user_id: &matrix_sdk::ruma::UserId) -> String {
-    let mut cache = HashMap::new();
-    search::cached_sender_name(room, user_id, &mut cache).await
+/// The name of the user `uid` as the member list has it now (see
+/// `search::member_name`); the ID's first part if it is not a user ID.
+async fn sender_name(room: &Room, uid: &str) -> String {
+    match matrix_sdk::ruma::UserId::parse(uid) {
+        Ok(user) => search::member_name(room, &user).await,
+        Err(_) => crate::text::sanitize_line(uid),
+    }
 }
 
 pub(super) fn is_event_redacted(event: &TimelineEvent) -> bool {
@@ -783,7 +786,6 @@ mod tests {
 
         let entry = || CachedPinned {
             sender_id: None,
-            sender: String::new(),
             day: String::new(),
             time: String::new(),
             snippet: String::new(),
