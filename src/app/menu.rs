@@ -281,9 +281,18 @@ impl App {
                 self.open_room_menu(index, at);
             }
             Pane::Composer => {
-                let area = self.composer_view.area;
-                let (column, row) = self.composer_view.cursor.unwrap_or((area.x, area.y));
-                self.open_composer_menu(Anchor::at(column, row));
+                // At the cursor, else where the text starts; with no room for any text
+                // (a tiny window), in the composer's frame.
+                let view = &self.composer_view;
+                let at = match view.cursor {
+                    Some((column, row)) => Anchor::at(column, row),
+                    None if !view.area.is_empty() => Anchor::at(view.area.x, view.area.y),
+                    None => self
+                        .hits
+                        .rect_of(HitId::Pane(Pane::Composer))
+                        .map_or(Anchor::at(0, 0), |rect| Anchor::below(rect, 2)),
+                };
+                self.open_composer_menu(at);
             }
         }
     }
@@ -1730,6 +1739,25 @@ mod tests {
         app.on_event(key(KeyCode::Menu));
         app.on_event(key(KeyCode::Enter));
         assert!(app.composer.text().starts_with("/upload"));
+    }
+
+    #[test]
+    fn the_composer_menu_hangs_from_the_composer_when_it_has_no_room_for_text() {
+        // Two rows for the chat: the composer's frame, with no row inside it.
+        let mut app = App::demo();
+        let mut terminal = Terminal::new(TestBackend::new(100, 3)).unwrap();
+        screen(&mut app, &mut terminal);
+        assert_eq!(app.focus, Pane::Composer);
+        assert!(app.composer_view.area.is_empty());
+        let pane = app.hits.rect_of(HitId::Pane(Pane::Composer)).unwrap();
+        assert!(pane.x > 0 && !pane.is_empty(), "{pane:?}");
+
+        app.on_event(key(KeyCode::Menu));
+        let anchor = open_menu(&app).anchor;
+        for row in [anchor.top, anchor.bottom] {
+            let at = ratatui::layout::Position::new(anchor.column, row);
+            assert!(pane.contains(at), "{anchor:?} is not in {pane:?}");
+        }
     }
 
     #[test]

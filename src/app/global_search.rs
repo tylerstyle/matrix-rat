@@ -1039,25 +1039,29 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let (mut app, mut rx, _handle) = test_app_with_matrix();
-        app.perform(Action::SearchEverywhere);
-        let Some(Modal::GlobalSearch(search)) = &mut app.modal else {
-            panic!("modal missing");
+        // A search with three hits, all in the same room from the same sender.
+        let search = |app: &mut App, rx: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>| {
+            app.perform(Action::SearchEverywhere);
+            let Some(Modal::GlobalSearch(search)) = &mut app.modal else {
+                panic!("modal missing");
+            };
+            search.query.set("needle");
+            let generation = search.generation;
+            let hits = (0..3)
+                .map(|n| SearchHit {
+                    room_id: "!b:example.org".into(),
+                    event_id: format!("$hit{n}"),
+                    thread_root: None,
+                    room_name: "beta".into(),
+                    sender: "bob".into(),
+                    date: "Today".into(),
+                    snippet: format!("needle number {n}"),
+                })
+                .collect();
+            app.on_search_results(generation, hits, true, None);
+            while rx.try_recv().is_ok() {}
         };
-        search.query.set("needle");
-        let generation = search.generation;
-        let hits = (0..3)
-            .map(|n| SearchHit {
-                room_id: "!b:example.org".into(),
-                event_id: format!("$hit{n}"),
-                thread_root: None,
-                room_name: "beta".into(),
-                sender: "bob".into(),
-                date: "Today".into(),
-                snippet: format!("needle number {n}"),
-            })
-            .collect();
-        app.on_search_results(generation, hits, true, None);
-        while rx.try_recv().is_ok() {}
+        search(&mut app, &mut rx);
 
         // Clicks go where the last frame drew things, as in the app.
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -1095,14 +1099,27 @@ mod tests {
         assert!(opened(&mut rx).is_empty());
         assert!(matches!(app.modal, Some(Modal::GlobalSearch(_))));
 
-        // Either line of a card opens the hit drawn there.
+        // Either line of a card opens the hit drawn there: its text, and the line
+        // above it with room, sender and date.
         let screen = draw(&mut app);
+        let text = row_of(&screen, "needle number 1");
         assert_eq!(
-            app.hits.at(20, row_of(&screen, "needle number 1") as u16),
+            app.hits.at(20, text as u16),
             Some(crate::ui::hit::HitId::GlobalSearch(1))
         );
-        click(&mut app, row_of(&screen, "needle number 1"));
+        click(&mut app, text);
         assert_eq!(opened(&mut rx), ["$hit1"]);
+        assert!(app.modal.is_none());
+
+        search(&mut app, &mut rx);
+        let screen = draw(&mut app);
+        let head = row_of(&screen, "needle number 2") - 1;
+        assert!(
+            screen.lines().nth(head).unwrap().contains("beta"),
+            "{screen}"
+        );
+        click(&mut app, head);
+        assert_eq!(opened(&mut rx), ["$hit2"]);
         assert!(app.modal.is_none());
     }
 
