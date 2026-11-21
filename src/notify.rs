@@ -1609,15 +1609,19 @@ mod tests {
                 i32,
             );
             let service = zbus::connection::Builder::address(self.address.as_str())
-                .name(SERVICE)
                 .build()
                 .await
                 .expect("the stand-in service");
             let (shown, asked) = tokio::sync::mpsc::unbounded_channel();
             let connection = service.clone();
-            // Listening from before the first caller can know of the service: a call
-            // that arrived ahead of the task below would never be answered.
+            // Listening from before the first caller can know of the service (the name
+            // is taken only after): a call that arrived ahead of the task below would
+            // never be answered.
             let mut calls = zbus::MessageStream::from(&service);
+            service
+                .request_name(SERVICE)
+                .await
+                .expect("the stand-in service's name");
             tokio::spawn(async move {
                 let mut next_id = 7u32;
                 while let Some(Ok(call)) = calls.next().await {
