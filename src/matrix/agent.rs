@@ -19,12 +19,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use futures::{FutureExt, StreamExt, pin_mut};
+use futures::{FutureExt, Stream, StreamExt, pin_mut};
 use matrix_sdk::deserialized_responses::{DeviceLinkProblem, VerificationLevel, VerificationState};
 use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
 use matrix_sdk::ruma::{EventId, RoomId, UserId};
 use matrix_sdk::{Client, Room, RoomState};
-use matrix_sdk_ui::eyeball_im::Vector;
+use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     MsgLikeKind, RoomExt, Timeline, TimelineFocus, TimelineItem, TimelineItemContent,
 };
@@ -504,26 +504,50 @@ async fn watch_room(
             diff.apply(&mut items);
         }
     }
+    let tell = |messages| {
+        events
+            .send(MatrixEvent::Agent(AgentEvent::Watched {
+                room_id: room_id.clone(),
+                messages,
+            }))
+            .is_ok()
+    };
+    if follow(items, changes, &own, &mut ignored, tell).await {
+        ended("the room's messages are no longer followed");
+    }
+}
+
+/// Tells (`tell`) the newest messages among `items` now, and again whenever
+/// `changes` or the ignore list change them, until the changes end (`true`) or what
+/// is told is no longer taken (`false`).
+async fn follow(
+    mut items: Vector<Arc<TimelineItem>>,
+    mut changes: impl Stream<Item = Vec<VectorDiff<Arc<TimelineItem>>>> + Unpin,
+    own: &UserId,
+    ignored: &mut watch::Receiver<IgnoredSet>,
+    mut tell: impl FnMut(Vec<Msg>) -> bool,
+) -> bool {
     // What was told last. Most changes of a timeline change no message as it is
     // handed out (a read receipt, a date divider, an ignored user who said nothing
     // here): those are not told.
     let mut told: Option<Vec<Msg>> = None;
+    // The changes ended right after a batch: that is told first.
+    let mut ended = false;
     loop {
-        let newest = messages(&items, &own, &ignored.borrow(), WATCH_TAIL);
+        let newest = messages(&items, own, &ignored.borrow(), WATCH_TAIL);
         if told.as_ref() != Some(&newest) {
-            let sent = events.send(MatrixEvent::Agent(AgentEvent::Watched {
-                room_id: room_id.clone(),
-                messages: newest.clone(),
-            }));
-            if sent.is_err() {
-                return;
+            if !tell(newest.clone()) {
+                return false;
             }
             told = Some(newest);
+        }
+        if ended {
+            return true;
         }
         tokio::select! {
             diffs = changes.next() => {
                 let Some(diffs) = diffs else {
-                    return ended("the room's messages are no longer followed");
+                    return true;
                 };
                 for diff in diffs {
                     diff.apply(&mut items);
@@ -537,7 +561,8 @@ async fn watch_room(
                             }
                         }
                         Some(None) => {
-                            return ended("the room's messages are no longer followed");
+                            ended = true;
+                            break;
                         }
                         None => break,
                     }
@@ -545,7 +570,7 @@ async fn watch_room(
             }
             changed = ignored.changed() => {
                 if changed.is_err() {
-                    return;
+                    return false;
                 }
             }
         }
@@ -1241,6 +1266,23 @@ mod tests {
             other => panic!("not watched: {other:?}"),
         }
         watching.abort();
+    }
+
+    /// The last change before the changes end is told before the watch ends.
+    #[tokio::test]
+    async fn a_last_change_before_the_end_is_told() {
+        let last = shown(&[("$a", "hello")]).await;
+        let (_ignore, mut ignored) = watch::channel(IgnoredSet::default());
+        let own = UserId::parse(crate::matrix::spaces::fake::ME).unwrap();
+        let changes = futures::stream::iter([vec![VectorDiff::Reset { values: last }]]);
+        let mut told = Vec::new();
+        let tell = |messages| {
+            told.push(messages);
+            true
+        };
+        assert!(follow(Vector::new(), changes, &own, &mut ignored, tell).await);
+        let told: Vec<_> = told.iter().map(|messages| said(messages)).collect();
+        assert_eq!(told, [vec![], vec![("$a", "hello")]]);
     }
 
     // ----- against a real homeserver ----------------------------------------------------
