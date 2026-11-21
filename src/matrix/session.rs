@@ -262,6 +262,14 @@ async fn offline_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Re
                 passphrase.to_owned(),
             ),
         )
+        // Only one process ever opens a profile's stores: the app and `serve` take the
+        // profile lock (`lock.rs`) before any store is opened, and the agent clients open
+        // none. The SDK's default lock between processes would renew a lease in SQLite
+        // every 50 ms for as long as the encryption sync holds it, so even at rest it
+        // writes 20 times a second and keeps blocking threads awake.
+        .cross_process_store_config(
+            matrix_sdk_base::cross_process_lock::CrossProcessLockConfig::SingleProcess,
+        )
         .with_encryption_settings(encryption_settings())
         .with_threading_support(super::threads::SUPPORT)
         .handle_refresh_tokens()
