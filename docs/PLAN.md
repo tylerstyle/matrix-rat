@@ -9,7 +9,7 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-21, with the release of 1.0.0 (§6); releases up to 1.0.0. The
+Last brought up to date: 2026-11-21, with the release of 1.0.0 (§6); releases up to 1.0.1. The
 plans of 0.8 and 0.9 moved to [`docs/history/`](history/) on 2026-11-20.
 
 ## 1. What it is for
@@ -43,6 +43,7 @@ Not goals: calls, widgets, creating or deactivating accounts, a Windows build.
 | 0.9.0 | 2026-11-16 | A channel for agents: `matrix-rat serve` without the screen on a bot account, `rooms`/`send`/`read`/`listen` for scripts, and an MCP server bound to one room with which a coding agent asks a question and waits for the answer (only a verified sender counts unless told otherwise). A playing message shows as playing in its thread too, and a long file name goes on over its rows; the doctor keeps key names in one piece. Build checks: no blocking call without a stated reason, `cargo deny` in CI. |
 | 0.9.1 | 2026-11-17 | `serve` ends with exit code 78 when the profile needs a login, so a service can restart after a real failure; a `wait_for_message` that is already waiting finds an answer loaded late; a first read no longer keeps unverified history for later. |
 | 1.0.0 | 2026-11-21 | Voice messages recorded in the composer (listened to before sending), a rooms bar above the chat while the room list is out of sight, local transcripts (`W`) and translations (`L`) under messages, saved messages and reminders (`b`, `B`), `/archive` to Markdown, `/catchup` through a summary command of your own, `--from` once for each account of the user, `MATRIX_RAT_AGENT_NAME` for `mcp`. The passes of 6.2: fewer threads, open files and wakeups, memory that levels off over a day, timeline changes and drawing many times faster; a swarm review of the whole code with every verified finding fixed; people who share a name told apart (colours follow the account); paging that never stalls and no hidden history; no wildcard matches on our own enums. |
+| 1.0.1 | 2026-11-21 | No more quitting two seconds after opening a room (a repaint asked the terminal for its cursor while the event stream held its reader); an error exit shuts the worker down first. Nothing lights up under the mouse pointer any more, and the terminal reports only clicks, the wheel and drags. comrak 1.0, clap 4.6.8, zeroize 1.9.2; the release workflow on checkout v7, upload-artifact v7, download-artifact v8. |
 
 Each release is a tag, a GitHub release with notes, the Nix package in the NUR with a binary
 cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
