@@ -194,7 +194,7 @@ impl Conn {
             .into_iter()
             .filter_map(|item| match item {
                 Item::Room(room) => Some(room),
-                Item::Message(_) | Item::End(_) => None,
+                Item::Message(_) | Item::Changed(_) | Item::End(_) => None,
             })
             .collect())
     }
@@ -234,7 +234,7 @@ impl Conn {
             .into_iter()
             .filter_map(|item| match item {
                 Item::Message(message) => Some(*message),
-                Item::Room(_) | Item::End(_) => None,
+                Item::Changed(_) | Item::Room(_) | Item::End(_) => None,
             })
             .collect();
         Ok((room_id, messages))
@@ -280,10 +280,18 @@ impl Listener {
     /// An error is the end of the stream. May be dropped while waiting and called
     /// again.
     pub async fn next(&mut self) -> Result<Msg, ClientError> {
+        self.next_told().await.map(|(message, _)| message)
+    }
+
+    /// [`Self::next`], and whether the message was there before and is told again
+    /// because it changed (`false`: it is new at the room's end, or `serve` is of a
+    /// version that does not say).
+    pub async fn next_told(&mut self) -> Result<(Msg, bool), ClientError> {
         loop {
             let line = self.conn.line(None).await?;
             match proto::parse_item(&line) {
-                Some(Item::Message(message)) => return Ok(*message),
+                Some(Item::Message(message)) => return Ok((*message, false)),
+                Some(Item::Changed(message)) => return Ok((*message, true)),
                 Some(Item::End(refusal)) => return Err(ClientError::Refused(refusal)),
                 // A line of a kind a newer `serve` may send.
                 _ => {}

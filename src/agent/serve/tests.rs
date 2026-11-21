@@ -472,6 +472,62 @@ async fn listen_tells_what_is_new_or_changed_and_nothing_that_was_there_before()
     fake.stop().await;
 }
 
+/// A message told again because it changed says so on its line; one that is new at
+/// the room's end does not. A wait needs to know: a changed message it never read is
+/// history, not the user's new word.
+#[tokio::test]
+async fn a_message_told_again_says_that_it_changed() {
+    use serde_json::{Value, json};
+    let mut fake = Fake::ready("changed", quick()).await;
+    let mut raw = Raw::open(&fake.socket).await;
+    raw.say(&Request::Listen { room: ROOM.into() }.line()).await;
+    assert!(matches!(fake.asked().await, AgentCmd::Watch { .. }));
+    let old = message("$old", ANN, "before");
+    fake.watched(vec![old.clone()]);
+    assert!(matches!(
+        proto::parse_header(&raw.line().await),
+        Some(Ok(_))
+    ));
+    let new = message("$new", ANN, "hello");
+    fake.watched(vec![old.clone(), new.clone()]);
+    let line: Value = serde_json::from_str(&raw.line().await).unwrap();
+    assert_eq!(line, json!({ "message": new }));
+    let edited = Msg {
+        body: "hello!".into(),
+        edited: true,
+        ..new.clone()
+    };
+    fake.watched(vec![old.clone(), edited.clone()]);
+    let line: Value = serde_json::from_str(&raw.line().await).unwrap();
+    assert_eq!(line, json!({ "message": edited, "changed": true }));
+
+    // The same through the client.
+    let mut listener = Conn::open(&fake.socket)
+        .await
+        .unwrap()
+        .listen(ROOM)
+        .await
+        .unwrap();
+    let corrected = Msg {
+        body: "hello, Ann".into(),
+        ..edited.clone()
+    };
+    fake.watched(vec![old.clone(), corrected.clone()]);
+    let told = tokio::time::timeout(Duration::from_secs(10), listener.next_told())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(told, (corrected.clone(), true));
+    let newer = message("$newer", ANN, "again");
+    fake.watched(vec![old, corrected, newer.clone()]);
+    let told = tokio::time::timeout(Duration::from_secs(10), listener.next_told())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(told, (newer, false));
+    fake.stop().await;
+}
+
 #[tokio::test]
 async fn listening_before_the_first_sync_is_through_is_refused_after_a_while() {
     let limits = Limits {

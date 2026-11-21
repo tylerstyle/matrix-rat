@@ -154,7 +154,10 @@ pub struct Listening {
 /// One thing a listener is told. The channel closing without an [`News::End`] means
 /// the listener did not keep up and was dropped.
 pub enum News {
+    /// New at the room's end.
     Message(Box<Msg>),
+    /// It was there before, and has changed.
+    Changed(Box<Msg>),
     End(Refusal),
 }
 
@@ -256,23 +259,23 @@ impl Seen {
 
 impl Seen {
     /// Notes all of `messages` (a room's newest, oldest first) and returns what of
-    /// them is news: what is new at the room's end, and what changed. A message that
-    /// was not known but stands before one that was is not news: it is history that
-    /// was loaded meanwhile (a `read` that asked for more than was there), older than
-    /// what has been told already.
-    fn sift(&mut self, messages: Vec<Msg>) -> Vec<Msg> {
+    /// them is news: what is new at the room's end, and what changed (each with
+    /// `true`). A message that was not known but stands before one that was is not
+    /// news: it is history that was loaded meanwhile (a `read` that asked for more
+    /// than was there), older than what has been told already.
+    fn sift(&mut self, messages: Vec<Msg>) -> Vec<(Msg, bool)> {
         let newest_known = messages
             .iter()
             .rposition(|message| self.marks.contains_key(&message.event_id));
         messages
             .into_iter()
             .enumerate()
-            .filter(|(at, message)| {
+            .filter_map(|(at, message)| {
                 let known = self.marks.contains_key(&message.event_id);
-                let differs = self.note(message);
-                differs && (known || newest_known.is_none_or(|newest| *at > newest))
+                let differs = self.note(&message);
+                let news = differs && (known || newest_known.is_none_or(|newest| at > newest));
+                news.then_some((message, known))
             })
-            .map(|(_, message)| message)
             .collect()
     }
 }
@@ -331,12 +334,18 @@ impl Watch {
         }
     }
 
-    /// Hands `message` to every listener that has room for it. One that has none has
-    /// not been reading for [`Limits::backlog`] messages and is dropped: its
-    /// connection sees the channel close.
-    fn tell(&mut self, message: &Msg) {
+    /// Hands `message` to every listener that has room for it, as one that `changed`
+    /// or as new. One that has no room has not been reading for [`Limits::backlog`]
+    /// messages and is dropped: its connection sees the channel close.
+    fn tell(&mut self, message: &Msg, changed: bool) {
         self.listeners.retain(|listener| {
-            match listener.try_send(News::Message(Box::new(message.clone()))) {
+            let message = Box::new(message.clone());
+            let news = if changed {
+                News::Changed(message)
+            } else {
+                News::Message(message)
+            };
+            match listener.try_send(news) {
                 Ok(()) => true,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     tracing::warn!("agent: a listener that did not keep up was dropped");
@@ -707,8 +716,8 @@ impl Hub {
                     }
                     return;
                 }
-                for message in &news {
-                    watch.tell(message);
+                for (message, changed) in &news {
+                    watch.tell(message, *changed);
                 }
             }
             AgentEvent::WatchEnded { room_id, reason } => {
@@ -1110,6 +1119,11 @@ async fn stream<R, W>(
             news = listening.news.recv() => match news {
                 Some(News::Message(message)) => {
                     if !say(writer, &proto::message_line(&message), limits).await {
+                        return;
+                    }
+                }
+                Some(News::Changed(message)) => {
+                    if !say(writer, &proto::changed_line(&message), limits).await {
                         return;
                     }
                 }

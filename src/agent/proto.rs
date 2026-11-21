@@ -8,7 +8,7 @@
 //! | `{"op":"rooms"}` | `{"ok":true,"count":N}`, then N lines `{"room":{id,name,encrypted,direct}}` |
 //! | `{"op":"send","room":R,"text":T}` | `{"ok":true,"event_id":"$…"}` |
 //! | `{"op":"read","room":R,"limit":N}` | `{"ok":true,"room":"!…","count":N}`, then N lines `{"message":{…}}`, oldest first |
-//! | `{"op":"listen","room":R}` | `{"ok":true,"room":"!…"}`, then a line `{"message":{…}}` for every message that is new or has changed, until the client goes away; an `{"ok":false,…}` line if the stream has to end |
+//! | `{"op":"listen","room":R}` | `{"ok":true,"room":"!…"}`, then a line `{"message":{…}}` for every message that is new, and `{"message":{…},"changed":true}` for one that was there before and has changed, until the client goes away; an `{"ok":false,…}` line if the stream has to end |
 //!
 //! `R` is a room id, or the exact name or the main address of a joined room. Several
 //! requests may follow each other on one connection, except after `listen`.
@@ -474,6 +474,13 @@ pub fn message_line(message: &Msg) -> String {
     json!({ "message": message }).to_string()
 }
 
+/// A message that was there before, told again by a `listen` because it changed. The
+/// field is outside the message, so that a client that does not know it reads the
+/// line as ever (and takes the message for new, as before there was the field).
+pub fn changed_line(message: &Msg) -> String {
+    json!({ "message": message, "changed": true }).to_string()
+}
+
 // ----- the lines a client reads ---------------------------------------------------------
 
 /// A header line: its fields if it says `"ok":true`, the refusal if it says
@@ -502,6 +509,8 @@ pub fn parse_header(line: &str) -> Option<Result<serde_json::Map<String, Value>,
 /// What a line after the header holds.
 pub enum Item {
     Message(Box<Msg>),
+    /// A message that was there before, told again by a `listen` because it changed.
+    Changed(Box<Msg>),
     Room(RoomInfo),
     /// The stream has to end.
     End(Refusal),
@@ -520,9 +529,14 @@ pub fn parse_item(line: &str) -> Option<Item> {
         };
     }
     if let Some(message) = object.remove("message") {
-        return serde_json::from_value(message)
-            .ok()
-            .map(|message| Item::Message(Box::new(message)));
+        let changed = object.get("changed").and_then(Value::as_bool) == Some(true);
+        return serde_json::from_value(message).ok().map(|message| {
+            if changed {
+                Item::Changed(Box::new(message))
+            } else {
+                Item::Message(Box::new(message))
+            }
+        });
     }
     let room = object.remove("room")?;
     serde_json::from_value(room).ok().map(Item::Room)
@@ -952,6 +966,26 @@ mod tests {
             Some(Item::Message(got)) => assert_eq!(*got, doubted),
             _ => panic!("not a message: {line}"),
         }
+        // A message told again because it changed says so; a client that does not
+        // know that reads the message as ever.
+        let line = changed_line(&sent);
+        assert!(!line.contains('\n'), "{line}");
+        match parse_item(&line) {
+            Some(Item::Changed(got)) => assert_eq!(*got, sent),
+            _ => panic!("not a changed message: {line}"),
+        }
+        let Ok(Value::Object(mut object)) = serde_json::from_str::<Value>(&line) else {
+            panic!("not an object: {line}");
+        };
+        let got: Msg = serde_json::from_value(object.remove("message").unwrap()).unwrap();
+        assert_eq!(got, sent);
+        // Only `true` says so.
+        for line in [
+            r#"{"message":{"event_id":"$e","sender":"@a:b","sender_name":"a","timestamp_ms":1,"kind":"text","body":"x","edited":false,"own":false},"changed":false}"#,
+            r#"{"message":{"event_id":"$e","sender":"@a:b","sender_name":"a","timestamp_ms":1,"kind":"text","body":"x","edited":false,"own":false},"changed":"yes"}"#,
+        ] {
+            assert!(matches!(parse_item(line), Some(Item::Message(_))), "{line}");
+        }
         // A message of a `serve` that does not judge yet is not verified.
         let old = r#"{"message":{"event_id":"$e","sender":"@a:b","sender_name":"a","timestamp_ms":1,"kind":"text","body":"x","edited":false,"own":false}}"#;
         match parse_item(old) {
@@ -1068,6 +1102,7 @@ mod tests {
             ..message()
         };
         assert!(message_line(&worst).len() < MAX_REPLY_LINE);
+        assert!(changed_line(&worst).len() < MAX_REPLY_LINE);
     }
 
     #[tokio::test]
