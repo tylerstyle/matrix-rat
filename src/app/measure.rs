@@ -383,3 +383,60 @@ async fn measure_interface_cost_of_a_change_and_a_frame() {
         grew(before, after) as f64 / messages.len() as f64
     );
 }
+
+/// The worker's news of a busy open room while the external editor has the terminal:
+/// what `CHANGES` changes of a room of 5000 messages hold while they wait. Left in the
+/// worker's channel (as they were before), each change is a whole copy of the messages;
+/// held as the run loop holds them now, the open timeline is kept once.
+#[tokio::test]
+#[ignore = "a measurement: run alone and in release, see crate::measure"]
+async fn measure_news_waiting_while_the_editor_runs() {
+    use super::external_editor::{HeldEvents, hold_events_while};
+    const CHANGES: usize = 20;
+    if !crate::measure::wanted() {
+        return;
+    }
+    let messages = crate::matrix::sample_messages(5000).await;
+    let change = |messages: Vec<Message>| MatrixEvent::Timeline {
+        room_id: "!open:example.org".to_owned(),
+        generation: 1,
+        messages,
+        reached_start: false,
+        detached: None,
+    };
+    let (worker, mut events) = tokio::sync::mpsc::unbounded_channel();
+
+    // In the channel, one copy per change.
+    let before = heap_in_use();
+    for _ in 0..CHANGES {
+        worker.send(change(messages.clone())).unwrap();
+    }
+    let queued = heap_in_use();
+    while events.try_recv().is_ok() {}
+    println!(
+        "[editor] {CHANGES} changes of {} messages waiting in the channel: {:+.1} MB",
+        messages.len(),
+        mb(grew(before, queued) as f64)
+    );
+
+    // Held while the editor runs: the editor here is what sends the changes.
+    let mut held = HeldEvents::default();
+    let before = heap_in_use();
+    let editor = async {
+        for _ in 0..CHANGES {
+            worker.send(change(messages.clone())).unwrap();
+            tokio::task::yield_now().await;
+        }
+    };
+    hold_events_while(editor, Some(&mut events), &mut held).await;
+    let kept = heap_in_use();
+    let mut count = 0;
+    while held.pop().is_some() {
+        count += 1;
+    }
+    assert_eq!(count, 1);
+    println!(
+        "[editor] the same {CHANGES} changes held while the editor runs: {:+.1} MB ({count} kept)",
+        mb(grew(before, kept) as f64)
+    );
+}

@@ -863,3 +863,447 @@ async fn measure_sample_room_has_the_mix() {
             .all(|(sender, _)| !sender.is_empty())
     );
 }
+
+/// A stand-in server whose first sync is the sample room of `messages` messages; each
+/// later sync brings the next of `bursts` bursts of `per_burst` new messages (with the
+/// reactions on them) at once, as a busy room does, and after them nothing. With the ids
+/// of each burst's messages.
+async fn server_with_bursts(
+    messages: usize,
+    bursts: usize,
+    per_burst: usize,
+) -> (fake::Server, Vec<Vec<String>>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let people = people(&mut Lcg(0x5eed));
+    let start = 1_800_000_000_000;
+    let (timelines, ids): (Vec<Vec<Value>>, Vec<Vec<String>>) = (0..bursts)
+        .map(|n| {
+            let at = start + n as u64 * 1_000_000;
+            sample_timeline(&mut Lcg(0xb0057 + n as u64), &people, at, 1000, per_burst)
+        })
+        .unzip();
+    let syncs = AtomicUsize::new(0);
+    let server = fake::Server::answering(
+        json!({ "join": { ROOM: sample_room(messages) } }),
+        Box::new(move |request| {
+            if !request.path.ends_with("/sync") {
+                return None;
+            }
+            let n = syncs.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                return None;
+            }
+            let rooms = match timelines.get(n - 1) {
+                Some(events) => json!({ "join": { ROOM: {
+                    "timeline": { "events": events, "limited": false },
+                } } }),
+                None => json!({}),
+            };
+            let sync = json!({ "next_batch": format!("s{}", n + 1), "rooms": rooms });
+            Some(fake::Reply::Json(sync.to_string()))
+        }),
+    )
+    .await;
+    (server, ids)
+}
+
+/// The sample room opened as the app opens it: `Timelines` forwarding its live
+/// timeline, and what it says to the interface.
+struct Opened {
+    timelines: super::Timelines,
+    events: tokio::sync::mpsc::UnboundedReceiver<crate::matrix::MatrixEvent>,
+    // Kept: `forward` ends when they are gone.
+    _ignored: tokio::sync::watch::Sender<super::IgnoredSet>,
+    _own_refresh: tokio::sync::watch::Sender<u64>,
+}
+
+impl Opened {
+    async fn new(client: Client) -> Self {
+        let (events, received) = tokio::sync::mpsc::unbounded_channel();
+        let (_ignored, ignored) = tokio::sync::watch::channel(super::IgnoredSet::default());
+        let (_own_refresh, own_refresh) = tokio::sync::watch::channel(0);
+        let mut timelines = super::Timelines::new(
+            client,
+            events,
+            ignored,
+            own_refresh,
+            super::super::people::OwnRoomNames::default(),
+            super::super::left::LeftRooms::default(),
+        );
+        timelines
+            .handle(crate::matrix::MatrixCmd::OpenRoom {
+                room_id: ROOM.to_owned(),
+                generation: 1,
+            })
+            .await;
+        let mut opened = Self {
+            timelines,
+            events: received,
+            _ignored,
+            _own_refresh,
+        };
+        opened.next_timeline().await;
+        opened
+    }
+
+    /// The next whole timeline the interface is sent.
+    async fn next_timeline(&mut self) -> Vec<Message> {
+        loop {
+            if let Some(crate::matrix::MatrixEvent::Timeline { messages, .. }) =
+                self.next_event().await
+            {
+                return messages;
+            }
+        }
+    }
+
+    async fn next_event(&mut self) -> Option<crate::matrix::MatrixEvent> {
+        tokio::time::timeout(Duration::from_secs(60), self.events.recv())
+            .await
+            .expect("the worker says something within a minute")
+    }
+
+    /// Snapshots until one holds all of `wanted`; with the count.
+    async fn until_all(&mut self, wanted: &[String]) -> (usize, Vec<Message>) {
+        let mut snapshots = 0;
+        loop {
+            let messages = self.next_timeline().await;
+            snapshots += 1;
+            let shown: HashSet<&str> = messages.iter().filter_map(event_id).collect();
+            if wanted.iter().all(|id| shown.contains(id.as_str())) {
+                return (snapshots, messages);
+            }
+        }
+    }
+}
+
+fn event_id(message: &Message) -> Option<&str> {
+    match message.item.as_ref()? {
+        crate::model::ItemRef::Event(id) => Some(id.as_str()),
+        crate::model::ItemRef::Transaction(_) => None,
+    }
+}
+
+/// Not a measurement: a burst of new messages in the open room (one sync with many)
+/// reaches the interface in fewer snapshots than messages, and the last one has them
+/// all, newest last. (`forward` converts the whole timeline for every snapshot.) It
+/// pins the outcome, not how it comes about: one sync is likely one diff batch anyway.
+/// That `forward` needs no batching of its own rests on matrix-sdk-ui 0.19.1's subscriber
+/// merging every diff waiting at each poll; `measure_snapshots_of_bursts` shows it (126
+/// pages back over 5000 messages: 2 to 4 snapshots).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_of_messages_reaches_the_interface_in_fewer_snapshots() {
+    const BURST: usize = 60;
+    let (server, bursts) = server_with_bursts(40, 1, BURST).await;
+    let (client, _room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
+    let mut opened = Opened::new(client.clone()).await;
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    let (snapshots, messages) = opened.until_all(&bursts[0]).await;
+    assert!(
+        snapshots < BURST,
+        "{snapshots} snapshots for {BURST} messages"
+    );
+    let last = messages.iter().rev().find_map(event_id);
+    assert_eq!(last, bursts[0].last().map(String::as_str));
+    drop(opened);
+    drop(server);
+}
+
+/// How many snapshots `forward` sends the interface (each a conversion of the whole
+/// timeline: 9 ms at 5000 messages) for news that comes in bursts: syncs right after
+/// one another, each with new messages, and paging back over a room of 5000 messages a
+/// page at a time, as scrolling to the top does.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement: run alone and in release, see crate::measure"]
+async fn measure_snapshots_of_bursts() {
+    const MESSAGES: usize = 5000;
+    const BURSTS: usize = 20;
+    const PER_BURST: usize = 25;
+    if !crate::measure::wanted() {
+        return;
+    }
+    let (server, bursts) = server_with_bursts(MESSAGES, BURSTS, PER_BURST).await;
+    let (client, _room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
+    let mut opened = Opened::new(client.clone()).await;
+
+    // Paging back to the start, one request after the other, as the app asks.
+    let started = Instant::now();
+    let (mut pages, mut snapshots) = (0, 0);
+    loop {
+        opened
+            .timelines
+            .handle(crate::matrix::MatrixCmd::Paginate {
+                room_id: ROOM.to_owned(),
+                generation: 1,
+            })
+            .await;
+        pages += 1;
+        let reached_start = loop {
+            match opened.next_event().await {
+                Some(crate::matrix::MatrixEvent::Timeline { .. }) => snapshots += 1,
+                Some(crate::matrix::MatrixEvent::Paginated { reached_start, .. }) => {
+                    break reached_start;
+                }
+                _ => {}
+            }
+        };
+        if reached_start {
+            break;
+        }
+    }
+    // What is still on its way after the last page.
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), opened.events.recv()).await
+    {
+        if matches!(event, crate::matrix::MatrixEvent::Timeline { .. }) {
+            snapshots += 1;
+        }
+    }
+    println!(
+        "[bursts] paging back over {MESSAGES} messages: {pages} pages, {snapshots} snapshots, \
+         {:.2} s",
+        started.elapsed().as_secs_f64()
+    );
+
+    // Syncs one right after the other, each with new messages.
+    let started = Instant::now();
+    for _ in 0..BURSTS {
+        client.sync_once(SyncSettings::default()).await.unwrap();
+    }
+    let (snapshots, _) = opened.until_all(&bursts[BURSTS - 1]).await;
+    println!(
+        "[bursts] {BURSTS} syncs of {PER_BURST} messages each, one right after the other: \
+         {snapshots} snapshots until the last message was shown, {:.2} s",
+        started.elapsed().as_secs_f64()
+    );
+    drop(opened);
+    drop(server);
+}
+
+/// Not a measurement: a room's timeline that was not used for `IDLE_TIMELINE` is dropped
+/// from the cache unless it is shown, however long that is; the timer of the session
+/// loop goes off for it; and the room opened again shows its messages, paged back from
+/// the store without asking the server.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timeline_idle_for_long_is_dropped_and_opens_again_from_the_store() {
+    use super::IDLE_TIMELINE;
+    use crate::matrix::{MatrixCmd, MatrixEvent};
+    const OTHER: &str = "!other:localhost";
+    const MESSAGES: usize = 300;
+    let minute = Duration::from_secs(60);
+    let server = fake::Server::start(json!({ "join": {
+        ROOM: sample_room(MESSAGES),
+        OTHER: fake::joined(false, vec![]),
+    } }))
+    .await;
+    let (client, _room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
+    let mut opened = Opened::new(client).await;
+    let cached = |opened: &Opened| -> Vec<String> {
+        let cache = &opened.timelines.cache;
+        cache.iter().map(|cached| cached.key.clone()).collect()
+    };
+    // The sample room is left for another: from now on it is idle.
+    opened
+        .timelines
+        .handle(MatrixCmd::OpenRoom {
+            room_id: OTHER.to_owned(),
+            generation: 2,
+        })
+        .await;
+    let left = Instant::now();
+    assert_eq!(cached(&opened), [ROOM, OTHER]);
+    let next = opened.timelines.next_idle().unwrap();
+    assert!(next <= left + IDLE_TIMELINE && next >= left + IDLE_TIMELINE - minute);
+
+    // Not long enough: kept.
+    opened.timelines.drop_idle(left + IDLE_TIMELINE - minute);
+    assert_eq!(cached(&opened), [ROOM, OTHER]);
+    // Long enough: dropped. The one shown stays, however long it has been.
+    opened.timelines.drop_idle(left + IDLE_TIMELINE + minute);
+    assert_eq!(cached(&opened), [OTHER]);
+    opened.timelines.drop_idle(left + 100 * IDLE_TIMELINE);
+    assert_eq!(cached(&opened), [OTHER]);
+    assert_eq!(opened.timelines.next_idle(), None);
+
+    // Opened again, it starts from its latest messages and pages back to the start
+    // from the store.
+    opened
+        .timelines
+        .handle(MatrixCmd::OpenRoom {
+            room_id: ROOM.to_owned(),
+            generation: 3,
+        })
+        .await;
+    let mut shown = 0;
+    let mut reached_start = false;
+    for _ in 0..100 {
+        opened
+            .timelines
+            .handle(MatrixCmd::Paginate {
+                room_id: ROOM.to_owned(),
+                generation: 3,
+            })
+            .await;
+        loop {
+            match opened.next_event().await {
+                Some(MatrixEvent::Timeline {
+                    generation: 3,
+                    messages,
+                    ..
+                }) => shown = messages.iter().filter(|m| m.item.is_some()).count(),
+                Some(MatrixEvent::Paginated {
+                    generation: 3,
+                    reached_start: start,
+                }) => {
+                    reached_start = start;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if reached_start {
+            break;
+        }
+    }
+    // The page that reached the start may be shown right after it said so.
+    while shown < MESSAGES {
+        if let Some(MatrixEvent::Timeline {
+            generation: 3,
+            messages,
+            ..
+        }) = opened.next_event().await
+        {
+            shown = messages.iter().filter(|m| m.item.is_some()).count();
+        }
+    }
+    assert!(reached_start);
+    assert_eq!(shown, MESSAGES);
+    assert_eq!(cached(&opened), [OTHER, ROOM]);
+    let asked: Vec<String> = server
+        .requests()
+        .into_iter()
+        .map(|request| request.path)
+        .filter(|path| path.ends_with("/messages"))
+        .collect();
+    assert!(asked.is_empty(), "{asked:?}");
+
+    // The session loop's timer goes off once a timeline not shown has been idle long
+    // enough. (Made so by putting its last use back, where the clock allows it.)
+    if let Some(long_ago) = Instant::now().checked_sub(IDLE_TIMELINE + minute) {
+        // Shown: its last use does not count.
+        opened.timelines.cache[1].last_used = long_ago;
+        let other = opened.timelines.cache[0].last_used;
+        assert_eq!(opened.timelines.next_idle(), Some(other + IDLE_TIMELINE));
+        opened
+            .timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: OTHER.to_owned(),
+                generation: 4,
+            })
+            .await;
+        // Leaving it was a use: it is idle from now on, not from long ago.
+        assert!(opened.timelines.next_idle() > Some(long_ago + IDLE_TIMELINE));
+        let at = opened
+            .timelines
+            .cache
+            .iter()
+            .position(|cached| cached.key == ROOM)
+            .unwrap();
+        opened.timelines.cache[at].last_used = long_ago;
+        tokio::time::timeout(Duration::from_secs(10), opened.timelines.idle_due())
+            .await
+            .expect("the timer goes off");
+        opened.timelines.drop_idle(Instant::now());
+        assert_eq!(cached(&opened), [OTHER]);
+    }
+    drop(opened);
+    drop(server);
+}
+
+/// What dropping an idle timeline gives back: the sample room of 5000 messages opened as
+/// the app opens it and scrolled to the top, then left for another room. Before
+/// `IDLE_TIMELINE` its timeline stayed cached for as long as it was among the last six
+/// rooms used; now it goes once it has been idle that long.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement: run alone and in release, see crate::measure"]
+async fn measure_idle_timeline_given_back() {
+    use crate::matrix::MatrixCmd;
+    const MESSAGES: usize = 5000;
+    const OTHER: &str = "!other:localhost";
+    if !crate::measure::wanted() {
+        return;
+    }
+    let server = fake::Server::start(json!({ "join": {
+        ROOM: sample_room(MESSAGES),
+        OTHER: fake::joined(false, vec![]),
+    } }))
+    .await;
+    let (client, room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
+    wait_indexed(&room).await;
+    let mut opened = Opened::new(client).await;
+    // Scrolled to the top: the forwarder sees every item.
+    let timeline = opened.timelines.cache[0].timeline.clone();
+    show_all(&timeline).await;
+    drop(timeline);
+    opened
+        .timelines
+        .handle(MatrixCmd::OpenRoom {
+            room_id: OTHER.to_owned(),
+            generation: 2,
+        })
+        .await;
+    // What was sent to the interface is not counted.
+    async fn settled(opened: &mut Opened) -> usize {
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            while opened.events.try_recv().is_ok() {}
+        }
+        heap_in_use()
+    }
+    let in_memory = async || {
+        let (cache, _drop_handles) = room.event_cache().await.unwrap();
+        cache.events().await.unwrap().len()
+    };
+    let h0 = settled(&mut opened).await;
+    let events_before = in_memory().await;
+    let left = Instant::now();
+    opened
+        .timelines
+        .drop_idle(left + super::IDLE_TIMELINE + Duration::from_secs(60));
+    assert_eq!(opened.timelines.cache.len(), 1);
+    let h1 = settled(&mut opened).await;
+    let events_after = in_memory().await;
+    println!(
+        "[idle] the timeline of a room of {MESSAGES} messages, scrolled to the top and left, \
+         dropped after {} minutes idle: {:+.1} MB (SDK events in memory {events_before} -> \
+         {events_after}); before, it stayed cached",
+        super::IDLE_TIMELINE.as_secs() / 60,
+        mb(grew(h0, h1) as f64)
+    );
+    // Opened again: from its latest messages, as after a restart.
+    let started = Instant::now();
+    opened
+        .timelines
+        .handle(MatrixCmd::OpenRoom {
+            room_id: ROOM.to_owned(),
+            generation: 3,
+        })
+        .await;
+    let first = loop {
+        if let Some(crate::matrix::MatrixEvent::Timeline {
+            generation: 3,
+            messages,
+            ..
+        }) = opened.next_event().await
+        {
+            break messages;
+        }
+    };
+    println!(
+        "[idle] opened again: first snapshot after {:.1} ms with {} messages",
+        started.elapsed().as_secs_f64() * 1000.0,
+        first.iter().filter(|m| m.item.is_some()).count()
+    );
+    drop(opened);
+    drop(server);
+}

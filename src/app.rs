@@ -5232,6 +5232,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // The same for the summary command of "catch up".
     let (summary_news, mut summary_back) = tokio::sync::mpsc::unbounded_channel();
     let mut summaries = tokio::task::JoinSet::new();
+    // What the worker said while the external editor had the terminal.
+    let mut held_events = external_editor::HeldEvents::default();
 
     while !app.should_quit {
         if app.suspend_requested {
@@ -5266,11 +5268,16 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             terminal::absorb_reader_wake();
             terminal::release();
             let dir = paths.runtime_dir.clone();
-            // A blocking child: the worker, a task of its own, goes on syncing and its
-            // events wait in their channel.
-            let outcome = tokio::task::spawn_blocking(move || {
+            // A blocking child: the worker, a task of its own, goes on syncing; what it
+            // says meanwhile is held, each snapshot once, and handled when we are back.
+            let editor = tokio::task::spawn_blocking(move || {
                 crate::editor::edit(&request, &dir, crate::editor::run_command)
-            })
+            });
+            let outcome = external_editor::hold_events_while(
+                editor,
+                matrix_events.as_mut(),
+                &mut held_events,
+            )
             .await
             .unwrap_or(crate::editor::Outcome::Failed(
                 crate::editor::Failure::Launch,
@@ -5368,12 +5375,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 Some(Err(err)) => return Err(err.into()),
                 None => break,
             },
-            Some(event) = async {
-                match matrix_events.as_mut() {
-                    Some(events) => events.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => app.on_matrix(event),
+            Some(event) = external_editor::next_matrix_event(
+                &mut held_events,
+                matrix_events.as_mut(),
+            ) => app.on_matrix(event),
             Some(click) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked {
                 room_id: click.room_id,
                 event: click.event,
