@@ -123,6 +123,9 @@ pub struct Message {
     pub sender: String,
     /// Full Matrix user ID (`@user:server`), when known (real events from the SDK).
     pub sender_id: Option<String>,
+    /// Someone else in the room goes by the same name, as the SDK finds: the name is
+    /// shown with the user ID (see [`Message::sender_name`]).
+    pub sender_ambiguous: bool,
     pub time: String,
     pub day: String,
     /// When it was sent, in milliseconds since 1970: as the sender's server says, or
@@ -299,9 +302,31 @@ impl ReadBy {
 pub struct Reader {
     /// Display name, safe to show.
     pub name: String,
+    /// Their user ID, which their colour comes from as a sender's does; `None` for
+    /// demo data.
+    pub id: Option<String>,
+    /// Someone else in the room goes by the same name (see [`Reader::shown_name`]).
+    pub ambiguous: bool,
     /// When they read it ("14:05", or with the day when it was not today); empty if
     /// the receipt does not say.
     pub time: String,
+}
+
+impl Reader {
+    /// What tells them from anyone else (see [`Message::sender_key`]).
+    pub fn key(&self) -> &str {
+        self.id.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Their name as a list of readers shows it: with their user ID where someone else
+    /// in the room goes by the same name. (A read marker has no room for the ID: its
+    /// initials are in the colour of the ID instead.)
+    pub fn shown_name(&self) -> std::borrow::Cow<'_, str> {
+        match &self.id {
+            Some(id) if self.ambiguous => disambiguated(&self.name, id).into(),
+            _ => self.name.as_str().into(),
+        }
+    }
 }
 
 /// Hand-written: who read it stays out of logs.
@@ -491,7 +516,7 @@ impl ThreadSummary {
         let latest = replies.last()?;
         Some(Self {
             replies: replies.len() as u32,
-            latest: Some((latest.sender.clone(), latest.body.clone())),
+            latest: Some((latest.sender_name().into_owned(), latest.body.clone())),
             unread: false,
             demo_replies: replies,
         })
@@ -641,6 +666,30 @@ impl Message {
         }
     }
 
+    /// The sender's name as shown: with their user ID after it where someone else in
+    /// the room goes by the same name.
+    pub fn sender_name(&self) -> std::borrow::Cow<'_, str> {
+        match &self.sender_id {
+            Some(id) if self.sender_ambiguous => disambiguated(&self.sender, id).into(),
+            _ => self.sender.as_str().into(),
+        }
+    }
+
+    /// What tells the sender from anyone else (their colour comes from it): their user
+    /// ID, or their name where that is not known.
+    pub fn sender_key(&self) -> &str {
+        self.sender_id.as_deref().unwrap_or(&self.sender)
+    }
+
+    /// Whether `other` is by the same person: the same user ID where both have one,
+    /// else the same name.
+    pub fn same_sender(&self, other: &Message) -> bool {
+        match (&self.sender_id, &other.sender_id) {
+            (Some(one), Some(two)) => one == two,
+            _ => self.sender == other.sender,
+        }
+    }
+
     /// True for non-interactive status or divider rows (`System` or `ReadMarker`).
     pub fn is_system_or_marker(&self) -> bool {
         matches!(self.kind, MsgKind::System | MsgKind::ReadMarker)
@@ -740,6 +789,12 @@ impl Message {
                 .any(|window| window.eq_ignore_ascii_case(MARK))
         })
     }
+}
+
+/// A name that someone else in the room goes by too, told apart as Element does:
+/// `name (@user:server)`. The ID is made safe for the terminal.
+pub fn disambiguated(name: &str, user_id: &str) -> String {
+    format!("{name} ({})", crate::text::sanitize_line(user_id))
 }
 
 #[derive(Clone)]

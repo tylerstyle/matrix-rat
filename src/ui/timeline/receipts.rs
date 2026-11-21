@@ -160,7 +160,7 @@ fn marker(
                 let tile = initial(&reader.name);
                 spans.push(Span::styled(
                     tile.trim_end().to_owned(),
-                    Style::new().fg(theme.user_color(&reader.name)),
+                    Style::new().fg(theme.user_color(reader.key())),
                 ));
             }
             let more = read_by.total as usize - shown;
@@ -192,6 +192,7 @@ mod tests {
                 .map(|name| Reader {
                     name: (*name).to_owned(),
                     time: "12:00".into(),
+                    ..Default::default()
                 })
                 .collect(),
             total,

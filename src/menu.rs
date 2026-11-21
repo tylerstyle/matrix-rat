@@ -655,7 +655,7 @@ pub fn read_by_items(read_by: &ReadBy) -> Vec<Item> {
         .readers
         .iter()
         .map(|reader| Item {
-            label: truncate(&sanitize_line(&reader.name), 30),
+            label: truncate(&sanitize_line(&reader.shown_name()), 30),
             hint: sanitize_line(&reader.time),
             run: None,
             confirm: None,
@@ -951,6 +951,7 @@ mod tests {
             readers: vec![Reader {
                 name: "Alice Secret".into(),
                 time: "14:05".into(),
+                ..Default::default()
             }],
             total: 1,
         };
@@ -1270,10 +1271,12 @@ mod tests {
                 Reader {
                     name: "bob".into(),
                     time: "14:05".into(),
+                    ..Default::default()
                 },
                 Reader {
                     name: "carol\u{1b}[2J".into(),
                     time: String::new(),
+                    ..Default::default()
                 },
             ],
             total: 5,

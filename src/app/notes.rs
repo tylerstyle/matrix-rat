@@ -1927,6 +1927,7 @@ mod tests {
             readers: vec![crate::model::Reader {
                 name: "Carol".into(),
                 time: String::new(),
+                ..Default::default()
             }],
             total: 1,
         };

@@ -2137,6 +2137,46 @@ mod tests {
         assert_eq!(other.messages[0].sender, "alice");
     }
 
+    /// Our own name, put on our messages when the profile arrives, stays told apart
+    /// from someone else's of the same name (as the SDK said it is).
+    #[test]
+    fn an_own_name_that_someone_else_has_too_keeps_the_id() {
+        let (mut app, mut terminal, _commands) = connected();
+        let said = |id: &str, sender_id: &str, own: bool| Message {
+            id: id.into(),
+            item: Some(ItemRef::Event(format!("${id}:example.org"))),
+            sender: "alice".into(),
+            sender_id: Some(sender_id.into()),
+            sender_ambiguous: true,
+            body: format!("said {id}"),
+            day: "Today".into(),
+            time: "12:00".into(),
+            own,
+            ..Message::default()
+        };
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: ROOM.into(),
+            generation: app.generation,
+            messages: vec![
+                said("t1", "@alice:example.org", true),
+                said("t2", "@alice:elsewhere.org", false),
+            ],
+            reached_start: false,
+            detached: None,
+        });
+        app.on_matrix(MatrixEvent::OwnProfile(OwnProfile {
+            display_name: None,
+            avatar: None,
+            room_names: std::collections::BTreeMap::new(),
+        }));
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "● alice (@alice:example.org)");
+        find(&text, "● alice (@alice:elsewhere.org)");
+        let messages = &app.room().unwrap().messages;
+        let own = messages.iter().find(|m| m.id == "t1").unwrap();
+        assert_eq!(own.sender_name(), "alice (@alice:example.org)");
+    }
+
     #[test]
     fn user_info_marks_shared_rooms_maybe_more_when_incomplete() {
         let (mut app, mut terminal, mut commands) = connected();

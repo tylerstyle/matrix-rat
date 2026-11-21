@@ -2140,7 +2140,8 @@ impl App {
             }
             ComposeMode::Reply(i) if i < self.messages().len() => {
                 let target = &self.messages()[i];
-                message.reply_to = Some((target.sender.clone(), target.body.clone()));
+                // Named as the quote will be once the server has it (see `convert`).
+                message.reply_to = Some((target.sender_name().into_owned(), target.body.clone()));
                 self.push_message(message);
             }
             ComposeMode::Normal | ComposeMode::Reply(_) | ComposeMode::Edit(_) => {

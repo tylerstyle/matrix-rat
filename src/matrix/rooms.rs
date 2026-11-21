@@ -2791,15 +2791,21 @@ async fn forward(
                 }
             }
             users = typing.recv() => {
-                let names = match users {
-                    Ok(users) => users
-                        .iter()
-                        .filter(|u| !is_ignored_in(&ignored, u))
-                        .map(|u| crate::text::sanitize_line(u.localpart()))
-                        .collect(),
+                let users = match users {
+                    Ok(users) => users,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => return,
                 };
+                let users: Vec<_> = users
+                    .iter()
+                    .filter(|u| !is_ignored_in(&ignored, u))
+                    .collect();
+                // Named as their messages are: two people of the same name are told
+                // apart by their IDs.
+                let mut names = Vec::with_capacity(users.len());
+                for user in users {
+                    names.push(super::search::member_name(&room, user).await);
+                }
                 if events.send(MatrixEvent::Typing { generation, names }).is_err() {
                     return;
                 }

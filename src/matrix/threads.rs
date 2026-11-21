@@ -20,7 +20,7 @@ use matrix_sdk_ui::timeline::{
     TimelineFocus, TimelineItem, TimelineReadReceiptTracking,
 };
 
-use super::convert::display_name;
+use super::convert::shown_name;
 use super::safety::IgnoredSet;
 use super::{moderation, search};
 use crate::model::{ItemRef, Message, ThreadInfo, ThreadSummary};
@@ -81,7 +81,7 @@ pub fn summary(content: &MsgLikeContent, ignored: &HashSet<OwnedUserId>) -> Opti
             None => "a message".to_owned(),
         };
         Some((
-            sanitize_line(&display_name(&event.sender_profile, &event.sender)),
+            sanitize_line(&shown_name(&event.sender_profile, &event.sender)),
             truncate(text.trim(), PREVIEW),
         ))
     } else {

@@ -15,7 +15,7 @@ use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedUserId, UserId};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{EventTimelineItem, TimelineItem};
 
-use super::convert::{day_label, display_name};
+use super::convert::{ambiguous, day_label, display_name};
 use crate::model::{Message, ReadBy, Reader};
 use crate::text::{is_blank, sanitize_line, truncate};
 
@@ -43,6 +43,8 @@ struct Picked<'a> {
 struct Known {
     name: String,
     found: bool,
+    /// Someone else in the room goes by the same name.
+    ambiguous: bool,
 }
 
 /// Turns receipts into names, and remembers both between the timeline's changes:
@@ -90,20 +92,24 @@ impl Names {
             .collect();
         if let Some(needed) = self.plan(&picked, room.are_members_synced()) {
             // Whoever wrote something loaded is named by it, the newest first.
-            let mut speakers: HashMap<&UserId, String> = HashMap::new();
+            let mut speakers: HashMap<&UserId, (String, bool)> = HashMap::new();
             for event in items.iter().rev().filter_map(|item| item.as_event()) {
                 let sender = event.sender();
                 if needed.contains(sender) && !speakers.contains_key(sender) {
-                    let name = display_name(event.sender_profile(), sender);
-                    speakers.insert(sender, clean_name(Some(&name), sender));
+                    let profile = event.sender_profile();
+                    let name = clean_name(Some(&display_name(profile, sender)), sender);
+                    speakers.insert(sender, (name, ambiguous(profile)));
                 }
             }
             for user in self.wanted(&needed, &speakers) {
-                let name = match room.get_member_no_sync(user).await {
-                    Ok(Some(member)) => member.display_name().map(str::to_owned),
-                    _ => None,
+                let (name, ambiguous) = match room.get_member_no_sync(user).await {
+                    Ok(Some(member)) => (
+                        member.display_name().map(str::to_owned),
+                        member.name_ambiguous(),
+                    ),
+                    _ => (None, false),
                 };
-                self.learn(user, name.as_deref());
+                self.learn(user, name.as_deref(), ambiguous);
             }
             self.make(&picked, &speakers, &Local::now());
         }
@@ -153,7 +159,7 @@ impl Names {
     fn wanted<'a>(
         &mut self,
         needed: &HashSet<&'a UserId>,
-        speakers: &HashMap<&UserId, String>,
+        speakers: &HashMap<&UserId, (String, bool)>,
     ) -> Vec<&'a UserId> {
         let mut wanted: Vec<&UserId> = needed
             .iter()
@@ -167,11 +173,13 @@ impl Names {
         wanted
     }
 
-    /// Remembers what the member list says about `user` (`None`: nothing).
-    fn learn(&mut self, user: &UserId, name: Option<&str>) {
+    /// Remembers what the member list says about `user` (`None`: nothing), and whether
+    /// someone else goes by the same name.
+    fn learn(&mut self, user: &UserId, name: Option<&str>, ambiguous: bool) {
         let known = Known {
             name: clean_name(name, user),
             found: name.is_some(),
+            ambiguous,
         };
         if self.known.insert(user.to_owned(), known).is_none() {
             self.order.push_back(user.to_owned());
@@ -188,7 +196,7 @@ impl Names {
     fn make(
         &mut self,
         picked: &[Picked],
-        speakers: &HashMap<&UserId, String>,
+        speakers: &HashMap<&UserId, (String, bool)>,
         now: &DateTime<Local>,
     ) {
         self.made = picked
@@ -197,16 +205,21 @@ impl Names {
                 let readers = item
                     .readers
                     .iter()
-                    .map(|(user, stamp)| Reader {
-                        name: match (speakers.get(user), self.known.get(*user)) {
-                            (Some(name), _) => name.clone(),
-                            (None, Some(known)) => known.name.clone(),
-                            (None, None) => clean_name(None, user),
-                        },
-                        time: stamp
-                            .and_then(local_time)
-                            .map(|when| time_label(&when, now))
-                            .unwrap_or_default(),
+                    .map(|(user, stamp)| {
+                        let (name, ambiguous) = match (speakers.get(user), self.known.get(*user)) {
+                            (Some((name, ambiguous)), _) => (name.clone(), *ambiguous),
+                            (None, Some(known)) => (known.name.clone(), known.ambiguous),
+                            (None, None) => (clean_name(None, user), false),
+                        };
+                        Reader {
+                            name,
+                            id: Some(user.to_string()),
+                            ambiguous,
+                            time: stamp
+                                .and_then(local_time)
+                                .map(|when| time_label(&when, now))
+                                .unwrap_or_default(),
+                        }
                     })
                     .collect();
                 let read_by = ReadBy {
@@ -375,14 +388,14 @@ mod tests {
     fn pass(
         names: &mut Names,
         items: &[Picked],
-        speakers: &HashMap<&UserId, String>,
+        speakers: &HashMap<&UserId, (String, bool)>,
         members: &HashMap<&UserId, &str>,
         synced: bool,
     ) -> Option<usize> {
         let needed = names.plan(items, synced)?;
         let wanted = names.wanted(&needed, speakers);
         for user in &wanted {
-            names.learn(user, members.get(user).copied());
+            names.learn(user, members.get(user).copied(), false);
         }
         names.make(items, speakers, &Local::now());
         Some(wanted.len())
@@ -397,7 +410,7 @@ mod tests {
     fn names_come_from_messages_first_and_are_worked_out_once() {
         let bob = user_id!("@bob:example.org");
         let carol = user_id!("@carol:example.org");
-        let speakers = HashMap::from([(bob, "Bob the Speaker".to_owned())]);
+        let speakers = HashMap::from([(bob, ("Bob the Speaker".to_owned(), false))]);
         let members = HashMap::from([(bob, "Bobby"), (carol, "Carol")]);
         let mut names = Names::default();
         let items = [picked("m1", &[bob, carol])];
@@ -415,6 +428,37 @@ mod tests {
         // Nobody reads anything any more.
         assert_eq!(pass(&mut names, &[], &speakers, &members, true), Some(0));
         assert!(names.made.is_empty());
+    }
+
+    /// Two readers of the same name (here without display names, as the SDK counts
+    /// the first part of the id then) are told apart in a list of readers, and their
+    /// colours come from their ids.
+    #[test]
+    fn readers_who_share_a_name_carry_their_ids() {
+        let here = user_id!("@samuelsson:home1.test");
+        let there = user_id!("@samuelsson:home2.test");
+        let bob = user_id!("@bob:example.org");
+        // One of them wrote something; the other is looked up.
+        let speakers = HashMap::from([(here, ("samuelsson".to_owned(), true))]);
+        let mut names = Names::default();
+        let items = [picked("m1", &[here, there, bob])];
+        let needed = names.plan(&items, true).unwrap();
+        for user in names.wanted(&needed, &speakers) {
+            names.learn(user, None, user != bob);
+        }
+        names.make(&items, &speakers, &Local::now());
+        let readers = &names.made["m1"].readers;
+        let shown: Vec<String> = readers.iter().map(|r| r.shown_name().into()).collect();
+        assert_eq!(
+            shown,
+            [
+                "samuelsson (@samuelsson:home1.test)",
+                "samuelsson (@samuelsson:home2.test)",
+                "bob"
+            ]
+        );
+        let keys: Vec<&str> = readers.iter().map(Reader::key).collect();
+        assert_eq!(keys, [here.as_str(), there.as_str(), bob.as_str()]);
     }
 
     #[test]

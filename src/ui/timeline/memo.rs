@@ -586,6 +586,7 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
         state,
         sender,
         sender_id,
+        sender_ambiguous,
         time,
         day,
         sent_at,
@@ -626,6 +627,7 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
     discriminant(state).hash(h);
     sender.hash(h);
     sender_id.hash(h);
+    sender_ambiguous.hash(h);
     time.hash(h);
     day.hash(h);
     sent_at.hash(h);
@@ -715,8 +717,16 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
     let ReadBy { readers, total } = read_by;
     total.hash(h);
     readers.len().hash(h);
-    for Reader { name, time } in readers {
+    for Reader {
+        name,
+        id,
+        ambiguous,
+        time,
+    } in readers
+    {
         name.hash(h);
+        id.hash(h);
+        ambiguous.hash(h);
         time.hash(h);
     }
     utd.map(|why| discriminant(&why)).hash(h);
@@ -1056,6 +1066,7 @@ mod tests {
                 .map(|name| Reader {
                     name: (*name).to_owned(),
                     time: "12:01".to_owned(),
+                    ..Default::default()
                 })
                 .collect(),
             total: names.len() as u32,
@@ -1325,6 +1336,29 @@ mod tests {
     }
 
     #[test]
+    fn a_namesake_is_someone_else() {
+        let mut world = World::new(sample());
+        world.step("first");
+        let n = world.len();
+        // bob's first message is from another bob, on another server: his second one
+        // gets a header of its own.
+        world.at("b1").sender_id = Some("@bob:elsewhere.org".into());
+        assert_eq!(world.step("a namesake"), n - 2);
+        // The SDK finds the name ambiguous: that message names its sender anew.
+        world.at("b1").sender_ambiguous = true;
+        assert_eq!(world.step("told apart"), n - 1);
+        assert!(
+            rows_of(&world, "b1")
+                .iter()
+                .any(|row| row.line.to_string().contains("bob (@bob:elsewhere.org)"))
+        );
+        // The same person again.
+        world.at("b1").sender_id = Some("@bob:example.org".into());
+        world.at("b1").sender_ambiguous = false;
+        assert_eq!(world.step("the same bob"), n - 2);
+    }
+
+    #[test]
     fn messages_that_move_get_their_rows_numbered_for_their_place() {
         let mut world = World::new(sample());
         world.step("first");
@@ -1517,7 +1551,7 @@ mod tests {
         let made = *made;
         let len = world.len();
         let i = dice.below(len);
-        let what = dice.below(37);
+        let what = dice.below(38);
         let message = &mut world.room.messages[i];
         let id = message.id.clone();
         match what {
@@ -1713,6 +1747,13 @@ mod tests {
             34 => {
                 message.reply_to = Some(("carol".into(), format!("quoted {made}")));
                 message.reply_event = (dice.below(2) == 0).then(|| "$c1".to_owned());
+            }
+            // Someone of the same name on another server, or the same person again; and
+            // whether the SDK finds that name to be someone else's too.
+            36 => {
+                let server = dice.pick(&["example.org", "elsewhere.org"]);
+                message.sender_id = Some(format!("@{}:{server}", message.sender));
+                message.sender_ambiguous = dice.below(2) == 0;
             }
             // Nothing: the same messages again.
             _ => return "nothing".to_owned(),

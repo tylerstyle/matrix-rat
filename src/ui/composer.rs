@@ -137,10 +137,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     // Reply / edit banner.
     let banner = match app.compose_mode {
         ComposeMode::Normal => None,
-        ComposeMode::Reply(i) => app
-            .room()
-            .and_then(|r| r.messages.get(i))
-            .map(|m| format!("↩ Replying to {}: {}", m.sender, m.body.replace('\n', " "))),
+        ComposeMode::Reply(i) => app.room().and_then(|r| r.messages.get(i)).map(|m| {
+            let body = m.body.replace('\n', " ");
+            format!("↩ Replying to {}: {body}", m.sender_name())
+        }),
         // With the key that gives it up: not in every preset is that Esc.
         ComposeMode::Edit(_) => Some(format!(
             "✎ Editing your message · {} cancel",

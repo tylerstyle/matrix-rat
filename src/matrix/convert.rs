@@ -20,7 +20,7 @@ use matrix_sdk_ui::timeline::{
 
 use crate::model::{
     Attachment, AudioMeta, ImageInfo, ImageSource, ItemRef, MediaKind, MediaRef, Message, MsgKind,
-    Reaction, SendState, Shield, UtdWhy,
+    Reaction, SendState, Shield, UtdWhy, disambiguated,
 };
 use crate::text::{sanitize, sanitize_line};
 
@@ -496,6 +496,9 @@ pub(super) fn preview(content: &TimelineItemContent) -> String {
     crate::text::truncate(&sanitize_line(line), 160)
 }
 
+/// The name of `user`: their display name, or the first part of their ID where they
+/// have none (which the SDK counts as their name too, when it looks for others of the
+/// same name).
 pub(super) fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) -> String {
     if let TimelineDetails::Ready(Profile {
         display_name: Some(name),
@@ -506,6 +509,29 @@ pub(super) fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) ->
         sanitize_line(name)
     } else {
         user.localpart().to_owned()
+    }
+}
+
+/// Whether someone else in the room goes by the same name, as far as the SDK knows (in
+/// a room whose members are not all loaded yet it may not know).
+pub(super) fn ambiguous(profile: &TimelineDetails<Profile>) -> bool {
+    matches!(
+        profile,
+        TimelineDetails::Ready(Profile {
+            display_name_ambiguous: true,
+            ..
+        })
+    )
+}
+
+/// The name of `user` as shown: with their ID after it where someone else in the room
+/// goes by the same name.
+pub(super) fn shown_name(profile: &TimelineDetails<Profile>, user: &UserId) -> String {
+    let name = display_name(profile, user);
+    if ambiguous(profile) {
+        disambiguated(&name, user.as_str())
+    } else {
+        name
     }
 }
 
@@ -536,6 +562,9 @@ pub(super) fn event_message(
         return None;
     }
     let sender = display_name(event.sender_profile(), event.sender());
+    let sender_ambiguous = ambiguous(event.sender_profile());
+    // In a line of its own ("… joined") the name stands alone: told apart there.
+    let shown = shown_name(event.sender_profile(), event.sender());
     let when = local_time(event.timestamp());
     let mut message = Message {
         shield: shield(event),
@@ -556,8 +585,9 @@ pub(super) fn event_message(
         sent_at: Some(u64::from(event.timestamp().get())),
         encrypted: event.encryption_info().is_some() || event.content().is_unable_to_decrypt(),
         own: event.is_own(),
-        sender: sender.clone(),
+        sender,
         sender_id: Some(event.sender().to_string()),
+        sender_ambiguous,
         ..Message::default()
     };
     match event.send_state() {
@@ -603,7 +633,7 @@ pub(super) fn event_message(
                         (String::new(), "message from ignored user".to_owned())
                     }
                     TimelineDetails::Ready(original) => (
-                        display_name(&original.sender_profile, &original.sender),
+                        shown_name(&original.sender_profile, &original.sender),
                         original
                             .content
                             .as_message()
@@ -763,23 +793,23 @@ pub(super) fn event_message(
                     "joined".to_owned()
                 }
                 Some(MembershipChange::Left) => "left".to_owned(),
-                Some(MembershipChange::Invited) => format!("was invited by {sender}"),
+                Some(MembershipChange::Invited) => format!("was invited by {shown}"),
                 Some(MembershipChange::InvitationRejected) => "declined the invitation".to_owned(),
                 Some(MembershipChange::InvitationRevoked) => {
                     "had their invitation withdrawn".to_owned()
                 }
-                Some(MembershipChange::Kicked) => format!("was removed by {sender}"),
+                Some(MembershipChange::Kicked) => format!("was removed by {shown}"),
                 Some(MembershipChange::Banned | MembershipChange::KickedAndBanned) => {
-                    format!("was banned by {sender}")
+                    format!("was banned by {shown}")
                 }
-                Some(MembershipChange::Unbanned) => format!("was unbanned by {sender}"),
+                Some(MembershipChange::Unbanned) => format!("was unbanned by {shown}"),
                 Some(MembershipChange::Knocked) => "asked to join".to_owned(),
                 _ => "changed membership".to_owned(),
             };
             system(&mut message, format!("{who} {what}"));
         }
         TimelineItemContent::ProfileChange(_) => {
-            system(&mut message, format!("{sender} updated their profile"));
+            system(&mut message, format!("{shown} updated their profile"));
         }
         TimelineItemContent::OtherState(state) => {
             let what = state.content().event_type().to_string();
@@ -789,15 +819,15 @@ pub(super) fn event_message(
                 "m.room.avatar" => "the room picture".to_owned(),
                 "m.room.encryption" => "encryption (now on)".to_owned(),
                 "m.room.create" => {
-                    return Some(system_owned(message, format!("{sender} created the room")));
+                    return Some(system_owned(message, format!("{shown} created the room")));
                 }
                 // Power levels, join rules and the like: noise in a chat view.
                 _ => return None,
             };
-            system(&mut message, format!("{sender} changed {what}"));
+            system(&mut message, format!("{shown} changed {what}"));
         }
         TimelineItemContent::CallInvite | TimelineItemContent::RtcNotification { .. } => {
-            system(&mut message, format!("{sender} started a call"));
+            system(&mut message, format!("{shown} started a call"));
         }
         _ => system(&mut message, "An event this app cannot read".to_owned()),
     }
@@ -1638,6 +1668,7 @@ mod tests {
             readers: vec![Reader {
                 name: "Bob".to_owned(),
                 time: "12:00".to_owned(),
+                ..Default::default()
             }],
             total: 1,
         };
@@ -1645,6 +1676,7 @@ mod tests {
             readers: vec![Reader {
                 name: "Carol".to_owned(),
                 time: "12:05".to_owned(),
+                ..Default::default()
             }],
             total: 1,
         };
