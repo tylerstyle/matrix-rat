@@ -53,7 +53,7 @@ cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
 
 One binary crate, about 190,000 lines of Rust with its tests (945 unit tests and 43 tests against
 a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0; 1113 and 45 at 0.9.1;
-1589 and 47 at 1.0.0, besides 12 measurements that are run by hand).
+1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1, besides 12 measurements that are run by hand).
 
 **Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.19.1, pinned exactly (every minor
 release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`; `ratatui-image` and `image` for
