@@ -116,9 +116,13 @@ impl App {
     ) {
         let open = self.room_id();
         let asked = self.complete.opened_for_room.as_deref();
-        self.complete
-            .room_members
-            .retain(|id, _| open.as_deref() == Some(id.as_str()) || asked == Some(id.as_str()));
+        let readable = |id: &str| open.as_deref() == Some(id) || asked == Some(id);
+        self.complete.room_members.retain(|id, _| readable(id));
+        // A list that comes after its room was left (a big room's, from the server, can
+        // take a while) is not kept either: that room asks again when it is opened.
+        if !readable(&room_id) {
+            return;
+        }
         self.complete.room_members.insert(
             room_id.clone(),
             RoomMembers {
@@ -899,6 +903,16 @@ mod tests {
         type_text(&mut app, "@al");
         app.on_event(key(KeyCode::Tab));
         assert_eq!(app.composer.text(), "Alice ");
+
+        // A list that comes late, after its room was left, is not kept: the second
+        // room's list came first, and the first room's slow one is let go.
+        app.composer.take();
+        app.clear_completion_marks();
+        app.open_room(1);
+        assert_eq!(fetches(&mut commands), ["!b"]);
+        app.on_room_members("!b".into(), members("Bob"), true);
+        app.on_room_members("!a".into(), members("Alice"), true);
+        assert_eq!(app.complete.room_members.keys().collect::<Vec<_>>(), ["!b"]);
     }
 
     #[test]
