@@ -349,7 +349,8 @@ fn draw_own_badge(frame: &mut Frame, app: &mut App, area: Rect, title: &str) {
     if let Some(url) = app.own_profile.as_ref().and_then(|p| p.avatar.as_deref()) {
         let cells = Rect::new(pill_x + 1, area.y, 2, 1);
         let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
-        super::image::draw_avatar(frame, &mut app.images, &theme, url, cells, 0, covered);
+        let avatar = super::image::Avatar::whole(cells);
+        super::image::draw_avatar(frame, &mut app.images, &theme, url, avatar, covered);
     }
 }
 
@@ -424,5 +425,64 @@ mod tests {
         // The last button ends one column before the border.
         let smiley = app.hits.rect_of(HitId::Do(Action::OpenEmoji)).unwrap();
         assert_eq!(smiley.right(), 18 - 2);
+    }
+
+    #[test]
+    fn ones_own_picture_is_made_for_its_two_cells_beside_a_larger_one() {
+        use crate::images::testing::{decoded, kitty};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use std::collections::HashMap;
+        const URL: &str = "mxc://example.org/face";
+
+        // With room previews the room list draws pictures four cells by two; the
+        // composer's corner draws one's own two by one. Here they are the same.
+        let mut app = App::demo();
+        app.images = crate::images::ImageStore::new(kitty());
+        app.room_previews = true;
+        app.rooms[app.active].messages.clear();
+        app.rooms[app.active].avatar = Some(URL.into());
+        app.own_profile = Some(crate::matrix::OwnProfile {
+            display_name: Some("me".into()),
+            avatar: Some(URL.into()),
+            room_names: Default::default(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| super::super::draw(frame, &mut app))
+            .unwrap();
+        app.images.on_avatar(URL, Ok(decoded(96, 96)));
+
+        terminal
+            .draw(|frame| super::super::draw(frame, &mut app))
+            .unwrap();
+        let mut cells: HashMap<_, usize> = HashMap::new();
+        let mut sent = Vec::new();
+        for cell in terminal.backend().buffer().content() {
+            let symbol = cell.symbol();
+            if symbol.contains('\u{10EEEE}') {
+                // The picture a cell shows is told by its colour.
+                *cells.entry(cell.fg).or_default() += 1;
+            }
+            if let Some(at) = symbol.find(",s=") {
+                let size = &symbol[at + 1..];
+                sent.push(size[..size.find(",m=").unwrap()].to_owned());
+            }
+        }
+        // Two pictures, each with all of its cells: 40 by 40 pixels for four cells by
+        // two, 20 by 20 for two cells by one.
+        let mut counts: Vec<usize> = cells.into_values().collect();
+        counts.sort_unstable();
+        assert_eq!(counts, [2, 8]);
+        sent.sort();
+        assert_eq!(sent, ["s=20,v=20", "s=40,v=40"]);
+
+        // Both stay: nothing is sent or deleted again.
+        terminal
+            .draw(|frame| super::super::draw(frame, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(!buffer.content().iter().any(|c| c.symbol().contains('\x1b')));
+        assert!(app.images.cleanup_sequence(false).is_empty());
     }
 }

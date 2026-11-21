@@ -6,7 +6,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use super::hit::{HitId, InputTarget};
-use super::image::{avatar_tile, draw_avatar};
+use super::image::{Avatar, avatar_tile, draw_avatar};
 use super::modal::{button, centered, field, popup, row};
 use super::roominfo::{draw_ban_prompt, draw_role_chooser, fit};
 use crate::app::App;
@@ -219,7 +219,8 @@ pub fn draw_user_info(frame: &mut Frame, app: &mut App, area: Rect, info: &mut U
                     && let Some(url) = avatar
                 {
                     let cells = Rect::new(r.x, r.y, 2, 1);
-                    draw_avatar(frame, &mut app.images, &theme, url, cells, 0, false);
+                    let avatar = Avatar::whole(cells);
+                    draw_avatar(frame, &mut app.images, &theme, url, avatar, false);
                 }
             }
             Entry::UserId { id } => {
@@ -480,7 +481,8 @@ pub fn draw_own_profile(frame: &mut Frame, app: &mut App, area: Rect, form: &mut
             && let Some(url) = &form.current_avatar
         {
             let cells = Rect::new(r0.x, r0.y, 2, 1);
-            draw_avatar(frame, &mut app.images, &theme, url, cells, 0, false);
+            let avatar = Avatar::whole(cells);
+            draw_avatar(frame, &mut app.images, &theme, url, avatar, false);
         }
     }
 

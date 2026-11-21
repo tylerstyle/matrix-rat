@@ -710,7 +710,11 @@ fn emoji(frame: &mut Frame, app: &mut App, area: Rect, picker: &mut EmojiPicker)
         area.right()
     };
     let bottom = if anchor.height > 0 {
-        anchor.y.saturating_sub(1).max(area.y + height)
+        anchor
+            .y
+            .saturating_sub(1)
+            .max(area.y + height)
+            .min(area.bottom())
     } else {
         area.bottom()
     };

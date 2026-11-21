@@ -51,7 +51,14 @@ pub fn draw_inline(frame: &mut Frame, images: &mut ImageStore, theme: &Theme, in
         Some(encoded) => {
             let pending = !encoded.shown;
             render(frame, theme, encoded, area, skip);
-            if pending {
+            // The same picture can be on screen twice (a sticker sent twice). Only the
+            // first copy drawn carries the data; the other refers to it and must not
+            // be mistaken for a failed transmission, which would delete it.
+            let carries_data = frame
+                .buffer_mut()
+                .cell((area.x, area.y))
+                .is_some_and(|cell| cell.symbol().starts_with('\x1b'));
+            if pending && carries_data {
                 images.sent_inline(&info.key, area.x, area.y);
             }
         }
@@ -73,19 +80,40 @@ pub fn draw_inline(frame: &mut Frame, images: &mut ImageStore, theme: &Theme, in
     }
 }
 
-/// Draws a room's picture over the two cells of its coloured tile, once there is
-/// one. Until then, and wherever pictures cannot be drawn, the tile stays.
+/// The part of a room's or a person's picture that is on screen.
+#[derive(Clone, Copy)]
+pub struct Avatar {
+    /// Where the visible rows go.
+    pub area: Rect,
+    /// Rows of the picture scrolled out above `area`.
+    pub skip: u16,
+    /// Size of the whole picture in cells: it is made for that size.
+    pub size: (u16, u16),
+}
+
+impl Avatar {
+    /// All of the picture, in `area`.
+    pub fn whole(area: Rect) -> Self {
+        Self {
+            area,
+            skip: 0,
+            size: (area.width, area.height),
+        }
+    }
+}
+
+/// Draws a room's or a person's picture over the cells of its coloured tile, once
+/// there is one. Until then, and wherever pictures cannot be drawn, the tile stays.
 pub fn draw_avatar(
     frame: &mut Frame,
     images: &mut ImageStore,
     theme: &Theme,
     url: &str,
-    area: Rect,
-    // Rows of the picture above `area` that are scrolled out of view.
-    skip: u16,
+    avatar: Avatar,
     covered: bool,
 ) {
-    let Some(encoded) = images.avatar(url, covered) else {
+    let Avatar { area, skip, size } = avatar;
+    let Some(encoded) = images.avatar(url, size, covered) else {
         return;
     };
     let pending = !encoded.shown;
@@ -102,7 +130,7 @@ pub fn draw_avatar(
         .cell((area.x, area.y))
         .is_some_and(|cell| cell.symbol().starts_with('\x1b'));
     if pending && carries_data {
-        images.sent_avatar(url, area.x, area.y);
+        images.sent_avatar(url, size, area.x, area.y);
     }
 }
 
@@ -350,4 +378,75 @@ pub fn verify(frame: &mut Frame, app: &mut App) {
             .cell((x, y))
             .is_some_and(|cell| cell.symbol().starts_with('\x1b'))
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+    use crate::images::testing::{decoded, kitty, remote_image};
+    use crate::theme::DEFAULT_THEME;
+
+    /// Draws the picture at both places, then checks the frame as `verify` does.
+    /// Gives the number of cells that carry a transmission.
+    fn draw_twice(
+        terminal: &mut Terminal<TestBackend>,
+        images: &mut ImageStore,
+        info: &ImageInfo,
+        at: [Rect; 2],
+    ) -> usize {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        images.begin_frame();
+        terminal
+            .draw(|frame| {
+                for area in at {
+                    let inline = Inline {
+                        info,
+                        area,
+                        skip: 0,
+                        size: (area.width, area.height),
+                        play_mark: false,
+                        covered: false,
+                    };
+                    draw_inline(frame, images, &theme, inline);
+                }
+                let buffer = frame.buffer_mut();
+                images.verify(|x, y| {
+                    buffer
+                        .cell((x, y))
+                        .is_some_and(|cell| cell.symbol().starts_with('\x1b'))
+                });
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol().starts_with('\x1b'))
+            .count()
+    }
+
+    #[test]
+    fn a_picture_on_screen_twice_is_sent_once_and_kept() {
+        // A sticker sent twice: two messages with the same picture.
+        let info = remote_image("mxc://example.org/sticker", Some((160, 100)));
+        let mut images = ImageStore::new(kitty());
+        images.begin_frame();
+        images.request(&info);
+        images.on_loaded(&info.key, false, Ok(decoded(160, 100)));
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        let at = [Rect::new(2, 1, 16, 5), Rect::new(2, 10, 16, 5)];
+
+        // The first copy carries the picture and the second refers to it: the terminal
+        // keeps what it was sent.
+        assert_eq!(draw_twice(&mut terminal, &mut images, &info, at), 1);
+        assert!(images.cleanup_sequence(false).is_empty());
+        // And it is not sent again.
+        for _ in 0..2 {
+            assert_eq!(draw_twice(&mut terminal, &mut images, &info, at), 0);
+            assert!(images.cleanup_sequence(false).is_empty());
+        }
+    }
 }

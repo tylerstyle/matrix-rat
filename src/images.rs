@@ -43,13 +43,20 @@ pub const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 /// Memory the cache may hold before the pictures unused for longest are dropped.
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 256;
-/// Room pictures are kept as squares of this size; they are shown in
-/// [`AVATAR_CELLS`], which is some 20 to 40 pixels each way.
+/// Room pictures are kept as squares of this size; they are shown in two cells (four
+/// by two in the room list with room previews), which is some 20 to 80 pixels each way.
 pub const AVATAR_PIXELS: (u32, u32) = (96, 96);
-/// Columns and rows a room picture takes in the room list.
-pub const AVATAR_CELLS: (u16, u16) = (2, 1);
-/// Room pictures kept; at 96x96 each that is some 20 MB at the very most.
+/// Room pictures kept; at 96x96 each that is some 20 MB at the very most. On top of
+/// that each keeps, for each size it is drawn at, what the terminal is sent: kitty's
+/// base64 of the pixels of those cells, which is a third more than their four bytes
+/// each. That is at most [`AVATAR_SIZES`] for each, so 512 x 3 in all; with cells of
+/// 10 by 20 pixels, some 2 KB for two cells and 9 KB for four by two, some 6 MB for
+/// all 512 at both. It grows with the pixels of a cell.
 const AVATAR_ENTRIES: usize = 512;
+/// Sizes a room picture is kept made for at once: it is drawn at two (see
+/// [`ImageStore::avatar`]), and one more is spare. Frames that draw it at more sizes
+/// keep them all, until two frames in a row draw fewer.
+const AVATAR_SIZES: usize = 3;
 /// Custom emoji are fetched as thumbnails no larger than this.
 pub const EMOTE_PIXELS: (u32, u32) = (64, 64);
 /// Columns and rows a custom emoji's picture takes in a line of text or on a reaction:
@@ -326,6 +333,9 @@ pub struct Encoded {
     /// cell it is drawn into, and is lost if something else is drawn over that cell.
     pub shown: bool,
     bytes: usize,
+    /// The frame it was last drawn in. A room picture keeps one for each size it is
+    /// drawn at; one drawn in the current frame or the one before stays.
+    drawn: u64,
 }
 
 /// Turns pixels into what the terminal draws. `None` if pictures are off or the
@@ -351,6 +361,7 @@ fn encode(
                 kitty_id: Some(kitty_id),
                 shown: false,
                 bytes,
+                drawn: 0,
             })
         }
         Protocol::Halfblocks => {
@@ -362,13 +373,15 @@ fn encode(
                 // Half blocks are plain cells; there is nothing to transmit.
                 shown: true,
                 bytes: usize::from(size.0) * usize::from(size.1) * 16,
+                drawn: 0,
             })
         }
     }
 }
 
-/// A room picture for its two cells in the room list: cut to the shape of those cells
-/// around its middle, so that it fills them without being squeezed.
+/// A room picture for `cells`, whichever size it is drawn at: cut to the shape of
+/// those cells around its middle, so that it fills them without being squeezed.
+/// `None` if pictures are not sent to the terminal, or for no cells at all.
 fn encode_avatar(
     pixels: &DynamicImage,
     graphics: Graphics,
@@ -379,6 +392,9 @@ fn encode_avatar(
         return None;
     };
     let (cols, rows) = cells;
+    if cols == 0 || rows == 0 {
+        return None;
+    }
     let width = u32::from(cols) * u32::from(graphics.font.0.max(1));
     let height = u32::from(rows) * u32::from(graphics.font.1.max(1));
     let (crop_width, crop_height) = cover_crop((pixels.width(), pixels.height()), (width, height));
@@ -398,6 +414,7 @@ fn encode_avatar(
         kitty_id: Some(kitty_id),
         shown: false,
         bytes,
+        drawn: 0,
     })
 }
 
@@ -453,6 +470,7 @@ fn encode_emote(
         kitty_id: Some(kitty_id),
         shown: false,
         bytes,
+        drawn: 0,
     })
 }
 
@@ -578,7 +596,7 @@ pub struct EncodeDone {
 enum Target {
     Inline(String),
     Viewer,
-    Avatar(String),
+    Avatar(String, (u16, u16)),
     Emote(String),
 }
 
@@ -606,7 +624,9 @@ enum SmallState {
     Failed,
     Ready {
         pixels: Pixels,
-        encoded: Option<Encoded>,
+        /// One for each size it is drawn at, the one drawn last at the end. A custom
+        /// emoji has the one size; a room picture can have more.
+        encoded: Vec<Encoded>,
     },
 }
 
@@ -636,8 +656,6 @@ pub struct ImageStore {
     /// limit, apart from the pictures in messages.
     avatars: HashMap<String, Small>,
     avatar_requests: Vec<String>,
-    /// The size room pictures are drawn at.
-    avatar_cells: (u16, u16),
     /// Custom emoji pictures by their `mxc://` address, with a limit of their own.
     emotes: HashMap<String, Small>,
     emote_requests: Vec<String>,
@@ -686,7 +704,6 @@ impl ImageStore {
             encoder: None,
             avatars: HashMap::new(),
             avatar_requests: Vec::new(),
-            avatar_cells: AVATAR_CELLS,
             emotes: HashMap::new(),
             emote_requests: Vec::new(),
             emote_rev: 0,
@@ -716,12 +733,10 @@ impl ImageStore {
         self.next_id
     }
 
-    fn discard(garbage: &mut Vec<u32>, encoded: Option<Encoded>) {
+    fn discard(garbage: &mut Vec<u32>, encoded: impl IntoIterator<Item = Encoded>) {
         // Only what the terminal may have received needs deleting there, but an id it
         // never saw does no harm either.
-        if let Some(id) = encoded.and_then(|encoded| encoded.kitty_id) {
-            garbage.push(id);
-        }
+        garbage.extend(encoded.into_iter().filter_map(|encoded| encoded.kitty_id));
     }
 
     // ----- layout --------------------------------------------------------------------
@@ -894,23 +909,6 @@ impl ImageStore {
 
     // ----- room pictures -------------------------------------------------------------
 
-    /// The picture of a room ready to draw into its two cells, if there is one yet.
-    /// Asks for it otherwise. Only with real graphics: two cells of half blocks are
-    /// four pixels. `covered` as for [`ImageStore::inline`].
-    /// Sets the size of room pictures in cells. Pictures encoded for another size are
-    /// made again.
-    pub fn set_avatar_cells(&mut self, cells: (u16, u16)) {
-        if self.avatar_cells == cells {
-            return;
-        }
-        self.avatar_cells = cells;
-        for avatar in self.avatars.values_mut() {
-            if let SmallState::Ready { encoded, .. } = &mut avatar.state {
-                Self::discard(&mut self.garbage, encoded.take());
-            }
-        }
-    }
-
     fn queue_avatar_if_needed(&mut self, url: &str) -> bool {
         let wanted = match self.avatars.get(url).map(|avatar| &avatar.state) {
             None => true,
@@ -948,19 +946,25 @@ impl ImageStore {
         }
     }
 
-    pub fn avatar(&mut self, url: &str, covered: bool) -> Option<&mut Encoded> {
+    /// The picture of a room or a person ready to draw into `cells` (columns and rows),
+    /// if there is one yet. Asks for it otherwise. Only with real graphics: two cells of
+    /// half blocks are four pixels. `covered` as for [`ImageStore::inline`].
+    ///
+    /// It is made for each size it is drawn at, and kept for each: the room list draws
+    /// it four cells by two with room previews on, everything else two by one, and the
+    /// two are on screen together or take turns in a narrow window.
+    pub fn avatar(&mut self, url: &str, cells: (u16, u16), covered: bool) -> Option<&mut Encoded> {
         if !self.is_kitty() {
             return None;
         }
         let graphics = self.graphics;
         let frame = self.frame;
-        let cells = self.avatar_cells;
         if self.queue_avatar_if_needed(url) {
             return None;
         }
         let missing = matches!(
-            self.avatars.get(url)?.state,
-            SmallState::Ready { encoded: None, .. }
+            &self.avatars.get(url)?.state,
+            SmallState::Ready { encoded, .. } if !encoded.iter().any(|e| e.size == cells)
         );
         let id = if missing && !covered {
             self.fresh_id()
@@ -976,9 +980,26 @@ impl ImageStore {
             if covered {
                 return None;
             }
-            *encoded = encode_avatar(pixels, graphics, id, cells);
+            // Made before any other makes room: a size that cannot be made pushes
+            // out none.
+            encoded.push(encode_avatar(pixels, graphics, id, cells)?);
         }
-        encoded.as_mut().filter(|encoded| encoded.shown || !covered)
+        let at = encoded.iter().position(|e| e.size == cells)?;
+        encoded[at].drawn = frame;
+        encoded[at..].rotate_left(1);
+        // Over the limit, the sizes drawn at longest ago make room, but none drawn in
+        // this frame: that one is on the screen, and deleting it would blank it. Nor
+        // one drawn in the frame before, which this frame may not have come to yet:
+        // a picture drawn at more sizes every frame would otherwise make, send and
+        // delete them again each time. As they are in the order drawn, once the first
+        // must stay all must; then the picture keeps more, until two frames in a row
+        // draw fewer of them.
+        while encoded.len() > AVATAR_SIZES && encoded[0].drawn + 1 < frame {
+            Self::discard(&mut self.garbage, Some(encoded.remove(0)));
+        }
+        encoded
+            .last_mut()
+            .filter(|encoded| encoded.shown || !covered)
     }
 
     /// The addresses asked for since the last call, for the worker.
@@ -998,14 +1019,17 @@ impl ImageStore {
         avatar.state = match result {
             Ok(decoded) => SmallState::Ready {
                 pixels: decoded.pixels,
-                encoded: None,
+                encoded: Vec::new(),
             },
             Err(_) => SmallState::Failed,
         };
     }
 
-    pub fn sent_avatar(&mut self, url: &str, x: u16, y: u16) {
-        self.unverified.push((Target::Avatar(url.to_owned()), x, y));
+    /// Remembers that the untransmitted picture for `cells` was put into the frame at
+    /// this cell.
+    pub fn sent_avatar(&mut self, url: &str, cells: (u16, u16), x: u16, y: u16) {
+        self.unverified
+            .push((Target::Avatar(url.to_owned(), cells), x, y));
     }
 
     /// Keeps the room pictures within their limit, dropping those unseen for longest.
@@ -1122,7 +1146,7 @@ impl ImageStore {
                 self.emote_rev += 1;
                 SmallState::Ready {
                     pixels: decoded.pixels,
-                    encoded: None,
+                    encoded: Vec::new(),
                 }
             }
             // The name stays where it is.
@@ -1139,8 +1163,8 @@ impl ImageStore {
         let graphics = self.graphics;
         let frame = self.frame;
         let missing = matches!(
-            self.emotes.get(url)?.state,
-            SmallState::Ready { encoded: None, .. }
+            &self.emotes.get(url)?.state,
+            SmallState::Ready { encoded, .. } if encoded.is_empty()
         );
         let id = if missing && !covered {
             self.fresh_id()
@@ -1156,9 +1180,11 @@ impl ImageStore {
             if covered {
                 return None;
             }
-            *encoded = encode_emote(pixels, graphics, id, EMOTE_CELLS);
+            encoded.extend(encode_emote(pixels, graphics, id, EMOTE_CELLS));
         }
-        encoded.as_mut().filter(|encoded| encoded.shown || !covered)
+        encoded
+            .first_mut()
+            .filter(|encoded| encoded.shown || !covered)
     }
 
     pub fn sent_emote(&mut self, url: &str, x: u16, y: u16) {
@@ -1346,42 +1372,44 @@ impl ImageStore {
     pub fn verify(&mut self, intact: impl Fn(u16, u16) -> bool) {
         let mut emote_lost = false;
         for (target, x, y) in std::mem::take(&mut self.unverified) {
-            let slot = match &target {
-                Target::Inline(key) => match self.entries.get_mut(key) {
-                    Some(Entry {
+            // Whether the terminal got it.
+            let kept = intact(x, y);
+            match &target {
+                Target::Inline(key) => {
+                    if let Some(Entry {
                         state: State::Ready { encoded, .. },
                         ..
-                    }) => encoded,
-                    _ => continue,
-                },
-                Target::Viewer => match self.viewer.as_mut() {
-                    Some(viewer) => &mut viewer.encoded,
-                    None => continue,
-                },
-                Target::Avatar(url) => match self.avatars.get_mut(url) {
-                    Some(Small {
-                        state: SmallState::Ready { encoded, .. },
-                        ..
-                    }) => encoded,
-                    _ => continue,
-                },
-                Target::Emote(url) => match self.emotes.get_mut(url) {
-                    Some(Small {
-                        state: SmallState::Ready { encoded, .. },
-                        ..
-                    }) => encoded,
-                    _ => continue,
-                },
-            };
-            if intact(x, y) {
-                if let Some(encoded) = slot {
-                    encoded.shown = true;
+                    }) = self.entries.get_mut(key)
+                    {
+                        Self::settle(&mut self.garbage, encoded, kept);
+                    }
                 }
-            } else {
-                Self::discard(&mut self.garbage, slot.take());
-                if matches!(target, Target::Emote(_)) {
-                    emote_lost = true;
-                    self.emotes_painted_over.push((x, y));
+                Target::Viewer => {
+                    if let Some(viewer) = self.viewer.as_mut() {
+                        Self::settle(&mut self.garbage, &mut viewer.encoded, kept);
+                    }
+                }
+                Target::Avatar(url, cells) => {
+                    if let Some(Small {
+                        state: SmallState::Ready { encoded, .. },
+                        ..
+                    }) = self.avatars.get_mut(url)
+                    {
+                        Self::settle_one(&mut self.garbage, encoded, *cells, kept);
+                    }
+                }
+                Target::Emote(url) => {
+                    if let Some(Small {
+                        state: SmallState::Ready { encoded, .. },
+                        ..
+                    }) = self.emotes.get_mut(url)
+                    {
+                        Self::settle_one(&mut self.garbage, encoded, EMOTE_CELLS, kept);
+                        if !kept {
+                            emote_lost = true;
+                            self.emotes_painted_over.push((x, y));
+                        }
+                    }
                 }
             }
         }
@@ -1389,6 +1417,34 @@ impl ImageStore {
             self.redraw = true;
         } else {
             self.emotes_painted_over.clear();
+        }
+    }
+
+    /// After a frame: the terminal has `encoded` if its transmission was `kept`;
+    /// otherwise it never got it, and it is made again when next drawn.
+    fn settle(garbage: &mut Vec<u32>, encoded: &mut Option<Encoded>, kept: bool) {
+        if !kept {
+            Self::discard(garbage, encoded.take());
+        } else if let Some(encoded) = encoded {
+            encoded.shown = true;
+        }
+    }
+
+    /// [`ImageStore::settle`] for the one of a small picture's encodings that is made
+    /// for `cells`.
+    fn settle_one(
+        garbage: &mut Vec<u32>,
+        encoded: &mut Vec<Encoded>,
+        cells: (u16, u16),
+        kept: bool,
+    ) {
+        let Some(at) = encoded.iter().position(|encoded| encoded.size == cells) else {
+            return;
+        };
+        if kept {
+            encoded[at].shown = true;
+        } else {
+            Self::discard(garbage, Some(encoded.remove(at)));
         }
     }
 
@@ -1402,7 +1458,7 @@ impl ImageStore {
         }
         for small in self.avatars.values_mut().chain(self.emotes.values_mut()) {
             if let SmallState::Ready { encoded, .. } = &mut small.state {
-                Self::discard(&mut self.garbage, encoded.take());
+                Self::discard(&mut self.garbage, std::mem::take(encoded));
             }
         }
         if let Some(viewer) = &mut self.viewer {
@@ -2053,9 +2109,9 @@ mod tests {
         assert!(decode_avatar(b"junk").is_err());
 
         // Encoded for two cells at this font: 2x10 by 20 pixels.
-        let encoded = encode_avatar(&avatar.pixels, kitty(), 7, AVATAR_CELLS).unwrap();
+        let encoded = encode_avatar(&avatar.pixels, kitty(), 7, (2, 1)).unwrap();
         assert_eq!(encoded.size, (2, 1));
-        assert!(encode_avatar(&avatar.pixels, Graphics::halfblocks(), 7, AVATAR_CELLS).is_none());
+        assert!(encode_avatar(&avatar.pixels, Graphics::halfblocks(), 7, (2, 1)).is_none());
     }
 
     #[test]
@@ -2064,9 +2120,9 @@ mod tests {
         for n in 0..AVATAR_ENTRIES + 50 {
             store.begin_frame();
             let url = format!("mxc://x/{n}");
-            assert!(store.avatar(&url, false).is_none());
+            assert!(store.avatar(&url, (2, 1), false).is_none());
             store.on_avatar(&url, Ok(decoded(96, 96)));
-            assert!(store.avatar(&url, false).is_some());
+            assert!(store.avatar(&url, (2, 1), false).is_some());
         }
         assert_eq!(store.avatars.len(), AVATAR_ENTRIES);
         // The oldest are gone, their copies in the terminal are freed, and the
@@ -2075,6 +2131,125 @@ mod tests {
         assert_eq!(store.cleanup_sequence(false).matches("a=d,d=I").count(), 50);
         assert!(store.entries.is_empty());
         assert_eq!(store.take_avatar_requests().len(), AVATAR_ENTRIES + 50);
+    }
+
+    #[test]
+    fn a_room_picture_is_made_for_each_size_it_is_drawn_at_and_kept() {
+        let mut store = ImageStore::new(kitty());
+        let url = "mxc://x/face";
+        let delete = |id: Option<u32>| format!("\x1b_Ga=d,d=I,i={},q=2\x1b\\", id.unwrap());
+        store.begin_frame();
+        assert!(store.avatar(url, (2, 1), false).is_none());
+        store.on_avatar(url, Ok(decoded(96, 96)));
+
+        // Two cells by one in most places, four by two in the room list with room
+        // previews: each has its own, made for its cells.
+        let small = store.avatar(url, (2, 1), false).unwrap();
+        assert_eq!(small.size, (2, 1));
+        let small = small.kitty_id;
+        let large = store.avatar(url, (4, 2), false).unwrap();
+        assert_eq!(large.size, (4, 2));
+        let large = large.kitty_id;
+        assert_ne!(small, large);
+
+        // Drawn at the one and the other in turn, as a narrow window going between
+        // the room list and the chat does: neither is made again.
+        for _ in 0..3 {
+            store.begin_frame();
+            assert_eq!(store.avatar(url, (4, 2), false).unwrap().kitty_id, large);
+            store.begin_frame();
+            assert_eq!(store.avatar(url, (2, 1), false).unwrap().kitty_id, small);
+        }
+        assert!(store.cleanup_sequence(false).is_empty());
+
+        // A transmission that was painted over costs only the size it was for.
+        store.sent_avatar(url, (4, 2), 3, 4);
+        store.verify(|_, _| false);
+        assert_eq!(store.cleanup_sequence(false), delete(large));
+        assert_eq!(store.avatar(url, (2, 1), false).unwrap().kitty_id, small);
+        let large = store.avatar(url, (4, 2), false).unwrap().kitty_id;
+
+        // Three sizes are kept; a fourth pushes out the one drawn at longest ago, once
+        // neither this frame nor the one before drew it.
+        store.begin_frame();
+        store.avatar(url, (3, 1), false).unwrap();
+        store.avatar(url, (2, 1), false).unwrap();
+        store.avatar(url, (3, 1), false).unwrap();
+        assert!(store.cleanup_sequence(false).is_empty());
+        store.begin_frame();
+        store.avatar(url, (6, 3), false).unwrap();
+        assert_eq!(store.cleanup_sequence(false), delete(large));
+        assert_eq!(store.avatar(url, (2, 1), false).unwrap().kitty_id, small);
+    }
+
+    #[test]
+    fn a_room_picture_on_the_screen_is_not_pushed_out_by_another_size() {
+        let mut store = ImageStore::new(kitty());
+        let url = "mxc://x/face";
+        let delete = |id: Option<u32>| format!("\x1b_Ga=d,d=I,i={},q=2\x1b\\", id.unwrap());
+        store.begin_frame();
+        assert!(store.avatar(url, (2, 1), false).is_none());
+        store.on_avatar(url, Ok(decoded(96, 96)));
+
+        // Four sizes in one frame, one more than are kept: all four are on the
+        // screen, so none is deleted, and each keeps the one made for it.
+        store.begin_frame();
+        let sizes = [(2, 1), (4, 2), (3, 1), (6, 3)];
+        let ids: Vec<_> = sizes
+            .iter()
+            .map(|&cells| store.avatar(url, cells, false).unwrap().kitty_id)
+            .collect();
+        for (&cells, &id) in sizes.iter().zip(&ids) {
+            assert_eq!(store.avatar(url, cells, false).unwrap().kitty_id, id);
+        }
+        assert!(store.cleanup_sequence(false).is_empty());
+
+        // The next frames draw all four again: none is made, sent or deleted again,
+        // though the first drawn in a frame finds the others drawn in the last.
+        for _ in 0..3 {
+            store.begin_frame();
+            for (&cells, &id) in sizes.iter().zip(&ids) {
+                assert_eq!(store.avatar(url, cells, false).unwrap().kitty_id, id);
+            }
+            assert!(store.cleanup_sequence(false).is_empty());
+        }
+
+        // A frame that draws fewer keeps the others, which the frame before drew; in
+        // the frame after, the one drawn at longest ago goes.
+        store.begin_frame();
+        store.avatar(url, (6, 3), false).unwrap();
+        assert!(store.cleanup_sequence(false).is_empty());
+        store.begin_frame();
+        store.avatar(url, (6, 3), false).unwrap();
+        assert_eq!(store.cleanup_sequence(false), delete(ids[0]));
+        for (&cells, &id) in sizes.iter().zip(&ids).skip(1) {
+            assert_eq!(store.avatar(url, cells, false).unwrap().kitty_id, id);
+        }
+        assert!(store.cleanup_sequence(false).is_empty());
+    }
+
+    #[test]
+    fn a_size_of_a_room_picture_that_cannot_be_made_pushes_out_none() {
+        let mut store = ImageStore::new(kitty());
+        let url = "mxc://x/face";
+        store.begin_frame();
+        assert!(store.avatar(url, (2, 1), false).is_none());
+        store.on_avatar(url, Ok(decoded(96, 96)));
+        let sizes = [(2, 1), (4, 2), (3, 1)];
+        let ids: Vec<_> = sizes
+            .iter()
+            .map(|&cells| store.avatar(url, cells, false).unwrap().kitty_id)
+            .collect();
+
+        // As many sizes as are kept, and in a later frame one that is not made (no
+        // cells at all): none of the three is deleted for it.
+        store.begin_frame();
+        assert!(store.avatar(url, (0, 1), false).is_none());
+        assert!(store.cleanup_sequence(false).is_empty());
+        for (&cells, &id) in sizes.iter().zip(&ids) {
+            assert_eq!(store.avatar(url, cells, false).unwrap().kitty_id, id);
+        }
+        assert!(store.cleanup_sequence(false).is_empty());
     }
 
     #[test]

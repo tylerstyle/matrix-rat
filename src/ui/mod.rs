@@ -58,6 +58,11 @@ pub const SIDEBAR_MIN: u16 = 16;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.hits.clear();
     app.images.begin_frame();
+    // The composer says where it is when it is drawn. In a frame without it (the room
+    // list alone, or too little room) what it said for an earlier, perhaps larger,
+    // window must not place the emoji picker or a menu.
+    app.composer_view.area = Rect::default();
+    app.composer_view.cursor = None;
     let area = frame.area();
     app.screen = area;
     frame
@@ -1348,5 +1353,30 @@ mod tests {
             "pinned_badge_and_forward_toast",
             render(&mut toast_app, 100, 30)
         );
+    }
+
+    #[test]
+    fn the_emoji_picker_stays_on_screen_when_the_composer_is_not_drawn() {
+        use crate::modal::{EmojiPicker, Modal};
+        use crate::ui::hit::HitId;
+
+        // Drawn above the composer of a large window.
+        let mut app = App::demo();
+        app.modal = Some(Modal::Emoji(EmojiPicker::default()));
+        render(&mut app, 120, 40);
+        assert!(app.composer_view.area.y > 30);
+
+        // The window shrinks to one pane, and that is the room list: there is no
+        // composer to sit by, and where it was is far below the window now.
+        app.focus = Pane::Sidebar;
+        render(&mut app, 50, 14);
+        let picker = app
+            .hits
+            .rect_of(HitId::Overlay)
+            .expect("the picker is drawn");
+        assert_eq!(picker.intersection(app.screen), picker, "{picker:?}");
+        // Nor is anything else placed by it.
+        assert!(app.composer_view.area.is_empty());
+        assert!(app.composer_view.cursor.is_none());
     }
 }

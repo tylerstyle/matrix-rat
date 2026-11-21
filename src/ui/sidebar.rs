@@ -149,7 +149,6 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let wide = app.room_previews;
     let lines = if wide { 2 } else { 1 };
     let tile_cols: u16 = if wide { 4 } else { 2 };
-    app.images.set_avatar_cells((tile_cols, lines as u16));
     if app.sidebar.reveal_cursor {
         app.sidebar.reveal_cursor = false;
         if let Some(at) = rows
@@ -267,17 +266,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     && rect.width > tile_cols + 1
                     && let Some(url) = &room.avatar
                 {
-                    let cells = Rect::new(rect.x + 1, rect.y, tile_cols, 1);
+                    // With two lines it is the upper half: made for both all the same.
+                    let avatar = super::image::Avatar {
+                        area: Rect::new(rect.x + 1, rect.y, tile_cols, 1),
+                        skip: 0,
+                        size: (tile_cols, lines as u16),
+                    };
                     let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
-                    super::image::draw_avatar(
-                        frame,
-                        &mut app.images,
-                        theme,
-                        url,
-                        cells,
-                        0,
-                        covered,
-                    );
+                    super::image::draw_avatar(frame, &mut app.images, theme, url, avatar, covered);
                 }
                 if badge_width > 0 && rect.width > badge_width + 4 {
                     let badge_rect =
@@ -364,16 +360,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                     } else {
                         (Rect::new(rect.x + 1, rect.y, tile_cols, 1), 1)
                     };
-                    let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
-                    super::image::draw_avatar(
-                        frame,
-                        &mut app.images,
-                        theme,
-                        url,
-                        cells,
+                    let avatar = super::image::Avatar {
+                        area: cells,
                         skip,
-                        covered,
-                    );
+                        size: (tile_cols, lines as u16),
+                    };
+                    let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
+                    super::image::draw_avatar(frame, &mut app.images, theme, url, avatar, covered);
                 }
                 app.hits.add(rect, HitId::Room(*index));
             }

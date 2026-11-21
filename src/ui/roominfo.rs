@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::hit::{HitId, InputTarget};
-use super::image::{avatar_tile, draw_avatar};
+use super::image::{Avatar, avatar_tile, draw_avatar};
 use super::modal::{button, centered, field, popup, row};
 use crate::action::Action;
 use crate::app::App;
@@ -780,7 +780,8 @@ fn user_search_rows(frame: &mut Frame, app: &mut App, theme: &Theme, inner: Rect
             && let Some(url) = &person.avatar
         {
             let cells = Rect::new(r.x + 2, r.y, 2, 1);
-            super::image::draw_avatar(frame, &mut app.images, theme, url, cells, 0, false);
+            let avatar = Avatar::whole(cells);
+            draw_avatar(frame, &mut app.images, theme, url, avatar, false);
         }
     }
 }
@@ -2714,7 +2715,8 @@ fn draw_picture_subview(
     if let Some(url) = avatar_url.as_deref()
         && tile_rect.width >= 2
     {
-        draw_avatar(frame, &mut app.images, theme, url, tile_rect, 0, false);
+        let avatar = Avatar::whole(tile_rect);
+        draw_avatar(frame, &mut app.images, theme, url, avatar, false);
     }
 
     let (cursor, input_rect) = field(
