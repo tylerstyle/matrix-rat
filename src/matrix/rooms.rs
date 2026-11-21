@@ -144,6 +144,9 @@ pub struct Timelines {
     saved_limit: Arc<tokio::sync::Semaphore>,
     /// The running request for a page of a room's threads, if any.
     thread_lister: Option<JoinHandle<()>>,
+    /// What commands left running (a send, a reaction, a lookup). It holds the
+    /// session's client and timelines, so it ends with the session (see `stop`).
+    actions: tokio::task::JoinSet<()>,
     /// Rooms left in this session (see [`super::left`]).
     left: super::left::LeftRooms,
 }
@@ -185,6 +188,7 @@ impl Timelines {
             pinned_cache: Arc::default(),
             saved_limit: Arc::new(tokio::sync::Semaphore::new(super::saved::CONCURRENCY)),
             thread_lister: None,
+            actions: tokio::task::JoinSet::new(),
             left,
             events,
         }
@@ -227,25 +231,39 @@ impl Timelines {
         // and files the answer under its room.
     }
 
-    /// Waits briefly on shutdown for in-flight file sends to reach the SDK's send queue.
+    /// Waits briefly on shutdown for in-flight file sends to reach the SDK's send queue,
+    /// and for what commands left running (a message on its way to the queue) to end.
     pub async fn finish_uploads(&mut self, wait: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + wait;
         self.uploads.finish(wait).await;
+        let actions = async { while self.actions.join_next().await.is_some() {} };
+        let _ = tokio::time::timeout_at(deadline, actions).await;
     }
 
     /// At the end of the session: closes the timelines, and stops a request for the
-    /// threads popup too (which, unlike them, is not bound to the open room).
+    /// threads popup too (which, unlike them, is not bound to the open room), what
+    /// commands left running, and the unread marks still to be sent. Nothing of the
+    /// session goes on after it: a logout clears its stores right after.
     pub fn stop(&mut self) {
         self.close();
         self.member_fetches.abort_all();
         if let Some(task) = self.thread_lister.take() {
             task.abort();
         }
+        self.actions.abort_all();
+        self.unread_flags.stop();
+    }
+
+    /// Starts `work` among [`Self::actions`], letting go of those that are done.
+    fn spawn_action(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+        while self.actions.try_join_next().is_some() {}
+        self.actions.spawn(work);
     }
 
     /// Message keys arrived from outside the usual ways (a key file): has every open
     /// timeline try again what it could not decrypt. (The SDK retries by itself for
     /// keys it sees arrive; this covers what that may have missed.)
-    pub async fn retry_decryption(&self) {
+    pub async fn retry_decryption(&mut self) {
         let mut timelines: Vec<Arc<Timeline>> = self
             .cache
             .iter()
@@ -258,7 +276,7 @@ impl Timelines {
         {
             timelines.push(timeline.clone());
         }
-        tokio::spawn(async move {
+        self.spawn_action(async move {
             for timeline in timelines {
                 // Which sessions does not matter: matrix-sdk-ui 0.19.1 retries
                 // everything the timeline shows as undecryptable.
@@ -500,12 +518,12 @@ impl Timelines {
     }
 
     /// Runs `work` in the background and reports a failure to the user.
-    fn spawn<F>(&self, what: &'static str, work: F)
+    fn spawn<F>(&mut self, what: &'static str, work: F)
     where
         F: Future<Output = Result<()>> + Send + 'static,
     {
         let events = self.events.clone();
-        tokio::spawn(async move {
+        self.spawn_action(async move {
             if let Err(err) = work.await {
                 tracing::warn!(why = %logsafe::kind_any(&err), "{what}");
                 let _ = events.send(MatrixEvent::ActionFailed(format!("{what}: {err:#}")));
@@ -1238,7 +1256,7 @@ impl Timelines {
                 };
                 let events = self.events.clone();
                 let cache = self.pinned_cache.clone();
-                tokio::spawn(async move {
+                self.spawn_action(async move {
                     match super::moderation::pin(&room, &event_id, pinned, &cache).await {
                         Ok(ids) => {
                             let _ = events.send(MatrixEvent::PinnedEvents { room_id, ids });
@@ -1264,7 +1282,7 @@ impl Timelines {
                 let events = self.events.clone();
                 let cache = self.pinned_cache.clone();
                 let ignored = self.ignored.borrow().clone();
-                tokio::spawn(async move {
+                self.spawn_action(async move {
                     let (items, error) =
                         super::moderation::fetch_pinned(&room, &cache, &ignored).await;
                     let _ = events.send(MatrixEvent::PinnedList {
@@ -1302,13 +1320,14 @@ impl Timelines {
                         (room_id, event_id, place)
                     })
                     .collect();
-                tokio::spawn(super::saved::fetch(
+                let fetch = super::saved::fetch(
                     request,
                     wanted,
                     self.pinned_cache.clone(),
                     self.saved_limit.clone(),
                     self.events.clone(),
-                ));
+                );
+                self.spawn_action(fetch);
             }
             MatrixCmd::Forward {
                 from_room_id,
@@ -1339,7 +1358,7 @@ impl Timelines {
                 };
                 let client = self.client.clone();
                 let events = self.events.clone();
-                tokio::spawn(async move {
+                self.spawn_action(async move {
                     let raw_name = match to_room.cached_display_name() {
                         Some(name) => name.to_string(),
                         None => to_room
@@ -1390,7 +1409,7 @@ impl Timelines {
                 };
                 match timeline {
                     Ok((timeline, _)) => {
-                        tokio::spawn(async move {
+                        self.spawn_action(async move {
                             let result = decrypt_again(&timeline, &event_id).await;
                             if let Err(err) = &result {
                                 tracing::warn!(why = %logsafe::kind_any(err), "could not retry decryption");
@@ -1415,7 +1434,7 @@ impl Timelines {
                 };
                 match self.active_timeline(&room_id).await {
                     Ok((timeline, _)) => {
-                        tokio::spawn(async move {
+                        self.spawn_action(async move {
                             answer(super::source::fetch(&timeline, &item).await);
                         });
                     }
@@ -1424,7 +1443,7 @@ impl Timelines {
             }
             MatrixCmd::Typing { room_id, typing } => {
                 if let Ok(room) = self.room(&room_id) {
-                    tokio::spawn(async move {
+                    self.spawn_action(async move {
                         if let Err(err) = room.typing_notice(typing).await {
                             tracing::debug!(why = %logsafe::kind(&err), "could not send typing notice");
                         }
@@ -1451,7 +1470,7 @@ impl Timelines {
                     };
                     let marks = self.read_marks.clone();
                     let flags = self.unread_flags.clone();
-                    tokio::spawn(async move {
+                    self.spawn_action(async move {
                         let Some((key, ticket, newest)) = mark else {
                             // The room itself: the read marker follows the receipt.
                             if let Err(err) = mark_room_read(&timeline, receipt, &flags).await {
@@ -2175,17 +2194,21 @@ async fn fallback_latest_event_id(room: &Room) -> Option<matrix_sdk::ruma::Owned
 /// while as a second witness, and a request is only skipped when nothing speaks
 /// against the room being that way already.
 #[derive(Clone)]
-struct UnreadFlags(UnboundedSender<(Room, bool)>);
+struct UnreadFlags {
+    queue: UnboundedSender<(Room, bool)>,
+    /// The task that sends them; stopped with the session.
+    task: tokio::task::AbortHandle,
+}
 
 impl UnreadFlags {
     /// For this long what we sent is remembered next to what the last sync said.
     const TRUST_SENT: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// Ends when the last copy of the handle is dropped.
+    /// Ends when the last copy of the handle is dropped, or at [`Self::stop`].
     fn start(events: UnboundedSender<MatrixEvent>) -> Self {
         use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
         let (queue, mut wanted) = tokio::sync::mpsc::unbounded_channel::<(Room, bool)>();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut sent: std::collections::HashMap<
                 matrix_sdk::ruma::OwnedRoomId,
                 (bool, std::time::Instant),
@@ -2225,11 +2248,19 @@ impl UnreadFlags {
                 }
             }
         });
-        Self(queue)
+        Self {
+            queue,
+            task: task.abort_handle(),
+        }
     }
 
     fn set(&self, room: Room, unread: bool) {
-        let _ = self.0.send((room, unread));
+        let _ = self.queue.send((room, unread));
+    }
+
+    /// At the end of the session: the marks not sent yet are not sent any more.
+    fn stop(&self) {
+        self.task.abort();
     }
 
     /// Whether asking for `wanted` changes anything, given what the last sync said
@@ -2516,9 +2547,12 @@ async fn forward(
         }
     };
     // Replies to messages that are not loaded only say "an earlier message" until the
-    // original is fetched. Ask once per reply.
+    // original is fetched. Ask once per reply. The requests end with this forwarder,
+    // when the room is closed or the session ends.
     let mut asked: HashSet<OwnedEventId> = HashSet::new();
+    let mut reply_fetches = tokio::task::JoinSet::new();
     let mut fetch_replies = |items: &Vector<Arc<TimelineItem>>| {
+        while reply_fetches.try_join_next().is_some() {}
         for event in items.iter().filter_map(|item| item.as_event()) {
             let unavailable = event
                 .content()
@@ -2530,7 +2564,7 @@ async fn forward(
             {
                 let timeline = timeline.clone();
                 let event_id = event_id.to_owned();
-                tokio::spawn(async move {
+                reply_fetches.spawn(async move {
                     if let Err(err) = timeline.fetch_details_for_event(&event_id).await {
                         tracing::debug!(why = %logsafe::kind(&err), "could not fetch the replied-to message");
                     }
@@ -4809,6 +4843,28 @@ mod tests {
         assert_eq!(names, ["carol"]);
         assert_eq!(read_by.total, 1);
         drop(server);
+    }
+
+    /// What a command left running (a send, a reaction, a lookup) holds the session's
+    /// client: it is given up when the session ends, so that nothing of the session
+    /// outlives it (a logout clears its stores right after).
+    #[tokio::test]
+    async fn work_left_running_ends_with_the_session() {
+        use crate::matrix::left::{LeftRooms, testing::Server};
+
+        let client = Server::default().client().await;
+        let (mut timelines, _events) = timelines_of(client, &LeftRooms::default());
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        timelines.spawn("never done", async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        timelines.stop();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), released)
+            .await
+            .expect("the work was given up");
+        assert!(outcome.is_err(), "it ended without finishing");
     }
 
     #[test]

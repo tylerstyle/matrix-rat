@@ -2073,6 +2073,9 @@ impl Worker {
                 &manager.refresh_signal(),
             ),
         ];
+        // What a command started and left running here (a recovery, a report): it
+        // holds the client, so it ends with the session.
+        let mut session_tasks = tokio::task::JoinSet::new();
         let end = loop {
             // A room's timeline left unused for long goes (see `rooms::IDLE_TIMELINE`).
             let timelines_idle = timelines.idle_due();
@@ -2183,7 +2186,8 @@ impl Worker {
                         // Can take a while (downloads keys); must not block the loop.
                         let recovery = client.encryption().recovery();
                         let events = self.events.clone();
-                        tokio::spawn(async move {
+                        while session_tasks.try_join_next().is_some() {}
+                        session_tasks.spawn(async move {
                             let result = recovery
                                 .recover(key.trim())
                                 .await
@@ -2223,7 +2227,8 @@ impl Worker {
                     }) => {
                         let client = client.clone();
                         let events = self.events.clone();
-                        tokio::spawn(async move {
+                        while session_tasks.try_join_next().is_some() {}
+                        session_tasks.spawn(async move {
                             safety::report_content(client, events, room_id, event_id, reason)
                                 .await;
                         });
@@ -2281,6 +2286,8 @@ impl Worker {
         user_searcher.stop();
         dir_searcher.stop();
         ignore_tracker.stop();
+        session_tasks.abort_all();
+        left.stop();
         if matches!(end, SessionEnd::Shutdown) {
             // Give files sent right before quitting a moment to reach the send queue's
             // persistent store before tearing timelines down.

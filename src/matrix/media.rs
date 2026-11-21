@@ -60,7 +60,8 @@ pub struct Media {
     emote_slots: Arc<Semaphore>,
     /// Saving holds a whole file in memory, so only one runs at a time.
     save_slot: Arc<Semaphore>,
-    /// The running picture fetches. They end with the session: dropping this stops them.
+    /// The running picture fetches, and files being saved. They end with the session:
+    /// dropping this stops them.
     fetches: Mutex<JoinSet<()>>,
     /// The download of the sound to play, if one is on its way: one at a time, given
     /// up when another is asked for, when the app cancels it, and with the session.
@@ -195,7 +196,9 @@ impl Media {
         let events = self.events.clone();
         let busy = self.busy.clone();
         let save_slot = self.save_slot.clone();
-        tokio::spawn(async move {
+        let mut fetches = self.fetches.lock().expect("not poisoned");
+        while fetches.try_join_next().is_some() {}
+        fetches.spawn(async move {
             let _slot = save_slot.acquire().await;
             let request = MediaRequestParameters {
                 source: *file.source,

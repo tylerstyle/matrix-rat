@@ -23,7 +23,7 @@
 //! [`StartCheck`]).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::FutureExt;
@@ -32,7 +32,7 @@ use matrix_sdk::ruma::api::client::membership::joined_rooms;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::{Client, Room, RoomState};
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 /// A room that shows up as joined this long after it was left is asked about.
 const ASK_AFTER: Duration = Duration::from_secs(10);
@@ -75,6 +75,9 @@ pub struct LeftRooms {
     /// The question on its way, and when it was put: rooms that fall due together (as
     /// all those found at the start do) cost one request, not one each.
     question: Arc<Mutex<Option<(Instant, Question)>>>,
+    /// Those waiting for an answer to it (see [`Self::hides`]). They hold the session's
+    /// client: given up with the session (see [`Self::stop`]).
+    askers: Arc<Mutex<JoinSet<()>>>,
 }
 
 /// A question to the server about the rooms the account is in, shared by the rooms
@@ -167,7 +170,9 @@ impl LeftRooms {
             Look::Ask(since) => {
                 let question = self.question(&room.client(), since);
                 let (room_id, left) = (room.room_id().to_owned(), self.clone());
-                tokio::spawn(async move {
+                let mut askers = self.askers.lock().unwrap_or_else(PoisonError::into_inner);
+                while askers.try_join_next().is_some() {}
+                askers.spawn(async move {
                     let joined = question.await.map(|rooms| rooms.contains(&room_id));
                     left.answered(&room_id, since, joined, Instant::now());
                     // Back in the list, or a new time to ask: either way the list is to
@@ -177,6 +182,16 @@ impl LeftRooms {
                 true
             }
         }
+    }
+
+    /// At the end of the session: the questions on their way, and those waiting for
+    /// them, are given up. (Rooms are not asked about after it.)
+    pub fn stop(&self) {
+        self.askers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .abort_all();
+        *self.question.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// The question on its way, if it was put after the room was left at `since` (one

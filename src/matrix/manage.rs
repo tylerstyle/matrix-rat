@@ -823,6 +823,9 @@ pub struct Manager {
     notify: NotificationSettings,
     /// Has the session make the room list again.
     relist: Arc<Notify>,
+    /// The commands still running (see `handle`). They hold the session's client: given
+    /// up with the session (see `stop`).
+    tasks: tokio::task::JoinSet<()>,
 }
 
 /// Wakes the open room info watcher when the watched room changes.
@@ -890,6 +893,7 @@ impl Manager {
             left,
             notify,
             relist,
+            tasks: tokio::task::JoinSet::new(),
         }
     }
 
@@ -902,6 +906,13 @@ impl Manager {
         if let Some(watcher) = self.watcher.take() {
             watcher.abort();
         }
+        self.tasks.abort_all();
+    }
+
+    /// Starts `work` among [`Self::tasks`], letting go of those that are done.
+    fn spawn_task(&mut self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+        while self.tasks.try_join_next().is_some() {}
+        self.tasks.spawn(work);
     }
 
     /// Every command runs in a task of its own: none of them may hold up the session.
@@ -919,7 +930,7 @@ impl Manager {
                 via,
             } => {
                 let left = self.left.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = join(&client, &left, &target, &via).await;
                     // Joined (again): no longer a room that was left.
                     if let Ok(room_id) = &result
@@ -936,7 +947,7 @@ impl Manager {
                 create,
             } => {
                 let left = self.left.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     emit(match direct_chat(&client, &left, &user_id, create).await {
                         Ok(Some(room_id)) => ManageEvent::Opened {
                             request,
@@ -957,14 +968,14 @@ impl Manager {
                 alias,
                 encrypted,
             } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = create(&client, name, topic, alias, encrypted).await;
                     emit(ManageEvent::Opened { request, result });
                 });
             }
             ManageCmd::Leave { room_id } => {
                 let left = self.left.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = leave(&client, &room_id).await;
                     // Remembered, so that a sync answer that was on its way cannot
                     // bring the room back as one the user is in.
@@ -982,7 +993,7 @@ impl Manager {
                 via,
             } => {
                 let left = self.left.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = super::directory::fetch_preview(&client, &left, &target, via)
                         .await
                         .map(Box::new);
@@ -995,7 +1006,7 @@ impl Manager {
                 via,
                 reason,
             } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = super::directory::knock(&client, &target, via, reason).await;
                     emit(ManageEvent::Knocked { request, result });
                 });
@@ -1031,7 +1042,7 @@ impl Manager {
             }
             ManageCmd::StopInfo => self.stop(),
             ManageCmd::Invite { room_id, user_id } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result =
                         with_member(&client, &room_id, &user_id, "invite", async |room, user| {
                             room.invite_user_by_id(user).await
@@ -1125,7 +1136,7 @@ impl Manager {
             } => {
                 let refresh = self.refresh.clone();
                 let events_tx = self.events.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = match Int::new(level) {
                         None => Err("Could not change role: power level out of range.".to_owned()),
                         Some(lvl) => {
@@ -1159,7 +1170,7 @@ impl Manager {
                 });
             }
             ManageCmd::SetName { room_id, name } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = match room(&client, &room_id) {
                         Ok(room) => room
                             .set_name(sanitize_line(&name))
@@ -1180,7 +1191,7 @@ impl Manager {
                 let own_room_names = self.own_room_names.clone();
                 let people_poke = self.people_poke.clone();
                 let own_refresh = self.own_refresh.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result =
                         match super::people::set_room_display_name(&client, &room_id, name).await {
                             Ok(applied) => {
@@ -1200,7 +1211,7 @@ impl Manager {
                 });
             }
             ManageCmd::SetTopic { room_id, topic } => {
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = match room(&client, &room_id) {
                         Ok(room) => room
                             .set_room_topic(&sanitize(&topic))
@@ -1235,7 +1246,7 @@ impl Manager {
             ManageCmd::SetNotify { room_id, level } => {
                 let settings = self.notify.clone();
                 let relist = self.relist.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = set_notify(&settings, &client, &room_id, level).await;
                     // The room list shows whether a room is muted. `settings` knows the
                     // change at once, but says nothing of it: only a change that comes
@@ -1386,7 +1397,7 @@ impl Manager {
                 let events = self.events.clone();
                 let refresh = self.refresh.clone();
                 let client = self.client.clone();
-                tokio::spawn(async move {
+                self.spawn_task(async move {
                     let result = match room(&client, &room_id) {
                         Ok(room) => {
                             let res = set_room_permissions(&room, &permissions).await;
@@ -1411,7 +1422,7 @@ impl Manager {
                 topic,
                 alias,
             } => {
-                tokio::spawn(super::spaces::answer_create(
+                self.spawn_task(super::spaces::answer_create(
                     self.client.clone(),
                     self.events.clone(),
                     request,
@@ -1426,7 +1437,7 @@ impl Manager {
                 child_id,
                 edit,
             } => {
-                tokio::spawn(super::spaces::answer_edit(
+                self.spawn_task(super::spaces::answer_edit(
                     self.client.clone(),
                     self.left.clone(),
                     self.events.clone(),
@@ -1439,7 +1450,7 @@ impl Manager {
         }
     }
 
-    fn spawn_setting<F, Fut>(&self, room_id: String, change: Change, work: F)
+    fn spawn_setting<F, Fut>(&mut self, room_id: String, change: Change, work: F)
     where
         F: FnOnce(Client, Room) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), String>> + Send,
@@ -1447,7 +1458,7 @@ impl Manager {
         let client = self.client.clone();
         let events = self.events.clone();
         let refresh = self.refresh.clone();
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             let result = match room(&client, &room_id) {
                 Ok(room) => work(client, room).await,
                 Err(err) => Err(err),
@@ -1463,14 +1474,14 @@ impl Manager {
         });
     }
 
-    fn spawn_tag<F, Fut>(&self, room_id: String, what: &'static str, change: Change, work: F)
+    fn spawn_tag<F, Fut>(&mut self, room_id: String, what: &'static str, change: Change, work: F)
     where
         F: FnOnce(Room) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = matrix_sdk::Result<()>> + Send,
     {
         let client = self.client.clone();
         let events = self.events.clone();
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             let result = match room(&client, &room_id) {
                 Ok(room) => work(room).await.map_err(|err| failed(what, &err)),
                 Err(err) => Err(err),
@@ -1484,7 +1495,7 @@ impl Manager {
     }
 
     fn spawn_member_action<F, Fut>(
-        &self,
+        &mut self,
         room_id: String,
         user_id: String,
         what: &'static str,
@@ -1497,7 +1508,7 @@ impl Manager {
         let client = self.client.clone();
         let events = self.events.clone();
         let refresh = self.refresh.clone();
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             let result = with_member(&client, &room_id, &user_id, what, async |room, user| {
                 work(room.clone(), user.to_owned()).await
             })
@@ -2890,6 +2901,35 @@ mod tests {
     use matrix_sdk::config::SyncSettings;
     use matrix_sdk::ruma::room_id;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    /// What a command left running holds the session's client: it is given up when the
+    /// session ends, so that nothing of the session outlives it.
+    #[tokio::test]
+    async fn commands_left_running_end_with_the_session() {
+        let client = Server::default().client().await;
+        let settings = client.notification_settings().await;
+        let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = Manager::new(
+            client,
+            events,
+            crate::matrix::people::OwnRoomNames::default(),
+            Arc::new(Notify::new()),
+            Arc::new(watch::Sender::new(0)),
+            LeftRooms::default(),
+            settings,
+            Arc::new(Notify::new()),
+        );
+        let (held, released) = tokio::sync::oneshot::channel::<()>();
+        manager.spawn_task(async move {
+            let _held = held;
+            std::future::pending::<()>().await;
+        });
+        manager.stop();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), released)
+            .await
+            .expect("the work was given up");
+        assert!(outcome.is_err(), "it ended without finishing");
+    }
 
     /// The room list's notification levels come from what the store has. A room whose
     /// encryption the sync has not told (`Unknown`) would have the server asked about it
