@@ -109,9 +109,9 @@ enum Command {
     /// Takes no lock and logs nobody in, so it also runs beside a running matrix-rat.
     Doctor,
     /// Run without the screen, for agents and scripts: stay in sync on a profile
-    /// that is already logged in, and serve `send`, `read`, `listen` and `mcp` over a
-    /// private socket. Accepts no invitation and never asks for a login. Ends on
-    /// SIGTERM or Ctrl-C.
+    /// that is already logged in, and serve `rooms`, `send`, `read`, `listen` and
+    /// `mcp` over a private socket. Accepts no invitation and never asks for a login.
+    /// Ends on SIGTERM, SIGHUP or Ctrl-C.
     Serve,
     /// Print the rooms the account is in (id, name, encrypted, direct), one JSON
     /// object per line, through a running `matrix-rat serve`. Exit codes as for
