@@ -145,13 +145,23 @@ impl Msg {
             "redacted" => return Some("redacted"),
             _ => {}
         }
-        // What contradicts the sender is turned away whatever else is said.
-        let contradicted = self.warning.as_deref().filter(|warning| {
-            matches!(
-                *warning,
-                "identity_changed" | "sender_mismatch" | "not_encrypted"
-            )
-        });
+        // What contradicts the sender is turned away whatever else is said: what
+        // the app shows, and what only the strict judgement found (the app's
+        // shield can say less than that: a lesser doubt, or none).
+        let contradicted = self
+            .warning
+            .as_deref()
+            .filter(|warning| {
+                matches!(
+                    *warning,
+                    "identity_changed" | "sender_mismatch" | "not_encrypted"
+                )
+            })
+            .or_else(|| {
+                self.untrusted
+                    .as_deref()
+                    .filter(|why| matches!(*why, "identity_changed" | "sender_mismatch"))
+            });
         match trust {
             Trust::AllowUnverified => contradicted,
             Trust::Verified if self.verified && self.warning.is_none() => None,
@@ -763,6 +773,22 @@ mod tests {
                 judged("text", Some("not_encrypted"), Some("not_encrypted")),
                 Some("not_encrypted"),
                 Some("not_encrypted"),
+            ),
+            // Also when only the strict judgement found it.
+            (
+                judged("text", None, Some("identity_changed")),
+                Some("identity_changed"),
+                Some("identity_changed"),
+            ),
+            (
+                judged("text", None, Some("sender_mismatch")),
+                Some("sender_mismatch"),
+                Some("sender_mismatch"),
+            ),
+            (
+                judged("text", Some("unverified_device"), Some("identity_changed")),
+                Some("identity_changed"),
+                Some("identity_changed"),
             ),
             // What says nothing never counts, whatever else is claimed about it.
             (
