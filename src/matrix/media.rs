@@ -974,6 +974,134 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_deduplicates_in_flight_picture_requests() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use matrix_sdk::ruma::mxc_uri;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut png = Vec::new();
+        images::demo_picture(4, 4)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let png = Arc::new(png);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+
+        let server_requests = requests.clone();
+        let server_png = png.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let requests = server_requests.clone();
+                let started_tx = started_tx.clone();
+                let mut release = release_rx.clone();
+                let png = server_png.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut chunk).await {
+                            Ok(n) if n > 0 => request.extend_from_slice(&chunk[..n]),
+                            _ => return,
+                        }
+                    }
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    let _ = started_tx.send(());
+                    let _ = release.wait_for(|&open| open).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                        png.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(&png).await;
+                });
+            }
+        });
+
+        let client = Client::builder()
+            .homeserver_url(format!("http://{address}"))
+            .build()
+            .await
+            .unwrap();
+        let (events, mut answers) = tokio::sync::mpsc::unbounded_channel();
+        let media = Media::new(client, events);
+        let pic = MediaRef {
+            full: MediaSource::Plain(mxc_uri!("mxc://example.org/pic").to_owned()),
+            thumbnail: None,
+        };
+
+        // First fetch for (key, full=true) reaches the server and pauses on the gate.
+        media.fetch("pic".to_owned(), pic.clone(), None, true);
+        tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // A second fetch of the same (key, full=true) while in flight is dropped by `busy`.
+        media.fetch("pic".to_owned(), pic.clone(), None, true);
+
+        // The same key with `full=false` is tracked separately and starts its own request,
+        // while a repeat of (key, full=false) while in flight is also dropped.
+        media.fetch("pic".to_owned(), pic.clone(), None, false);
+        tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        media.fetch("pic".to_owned(), pic.clone(), None, false);
+
+        // Release both in-flight responses: one answer per (key, full), two HTTP requests total.
+        let _ = release_tx.send(true);
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), answers.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match event {
+                MatrixEvent::Image {
+                    key,
+                    full,
+                    result: Ok(_),
+                } => got.push((key, full)),
+                other => panic!("{}", other.describe()),
+            }
+        }
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("pic".to_owned(), false), ("pic".to_owned(), true)]
+        );
+        let extra = tokio::time::timeout(Duration::from_millis(200), answers.recv()).await;
+        assert!(
+            extra.is_err(),
+            "duplicate in-flight fetch sent a second answer"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+
+        // Once finished, `busy` clears so a later fetch of the same picture answers again.
+        media.fetch("pic".to_owned(), pic, None, true);
+        let event = tokio::time::timeout(Duration::from_secs(5), answers.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match event {
+            MatrixEvent::Image {
+                key,
+                full: true,
+                result: Ok(_),
+            } => assert_eq!(key, "pic"),
+            other => panic!("{}", other.describe()),
+        }
+    }
+
     #[tokio::test]
     async fn media_addresses() {
         use matrix_sdk::ruma::mxc_uri;
