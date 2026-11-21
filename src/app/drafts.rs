@@ -66,6 +66,13 @@ pub(super) fn is_slash_command(text: &str) -> bool {
     trimmed.starts_with('/') && !trimmed.starts_with("//")
 }
 
+/// Whether `text` starts with `/` (either a slash command or a `//` literal-slash escape,
+/// both of which only work at the start of the message and keep any aside draft aside
+/// until sent or cancelled).
+fn starts_with_slash(text: &str) -> bool {
+    text.trim_start().starts_with('/')
+}
+
 impl App {
     /// The conversation whose draft is kept: the open room or thread, with an account
     /// (the demo stores nothing). Nothing is written "to" an invitation.
@@ -180,12 +187,17 @@ impl App {
             return;
         }
         if crate::upload::command_argument(self.composer.text()).is_some() {
+            let had_stash = !self.attach.stashed(scope).trim().is_empty();
             self.attach
                 .merge_stashed_draft(scope.clone(), draft.to_owned());
-            self.show_toast("Saved draft kept aside while you finish the command");
+            self.show_toast(if had_stash {
+                "Saved draft added to the waiting caption"
+            } else {
+                "Saved draft kept aside while you finish the command"
+            });
             return;
         }
-        if is_slash_command(self.composer.text()) {
+        if starts_with_slash(self.composer.text()) {
             self.drafts.aside.insert(
                 scope.clone(),
                 AsideDraft {
@@ -221,12 +233,14 @@ impl App {
 
     /// Once a carried `/command` is edited into plain text, puts the aside draft back
     /// into the composer right away so leaving, quitting or sending can never lose it.
+    /// Text starting with `//` stays unmerged so the leading `//` escape still works on
+    /// send (while `draft_text` still saves both on leave or quit).
     pub(super) fn reclaim_aside_if_plain(&mut self) {
         if matches!(self.compose_mode, ComposeMode::Edit(_)) {
             return;
         }
         let text = self.composer.text();
-        if text.trim().is_empty() || is_slash_command(text) {
+        if text.trim().is_empty() || starts_with_slash(text) {
             return;
         }
         let Some(scope) = self.attach_scope() else {
@@ -240,7 +254,7 @@ impl App {
     /// Esc in the composer: gives up a carried `/command` and restores the aside draft.
     pub(super) fn restore_aside_draft_on_cancel(&mut self) -> bool {
         let text = self.composer.text();
-        if !is_slash_command(text) && !text.trim().is_empty() {
+        if !starts_with_slash(text) && !text.trim().is_empty() {
             return false;
         }
         if !self
@@ -393,7 +407,7 @@ impl App {
                     self.drafts.changed = Some(Instant::now());
                 }
                 self.show_toast(if had_stash {
-                    "Restored saved draft above your text"
+                    "Saved draft added to the waiting caption"
                 } else {
                     "Saved draft kept aside while you finish the command"
                 });
@@ -402,7 +416,7 @@ impl App {
                 if front.trim() != text.trim() {
                     if editing {
                         let early = front.to_owned();
-                        if is_slash_command(&early) {
+                        if starts_with_slash(&early) {
                             self.drafts.aside.insert(
                                 scope.clone(),
                                 AsideDraft {
@@ -1215,10 +1229,68 @@ mod tests {
             app.attach.stashed(&("!a".to_owned(), None)),
             "stored\n\nearly caption"
         );
+        assert_eq!(
+            app.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Saved draft added to the waiting caption")
+        );
         app.save_idle_draft(Duration::ZERO);
         assert_eq!(saves(&mut commands), ["!a=stored\n\nearly caption"]);
         // Esc cancels `/upload ` and brings back both texts.
         app.on_event(key(KeyCode::Esc));
         assert_eq!(app.composer.text(), "stored\n\nearly caption");
+    }
+
+    #[test]
+    fn double_slash_escape_stays_aside_until_sent_and_saves_both_on_leave_and_quit() {
+        let setup_escaped = || {
+            let mut app = App::demo();
+            let (handle, mut commands) = MatrixHandle::for_test();
+            app.matrix = Some(handle);
+            app.rooms.clear();
+            app.screen = ratatui::layout::Rect::new(0, 0, 100, 30);
+            app.perform(Action::Focus(Pane::Composer));
+            type_text(&mut app, "/topic x");
+            app.on_matrix(MatrixEvent::Rooms(vec![listed("!a"), listed("!b")]));
+            app.on_matrix(stored("!a", "remember milk"));
+            assert_eq!(app.composer.text(), "/topic x");
+            let _ = saves(&mut commands);
+            // Turn `/topic x` into `//topic x` (escaped literal leading `/`).
+            app.on_event(key(KeyCode::Home));
+            app.on_event(key(KeyCode::Char('/')));
+            (app, commands)
+        };
+
+        // 1. Send: `//topic x` stays unmerged so `//` is stripped to literal `/topic x`,
+        //    and the aside draft returns to the composer afterwards.
+        let (mut app, mut commands) = setup_escaped();
+        assert_eq!(app.composer.text(), "//topic x");
+        app.perform(Action::Send);
+        let mut sent_plain = None;
+        let mut cleared = false;
+        while let Ok(cmd) = commands.try_recv() {
+            match cmd {
+                MatrixCmd::Send {
+                    message: crate::format::Outgoing::Text { plain, .. },
+                    ..
+                } => sent_plain = Some(plain),
+                MatrixCmd::SaveDraft { text, .. } if text.is_empty() => cleared = true,
+                _ => {}
+            }
+        }
+        assert_eq!(sent_plain.as_deref(), Some("/topic x"));
+        assert!(!cleared, "sending //escape must not wipe the aside draft");
+        assert_eq!(app.composer.text(), "remember milk");
+
+        // 2. Leave: store keeps both texts, while returning still has `//topic x` ready.
+        let (mut app, mut commands) = setup_escaped();
+        app.perform(Action::OpenRoom(1));
+        assert_eq!(saves(&mut commands), ["!a=remember milk\n\n//topic x"]);
+        app.perform(Action::OpenRoom(0));
+        assert_eq!(app.composer.text(), "//topic x");
+
+        // 3. Quit: store keeps both texts.
+        let (mut app, mut commands) = setup_escaped();
+        app.shut_down_worker();
+        assert_eq!(saves(&mut commands), ["!a=remember milk\n\n//topic x"]);
     }
 }
