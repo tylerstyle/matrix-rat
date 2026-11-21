@@ -1107,6 +1107,11 @@ mod tests {
         let client = offline_client(&paths, "http://127.0.0.1:1", "unit-test-secret")
             .await
             .unwrap();
+        // One process per profile (the profile lock): no lease renewed in SQLite every 50 ms.
+        assert!(matches!(
+            client.cross_process_lock_config(),
+            matrix_sdk_base::cross_process_lock::CrossProcessLockConfig::SingleProcess
+        ));
         drop(client);
         let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
     }
