@@ -931,9 +931,35 @@ impl Namesakes {
         }
     }
 
+    /// Takes in the room's members, each a name and a user ID, after the messages:
+    /// those who go by a name seen among them, as only they can change what is told
+    /// apart there. A ban line about someone who wrote nothing then names them with
+    /// the ID where a member goes by the same name.
+    pub fn learn_members<'a>(&mut self, members: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        for (name, id) in members {
+            if let Some(only) = self.seen.get_mut(name)
+                && only.as_deref() != Some(id)
+            {
+                *only = None;
+            }
+        }
+    }
+
     /// Nobody seen is to be told apart.
     fn nobody(&self) -> bool {
         self.flagged.is_empty() && self.seen.values().all(Option::is_some)
+    }
+
+    /// Someone else goes by `name`.
+    fn shared(&self, name: &str) -> bool {
+        matches!(self.seen.get(name), Some(None))
+    }
+
+    /// Whether [`Namesakes::mark`] names anyone of `message` with the ID.
+    pub fn touches(&self, message: &Message) -> bool {
+        message
+            .people()
+            .any(|(name, id)| self.shared(name) || self.flagged.contains(id))
     }
 
     /// Names with their IDs the people of `message` who are to be told apart.
@@ -943,7 +969,7 @@ impl Namesakes {
 
     /// [`Namesakes::mark`], with `elsewhere` as for [`mark_namesakes_among`].
     pub fn mark_among(&self, message: &mut Message, elsewhere: Option<Elsewhere<'_>>) {
-        let shared = |name: &str| matches!(self.seen.get(name), Some(None));
+        let shared = |name: &str| self.shared(name);
         let elsewhere = |name: &str, id: &str| elsewhere.is_some_and(|other| other(name, id));
         let apart =
             |name: &str, id: &str| shared(name) || self.flagged.contains(id) || elsewhere(name, id);

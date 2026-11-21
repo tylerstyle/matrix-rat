@@ -28,9 +28,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use futures::{FutureExt, StreamExt, pin_mut};
-use matrix_sdk::Room;
 use matrix_sdk::ruma::events::fully_read::FullyReadEventContent;
 use matrix_sdk::ruma::{OwnedUserId, UserId};
+use matrix_sdk::{Room, RoomMemberships};
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     RoomExt, Timeline, TimelineFocus, TimelineItem, TimelineReadReceiptTracking, TimelineUniqueId,
@@ -862,8 +862,10 @@ async fn unread(
     read.extend(last_own(&items));
     let slots = slots(&items, &own, &ignored.borrow());
     let read: Vec<&str> = read.iter().map(String::as_str).collect();
+    let members = member_names(room).await;
     Ok(unread_text(
         &slots,
+        &members,
         from.as_deref(),
         &read,
         newest,
@@ -880,9 +882,11 @@ async fn unread(
 /// starts at the next message after it.
 ///
 /// With no such place among what is loaded nothing is known: the answer then holds
-/// the `newest` messages, read or not, and says so.
+/// the `newest` messages, read or not, and says so. People of one name among the
+/// slots and the room's `members` (names and IDs) are told apart.
 fn unread_text<Tz: chrono::TimeZone>(
     slots: &[Slot],
+    members: &[(String, String)],
     from: Option<&str>,
     read: &[&str],
     newest: usize,
@@ -897,15 +901,21 @@ where
         let read = read.iter().filter_map(|id| place(id));
         line.into_iter().chain(read).max().map(|at| at + 1)
     });
-    // Two people of one name among what is loaded are told apart, as in the timeline.
+    // Two people of one name among what is loaded and the room's members are told
+    // apart, as in the timeline.
     let mut namesakes = Namesakes::default();
     for message in slots.iter().filter_map(|slot| slot.message.as_ref()) {
         namesakes.learn(message);
     }
+    namesakes.learn_members(pairs(members));
     let mut lines: Vec<String> = slots[start.unwrap_or(0)..]
         .iter()
         .filter_map(|slot| {
-            let mut message = slot.message.clone()?;
+            let message = slot.message.as_ref()?;
+            if !namesakes.touches(message) {
+                return collect::entry(message);
+            }
+            let mut message = message.clone();
             namesakes.mark(&mut message);
             collect::entry(&message)
         })
@@ -964,12 +974,15 @@ async fn archive(
     progress.tell(event_count(&items));
     let own = room.own_user_id().to_owned();
     let ignored = ignored.borrow().clone();
+    let members = member_names(room).await;
     let stop = Arc::new(AtomicBool::new(false));
     // Given up while the file is written: the writing ends at the next message.
     let _guard = StopOnDrop(stop.clone());
     let written = tokio::task::spawn_blocking(move || {
         let messages = || messages_of(&items, &own, &ignored);
-        write(file, messages, since, cut, &room_name, &now, &stop)
+        write(
+            file, messages, &members, since, cut, &room_name, &now, &stop,
+        )
     })
     .await
     .map_err(|_| anyhow!("writing the file failed"))?;
@@ -994,16 +1007,50 @@ fn messages_of<'a>(
     })
 }
 
+/// The names and user IDs of the room's joined members, as the store has them (the
+/// server is not asked): a name is the display name, or the first part of the ID for
+/// someone without one, as the messages name people.
+async fn member_names(room: &Room) -> Vec<(String, String)> {
+    let members = match room.members_no_sync(RoomMemberships::JOIN).await {
+        Ok(members) => members,
+        Err(err) => {
+            tracing::debug!(why = %logsafe::kind(&err), "could not load the room's members");
+            return Vec::new();
+        }
+    };
+    members
+        .iter()
+        .map(|member| {
+            let name = member
+                .display_name()
+                .map(crate::text::sanitize_line)
+                .filter(|name| !crate::text::is_blank(name))
+                .unwrap_or_else(|| member.user_id().localpart().to_owned());
+            (name, member.user_id().to_string())
+        })
+        .collect()
+}
+
+/// `members` as names and IDs, for [`Namesakes::learn_members`].
+fn pairs(members: &[(String, String)]) -> impl Iterator<Item = (&str, &str)> {
+    members
+        .iter()
+        .map(|(name, id)| (name.as_str(), id.as_str()))
+}
+
 /// Writes the archive of `messages` (gone through twice, oldest first) into `file`
 /// and gives it its name. Gives the file's path and how many messages are in it.
-/// Ends early, leaving no file, when `stop` is set.
+/// Ends early, leaving no file, when `stop` is set. People of one name among the
+/// messages and the room's `members` (names and IDs) are told apart.
 ///
 /// With `since`, the oldest messages are left out as long as they were sent before
 /// it. Only those: a message between newer ones stays whatever time it claims, so
 /// nobody can keep their message out of an archive with a forged date.
+#[allow(clippy::too_many_arguments)]
 fn write<Tz: chrono::TimeZone, I: Iterator<Item = Message>>(
     file: crate::files::NewFile,
     messages: impl Fn() -> I,
+    members: &[(String, String)],
     since: Option<u64>,
     cut: Option<Cut>,
     room_name: &str,
@@ -1017,7 +1064,8 @@ where
         |message: &Message| since.is_some_and(|since| message.sent_at.is_none_or(|at| at < since));
     let kept = || messages().skip_while(|message| too_old(message));
     // Once through for the days the heading names, and for who shares a name with
-    // someone else in it (told apart as in the timeline); nothing else is kept of it.
+    // someone else in it or among the room's `members` (told apart as in the
+    // timeline); nothing else is kept of it.
     let (mut first, mut last) = (None, None);
     let mut namesakes = Namesakes::default();
     for message in kept() {
@@ -1027,6 +1075,7 @@ where
             last = Some(last.map_or(at, |last: u64| last.max(at)));
         }
     }
+    namesakes.learn_members(pairs(members));
     let entries = || {
         kept().filter_map(|mut message| {
             namesakes.mark(&mut message);
@@ -1183,7 +1232,7 @@ mod tests {
             with_id("$3", "Ann", "new two"),
         ];
         // The app's own line wins over the SDK's and over the read marker.
-        let unread = unread_text(&slots, Some("$2"), &["$3"], 50, &Utc);
+        let unread = unread_text(&slots, &[], Some("$2"), &["$3"], 50, &Utc);
         assert_eq!(
             unread.text,
             "[2026-11-20 14:03] Bob: new one\n[2026-11-20 14:03] Ann: new two\n"
@@ -1202,12 +1251,12 @@ mod tests {
             with_id("$2", "Bob", "new one"),
             with_id("$3", "Ann", "new two"),
         ];
-        let unread = unread_text(&slots, None, &["$1"], 50, &Utc);
+        let unread = unread_text(&slots, &[], None, &["$1"], 50, &Utc);
         assert_eq!(unread.messages, 2);
         assert!(unread.known);
         assert!(unread.text.starts_with("[2026-11-20 14:03] Bob: new one\n"));
         // An event the app named but that is not there: the same.
-        assert_eq!(unread_text(&slots, Some("$9"), &[], 50, &Utc), unread);
+        assert_eq!(unread_text(&slots, &[], Some("$9"), &[], 50, &Utc), unread);
 
         // No line (the SDK shows none): after the message the marker is at.
         let slots = [
@@ -1215,14 +1264,20 @@ mod tests {
             with_id("$2", "Bob", "read"),
             with_id("$3", "Ann", "new"),
         ];
-        let unread = unread_text(&slots, None, &["$2"], 50, &Utc);
+        let unread = unread_text(&slots, &[], None, &["$2"], 50, &Utc);
         assert_eq!(unread.text, "[2026-11-20 14:03] Ann: new\n");
         assert!(unread.known && !unread.cut);
         // A read receipt further on than the read marker: what was read is read.
-        assert_eq!(unread_text(&slots, None, &["$1", "$2"], 50, &Utc), unread);
-        assert_eq!(unread_text(&slots, None, &["$2", "$1"], 50, &Utc), unread);
+        assert_eq!(
+            unread_text(&slots, &[], None, &["$1", "$2"], 50, &Utc),
+            unread
+        );
+        assert_eq!(
+            unread_text(&slots, &[], None, &["$2", "$1"], 50, &Utc),
+            unread
+        );
         // The marker at the newest message: nothing is unread, and that is known.
-        let unread = unread_text(&slots, None, &["$3"], 50, &Utc);
+        let unread = unread_text(&slots, &[], None, &["$3"], 50, &Utc);
         assert_eq!(
             (unread.text.as_str(), unread.messages, unread.known),
             ("", 0, true)
@@ -1237,8 +1292,8 @@ mod tests {
             with_id("$3", "Bob", "new"),
         ];
         for unread in [
-            unread_text(&slots, None, &["$2"], 50, &Utc),
-            unread_text(&slots, Some("$2"), &[], 50, &Utc),
+            unread_text(&slots, &[], None, &["$2"], 50, &Utc),
+            unread_text(&slots, &[], Some("$2"), &[], 50, &Utc),
         ] {
             assert_eq!(unread.text, "[2026-11-20 14:03] Bob: new\n");
             assert!(unread.known);
@@ -1253,13 +1308,13 @@ mod tests {
             with_id("$3", "Ann", "three"),
         ];
         // The marker is at an event that is not among what is loaded.
-        let unread = unread_text(&slots, None, &["$0"], 2, &Utc);
+        let unread = unread_text(&slots, &[], None, &["$0"], 2, &Utc);
         assert!(!unread.known);
         assert_eq!(unread.messages, 2);
         assert!(unread.text.starts_with("[2026-11-20 14:03] Bob: two\n"));
         // Nothing says how far the account has read: the same.
-        assert!(!unread_text(&slots, None, &[], 50, &Utc).known);
-        assert_eq!(unread_text(&slots, None, &[], 50, &Utc).messages, 3);
+        assert!(!unread_text(&slots, &[], None, &[], 50, &Utc).known);
+        assert_eq!(unread_text(&slots, &[], None, &[], 50, &Utc).messages, 3);
     }
 
     #[test]
@@ -1269,7 +1324,7 @@ mod tests {
             (0..collect::SUMMARY_MESSAGES + 5)
                 .map(|n| with_id(&format!("${n}"), "Bob", &format!("m{n}"))),
         );
-        let unread = unread_text(&slots, None, &["$read"], 50, &Utc);
+        let unread = unread_text(&slots, &[], None, &["$read"], 50, &Utc);
         assert_eq!(unread.messages, collect::SUMMARY_MESSAGES);
         assert!(unread.cut && unread.known);
         assert!(unread.text.starts_with("[2026-11-20 14:03] Bob: m5\n"));
@@ -1295,6 +1350,7 @@ mod tests {
         let (path, count) = write(
             NewFile::create(&dir, &name).unwrap(),
             || messages.clone().into_iter(),
+            &[],
             Some(AT - 7 * day),
             None,
             "Plans / 2026",
@@ -1328,6 +1384,7 @@ mod tests {
         let (second, _) = write(
             NewFile::create(&dir, &name).unwrap(),
             || messages.clone().into_iter(),
+            &[],
             None,
             Some(Cut::Limit),
             "Plans / 2026",
@@ -1369,11 +1426,70 @@ mod tests {
             message: Some(message),
         };
         let slots = [slot("$1", here), slot("$2", there)];
-        let unread = unread_text(&slots, None, &["$1"], 50, &Utc);
+        let unread = unread_text(&slots, &[], None, &["$1"], 50, &Utc);
         assert_eq!(
             unread.text,
             "[2026-11-20 14:03] bob (@bob:elsewhere.org): there\n"
         );
+    }
+
+    /// A line about someone who wrote nothing loaded (banned, say) and goes by the name
+    /// of one of the room's members, and the member's.
+    fn ban_and_member() -> (Message, Vec<(String, String)>) {
+        let mut ban = said("carol", "bob was banned by carol");
+        ban.kind = crate::model::MsgKind::System;
+        ban.sender_id = Some("@carol:example.org".into());
+        ban.subject = Some(("bob".into(), "@bob:elsewhere.org".into()));
+        let members = vec![
+            ("carol".to_owned(), "@carol:example.org".to_owned()),
+            ("bob".to_owned(), "@bob:example.org".to_owned()),
+        ];
+        (ban, members)
+    }
+
+    /// What is unread counts the room's members too, as the timeline does: whom a
+    /// line is about is named with the ID where a member goes by the same name.
+    #[test]
+    fn unread_tells_apart_whom_a_line_is_about_from_a_member_of_the_same_name() {
+        let (ban, members) = ban_and_member();
+        let slots = [Slot {
+            id: Some("$ban".into()),
+            line: false,
+            message: Some(ban),
+        }];
+        let unread = unread_text(&slots, &members, None, &[], 50, &Utc);
+        assert!(
+            unread
+                .text
+                .contains("] (bob (@bob:elsewhere.org) was banned by carol)\n"),
+            "{}",
+            unread.text
+        );
+    }
+
+    /// An archive counts the room's members too.
+    #[test]
+    fn an_archive_tells_apart_whom_a_line_is_about_from_a_member_of_the_same_name() {
+        let dir = temp("archive-member-namesake");
+        let (ban, members) = ban_and_member();
+        let now = collect::local(&Utc, AT).unwrap();
+        let (path, _) = write(
+            NewFile::create(&dir, "members.md").unwrap(),
+            || std::iter::once(ban.clone()),
+            &members,
+            None,
+            None,
+            "Room",
+            &now,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("bob (@bob:elsewhere.org) was banned by carol"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An archive names two people of one name with their IDs, as the timeline does.
@@ -1385,6 +1501,7 @@ mod tests {
         let (path, _) = write(
             NewFile::create(&dir, "namesakes.md").unwrap(),
             || messages.clone().into_iter(),
+            &[],
             None,
             None,
             "Room",
@@ -1426,6 +1543,7 @@ mod tests {
         let (path, count) = write(
             NewFile::create(&dir, "forged.md").unwrap(),
             || messages.clone().into_iter(),
+            &[],
             Some(AT - 7 * day),
             None,
             "Plans",
@@ -1456,6 +1574,7 @@ mod tests {
             write(
                 NewFile::create(&dir, "Plans.md").unwrap(),
                 || messages.clone().into_iter(),
+                &[],
                 None,
                 None,
                 "Plans",
@@ -1470,6 +1589,7 @@ mod tests {
             write(
                 NewFile::create(&dir, "Plans.md").unwrap(),
                 std::iter::empty,
+                &[],
                 None,
                 None,
                 "Plans",
@@ -1490,6 +1610,7 @@ mod tests {
         let (path, count) = write(
             NewFile::create(&dir, "Plans.md").unwrap(),
             std::iter::empty,
+            &[],
             None,
             None,
             "Plans",
