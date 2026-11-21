@@ -272,8 +272,14 @@ impl Timelines {
         let room = self.room(room_id)?;
         if let Some(root) = &self.thread {
             let timeline = Arc::new(threads::open(&room, root).await?);
-            // One thread at a time stays alive; rooms keep their places.
-            self.cache.retain(|cached| !threads::is_thread(&cached.key));
+            // One thread at a time stays alive besides the one shown; rooms keep their
+            // places. The thread shown is not this one when the UI has not yet heard
+            // that a jump took it to another thread: what it sends meanwhile for the
+            // thread it still shows must not drop the one its forwarder watches (the
+            // next command for it would open a second timeline of it).
+            let shown = &self.shown;
+            self.cache
+                .retain(|cached| !threads::is_thread(&cached.key) || shown.contains(&cached.key));
             self.keep(key, timeline.clone());
             return Ok(timeline);
         }
@@ -2962,6 +2968,138 @@ mod tests {
         .await
         .expect("reopening the cached thread shows the root immediately");
         assert_eq!(relations_hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// The thread shown is never dropped from the cache for another thread. A command for
+    /// a thread other than the one shown comes when the UI has not yet heard that a jump
+    /// to a message took it to another thread: it marks read, or asks for older messages,
+    /// in the thread it still shows. The thread jumped to keeps its timeline (the one its
+    /// forwarder watches); a thread not shown still makes room for the next one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_for_another_thread_keeps_the_shown_thread() {
+        use std::sync::Arc;
+
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+        use matrix_sdk::authentication::SessionTokens;
+        use matrix_sdk::authentication::matrix::MatrixSession;
+        use matrix_sdk::{AuthSession, Client, SessionMeta};
+        use serde_json::json;
+
+        let room = "!threads:localhost";
+        let roots = [
+            "$root-a:localhost",
+            "$root-b:localhost",
+            "$root-c:localhost",
+        ];
+        let [a, b, c] = roots;
+        let event = |root: &str| {
+            json!({
+                "type": "m.room.message",
+                "room_id": room,
+                "event_id": root,
+                "sender": fake::ME,
+                "origin_server_ts": 1_000,
+                "content": { "msgtype": "m.text", "body": "a thread starts here" }
+            })
+        };
+        let mut joined = fake::joined(false, vec![]);
+        joined["timeline"]["events"] = json!(roots.map(event));
+        let events_json = roots.map(|root| (root.to_owned(), event(root).to_string()));
+        let server = fake::Server::answering(
+            json!({ "join": { room: joined } }),
+            Box::new(move |request| {
+                if request.path.contains("/relations/") {
+                    return Some(fake::Reply::Json(r#"{"chunk":[]}"#.to_owned()));
+                }
+                if request.path.contains("/event/") {
+                    let (_, json) = events_json.iter().find(|(root, _)| {
+                        let name = root.trim_start_matches('$').split(':').next();
+                        name.is_some_and(|name| request.path.contains(name))
+                    })?;
+                    return Some(fake::Reply::Json(json.clone()));
+                }
+                None
+            }),
+        )
+        .await;
+        let client = Client::builder()
+            .homeserver_url(&server.url)
+            .with_threading_support(super::threads::SUPPORT)
+            .build()
+            .await
+            .unwrap();
+        client
+            .restore_session(AuthSession::Matrix(MatrixSession {
+                meta: SessionMeta {
+                    user_id: fake::ME.try_into().unwrap(),
+                    device_id: "FAKE".into(),
+                },
+                tokens: SessionTokens {
+                    access_token: "token".into(),
+                    refresh_token: None,
+                },
+            }))
+            .await
+            .unwrap();
+        client.event_cache().subscribe().unwrap();
+        client.sync_once(SyncSettings::default()).await.unwrap();
+
+        let (event_tx, _events) = tokio::sync::mpsc::unbounded_channel::<MatrixEvent>();
+        let (_ignored_tx, ignored) = tokio::sync::watch::channel(super::IgnoredSet::default());
+        let (_own_refresh_tx, own_refresh) = tokio::sync::watch::channel(0);
+        let mut timelines = super::Timelines::new(
+            client,
+            event_tx,
+            ignored,
+            own_refresh,
+            crate::matrix::people::OwnRoomNames::default(),
+            LeftRooms::default(),
+        );
+        let in_thread = |root: &str| MatrixCmd::InThread {
+            root: root.to_owned(),
+            command: Box::new(MatrixCmd::MarkRead {
+                room_id: room.to_owned(),
+                public: false,
+            }),
+        };
+        let threads = |timelines: &super::Timelines| -> Vec<String> {
+            let keys = timelines.cache.iter().map(|cached| cached.key.clone());
+            keys.filter(|key| super::threads::is_thread(key)).collect()
+        };
+        let timeline_of = |timelines: &super::Timelines, root: &str| {
+            let key = super::threads::key(room, Some(root));
+            let cached = timelines.cache.iter().find(|cached| cached.key == key);
+            cached.map(|cached| cached.timeline.clone())
+        };
+        let key = |root: &str| super::threads::key(room, Some(root));
+
+        // Thread B is what is shown now (as after the jump); the UI still shows A.
+        timelines
+            .handle(MatrixCmd::OpenThread {
+                room_id: room.to_owned(),
+                root: b.to_owned(),
+                generation: 1,
+            })
+            .await;
+        let shown = timeline_of(&timelines, b).expect("the thread shown is cached");
+        timelines.handle(in_thread(a)).await;
+        assert_eq!(threads(&timelines), [key(b), key(a)]);
+        // The UI hears of the jump: B's commands go to the timeline B was shown with.
+        timelines.handle(in_thread(b)).await;
+        let now = timeline_of(&timelines, b).expect("the thread shown is still cached");
+        assert!(
+            Arc::ptr_eq(&shown, &now),
+            "the thread shown was opened anew"
+        );
+
+        // One more thread that is not shown takes the place of the one before it.
+        timelines.handle(in_thread(c)).await;
+        assert_eq!(threads(&timelines), [key(b), key(c)]);
+        let now = timeline_of(&timelines, b).expect("the thread shown is still cached");
+        assert!(Arc::ptr_eq(&shown, &now));
+        drop(server);
     }
 
     #[test]
