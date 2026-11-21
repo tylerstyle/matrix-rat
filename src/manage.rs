@@ -1266,6 +1266,183 @@ impl std::fmt::Debug for SpaceRef {
     }
 }
 
+/// The rows the room-info popup can move through, shared so drawing does not copy them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InfoRows(std::sync::Arc<[InfoRow]>);
+
+impl std::ops::Deref for InfoRows {
+    type Target = [InfoRow];
+
+    fn deref(&self) -> &[InfoRow] {
+        &self.0
+    }
+}
+
+impl<const N: usize> PartialEq<[InfoRow; N]> for InfoRows {
+    fn eq(&self, other: &[InfoRow; N]) -> bool {
+        &*self.0 == other.as_slice()
+    }
+}
+
+impl<const N: usize> PartialEq<&[InfoRow; N]> for InfoRows {
+    fn eq(&self, other: &&[InfoRow; N]) -> bool {
+        &*self.0 == other.as_slice()
+    }
+}
+
+impl PartialEq<[InfoRow]> for InfoRows {
+    fn eq(&self, other: &[InfoRow]) -> bool {
+        &*self.0 == other
+    }
+}
+
+impl PartialEq<&[InfoRow]> for InfoRows {
+    fn eq(&self, other: &&[InfoRow]) -> bool {
+        &*self.0 == *other
+    }
+}
+
+impl PartialEq<Vec<InfoRow>> for InfoRows {
+    fn eq(&self, other: &Vec<InfoRow>) -> bool {
+        &*self.0 == other.as_slice()
+    }
+}
+
+pub struct InfoRowsIter {
+    rows: std::sync::Arc<[InfoRow]>,
+    index: usize,
+}
+
+impl Iterator for InfoRowsIter {
+    type Item = InfoRow;
+
+    fn next(&mut self) -> Option<InfoRow> {
+        let item = self.rows.get(self.index).copied()?;
+        self.index += 1;
+        Some(item)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.rows.len().saturating_sub(self.index);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for InfoRowsIter {}
+
+impl IntoIterator for InfoRows {
+    type Item = InfoRow;
+    type IntoIter = InfoRowsIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        InfoRowsIter {
+            rows: self.0,
+            index: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RowsKey {
+    pending: bool,
+    space: bool,
+    can_add_to_space: bool,
+    in_space: bool,
+    settings_open: bool,
+    filter: String,
+    details_rev: u64,
+    details_present: bool,
+    notify: bool,
+    can_rename: bool,
+    can_set_topic: bool,
+    can_invite: bool,
+    knocks: usize,
+    children: Option<usize>,
+    members_ptr: usize,
+    members_len: usize,
+}
+
+impl RowsKey {
+    fn from_popup(popup: &InfoPopup) -> Self {
+        let (
+            details_present,
+            notify,
+            can_rename,
+            can_set_topic,
+            can_invite,
+            knocks,
+            children,
+            members_ptr,
+            members_len,
+        ) = match &popup.details {
+            Some(d) => (
+                true,
+                d.notify.is_some(),
+                d.can_rename,
+                d.can_set_topic,
+                d.can_invite,
+                d.knock_requests.len(),
+                d.space.as_ref().map(|s| s.children.len()),
+                d.members.as_ptr() as usize,
+                d.members.len(),
+            ),
+            None => (false, false, false, false, false, 0, None, 0, 0),
+        };
+        Self {
+            pending: popup.pending(),
+            space: popup.space,
+            can_add_to_space: popup.can_add_to_space,
+            in_space: popup.in_space.is_some(),
+            settings_open: popup.settings_open,
+            filter: popup.filter.as_str().to_owned(),
+            details_rev: popup.details_rev,
+            details_present,
+            notify,
+            can_rename,
+            can_set_topic,
+            can_invite,
+            knocks,
+            children,
+            members_ptr,
+            members_len,
+        }
+    }
+
+    fn matches(&self, popup: &InfoPopup) -> bool {
+        if self.pending != popup.pending()
+            || self.space != popup.space
+            || self.can_add_to_space != popup.can_add_to_space
+            || self.in_space != popup.in_space.is_some()
+            || self.settings_open != popup.settings_open
+            || self.details_rev != popup.details_rev
+            || self.filter != popup.filter.as_str()
+        {
+            return false;
+        }
+        match &popup.details {
+            Some(d) => {
+                self.details_present
+                    && self.notify == d.notify.is_some()
+                    && self.can_rename == d.can_rename
+                    && self.can_set_topic == d.can_set_topic
+                    && self.can_invite == d.can_invite
+                    && self.knocks == d.knock_requests.len()
+                    && self.children == d.space.as_ref().map(|s| s.children.len())
+                    && self.members_ptr == d.members.as_ptr() as usize
+                    && self.members_len == d.members.len()
+            }
+            None => !self.details_present,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CachedRows {
+    key: RowsKey,
+    rows: InfoRows,
+    builds: u64,
+}
+
 #[derive(Clone)]
 pub struct InfoPopup {
     pub room_id: String,
@@ -1311,6 +1488,10 @@ pub struct InfoPopup {
     pub pending: Option<Pending>,
     /// A row to select once it is there: some only exist when the details are in.
     pub wanted: Option<InfoRow>,
+    /// Counts replacements of the room details so the row list knows when to rebuild.
+    details_rev: u64,
+    /// The popup's rows as last built, kept until one of their inputs changes.
+    rows_cache: std::cell::RefCell<Option<CachedRows>>,
 }
 
 /// Hand-written: which room, names and topics stay out of logs.
@@ -1349,6 +1530,8 @@ impl InfoPopup {
             busy: None,
             pending: None,
             wanted: None,
+            details_rev: 0,
+            rows_cache: std::cell::RefCell::new(None),
         }
     }
 
@@ -1462,8 +1645,33 @@ impl InfoPopup {
     }
 
     /// The selectable rows, top to bottom: what can be done, then the members that
-    /// pass the filter.
-    pub fn rows(&self) -> Vec<InfoRow> {
+    /// pass the filter. Rebuilt only when one of those inputs changes.
+    pub fn rows(&self) -> InfoRows {
+        let mut slot = self.rows_cache.borrow_mut();
+        if let Some(cached) = slot.as_ref()
+            && cached.key.matches(self)
+        {
+            return cached.rows.clone();
+        }
+        let builds = slot.as_ref().map_or(0, |cached| cached.builds) + 1;
+        let rows = InfoRows(self.compute_rows().into());
+        *slot = Some(CachedRows {
+            key: RowsKey::from_popup(self),
+            rows: rows.clone(),
+            builds,
+        });
+        rows
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rows_build_count(&self) -> u64 {
+        self.rows_cache
+            .borrow()
+            .as_ref()
+            .map_or(0, |cached| cached.builds)
+    }
+
+    fn compute_rows(&self) -> Vec<InfoRow> {
         let mut rows = Vec::new();
         if !self.pending() {
             // A space is not in the room list and has no messages of its own.
@@ -1511,19 +1719,27 @@ impl InfoPopup {
             }
         }
         if let Some(details) = &self.details {
-            let needle = self.filter.to_lowercase();
-            rows.extend(
-                details
-                    .members
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, member)| {
-                        needle.is_empty()
-                            || member.name.to_lowercase().contains(&needle)
-                            || member.user_id.to_lowercase().contains(&needle)
-                    })
-                    .map(|(index, _)| InfoRow::Member(index)),
-            );
+            if self.filter.is_empty() {
+                rows.extend((0..details.members.len()).map(InfoRow::Member));
+            } else {
+                let needle = self.filter.to_lowercase();
+                let mut lower_buf = String::new();
+                let mut matches_needle = |s: &str| {
+                    lower_buf.clear();
+                    if s.is_ascii() {
+                        lower_buf.push_str(s);
+                        lower_buf.make_ascii_lowercase();
+                    } else {
+                        lower_buf.push_str(&s.to_lowercase());
+                    }
+                    lower_buf.contains(&needle)
+                };
+                for (index, member) in details.members.iter().enumerate() {
+                    if matches_needle(&member.name) || matches_needle(&member.user_id) {
+                        rows.push(InfoRow::Member(index));
+                    }
+                }
+            }
         }
         rows
     }
@@ -1656,6 +1872,7 @@ impl InfoPopup {
             .map(|child| child.room_id.clone());
         self.name.clone_from(&details.name);
         self.details = Some(details);
+        self.details_rev = self.details_rev.wrapping_add(1);
         // A question about someone who is gone, or whom we may no longer remove, is
         // withdrawn; so is an edit we no longer have the right to make.
         let details = self.details.as_ref().expect("just set");
@@ -2904,5 +3121,77 @@ mod tests {
         popup.set_details(now_enc);
         assert!(popup.setting_view.is_none());
         assert!(popup.notice.is_some());
+    }
+
+    #[test]
+    fn info_rows_are_cached_until_inputs_change() {
+        let mut popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Room);
+        popup.set_details(details(&[
+            ("Alice", false),
+            ("Bob", false),
+            ("Übung", false),
+        ]));
+        let base_builds = popup.rows_build_count();
+
+        // Repeated reads and navigation within unchanged state must not recompute rows.
+        let first = popup.rows();
+        let _ = popup.current();
+        let _ = popup.selected_member();
+        let _ = popup.typing_blind();
+        popup.step(1);
+        popup.step(-1);
+        let second = popup.rows();
+        assert_eq!(first, second);
+        assert_eq!(popup.rows_build_count(), base_builds);
+
+        // Changing the filter recomputes once and matches Unicode case-insensitively.
+        popup.set_filter("üb".into());
+        assert_eq!(popup.rows_build_count(), base_builds + 1);
+        assert_eq!(popup.selected_member().unwrap().name, "Übung");
+        assert_eq!(popup.rows_build_count(), base_builds + 1);
+
+        // Direct field mutation on settings_open invalidates the cache on next read.
+        popup.settings_open = true;
+        assert!(
+            popup
+                .rows()
+                .iter()
+                .any(|row| matches!(row, InfoRow::Setting(_)))
+        );
+        assert_eq!(popup.rows_build_count(), base_builds + 2);
+        let _ = popup.rows();
+        assert_eq!(popup.rows_build_count(), base_builds + 2);
+
+        // Updating space context rebuilds once.
+        popup.set_space_context(
+            Some(SpaceRef {
+                id: "!s:example.org".into(),
+                name: "Space".into(),
+                can_edit: true,
+            }),
+            true,
+        );
+        assert!(popup.rows().contains(&InfoRow::AddToSpace));
+        assert!(popup.rows().contains(&InfoRow::RemoveFromSpace));
+        assert_eq!(popup.rows_build_count(), base_builds + 3);
+
+        // Replacing details with the same member count still invalidates via details_rev.
+        popup.set_filter(String::new());
+        let before_details = popup.rows_build_count();
+        popup.set_details(details(&[("Zoe", false), ("Yara", false), ("Xan", false)]));
+        assert_eq!(popup.rows_build_count(), before_details + 1);
+
+        // Switching kind to pending invalidates and drops joined-only action rows.
+        assert!(popup.set_kind(RoomKind::Invite));
+        assert_eq!(
+            popup.rows(),
+            [
+                InfoRow::Leave,
+                InfoRow::Member(0),
+                InfoRow::Member(1),
+                InfoRow::Member(2),
+            ]
+        );
+        assert_eq!(popup.rows_build_count(), before_details + 2);
     }
 }
