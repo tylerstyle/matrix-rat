@@ -1,0 +1,38 @@
+# A weekly update of the dependencies, grouped: one pull request for the compatible
+# updates of the week (minor and patch), one per update that breaks the API (major).
+# The checks of checks.yml (cargo deny) run on each of them.
+#
+# The matrix-sdk crates are pinned to an exact version (see AGENTS.md: minor releases
+# break APIs) and are updated by hand, with the code that the new version needs.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "Dependencies"
+    ignore:
+      - dependency-name: "matrix-sdk*"
+    groups:
+      compatible:
+        update-types: [minor, patch]
+
+  # The actions are pinned to exact commits (a tag can be moved, a commit cannot):
+  # the update moves the pin and its version comment together.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    commit-message:
+      prefix: "Actions"
+    groups:
+      actions:
+        patterns: ["*"]

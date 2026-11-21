@@ -226,7 +226,8 @@ numbers to hold its findings against.
   local fixes by agy, anything in encryption, sync or the agent channel by matrix-claude.
 - **With the review:** the rest of the lints that enforce our rules (forbid wildcard match
   arms on our own enums through clippy's configuration) and a weekly grouped dependency
-  update.
+  update (`.github/dependabot.yml`, 2026-11-21: compatible updates grouped weekly, majors
+  one by one, the matrix-sdk crates by hand; it starts with the first push after 1.0).
 
 ### 6.3 Later, after 1.0.0 or by demand
 
