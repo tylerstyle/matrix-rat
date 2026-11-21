@@ -14,6 +14,7 @@
 //! watched rooms and of running requests is bounded.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures::{FutureExt, StreamExt, pin_mut};
 use matrix_sdk::deserialized_responses::{DeviceLinkProblem, VerificationLevel, VerificationState};
 use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
-use matrix_sdk::ruma::{RoomId, UserId};
+use matrix_sdk::ruma::{EventId, RoomId, UserId};
 use matrix_sdk::{Client, Room, RoomState};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{
@@ -539,7 +540,8 @@ async fn watch_room(
 /// confirmed has no id yet and is left out until it has one. Deleted and unreadable
 /// messages are told as such. Everything is cleaned for a terminal and bounded; a
 /// message whose own id or whose sender's id cannot be handed out as it is, is left
-/// out (an id is never cut or changed).
+/// out (an id is never cut or changed). Each message is told once, also when the
+/// timeline shows it twice (see [`events_once`]).
 pub(super) fn messages(
     items: &Vector<Arc<TimelineItem>>,
     own: &UserId,
@@ -547,8 +549,8 @@ pub(super) fn messages(
 ) -> Vec<Msg> {
     let now = chrono::Local::now();
     let mut left_out = 0usize;
-    let messages = items
-        .iter()
+    let messages = events_once(items)
+        .into_iter()
         .filter_map(|item| {
             let event = item.as_event()?;
             let event_id = event.event_id()?;
@@ -597,6 +599,30 @@ pub(super) fn messages(
         );
     }
     messages
+}
+
+/// The events among `items`, each once: where its first copy stands, as its last copy
+/// has it. When a batch of events reaches a timeline while matrix-sdk-ui 0.19 builds
+/// it, the timeline can show the batch twice, and what happens to those events later
+/// (an edit, a deletion, a decryption) reaches only the trailing copy; the app keeps
+/// them the same way (`convert::EventDedup`). Told twice, the stale copy would pass
+/// for a message changed back, and the trailing one for a message that is new.
+fn events_once(items: &Vector<Arc<TimelineItem>>) -> Vec<&TimelineItem> {
+    let mut events: Vec<&TimelineItem> = Vec::new();
+    let mut at: HashMap<&EventId, usize> = HashMap::new();
+    for item in items {
+        let Some(event_id) = item.as_event().and_then(|event| event.event_id()) else {
+            continue;
+        };
+        match at.entry(event_id) {
+            Entry::Occupied(first) => events[*first.get()] = item,
+            Entry::Vacant(first) => {
+                first.insert(events.len());
+                events.push(item);
+            }
+        }
+    }
+    events
 }
 
 /// The strict judgement of who sent a message: why it cannot be taken as written by
@@ -1038,6 +1064,98 @@ mod tests {
                 assert!(!path.contains(forbidden), "{forbidden} in {asked:?}");
             }
         }
+    }
+
+    /// The items of a timeline of a room that holds the texts `said` (each an event id
+    /// and what it says, all by the account itself), as the SDK shows them.
+    async fn shown(said: &[(&str, &str)]) -> Vector<Arc<TimelineItem>> {
+        use matrix_sdk::authentication::SessionTokens;
+        use matrix_sdk::authentication::matrix::MatrixSession;
+        use matrix_sdk::config::SyncSettings;
+        use serde_json::json;
+
+        use crate::matrix::spaces::fake;
+
+        const ROOM: &str = "!said:localhost";
+        let create = json!({ "creator": fake::ME, "room_version": "10" });
+        let events: Vec<_> = said
+            .iter()
+            .zip(10u64..)
+            .map(|((id, body), at)| {
+                json!({
+                    "type": "m.room.message", "event_id": id, "sender": fake::ME,
+                    "origin_server_ts": at,
+                    "content": { "msgtype": "m.text", "body": body },
+                })
+            })
+            .collect();
+        let room = json!({
+            "state": { "events": [
+                fake::state("m.room.create", "", create),
+                fake::state("m.room.member", fake::ME, json!({ "membership": "join" })),
+            ] },
+            "timeline": { "events": events, "limited": false },
+        });
+        let server = fake::Server::start(json!({ "join": { ROOM: room } })).await;
+        let client = Client::builder()
+            .homeserver_url(&server.url)
+            .build()
+            .await
+            .unwrap();
+        client
+            .restore_session(matrix_sdk::AuthSession::Matrix(MatrixSession {
+                meta: matrix_sdk::SessionMeta {
+                    user_id: fake::ME.try_into().unwrap(),
+                    device_id: "FAKE".into(),
+                },
+                tokens: SessionTokens {
+                    access_token: "token".into(),
+                    refresh_token: None,
+                },
+            }))
+            .await
+            .unwrap();
+        // Before the sync, so that the room's events reach its timeline.
+        client.event_cache().subscribe().unwrap();
+        client.sync_once(SyncSettings::default()).await.unwrap();
+        let room = client.get_room(<&RoomId>::try_from(ROOM).unwrap()).unwrap();
+        let timeline = open(&room).await.unwrap();
+        for _ in 0..500 {
+            let items = timeline.items().await;
+            let there = said.iter().all(|(id, _)| {
+                items.iter().any(|item| {
+                    item.as_event()
+                        .and_then(|event| event.event_id())
+                        .is_some_and(|event_id| event_id.as_str() == *id)
+                })
+            });
+            if there {
+                return items;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the messages did not show within five seconds");
+    }
+
+    #[tokio::test]
+    async fn a_message_the_timeline_shows_twice_is_told_once_as_it_is_now() {
+        let before = shown(&[("$a", "first"), ("$b", "as it was")]).await;
+        let after = shown(&[("$a", "first"), ("$b", "as it is now")]).await;
+        // A batch shown twice, where only the trailing copy heard of the change.
+        let mut items = before;
+        items.extend(
+            after
+                .iter()
+                .filter(|item| item.as_event().is_some())
+                .cloned(),
+        );
+        let own = UserId::parse(crate::matrix::spaces::fake::ME).unwrap();
+        let told = messages(&items, &own, &IgnoredSet::default());
+        let told: Vec<_> = told
+            .iter()
+            .map(|message| (message.event_id.as_str(), message.body.as_str()))
+            .collect();
+        assert_eq!(told, [("$a", "first"), ("$b", "as it is now")]);
     }
 
     // ----- against a real homeserver ----------------------------------------------------
