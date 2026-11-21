@@ -3973,8 +3973,10 @@ impl App {
             .map(|room| room.id.clone());
         // Rooms arrive in batches. If all we could show so far was a pending invite or
         // knock, look again: a real conversation is the better default.
+        let mut switched_from_pending = false;
         if self.auto_opened && self.room().is_some_and(|room| room.is_pending()) {
             open_id = None;
+            switched_from_pending = true;
         }
         let cursor_id = self
             .cursor_room()
@@ -4117,6 +4119,25 @@ impl App {
                         self.restore_room_marks(&id);
                     } else {
                         self.clear_completion_marks();
+                    }
+                } else if switched_from_pending {
+                    // Auto-switched off a pending invite or knock: restore the newly
+                    // opened room's draft when nothing was typed yet, never silently
+                    // drop early-typed text (leave both the composer and `room.draft`
+                    // intact if both are non-empty), and clear the composer when no
+                    // rooms remain.
+                    match self.rooms.get_mut(self.active) {
+                        Some(room) if self.composer.is_empty() => {
+                            let draft = std::mem::take(&mut room.draft);
+                            let id = room.id.clone();
+                            self.composer.set_text(&draft);
+                            self.restore_room_marks(&id);
+                        }
+                        Some(_) => {}
+                        None => {
+                            self.composer.set_text("");
+                            self.clear_completion_marks();
+                        }
                     }
                 }
                 self.begin_unread_line();
@@ -7799,6 +7820,67 @@ mod tests {
             summary("!b", "Beta", RoomCategory::Room, 0),
         ]));
         assert_eq!(app.rooms[app.active].id, "!i");
+    }
+
+    #[test]
+    fn auto_switch_from_pending_restores_draft_and_clears_when_empty() {
+        let (mut app, _terminal) = drawn();
+        let (handle, _commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        // Two pending rooms arrive; the first is auto-opened.
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!i");
+        // If the second room has a draft and becomes joined, auto-switching to it
+        // restores that draft instead of leaving it stranded on Room::draft.
+        app.rooms[1].draft = "for k".to_owned();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!k");
+        assert_eq!(app.composer.text(), "for k");
+        assert!(app.rooms[app.active].draft.is_empty());
+
+        // When early text was typed AND the auto-opened room already has its own draft,
+        // keep the typed text in the composer and keep the room's draft intact.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!i");
+        type_text(&mut app, "typed early");
+        app.rooms[1].draft = "for k".to_owned();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!k");
+        assert_eq!(app.composer.text(), "typed early");
+        assert_eq!(app.rooms[app.active].draft, "for k");
+
+        // If the sole auto-opened pending invite vanishes, stale composer text is cleared.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!i",
+            "Invited",
+            RoomCategory::Invite,
+            0,
+        )]));
+        assert_eq!(app.rooms[app.active].id, "!i");
+        type_text(&mut app, "stale text");
+        app.on_matrix(MatrixEvent::Rooms(vec![]));
+        assert!(app.rooms.is_empty());
+        assert!(
+            app.composer.is_empty(),
+            "vanishing auto-opened pending room must clear the composer"
+        );
     }
 
     #[test]
