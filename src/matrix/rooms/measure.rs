@@ -25,7 +25,7 @@ use crate::matrix::spaces::fake;
 use crate::measure::{Times, grew, heap_in_use, mb, time_runs};
 use crate::model::Message;
 
-const ROOM: &str = "!measure:localhost";
+pub(super) const ROOM: &str = "!measure:localhost";
 /// The word only the sample room's last message has (see [`wait_indexed`]).
 const MARKER: &str = "zebrafinish";
 /// Runs of each timed step (after one to warm up).
@@ -170,7 +170,7 @@ fn people(rng: &mut Lcg) -> Vec<(String, String)> {
 /// - 60% carry `m.mentions` as current clients send it, 5% mention someone;
 /// - 15% have reactions: one to three emoji, from one to four people each;
 /// - 10% are our own; read receipts of 20 people on the last 60.
-fn sample_room(messages: usize) -> Value {
+pub(super) fn sample_room(messages: usize) -> Value {
     let people = people(&mut Lcg(0x5eed));
     let mut state = vec![json!({
         "type": "m.room.create", "state_key": "", "sender": fake::ME,
@@ -361,7 +361,7 @@ async fn wait_indexed(room: &matrix_sdk::Room) {
 
 /// A client of `server`, signed in as `ME`, with the event cache subscribed to (as the
 /// app has it) and synced once; and the sample room.
-async fn client_of(
+pub(super) async fn client_of(
     server: &fake::Server,
     search: SearchIndexStoreKind,
 ) -> (Client, matrix_sdk::Room) {
@@ -396,6 +396,7 @@ async fn client_of(
 struct Forward {
     readers: super::super::receipts::Names,
     dedup: super::super::convert::EventDedup,
+    reuse: super::super::convert::Reuse,
     own_room_names: super::super::people::OwnRoomNames,
     ignored: tokio::sync::watch::Receiver<super::IgnoredSet>,
     _ignored_tx: tokio::sync::watch::Sender<super::IgnoredSet>,
@@ -408,6 +409,7 @@ impl Forward {
         Self {
             readers: Default::default(),
             dedup: Default::default(),
+            reuse: Default::default(),
             own_room_names: Default::default(),
             ignored,
             _ignored_tx,
@@ -428,6 +430,7 @@ impl Forward {
             &self.own_room_names,
             &mut self.readers,
             &mut self.dedup,
+            &mut self.reuse,
         )
         .await
     }
@@ -479,7 +482,7 @@ async fn time_async<T>(mut step: impl AsyncFnMut() -> T) -> Times {
 /// `MAXIMUM_NUMBER_OF_INITIAL_ITEMS`). Pages back over exactly what is loaded already, so
 /// nothing is asked of the server, and gives all of it, as the app's `forward` has it
 /// once the room has been scrolled to the top.
-async fn show_all(timeline: &Timeline) -> Vector<Arc<TimelineItem>> {
+pub(super) async fn show_all(timeline: &Timeline) -> Vector<Arc<TimelineItem>> {
     let all = timeline.items().await.len();
     let mut hidden = all.saturating_sub(timeline.subscribe().await.0.len());
     while hidden > 0 {
@@ -513,7 +516,8 @@ fn per(bytes: i64, count: usize) -> f64 {
 /// The worker's side of an open room of 5000 messages: what its live timeline and the
 /// SDK's event cache hold per message, what is given back when no timeline is kept
 /// (the event cache shrinks to its last chunk), and what one change of the timeline
-/// costs `forward` (it converts every item, every time).
+/// costs `forward`: with nothing kept from before, and when one item changed (it makes
+/// again only the messages of items that changed, and copies the others).
 #[tokio::test]
 #[ignore = "a measurement: run alone and in release, see crate::measure"]
 async fn measure_worker_cost_of_an_open_room() {
@@ -566,11 +570,61 @@ async fn measure_worker_cost_of_an_open_room() {
     let convert = time_runs(RUNS, || {
         std::hint::black_box(super::super::convert::convert(&items, &own, &ignored));
     });
-    println!("[per change] convert of all items: {convert}");
-    let prepare = time_async(async || forward.prepare(room, &items).await).await;
-    println!("[per change] prepare_messages (convert, own name, receipts, dedup): {prepare}");
-    let change = time_async(async || forward.on_change(room, &items).await).await;
-    println!("[per change] all of forward's work on one change: {change}");
+    println!("[per change] convert of all items, every message made afresh: {convert}");
+    // Nothing made before to use again: the first change, and the first after a reset,
+    // or after the ignore list or the day changed.
+    let first = time_async(async || {
+        forward.reuse.forget();
+        forward.prepare(room, &items).await
+    })
+    .await;
+    println!(
+        "[per change] prepare_messages (convert, own name, receipts, dedup), nothing kept: {first}"
+    );
+    // One item changed, as the SDK changes one for an edit, a reaction, a receipt: a
+    // new `Arc` in its place (with the same content here, which costs as much). A
+    // different event every time, spread over the room.
+    let events: Vec<usize> = (0..items.len())
+        .filter(|&at| items[at].as_event().is_some())
+        .collect();
+    let mut changed = items.clone();
+    let mut next = 0;
+    let mut change_one = || {
+        next = (next + 997) % events.len();
+        let at = events[next];
+        let item = TimelineItem::clone(&changed[at]);
+        changed.set(at, Arc::new(item));
+        changed.clone()
+    };
+    let reuse_one = time_runs(RUNS, || {
+        let changed = change_one();
+        std::hint::black_box(forward.reuse.convert(&changed, &own, &ignored));
+    });
+    println!("[per change] Reuse::convert, one item changed: {reuse_one}");
+    let one = time_async(async || {
+        let changed = change_one();
+        forward.prepare(room, &changed).await
+    })
+    .await;
+    println!("[per change] prepare_messages, one item changed: {one}");
+    let unchanged = time_async(async || forward.prepare(room, &items).await).await;
+    println!("[per change] prepare_messages, nothing changed: {unchanged}");
+    let change = time_async(async || {
+        let changed = change_one();
+        forward.on_change(room, &changed).await
+    })
+    .await;
+    println!("[per change] all of forward's work on one change (one item changed): {change}");
+    // What is kept to be used again: a message per event item.
+    forward.reuse.forget();
+    let h_kept = heap_in_use();
+    drop(forward.reuse.convert(&items, &own, &ignored));
+    let kept = grew(h_kept, heap_in_use());
+    println!(
+        "[reuse] kept for the next change: {:+.2} MB ({:.0} B/message)",
+        mb(kept as f64),
+        per(kept, events.len())
+    );
 
     // What the messages sent to the UI hold, and what replacing them costs there.
     let h3 = heap_in_use();
@@ -827,14 +881,18 @@ async fn messages_are_made_without_room_to_spare() {
     let timeline = super::room_timeline(&fixture.room).await.unwrap();
     let items = show_all(&timeline).await;
     let own = fixture.room.own_user_id().to_owned();
-    let messages = super::super::convert::convert(&items, &own, &HashSet::new());
-    assert!(messages.len() >= 300, "{}", messages.len());
-    assert!(
-        messages.capacity() <= items.len(),
-        "room for {} messages, {} items",
-        messages.capacity(),
-        items.len()
-    );
+    let mut reuse = super::super::convert::Reuse::default();
+    // Made afresh, and with every message used again.
+    for _ in 0..2 {
+        let messages = reuse.convert(&items, &own, &HashSet::new());
+        assert!(messages.len() >= 300, "{}", messages.len());
+        assert!(
+            messages.capacity() <= items.len(),
+            "room for {} messages, {} items",
+            messages.capacity(),
+            items.len()
+        );
+    }
 }
 
 /// The sample room is what it says: as many lines as messages, with the mix's parts.
@@ -986,7 +1044,7 @@ fn event_id(message: &Message) -> Option<&str> {
 
 /// Not a measurement: a burst of new messages in the open room (one sync with many)
 /// reaches the interface in fewer snapshots than messages, and the last one has them
-/// all, newest last. (`forward` converts the whole timeline for every snapshot.) It
+/// all, newest last. (`forward` sends the whole timeline with every snapshot.) It
 /// pins the outcome, not how it comes about: one sync is likely one diff batch anyway.
 /// That `forward` needs no batching of its own rests on matrix-sdk-ui 0.19.1's subscriber
 /// merging every diff waiting at each poll; `measure_snapshots_of_bursts` shows it (126
@@ -1009,8 +1067,8 @@ async fn a_burst_of_messages_reaches_the_interface_in_fewer_snapshots() {
     drop(server);
 }
 
-/// How many snapshots `forward` sends the interface (each a conversion of the whole
-/// timeline: 9 ms at 5000 messages) for news that comes in bursts: syncs right after
+/// How many snapshots `forward` sends the interface (each the whole timeline: 9 ms at
+/// 5000 messages while every message was made afresh) for news that comes in bursts: syncs right after
 /// one another, each with new messages, and paging back over a room of 5000 messages a
 /// page at a time, as scrolling to the top does.
 #[tokio::test(flavor = "multi_thread")]

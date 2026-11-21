@@ -1,5 +1,6 @@
 //! Turning SDK timeline items into what the UI shows.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, BuildHasherDefault, Hasher, RandomState};
 use std::sync::Arc;
@@ -23,36 +24,217 @@ use crate::model::{
 };
 use crate::text::{sanitize, sanitize_line};
 
+/// The messages of `items`, every one made afresh: what [`Reuse::convert`] gives too,
+/// which the worker uses. For tests and measurements.
+#[cfg(test)]
 pub fn convert(
     items: &Vector<Arc<TimelineItem>>,
     own: &UserId,
     ignored: &HashSet<OwnedUserId>,
 ) -> Vec<Message> {
-    let now = Local::now();
+    convert_at(items, own, ignored, &Local::now())
+}
+
+/// [`convert`] as it is at `now`.
+#[cfg(test)]
+pub(super) fn convert_at(
+    items: &Vector<Arc<TimelineItem>>,
+    own: &UserId,
+    ignored: &HashSet<OwnedUserId>,
+    now: &DateTime<Local>,
+) -> Vec<Message> {
     let last = items.len().saturating_sub(1);
     // Room for every item, made once: collected from a `filter_map`, the list grew by
     // doubling, and the interface keeps this very list, with up to as many unused
     // messages again (784 bytes each) for every room it has shown.
     let mut messages = Vec::with_capacity(items.len());
-    messages.extend(items.iter().enumerate().filter_map(|(index, item)| {
-        let id = item.unique_id().0.clone();
-        if let Some(event) = item.as_event() {
-            return event_message(id, event, own, ignored, &now);
-        }
-        // Keep a trailing `ReadMarker` too when every item after it was
-        // hidden/ignored so the UI knows no visible unread messages follow it.
-        // Day separators are derived from the messages' own dates.
-        if matches!(item.as_virtual()?, VirtualTimelineItem::ReadMarker) && index < last {
-            Some(Message {
-                id,
-                kind: MsgKind::ReadMarker,
-                ..Message::default()
-            })
-        } else {
-            None
-        }
-    }));
+    messages.extend(
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| match item.as_event() {
+                Some(event) => event_message(item.unique_id().0.clone(), event, own, ignored, now),
+                None => read_marker(item, index == last),
+            }),
+    );
     messages
+}
+
+/// The line of a virtual item, if it has one: the read marker, kept even when every
+/// item after it was hidden or ignored, so the UI knows no visible unread messages
+/// follow it; but not as the very last item. Day separators are derived from the
+/// messages' own dates.
+fn read_marker(item: &TimelineItem, last: bool) -> Option<Message> {
+    (matches!(item.as_virtual()?, VirtualTimelineItem::ReadMarker) && !last).then(|| Message {
+        id: item.unique_id().0.clone(),
+        kind: MsgKind::ReadMarker,
+        ..Message::default()
+    })
+}
+
+/// The messages of a timeline that changes: what was made of each event item is kept
+/// and only what is new or changed is made again. A change of the open room is mostly
+/// one item, and making every message afresh took 9 ms in a room of 5000.
+///
+/// What a message is made from:
+///
+/// - its item. The SDK never changes one: an edit, a reaction, a read receipt, a
+///   decryption, a send state, the details of the message replied to, a sender's
+///   profile or a thread's summary each put a new `Arc<TimelineItem>` in its place
+///   (matrix-sdk-ui 0.19.1: `TimelineItem::with_kind`, `ObservableItems::replace`), and
+///   nothing in an item changes behind a shared reference. What was made is found by
+///   the address of the item and holds the item, so that no other item can be put at
+///   that address while it is kept: the same address is the same item, unchanged.
+/// - whose account it is, whom the user ignores (hidden senders, reaction counts,
+///   votes, quoted replies), and today's date and the local time's offset ("Today",
+///   "Yesterday", the time). These are the same for every message; when one of them
+///   changes, everything is made again.
+/// - for a virtual item, whether it is the last one. Virtual items are not kept: a
+///   read marker costs nothing to make.
+///
+/// What comes after (own name, read receipts, repeated events, threads) works on the
+/// whole list and is done again on every change.
+///
+/// It keeps one message per event item there is (`None` for one not shown): as much
+/// again as the list the interface is sent. Those of items that are gone are let go.
+#[derive(Default)]
+pub(super) struct Reuse {
+    made: HashMap<usize, Made, BuildHasherDefault<Address>>,
+    /// What everything in `made` was made with, besides its item.
+    with: Option<With>,
+    /// Counts the passes; an entry not seen in the last one is of an item that is gone.
+    pass: u64,
+    /// How many messages the last pass made and how many it used again.
+    #[cfg(test)]
+    pub(super) counts: (usize, usize),
+}
+
+/// What [`Reuse`] keeps for one item.
+struct Made {
+    /// Kept so that its address, the key, stays its own.
+    item: Arc<TimelineItem>,
+    /// `None` for an item that is not shown. Boxed: a hash table has room for more
+    /// entries than it holds, and a message is large.
+    message: Option<Box<Message>>,
+    pass: u64,
+}
+
+/// What every message [`Reuse`] keeps was made with, besides its item.
+struct With {
+    own: OwnedUserId,
+    ignored: HashSet<OwnedUserId>,
+    day: chrono::NaiveDate,
+    /// Seconds east of UTC.
+    offset: i32,
+}
+
+impl Reuse {
+    /// Lets go of everything kept: the timeline was cleared or reset.
+    pub(super) fn forget(&mut self) {
+        self.made = HashMap::default();
+    }
+
+    /// The messages of `items`, as if every one was made afresh; made again only for
+    /// the items that are new or changed since the last call.
+    pub(super) fn convert(
+        &mut self,
+        items: &Vector<Arc<TimelineItem>>,
+        own: &UserId,
+        ignored: &HashSet<OwnedUserId>,
+    ) -> Vec<Message> {
+        self.convert_at(items, own, ignored, &Local::now())
+    }
+
+    /// [`Reuse::convert`] as it is at `now`.
+    pub(super) fn convert_at(
+        &mut self,
+        items: &Vector<Arc<TimelineItem>>,
+        own: &UserId,
+        ignored: &HashSet<OwnedUserId>,
+        now: &DateTime<Local>,
+    ) -> Vec<Message> {
+        let same = self.with.as_ref().is_some_and(|with| {
+            *with.own == *own
+                && with.ignored == *ignored
+                && with.day == now.date_naive()
+                && with.offset == now.offset().local_minus_utc()
+        });
+        if !same {
+            self.made.clear();
+            self.with = Some(With {
+                own: own.to_owned(),
+                ignored: ignored.clone(),
+                day: now.date_naive(),
+                offset: now.offset().local_minus_utc(),
+            });
+        }
+        self.pass = self.pass.wrapping_add(1);
+        let pass = self.pass;
+        #[cfg(test)]
+        {
+            self.counts = (0, 0);
+        }
+        let last = items.len().saturating_sub(1);
+        // Room for every item, made once: the interface keeps this very list.
+        let mut messages = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let Some(event) = item.as_event() else {
+                messages.extend(read_marker(item, index == last));
+                continue;
+            };
+            let made = match self.made.entry(Arc::as_ptr(item) as usize) {
+                Entry::Occupied(found) => {
+                    #[cfg(test)]
+                    {
+                        self.counts.1 += 1;
+                    }
+                    found.into_mut()
+                }
+                Entry::Vacant(free) => {
+                    #[cfg(test)]
+                    {
+                        self.counts.0 += 1;
+                    }
+                    let message =
+                        event_message(item.unique_id().0.clone(), event, own, ignored, now);
+                    free.insert(Made {
+                        item: item.clone(),
+                        message: message.map(Box::new),
+                        pass,
+                    })
+                }
+            };
+            debug_assert!(Arc::ptr_eq(&made.item, item));
+            made.pass = pass;
+            if let Some(message) = &made.message {
+                messages.push(Message::clone(message));
+            }
+        }
+        self.made.retain(|_, made| made.pass == pass);
+        messages
+    }
+}
+
+/// Hashes the address of an item. Its low bits are the same for every item (they are
+/// aligned), so it is spread over all bits.
+#[derive(Default)]
+struct Address(u64);
+
+impl Hasher for Address {
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+
+    fn write_usize(&mut self, address: usize) {
+        let spread = (address as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        self.0 = spread ^ (spread >> 29);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 /// Why a message could not be decrypted, from what the SDK worked out.

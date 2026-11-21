@@ -1370,6 +1370,8 @@ pub(super) mod fake {
     /// A test's own answer to a request.
     pub enum Reply {
         Json(String),
+        /// An error: its status and the body (`errcode` and `error`).
+        Status(u16, String),
         /// No answer, ever: a server that has gone quiet.
         Never,
     }
@@ -1412,13 +1414,15 @@ pub(super) mod fake {
                             return;
                         };
                         seen.lock().unwrap().push(request.clone());
-                        let body = match answer(&request) {
-                            Some(Reply::Json(body)) => body,
+                        let (status, body) = match answer(&request) {
+                            Some(Reply::Json(body)) => (200, body),
+                            Some(Reply::Status(status, body)) => (status, body),
                             Some(Reply::Never) => return std::future::pending().await,
-                            None => usual(&request, &sync),
+                            None => (200, usual(&request, &sync)),
                         };
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            "HTTP/1.1 {status} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            if status == 200 { "OK" } else { "Error" },
                             body.len()
                         );
                         let _ = stream.write_all(response.as_bytes()).await;
