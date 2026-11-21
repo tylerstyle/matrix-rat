@@ -289,7 +289,8 @@ numbers to hold its findings against.
   messages of a flood stood twice, right after themselves, while sync still brought the newest
   ones. Archive and catch up count an event once. `matrix-agy` traced it to matrix-sdk-ui 0.19.1:
   a live timeline built while sync brings a batch gets that batch twice. The room view can show it
-  too; being fixed on our side (`dup-block`), with a draft of an upstream issue for the user.
+  too; fixed on our side (`dup-block`, merged 2026-11-21). A draft upstream issue waits for the
+  user's word.
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.
