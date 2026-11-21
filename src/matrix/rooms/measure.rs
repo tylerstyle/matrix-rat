@@ -1670,6 +1670,97 @@ async fn messages_that_come_in_while_the_first_page_waits_are_all_shown() {
     drop(server);
 }
 
+/// Not a measurement: messages that come into a room's timeline while it is empty after
+/// its event cache was cleared (as a change of the ignore list does), and the page the
+/// forwarder then starts waits for the server, are all shown once the room has paged back
+/// to its start. That page must not say the start while it hides some, as the first page
+/// must not (see `messages_that_come_in_while_the_first_page_waits_are_all_shown`): the
+/// UI, told the start, would ask for no more.
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_that_come_in_while_the_page_after_a_clear_waits_are_all_shown() {
+    use crate::matrix::MatrixEvent;
+    use matrix_sdk::event_cache::PaginationStatus;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const MESSAGES: usize = 300;
+    let room = sample_room(MESSAGES);
+    let messages = room["timeline"]["events"].clone();
+    let syncs = AtomicUsize::new(0);
+    let server = fake::Server::answering(
+        json!({ "join": { ROOM: room } }),
+        Box::new(move |request| {
+            if !request.path.ends_with("/sync") || syncs.fetch_add(1, Ordering::SeqCst) == 0 {
+                return None;
+            }
+            // After the clear, the server sends the messages again.
+            let rooms = json!({ "join": { ROOM: {
+                "timeline": { "events": messages, "limited": false },
+            } } });
+            let sync = json!({ "next_batch": "s2", "rooms": rooms });
+            Some(fake::Reply::Json(sync.to_string()))
+        }),
+    )
+    .await;
+    let (client, room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
+    let (cache, _cache_handles) = room.event_cache().await.unwrap();
+    let mut status = cache.pagination().status();
+    let mut opened = Opened::new(client.clone()).await;
+    client.event_cache().clear_all_rooms().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while status.get() != PaginationStatus::Paginating {
+            status.next().await;
+        }
+    })
+    .await
+    .expect("the page after the clear is on its way");
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while status.get() == PaginationStatus::Paginating {
+            status.next().await;
+        }
+    })
+    .await
+    .expect("the page after the clear is loaded");
+    // What it says, if anything, comes right after.
+    opened.heard.phase = "what the page after the clear says";
+    let mut start_said = false;
+    while let Ok(event) =
+        tokio::time::timeout(Duration::from_millis(500), opened.next_event()).await
+    {
+        start_said |= matches!(
+            event,
+            Some(MatrixEvent::Paginated {
+                reached_start: true,
+                ..
+            })
+        );
+    }
+    // Paging back as the app does, until a page says it reached the start.
+    opened.heard.phase = "paging back after the clear";
+    while !start_said {
+        opened.page(1).await;
+        loop {
+            if let Some(MatrixEvent::Paginated { reached_start, .. }) = opened.next_event().await {
+                start_said = reached_start;
+                break;
+            }
+        }
+    }
+    opened.heard.phase = "all shown after a page said the start was reached";
+    let all = tokio::time::timeout(Duration::from_secs(10), async {
+        while opened.heard.shown < MESSAGES {
+            opened.next_event().await;
+        }
+    })
+    .await;
+    assert!(
+        all.is_ok(),
+        "{} of {MESSAGES} messages shown after a page said the start was reached",
+        opened.heard.shown
+    );
+    drop(opened);
+    drop(server);
+}
+
 /// What dropping an idle timeline gives back: the sample room of 5000 messages opened as
 /// the app opens it and scrolled to the top, then left for another room. Before
 /// `IDLE_TIMELINE` its timeline stayed cached for as long as it was among the last six

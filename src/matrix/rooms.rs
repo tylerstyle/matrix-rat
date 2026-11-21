@@ -17,9 +17,9 @@ use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, R
 use matrix_sdk::{Client, Room, RoomMemberships};
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
-    MsgLikeKind, RoomExt, Timeline, TimelineDetails, TimelineEventFocusThreadMode,
-    TimelineEventItemId, TimelineFocus, TimelineItem, TimelineItemContent,
-    TimelineReadReceiptTracking,
+    Error as TimelineError, MsgLikeKind, RoomExt, Timeline, TimelineDetails,
+    TimelineEventFocusThreadMode, TimelineEventItemId, TimelineFocus, TimelineItem,
+    TimelineItemContent, TimelineReadReceiptTracking,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
@@ -471,19 +471,9 @@ impl Timelines {
         detached_start: Option<Arc<AtomicBool>>,
         generation: u64,
     ) {
+        let live = detached_start.is_none() && !timeline.is_threaded();
         let paging = Paging::spawn(self.events.clone(), async move {
-            let reached_start = match timeline.paginate_backwards(PAGE).await {
-                // A timeline not focused on an event shows only the last 20 items of what
-                // comes into it while it is empty (as while its first page waits for the
-                // server), and a page that ends at the start shows no more of them
-                // (matrix-sdk-ui 0.19.1). Asked once more, one that still hides some shows
-                // the next of them and says it is not at the start, so the UI pages on;
-                // one that hides none says the start again, from what the event cache
-                // knows, without asking the server.
-                Ok(true) if detached_start.is_none() => timeline.paginate_backwards(PAGE).await,
-                answer => answer,
-            };
-            let reached_start = match reached_start {
+            let reached_start = match page_back(&timeline, live).await {
                 Ok(reached_start) => reached_start,
                 Err(err) => {
                     tracing::warn!(why = %logsafe::kind(&err), "could not load older messages");
@@ -2509,6 +2499,29 @@ fn start_loaded(items: &Vector<Arc<TimelineItem>>, thread: Option<&str>) -> bool
     }
 }
 
+/// Loads a page of older messages of `timeline`, a live one if `live`: whether the start
+/// was reached.
+///
+/// A live timeline shows only the last 20 items of what comes into it while it is empty
+/// (after a clear, or while its first page waits for the server), and a page that ends at
+/// the start shows no more of them (matrix-sdk-ui 0.19.1; its skip count is for live
+/// timelines only). Asked once more, one that still hides some shows the next of them and
+/// says it is not at the start, so the UI pages on; one that hides none says the start
+/// again, from what the event cache knows, without asking the server. A page of one that
+/// was empty is asked once more after an error too: what came in meanwhile may be hidden
+/// the same way, and the UI, told the start for the error, would not ask for it.
+async fn page_back(timeline: &Timeline, live: bool) -> Result<bool, TimelineError> {
+    let was_empty = live && timeline.items().await.is_empty();
+    match timeline.paginate_backwards(PAGE).await {
+        Ok(true) if live => timeline.paginate_backwards(PAGE).await,
+        Err(err) if was_empty => {
+            tracing::debug!(why = %logsafe::kind(&err), "the first page failed, asked once more");
+            timeline.paginate_backwards(PAGE).await
+        }
+        answer => answer,
+    }
+}
+
 /// Sends the whole timeline to the UI whenever it changes, and who is typing.
 /// `thread`: the timeline is not the room's but that of the thread starting at this event.
 #[allow(clippy::too_many_arguments)]
@@ -2693,7 +2706,7 @@ async fn forward(
                     let timeline = timeline.clone();
                     let events = events.clone();
                     clear_paginators.spawn(async move {
-                        if let Ok(true) = timeline.paginate_backwards(PAGE).await {
+                        if let Ok(true) = page_back(&timeline, !in_thread).await {
                             let _ = events.send(MatrixEvent::Paginated {
                                 generation,
                                 reached_start: true,
