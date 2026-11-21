@@ -2396,7 +2396,9 @@ async fn prepare_messages(
     let mut messages = reuse.convert(items, own, &ignored);
     let own_name = super::people::room_own_display_name(room, own_room_names).await;
     super::convert::apply_own_display_name(&mut messages, own_name.as_deref());
-    readers.annotate(room, &mut messages, items, own).await;
+    readers
+        .annotate(room, &mut messages, items, own, &ignored)
+        .await;
     dedup.dedup(&mut messages);
     messages
 }
@@ -4766,6 +4768,46 @@ mod tests {
         assert_eq!(unread.len(), roots.len(), "no thread was read");
         // Read and private receipts: of each thread, and once of the whole room.
         assert_eq!(loads() - before, 2 * roots.len() + 2);
+        drop(server);
+    }
+
+    /// Who has read a message: not someone ignored.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ignored_users_read_receipt_is_not_shown() {
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::spaces::fake;
+
+        let room = "!receipts:localhost";
+        let (bob, carol, mallory) = ("@bob:localhost", "@carol:localhost", "@mallory:localhost");
+        let mut joined = fake::joined(false, vec![]);
+        joined["timeline"]["events"] =
+            serde_json::json!([said(room, "$read:localhost", bob, "read by some", None)]);
+        joined["ephemeral"] = serde_json::json!({ "events": [{
+            "type": "m.receipt",
+            "content": { "$read:localhost": { "m.read": {
+                carol: { "ts": 2_000 },
+                mallory: { "ts": 2_000 },
+            } } },
+        }] });
+        let (server, _client, mut timelines, mut events, (ignored_tx, _own)) =
+            opened_with(serde_json::json!({ room: joined })).await;
+        ignored_tx.send_replace(std::sync::Arc::new(
+            [matrix_sdk::ruma::OwnedUserId::try_from(mallory).unwrap()].into(),
+        ));
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room.to_owned(),
+                generation: 1,
+            })
+            .await;
+        let messages = timeline_where(&mut events, room, 1, |messages| {
+            message_of(messages, "$read:localhost").is_some_and(|m| m.read_by.total > 0)
+        })
+        .await;
+        let read_by = &message_of(&messages, "$read:localhost").unwrap().read_by;
+        let names: Vec<&str> = read_by.readers.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["carol"]);
+        assert_eq!(read_by.total, 1);
         drop(server);
     }
 

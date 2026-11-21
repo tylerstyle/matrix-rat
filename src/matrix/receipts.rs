@@ -65,20 +65,22 @@ pub struct Names {
 
 impl Names {
     /// Fills in `read_by` on the messages made from `items` (matched by their id).
-    /// Names come from the local store only: a receipt is not worth a request.
+    /// Names come from the local store only: a receipt is not worth a request. Those
+    /// `ignored` are not shown as readers.
     pub async fn annotate(
         &mut self,
         room: &Room,
         messages: &mut [Message],
         items: &Vector<Arc<TimelineItem>>,
         own: &UserId,
+        ignored: &HashSet<OwnedUserId>,
     ) {
         // One pass over the items for the receipts; names only if they changed.
         let picked: Vec<Picked> = items
             .iter()
             .filter_map(|item| {
                 let event = item.as_event()?;
-                let (readers, total) = pick(receipts(event), own, event.sender());
+                let (readers, total) = pick(receipts(event), own, event.sender(), ignored);
                 (total > 0).then_some(Picked {
                     id: item.unique_id().0.as_str(),
                     readers,
@@ -224,15 +226,17 @@ fn receipts(event: &EventTimelineItem) -> impl Iterator<Item = (&UserId, Stamp)>
         .map(|(user, receipt)| (user.as_ref(), receipt.ts))
 }
 
-/// The receipts to show under a message: not ours, not its sender's; the newest first
-/// and at most `ReadBy::KEPT` of them. Also says how many there are in all.
+/// The receipts to show under a message: not ours, not its sender's, not those of
+/// someone `ignored`; the newest first and at most `ReadBy::KEPT` of them. Also says
+/// how many there are in all.
 fn pick<'a>(
     receipts: impl Iterator<Item = (&'a UserId, Stamp)>,
     own: &UserId,
     sender: &UserId,
+    ignored: &HashSet<OwnedUserId>,
 ) -> (Vec<(&'a UserId, Stamp)>, u32) {
     let mut others: Vec<(&UserId, Stamp)> = receipts
-        .filter(|(user, _)| *user != own && *user != sender)
+        .filter(|(user, _)| *user != own && *user != sender && !ignored.contains(*user))
         .collect();
     let total = others.len().min(u32::MAX as usize) as u32;
     // Without a time last; the same time in a fixed order, so nothing flickers.
@@ -292,13 +296,20 @@ mod tests {
             (dave, None),
             (carol, stamp(30)),
         ];
-        let (picked, total) = pick(receipts.into_iter(), own, sender);
+        let none = HashSet::new();
+        let (picked, total) = pick(receipts.into_iter(), own, sender, &none);
         assert_eq!(total, 3);
         // Newest first; one without a time goes last.
         let order: Vec<&UserId> = picked.iter().map(|(user, _)| *user).collect();
         assert_eq!(order, [carol, bob, dave]);
+        // Nor anyone ignored, who is not counted either.
+        let ignored = HashSet::from([bob.to_owned()]);
+        let (picked, total) = pick(receipts.into_iter(), own, sender, &ignored);
+        assert_eq!(total, 2);
+        let order: Vec<&UserId> = picked.iter().map(|(user, _)| *user).collect();
+        assert_eq!(order, [carol, dave]);
         // A message of ours that only we have "read": nobody.
-        let (picked, total) = pick([(own, stamp(1))].into_iter(), own, own);
+        let (picked, total) = pick([(own, stamp(1))].into_iter(), own, own, &none);
         assert!(picked.is_empty());
         assert_eq!(total, 0);
     }
@@ -313,14 +324,15 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(n, user)| (user.as_ref(), stamp(n as u32)));
-        let (picked, total) = pick(receipts, own, own);
+        let none = HashSet::new();
+        let (picked, total) = pick(receipts, own, own, &none);
         assert_eq!(total as usize, ReadBy::KEPT + 15);
         assert_eq!(picked.len(), ReadBy::KEPT);
         // The ones who read it last.
         assert_eq!(picked[0].0, users.last().unwrap().as_ref() as &UserId);
         // Same time: by user id, whatever order they came in.
         let same = users.iter().rev().map(|user| (user.as_ref(), stamp(7)));
-        let (picked, _) = pick(same, own, own);
+        let (picked, _) = pick(same, own, own, &none);
         assert_eq!(picked[0].0, users[0].as_ref() as &UserId);
     }
 
