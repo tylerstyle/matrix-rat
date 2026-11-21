@@ -426,7 +426,30 @@ mod tests {
         app.on_event(key(KeyCode::Char('t')));
         assert!(app.threads.open.is_some(), "the demo has a thread to show");
         std::fs::write(dir.join("theme.svg"), svg(&mut app, 110, 34)).unwrap();
+
+        // A narrow window: going to the room list shows it in place of the chat, and
+        // opening a room puts the list away again, with the rooms bar above the chat.
+        let (narrow, tall) = (NARROW_SHOT_WIDTH, 30);
+        let mut app = App::demo();
+        app.room_previews = true;
+        render(&mut app, narrow, tall);
+        let open = app.active;
+        app.perform(Action::Focus(Pane::Sidebar));
+        let list = render(&mut app, narrow, tall);
+        assert!(!list.contains("☰ Rooms"), "the room list fills the window");
+        std::fs::write(dir.join("narrow-rooms.svg"), svg(&mut app, narrow, tall)).unwrap();
+        app.perform(Action::OpenRoom(open));
+        let chat = render(&mut app, narrow, tall);
+        assert!(
+            chat.contains("☰ Rooms"),
+            "the rooms bar shows above the chat"
+        );
+        std::fs::write(dir.join("narrow-chat.svg"), svg(&mut app, narrow, tall)).unwrap();
     }
+
+    /// Narrow enough that one pane fills the window (below [`super::NARROW_WIDTH`]).
+    const NARROW_SHOT_WIDTH: u16 = 56;
+    const _: () = assert!(NARROW_SHOT_WIDTH < super::NARROW_WIDTH);
 
     #[test]
     fn main_screen() {

@@ -20,8 +20,9 @@ anything to focus it, or never leave the keyboard: you start in the composer, `E
 sends, `↑` walks into the messages. Encrypted chats, pictures in the terminal, threads,
 notifications and themes that follow your desktop are all there.
 
-> **Status: early development.** It is used daily by its author, but it is young. Keep
-> another client at hand, and please report what breaks.
+> **Status: 1.0.** Used every day by its author, and checked against a real homeserver
+> before each release. Some things are still done in another client (creating a key backup
+> or recovery, see below); please report what breaks.
 
 ## Highlights
 
@@ -38,6 +39,16 @@ notifications and themes that follow your desktop are all there.
 | 🎨 **Yours to shape** | Twelve built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
 | 🔔 **Notifications** | Desktop notifications with the chat's picture (click one to open its room), or plain ones through the terminal; none for what you are reading right now. Keywords of your own count like a mention. |
 | 🤖 **A channel for agents** | `matrix-rat serve` runs without the screen on a bot account; scripts send and read with `matrix-rat send`, `read` and `listen`, and a coding agent asks you a question and waits for your answer through `matrix-rat mcp`. See [For agents and scripts](#for-agents-and-scripts). |
+
+<div align="center">
+
+<img src="docs/screenshots/narrow-rooms.svg" alt="A narrow window of 56 columns showing only the room list, with unread counts" width="420">
+<img src="docs/screenshots/narrow-chat.svg" alt="The same narrow window after opening a room: the room list has stepped aside, the chat fills the window, and the rooms bar above it shows the other rooms with new messages" width="420">
+
+</div>
+
+In a narrow window (here 56 columns) one pane fills it: the room list, and once a room is
+open, the chat, with the rooms bar above it for the rooms that have something new.
 
 ## Install
 
@@ -89,7 +100,7 @@ Ubuntu 22.04, Debian 12, Fedora 36 and later): releases from 0.7.0 on carry a
 [releases page](https://github.com/tylerstyle/matrix-rat/releases).
 
 ```sh
-f=matrix-rat-0.9.1-x86_64-unknown-linux-gnu   # the archive you downloaded, without .tar.gz
+f=matrix-rat-1.0.0-x86_64-unknown-linux-gnu   # the archive you downloaded, without .tar.gz
 sha256sum -c $f.tar.gz.sha256                 # the file is the one that was built
 tar -xzf $f.tar.gz
 install -Dm755 $f/matrix-rat ~/.local/bin/matrix-rat
@@ -730,6 +741,8 @@ There is no command that lists or removes profiles; a profile is its two folders
     newest) are written to `notes.json` in the profile's data folder, readable by you
     only (mode 0600), and read again at the next start. **That file holds the text of
     messages, also of encrypted rooms, in plain form outside the encrypted store.**
+    The file belongs to the account: a session the server ended, after which you log in
+    again, keeps it, and a file another account left there is removed unread.
     Switching the setting off removes the file, and so does logging out. A message
     that is deleted loses its transcript and translation, in the file too.
 - **Recording a voice message**: `Alt-M` or the 🎤 at the end of the composer's first
@@ -1017,7 +1030,7 @@ nix-shell                      # toolchain and C dependencies (or bring your own
 scripts/check.sh               # fmt, clippy -D warnings, tests, build
 scripts/dev-homeserver.sh      # a throwaway local homeserver for the server-backed tests
 MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass \
-  cargo test matrix:: -- --ignored --test-threads=1
+  cargo test matrix:: -- --ignored --test-threads=1 --skip measure_
 cargo test write_screenshots -- --ignored   # regenerate the pictures above
 ```
 
