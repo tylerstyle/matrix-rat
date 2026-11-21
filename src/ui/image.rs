@@ -80,19 +80,40 @@ pub fn draw_inline(frame: &mut Frame, images: &mut ImageStore, theme: &Theme, in
     }
 }
 
-/// Draws a room's picture over the two cells of its coloured tile, once there is
-/// one. Until then, and wherever pictures cannot be drawn, the tile stays.
+/// The part of a room's or a person's picture that is on screen.
+#[derive(Clone, Copy)]
+pub struct Avatar {
+    /// Where the visible rows go.
+    pub area: Rect,
+    /// Rows of the picture scrolled out above `area`.
+    pub skip: u16,
+    /// Size of the whole picture in cells: it is made for that size.
+    pub size: (u16, u16),
+}
+
+impl Avatar {
+    /// All of the picture, in `area`.
+    pub fn whole(area: Rect) -> Self {
+        Self {
+            area,
+            skip: 0,
+            size: (area.width, area.height),
+        }
+    }
+}
+
+/// Draws a room's or a person's picture over the cells of its coloured tile, once
+/// there is one. Until then, and wherever pictures cannot be drawn, the tile stays.
 pub fn draw_avatar(
     frame: &mut Frame,
     images: &mut ImageStore,
     theme: &Theme,
     url: &str,
-    area: Rect,
-    // Rows of the picture above `area` that are scrolled out of view.
-    skip: u16,
+    avatar: Avatar,
     covered: bool,
 ) {
-    let Some(encoded) = images.avatar(url, covered) else {
+    let Avatar { area, skip, size } = avatar;
+    let Some(encoded) = images.avatar(url, size, covered) else {
         return;
     };
     let pending = !encoded.shown;
@@ -109,7 +130,7 @@ pub fn draw_avatar(
         .cell((area.x, area.y))
         .is_some_and(|cell| cell.symbol().starts_with('\x1b'));
     if pending && carries_data {
-        images.sent_avatar(url, area.x, area.y);
+        images.sent_avatar(url, size, area.x, area.y);
     }
 }
 

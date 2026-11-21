@@ -189,12 +189,9 @@ fn draw_labelled(frame: &mut Frame, app: &mut App, area: Rect, label: &str) {
     app.hits
         .add(Rect::new(area.x, area.y, label_width, 1), to_list);
 
-    // The pictures are those of the room list, at its one-line size. The list is
-    // not drawn while the bar is, so the two never ask for different sizes in one
-    // frame.
-    // With room previews on the list wants them larger, so going between list and
-    // chat encodes them anew each time: left for the pass over memory and CPU.
-    app.images.set_avatar_cells((TILE, 1));
+    // The pictures are those of the room list, at its one-line size. With room
+    // previews on the list draws them larger; each size is kept, so going between
+    // list and chat makes none of them again.
     let covered = app.modal.is_some() || app.help_open || app.images.viewer_open();
     let mut x = area.x + label_width;
     for ((index, count), room_width) in rooms.iter().zip(&widths).take(plan.shown) {
@@ -223,7 +220,8 @@ fn draw_labelled(frame: &mut Frame, app: &mut App, area: Rect, label: &str) {
             && let Some(url) = &room.avatar
         {
             let cells = Rect::new(rect.x, rect.y, TILE, 1);
-            super::image::draw_avatar(frame, &mut app.images, theme, url, cells, 0, covered);
+            let avatar = super::image::Avatar::whole(cells);
+            super::image::draw_avatar(frame, &mut app.images, theme, url, avatar, covered);
         }
         app.hits.add(rect, HitId::BarRoom(*index));
         x = x.saturating_add(*room_width);
@@ -847,6 +845,47 @@ mod tests {
         let mut app = app_with((1..=40).map(|n| room(&format!("r{n}"), n * 7)).collect());
         for (width, height) in [(1, 1), (2, 6), (3, 7), (5, 8), (9, 6), (61, 6), (200, 6)] {
             let _ = terminal(&mut app, width, height);
+        }
+    }
+
+    #[test]
+    fn going_between_the_room_list_and_the_bar_sends_no_picture_again() {
+        use crate::images::testing::{decoded, kitty};
+        const URL: &str = "mxc://example.org/bob";
+
+        // A narrow window shows the room list or the chat with the bar. With room
+        // previews the list draws a room's picture four cells by two, the bar two by
+        // one.
+        let mut app = App::demo();
+        app.images = crate::images::ImageStore::new(kitty());
+        app.room_previews = true;
+        app.rooms.truncate(1);
+        app.rooms[0].messages.clear();
+        let mut bob = room("bob", 2);
+        bob.avatar = Some(URL.into());
+        app.rooms.push(bob);
+        // What was sent to the terminal in a frame, and what was deleted after it.
+        let frame = |app: &mut App, pane: Pane| {
+            app.focus = pane;
+            let terminal = terminal(app, 50, 20);
+            let sent = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .filter(|cell| cell.symbol().starts_with('\x1b'))
+                .count();
+            (sent, app.images.cleanup_sequence(false))
+        };
+        frame(&mut app, Pane::Sidebar);
+        app.images.on_avatar(URL, Ok(decoded(96, 96)));
+
+        // Each size is sent once, and kept.
+        assert_eq!(frame(&mut app, Pane::Sidebar), (1, String::new()));
+        assert_eq!(frame(&mut app, Pane::Timeline), (1, String::new()));
+        for _ in 0..2 {
+            assert_eq!(frame(&mut app, Pane::Sidebar), (0, String::new()));
+            assert_eq!(frame(&mut app, Pane::Timeline), (0, String::new()));
         }
     }
 }
