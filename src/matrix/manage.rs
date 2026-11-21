@@ -901,12 +901,20 @@ impl Manager {
         self.refresh.clone()
     }
 
+    /// At the end of the session: the room info view stops being kept current, and
+    /// the commands still running are given up.
     pub fn stop(&mut self) {
+        self.stop_info();
+        self.tasks.abort_all();
+    }
+
+    /// The room info view is closed, or another is opened: it stops being kept current.
+    /// What a command started on the server carries on.
+    fn stop_info(&mut self) {
         self.refresh.clear();
         if let Some(watcher) = self.watcher.take() {
             watcher.abort();
         }
-        self.tasks.abort_all();
     }
 
     /// Starts `work` among [`Self::tasks`], letting go of those that are done.
@@ -1012,7 +1020,7 @@ impl Manager {
                 });
             }
             ManageCmd::Info { room_id } => {
-                self.stop();
+                self.stop_info();
                 // Left in this session: whatever is still known of it here is stale. (An
                 // invitation or a knock since is news, and can be looked at.)
                 let gone = <&RoomId>::try_from(room_id.as_str())
@@ -1040,7 +1048,7 @@ impl Manager {
                     self.left.clone(),
                 )));
             }
-            ManageCmd::StopInfo => self.stop(),
+            ManageCmd::StopInfo => self.stop_info(),
             ManageCmd::Invite { room_id, user_id } => {
                 self.spawn_task(async move {
                     let result =
@@ -2924,6 +2932,22 @@ mod tests {
             let _held = held;
             std::future::pending::<()>().await;
         });
+        // Opening and closing the room info view leave it running: what was started on
+        // the server carries on (a leave, a kick, a new name).
+        manager.handle(ManageCmd::Info {
+            room_id: "!elsewhere:localhost".to_owned(),
+        });
+        manager.handle(ManageCmd::StopInfo);
+        // Time for an abort, had there been one, to take effect.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut released = released;
+        assert!(
+            matches!(
+                released.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "given up with the room info view"
+        );
         manager.stop();
         let outcome = tokio::time::timeout(Duration::from_secs(10), released)
             .await
