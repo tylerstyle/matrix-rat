@@ -52,6 +52,22 @@ impl Composer {
         self.cursor = self.text.len();
     }
 
+    /// Replaces the buffer with `text` and places the cursor at `cursor`, snapped to a
+    /// grapheme boundary within `text`.
+    pub fn set_text_with_cursor(&mut self, text: &str, cursor: usize) {
+        self.text = text.to_owned();
+        if cursor >= self.text.len() {
+            self.cursor = self.text.len();
+        } else {
+            self.cursor = self
+                .text
+                .grapheme_indices(true)
+                .take_while(|&(i, _)| i <= cursor)
+                .last()
+                .map_or(0, |(i, _)| i);
+        }
+    }
+
     /// Replaces `range` with `with` (sanitized like [`Self::insert`]) and moves the cursor
     /// to the end of the replacement.
     pub fn replace_range(&mut self, range: Range<usize>, with: &str) {

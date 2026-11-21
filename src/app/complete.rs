@@ -198,12 +198,15 @@ impl App {
         }
     }
 
-    pub(super) fn restore_room_marks(&mut self, room_id: &str) {
-        self.complete.marks = self
-            .complete
+    pub(super) fn take_room_marks(&mut self, room_id: &str) -> Vec<MentionMark> {
+        self.complete
             .draft_marks
             .remove(room_id)
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    pub(super) fn restore_room_marks(&mut self, room_id: &str) {
+        self.complete.marks = self.take_room_marks(room_id);
         self.complete.close_popup();
     }
 
@@ -247,6 +250,12 @@ impl App {
         self.complete.marks = self.complete.edit_stash_marks.take().unwrap_or_default();
         self.complete.edit_had_mentions = false;
         self.complete.close_popup();
+    }
+
+    pub(super) fn anchor_edit_stash_marks(&mut self, text: &str, shift: usize) {
+        if let Some(marks) = &mut self.complete.edit_stash_marks {
+            crate::complete::anchor_marks_in_segment(text, marks, shift);
+        }
     }
 
     /// Parses composer text together with accepted mention/room links and edit state.

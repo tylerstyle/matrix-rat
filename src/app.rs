@@ -174,6 +174,10 @@ pub struct TimelineState {
     pub empty_forward_batches: u8,
     /// New remote messages arrived on the room/thread's live timeline while detached.
     pub detached_new: u32,
+    /// Which timeline generation last supplied the shown messages. Cleared on reset
+    /// or when another timeline is requested so the next snapshot matches selection
+    /// and pending replies or edits by event id instead of local timeline id.
+    pub generation: Option<u64>,
 }
 
 /// Hand-written: what was marked read names an event and a room; only whether there is
@@ -204,6 +208,7 @@ impl std::fmt::Debug for TimelineState {
             .field("forward_count_at_request", &self.forward_count_at_request)
             .field("empty_forward_batches", &self.empty_forward_batches)
             .field("detached_new", &self.detached_new)
+            .field("generation", &self.generation)
             .finish()
     }
 }
@@ -1739,10 +1744,18 @@ impl App {
                 typing: false,
             });
         }
-        // What is unsent here goes to the store, in case we do not come back.
-        self.save_draft();
-        // An edit belongs to its room; a plain draft waits there until we come back.
+        // An edit belongs to its room; any aside draft whose command became plain text
+        // returns to the composer before the draft is saved to the store.
         self.cancel_compose();
+        self.reclaim_aside_if_plain();
+        self.save_draft();
+        self.clear_carried_draft();
+        // If the carried command was cleared to empty, put its aside draft (and marks)
+        // back onto the room; if a command is still typed, its own marks stay with it
+        // while the aside draft and its marks stay together in `drafts.aside`.
+        if self.composer.text().trim().is_empty() {
+            self.restore_aside_draft();
+        }
         let draft = self.composer.take();
         if let Some(room) = self.open_index().and_then(|open| self.rooms.get_mut(open)) {
             let old_id = room.id.clone();
@@ -2084,6 +2097,9 @@ impl App {
             if matches!(self.compose_mode, ComposeMode::Edit(_)) {
                 // The draft that waited behind the edit is back, and still unsent.
                 self.end_edit();
+            } else if self.restore_aside_draft() {
+                // The saved draft kept aside for a slash command is back, and still unsent.
+                self.note_draft();
             } else {
                 self.forget_sent_draft();
             }
@@ -2102,6 +2118,8 @@ impl App {
         let mode = self.compose_mode;
         if matches!(mode, ComposeMode::Edit(_)) {
             self.end_edit();
+        } else {
+            self.restore_aside_draft();
         }
         self.compose_mode = ComposeMode::Normal;
         let (body, html, mentions, kind) = match outgoing {
@@ -2566,7 +2584,7 @@ impl App {
 
     /// The timeline id of the message a pending reply or edit points at, before the list
     /// is replaced.
-    pub(super) fn compose_target_id(&self) -> Option<String> {
+    fn compose_target_id(&self) -> Option<String> {
         match self.compose_mode {
             ComposeMode::Reply(i) | ComposeMode::Edit(i) => {
                 self.messages().get(i).map(|m| m.id.clone())
@@ -2575,31 +2593,24 @@ impl App {
         }
     }
 
-    /// The event id of the message a pending reply or edit points at, if it has one.
-    pub(super) fn compose_target_event_id(&self) -> Option<String> {
+    /// The stable identity (event or local transaction id) of the message a pending reply
+    /// or edit points at, if it has one.
+    pub(super) fn compose_target_item(&self) -> Option<ItemRef> {
         match self.compose_mode {
-            ComposeMode::Reply(i) | ComposeMode::Edit(i) => self
-                .messages()
-                .get(i)
-                .and_then(|m| m.event_id().map(str::to_owned)),
+            ComposeMode::Reply(i) | ComposeMode::Edit(i) => {
+                self.messages().get(i).and_then(|m| m.item.clone())
+            }
             ComposeMode::Normal => None,
         }
     }
 
-    /// Keeps a pending reply or edit on the same message after the list changes, or
-    /// cancels it if that message is gone.
-    pub(super) fn remap_compose_mode(&mut self, compose_id: Option<String>) {
-        let compose_at = compose_id.and_then(|id| self.messages().iter().position(|m| m.id == id));
-        self.apply_remapped_compose(compose_at);
-    }
-
-    /// Keeps a pending reply or edit on the message with `event_id` after switching to
-    /// another timeline, or cancels it if that event is not shown (or had none).
-    pub(super) fn remap_compose_mode_by_event(&mut self, event_id: Option<&str>) {
-        let compose_at = event_id.and_then(|ev| {
+    /// Keeps a pending reply or edit on the message with `item` after switching to
+    /// another timeline, or cancels it if that message is not shown (or had no identity).
+    pub(super) fn remap_compose_mode_by_item(&mut self, item: Option<&ItemRef>) {
+        let compose_at = item.and_then(|wanted| {
             self.messages()
                 .iter()
-                .position(|m| m.event_id() == Some(ev))
+                .position(|m| m.item.as_ref() == Some(wanted))
         });
         self.apply_remapped_compose(compose_at);
     }
@@ -2611,9 +2622,14 @@ impl App {
             (ComposeMode::Edit(_), None) => {
                 // The message being edited is gone; its text must not be sent as new.
                 self.end_edit();
+                self.show_toast("Edit cancelled: that message is no longer shown");
                 ComposeMode::Normal
             }
-            _ => ComposeMode::Normal,
+            (ComposeMode::Reply(_), None) => {
+                self.show_toast("Reply cancelled: that message is no longer shown");
+                ComposeMode::Normal
+            }
+            (ComposeMode::Normal, _) => ComposeMode::Normal,
         };
     }
 
@@ -2631,25 +2647,48 @@ impl App {
         }
     }
 
-    /// Replaces the open room's messages with the worker's current list, keeping the
-    /// selection and a pending reply or edit on the same messages.
-    fn apply_timeline(&mut self, mut messages: Vec<Message>) {
+    /// Replaces the open conversation's messages with `messages`, keeping the selection
+    /// and any pending reply or edit on the same messages. On updates from the same
+    /// timeline, messages match by their local timeline id (falling back to `ItemRef` if
+    /// rebuilt in place); across a timeline change or reset, they match by `ItemRef`
+    /// (covering both server event ids and in-flight transaction ids) so local ids from
+    /// another timeline can never collide.
+    fn apply_timeline(&mut self, mut messages: Vec<Message>, same_timeline: bool) {
         // The worker told apart who shares a name among the messages; the room's
         // members, where the app holds them, may know of more.
         if let Some(room_id) = self.room_id() {
             self.complete.mark_namesakes(&room_id, &mut messages);
         }
-        let selected_id = self
+        let selected_id = same_timeline
+            .then(|| {
+                self.timeline
+                    .selected
+                    .and_then(|i| self.messages().get(i).map(|m| m.id.clone()))
+            })
+            .flatten();
+        let selected_item = self
             .timeline
             .selected
-            .and_then(|i| self.messages().get(i).map(|m| m.id.clone()));
-        let compose_id = self.compose_target_id();
+            .and_then(|i| self.messages().get(i))
+            .and_then(|m| m.item.clone());
+        let compose_id = same_timeline.then(|| self.compose_target_id()).flatten();
+        let compose_item = self.compose_target_item();
         if let Some(target) = self.messages_mut() {
             *target = messages;
         }
         self.request_custom_reaction_emotes();
-        let selected_at =
-            selected_id.and_then(|id| self.messages().iter().position(|m| m.id == id));
+        let find = |id: Option<&str>, item: Option<&ItemRef>| {
+            id.and_then(|id| self.messages().iter().position(|m| m.id == id))
+                .or_else(|| {
+                    item.and_then(|wanted| {
+                        self.messages()
+                            .iter()
+                            .position(|m| m.item.as_ref() == Some(wanted))
+                    })
+                })
+        };
+        let selected_at = find(selected_id.as_deref(), selected_item.as_ref());
+        let compose_at = same_timeline.then(|| find(compose_id.as_deref(), compose_item.as_ref()));
 
         if self.timeline.selected.is_some() {
             self.timeline.selected =
@@ -2658,7 +2697,11 @@ impl App {
                 self.set_focus(Pane::Composer);
             }
         }
-        self.remap_compose_mode(compose_id);
+        if let Some(compose_at) = compose_at {
+            self.apply_remapped_compose(compose_at);
+        } else {
+            self.remap_compose_mode_by_item(compose_item.as_ref());
+        }
     }
 
     /// The user's own latest message that can be edited, if the composer is free for
@@ -3771,7 +3814,9 @@ impl App {
                 {
                     let messages = self.place_unread_line(messages, detached.is_some());
                     let messages = self.thread_snapshot(messages, reached_start);
-                    self.apply_timeline(messages);
+                    let same_timeline = self.timeline.generation == Some(generation);
+                    self.apply_timeline(messages, same_timeline);
+                    self.timeline.generation = Some(generation);
                     self.forget_notes_of_deleted();
                     self.sync_pinned_flags(&room_id);
                     self.sync_saved_flags(&room_id);
@@ -3804,6 +3849,7 @@ impl App {
                 // was running for this view may have been aborted across a reset or
                 // restore, so the app can ask again.
                 if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
+                    self.timeline.generation = None;
                     self.timeline.reached_start = false;
                     self.timeline.empty_batches = 0;
                     self.timeline.loading_older = false;
@@ -4139,6 +4185,7 @@ impl App {
                 self.compose_mode = ComposeMode::Normal;
                 self.typing_sent = None;
                 if open_id.is_some() {
+                    self.clear_carried_draft();
                     let (draft, new_id) = self
                         .rooms
                         .get_mut(self.active)
@@ -4150,23 +4197,38 @@ impl App {
                     } else {
                         self.clear_completion_marks();
                     }
-                } else if switched_from_pending {
-                    // Auto-switched off a pending invite or knock: restore the newly
-                    // opened room's draft when nothing was typed yet, never silently
-                    // drop early-typed text (leave both the composer and `room.draft`
-                    // intact if both are non-empty), and clear the composer when no
-                    // rooms remain.
+                } else {
+                    // First list or auto-switched off a pending invite or knock: restore
+                    // the newly opened room's draft when nothing was typed yet; merge
+                    // when both early typing and an in-memory draft exist; remember the
+                    // carried scope when the room has no in-memory draft yet so a stored
+                    // draft arriving after `OpenRoom` merges too; clear stale text when
+                    // an auto-opened pending room vanished leaving no rooms.
                     match self.rooms.get_mut(self.active) {
-                        Some(room) if self.composer.is_empty() => {
+                        Some(room) if room.is_pending() => {
+                            self.clear_carried_draft();
+                        }
+                        Some(room) => {
                             let draft = std::mem::take(&mut room.draft);
                             let id = room.id.clone();
-                            self.composer.set_text(&draft);
-                            self.restore_room_marks(&id);
+                            let scope = (id.clone(), None);
+                            if self.composer.text().trim().is_empty() {
+                                self.composer.set_text(&draft);
+                                self.restore_room_marks(&id);
+                                self.clear_carried_draft();
+                            } else if !draft.is_empty() {
+                                self.merge_saved_draft(&scope, &draft, true);
+                                self.clear_carried_draft();
+                            } else {
+                                self.note_carried_draft(scope);
+                            }
                         }
-                        Some(_) => {}
                         None => {
-                            self.composer.set_text("");
-                            self.clear_completion_marks();
+                            self.clear_carried_draft();
+                            if switched_from_pending {
+                                self.composer.set_text("");
+                                self.clear_completion_marks();
+                            }
                         }
                     }
                 }
@@ -4216,6 +4278,8 @@ impl App {
             self.set_focus(Pane::Composer);
         } else if self.compose_mode != ComposeMode::Normal {
             self.cancel_compose();
+        } else if self.restore_aside_draft_on_cancel() {
+            // Gives up the carried slash command and brings the saved draft back.
         } else if self.thread_open() {
             self.close_thread();
         } else if self.esc_closes_chat {
@@ -7876,7 +7940,8 @@ mod tests {
         assert!(app.rooms[app.active].draft.is_empty());
 
         // When early text was typed AND the auto-opened room already has its own draft,
-        // keep the typed text in the composer and keep the room's draft intact.
+        // both are merged into the composer (existing draft first, blank line, typed text)
+        // so leaving and returning to the room loses neither.
         app.rooms.clear();
         app.composer.set_text("");
         app.on_matrix(MatrixEvent::Rooms(vec![
@@ -7889,10 +7954,17 @@ mod tests {
         app.on_matrix(MatrixEvent::Rooms(vec![
             summary("!i", "Invited", RoomCategory::Invite, 0),
             summary("!k", "Knocked", RoomCategory::Room, 0),
+            summary("!other", "Other", RoomCategory::Room, 0),
         ]));
         assert_eq!(app.rooms[app.active].id, "!k");
-        assert_eq!(app.composer.text(), "typed early");
-        assert_eq!(app.rooms[app.active].draft, "for k");
+        assert_eq!(app.composer.text(), "for k\n\ntyped early");
+        assert!(app.rooms[app.active].draft.is_empty());
+        // Leaving `!k` and coming back preserves both texts.
+        app.open_room(2);
+        assert_eq!(app.rooms[app.active].id, "!other");
+        assert_eq!(app.rooms[1].draft, "for k\n\ntyped early");
+        app.open_room(1);
+        assert_eq!(app.composer.text(), "for k\n\ntyped early");
 
         // If the sole auto-opened pending invite vanishes, stale composer text is cleared.
         app.rooms.clear();
@@ -7910,6 +7982,303 @@ mod tests {
         assert!(
             app.composer.is_empty(),
             "vanishing auto-opened pending room must clear the composer"
+        );
+    }
+
+    #[test]
+    fn merge_saved_draft_preserves_cursor_toast_marks_and_slash_commands() {
+        // 1. Cursor stays at `draft.len() + 2 + old_cursor`, toast is shown, and an
+        //    accepted mention in the typed text resolves at its shifted offset rather
+        //    than binding to the same word in the saved draft.
+        let (mut app, _terminal) = drawn();
+        let (handle, _commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        type_text(&mut app, "ping Alice now");
+        app.complete.marks.push(
+            crate::complete::MentionMark::user("Alice", "@alice:example.org").with_at(Some(5)),
+        );
+        // Move cursor left 4 bytes (" now") so old_cursor = 10 ("ping Alice| now").
+        for _ in 0..4 {
+            app.on_event(key(KeyCode::Left));
+        }
+        assert_eq!(app.composer.cursor(), 10);
+        app.rooms[1].draft = "Alice said hi".to_owned();
+        app.toast = None;
+
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!k");
+        assert_eq!(app.composer.text(), "Alice said hi\n\nping Alice now");
+        assert_eq!(app.composer.cursor(), "Alice said hi".len() + 2 + 10);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("saved draft")),
+            "expected merge toast, got {:?}",
+            app.toast.as_ref().map(|(m, _)| m)
+        );
+        let outgoing = app.format_outgoing(app.composer.text());
+        let Outgoing::Text {
+            html: Some(html),
+            mentions: Some(mentions),
+            ..
+        } = outgoing
+        else {
+            panic!("expected linked mention, got {outgoing:?}");
+        };
+        assert!(mentions.user_ids.iter().any(|u| u == "@alice:example.org"));
+        assert!(
+            html.contains("<p>Alice said hi</p>")
+                && html.contains(
+                    "ping <a href=\"https://matrix.to/#/@alice:example.org\">Alice</a> now"
+                ),
+            "accepted mention must resolve in typed part, got: {html}"
+        );
+
+        // 2a. An unanchored (`at: None`) mark in typed text must bind to the typed part,
+        //     not to an earlier matching word in the draft part.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.clear_completion_marks();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        type_text(&mut app, "tell Alice");
+        app.complete.marks.push(crate::complete::MentionMark::user(
+            "Alice",
+            "@alice:example.org",
+        ));
+        app.rooms[1].draft = "Alice said hi".to_owned();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        let Outgoing::Text {
+            html: Some(html), ..
+        } = app.format_outgoing(app.composer.text())
+        else {
+            panic!("expected html");
+        };
+        assert!(
+            html.contains("<p>Alice said hi</p>")
+                && html
+                    .contains("tell <a href=\"https://matrix.to/#/@alice:example.org\">Alice</a>"),
+            "unanchored typed mark must not bind into draft part, got: {html}"
+        );
+
+        // 2b. A stale unanchored (`at: None`) mark whose needle is only in the draft part
+        //     must NOT bind to the draft part.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.clear_completion_marks();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        type_text(&mut app, "tell Bob");
+        app.complete.marks.push(crate::complete::MentionMark::user(
+            "Alice",
+            "@alice:example.org",
+        ));
+        app.rooms[1].draft = "Alice said hi".to_owned();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        let outgoing = app.format_outgoing(app.composer.text());
+        let Outgoing::Text { mentions, .. } = outgoing else {
+            panic!("expected text, got {outgoing:?}");
+        };
+        assert!(
+            mentions.is_none(),
+            "stale typed mark must not bind to draft part, got {mentions:?}"
+        );
+
+        // 3a. A typed `/command` (room command `/help`) keeps the saved draft aside, runs
+        //     normally on Enter, and restores the saved draft afterwards.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.clear_completion_marks();
+        app.help_open = false;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        type_text(&mut app, "/help");
+        app.rooms[1].draft = "remember milk".to_owned();
+        app.toast = None;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.composer.text(), "/help");
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("aside")),
+            "expected aside toast, got {:?}",
+            app.toast.as_ref().map(|(m, _)| m)
+        );
+        app.perform(Action::Send);
+        assert!(app.help_open, "/help command must execute");
+        assert_eq!(app.composer.text(), "remember milk");
+
+        // 3b. A typed `/me` command with a stored draft keeps the stored draft aside,
+        //     sends only the emote, restores the draft, and never wipes the store.
+        let (mut app, _terminal) = drawn();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        type_text(&mut app, "/me waves");
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!a",
+            "Alpha",
+            RoomCategory::Room,
+            0,
+        )]));
+        app.on_matrix(MatrixEvent::Draft {
+            room_id: "!a".into(),
+            thread: None,
+            text: "keep me".into(),
+        });
+        assert_eq!(app.composer.text(), "/me waves");
+        app.save_idle_draft(Duration::ZERO);
+        let cmds = drain(&mut commands);
+        assert!(
+            !cmds.iter().any(|c| c.starts_with("SaveDraft")),
+            "idle save must not overwrite stored draft with /command: {cmds:?}"
+        );
+        app.on_event(key(KeyCode::Enter));
+        let mut sent_emote = false;
+        let mut cleared_draft = false;
+        while let Ok(cmd) = commands.try_recv() {
+            match cmd {
+                MatrixCmd::Send {
+                    message: Outgoing::Emote { plain, .. },
+                    ..
+                } => {
+                    assert_eq!(plain, "waves");
+                    sent_emote = true;
+                }
+                MatrixCmd::SaveDraft { text, .. } if text.is_empty() => {
+                    cleared_draft = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(sent_emote, "/me waves must send as an emote");
+        assert!(
+            !cleared_draft,
+            "sending /me must not forget the aside draft"
+        );
+        assert_eq!(app.composer.text(), "keep me");
+
+        // 3c. Pressing Esc on a carried `/command` cancels it and restores the aside draft.
+        let (mut app, _terminal) = drawn();
+        let (handle, _commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        type_text(&mut app, "/join #later");
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!a",
+            "Alpha",
+            RoomCategory::Room,
+            0,
+        )]));
+        app.on_matrix(MatrixEvent::Draft {
+            room_id: "!a".into(),
+            thread: None,
+            text: "back on esc".into(),
+        });
+        assert_eq!(app.composer.text(), "/join #later");
+        app.on_event(key(KeyCode::Esc));
+        assert!(!app.chat_closed);
+        assert_eq!(app.composer.text(), "back on esc");
+    }
+
+    #[test]
+    fn aside_draft_marks_stay_with_aside_draft_not_command() {
+        let (mut app, _terminal) = drawn();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!i");
+        // Suppose `!k` already had an in-memory draft with a mention mark for Alice.
+        app.rooms[1].draft = "ping Alice".to_owned();
+        app.complete.marks.push(
+            crate::complete::MentionMark::user("Alice", "@alice:example.org").with_at(Some(5)),
+        );
+        app.save_room_marks("!k");
+
+        // User is on pending `!i` and types a `/me` command mentioning "Alice" as plain text.
+        type_text(&mut app, "/me waves at Alice");
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+            summary("!other", "Other", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!k");
+        assert_eq!(app.composer.text(), "/me waves at Alice");
+
+        // Leave `!k` and come back: the aside draft's mention mark must NOT attach to `/me`.
+        app.open_room(2);
+        app.open_room(1);
+        assert_eq!(app.composer.text(), "/me waves at Alice");
+        let Outgoing::Emote { mentions, .. } = app.format_outgoing(app.composer.text()) else {
+            panic!("expected emote");
+        };
+        assert!(
+            mentions.is_none(),
+            "aside draft's mention marks must not land on the command: {mentions:?}"
+        );
+
+        // Sending `/me waves at Alice` sends no mention and restores "ping Alice" WITH its mark.
+        let _ = drain(&mut commands);
+        app.perform(Action::Send);
+        let mut emote_mentions = None;
+        while let Ok(cmd) = commands.try_recv() {
+            if let MatrixCmd::Send {
+                message: Outgoing::Emote { mentions, .. },
+                ..
+            } = cmd
+            {
+                emote_mentions = Some(mentions);
+            }
+        }
+        assert!(
+            matches!(emote_mentions, Some(None)),
+            "expected emote with no mentions, got {emote_mentions:?}"
+        );
+        assert_eq!(app.composer.text(), "ping Alice");
+        let Outgoing::Text {
+            html: Some(html),
+            mentions: Some(restored_mentions),
+            ..
+        } = app.format_outgoing(app.composer.text())
+        else {
+            panic!("restored aside draft must keep its mention mark");
+        };
+        assert!(
+            restored_mentions
+                .user_ids
+                .iter()
+                .any(|u| u == "@alice:example.org")
+        );
+        assert!(
+            html.contains("<a href=\"https://matrix.to/#/@alice:example.org\">Alice</a>"),
+            "{html}"
         );
     }
 
@@ -9454,6 +9823,206 @@ mod tests {
         assert!(
             cmds.iter().any(|c| c == "OpenThread(!a, $root)"),
             "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn return_to_live_and_timeline_reset_remap_compose_and_selection_by_event_id() {
+        let with_id = |id: &str, event: &str, sender: &str, body: &str| Message {
+            id: id.into(),
+            item: Some(ItemRef::Event(event.into())),
+            sender: sender.into(),
+            own: sender == "me",
+            time: "10:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        };
+
+        // 1. Reply and selection started in a detached slice (prefix `t2-`) survive
+        //    "back to live" when the live timeline (`t1-`) carries the same event id.
+        let (mut app, _terminal, mut commands) = connected();
+        app.rooms[0].messages = vec![with_id("t1-0", "$ev_live", "ann", "live")];
+        drain(&mut commands);
+
+        app.jump_to_event("!a".into(), "$ev_target".into(), None);
+        let jump_gen = app.next_gen;
+        drain(&mut commands);
+        app.on_matrix(detached_timeline(
+            "!a",
+            jump_gen,
+            "$ev_target",
+            None,
+            false,
+            vec![
+                with_id("t2-0", "$ev_earlier", "bob", "earlier"),
+                with_id("t2-1", "$ev_target", "bob", "target"),
+            ],
+        ));
+        assert!(app.timeline.detached);
+        assert_eq!(app.timeline.selected, Some(1));
+        app.compose_mode = ComposeMode::Reply(1);
+
+        // Return to live; the live list has different timeline ids (`t1-*`) and `$ev_target`
+        // now sits at index 0.
+        app.return_to_live();
+        drain(&mut commands);
+        app.on_matrix(timeline(
+            &app,
+            vec![
+                with_id("t1-0", "$ev_target", "bob", "target"),
+                with_id("t1-1", "$ev_newest", "ann", "newest"),
+            ],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Reply(0));
+        assert_eq!(app.timeline.selected, Some(0));
+
+        // 2. Edit started in a detached slice cancels cleanly when the event is absent
+        //    from the live timeline, even if local ids happen to collide.
+        app.jump_to_event("!a".into(), "$ev_old_mine".into(), None);
+        let jump_gen = app.next_gen;
+        drain(&mut commands);
+        app.on_matrix(detached_timeline(
+            "!a",
+            jump_gen,
+            "$ev_old_mine",
+            None,
+            false,
+            vec![with_id("0", "$ev_old_mine", "me", "old mine")],
+        ));
+        app.composer.set_text("unsent draft");
+        app.begin_edit(0, "old mine");
+        assert_eq!(app.compose_mode, ComposeMode::Edit(0));
+
+        app.return_to_live();
+        drain(&mut commands);
+        app.toast = None;
+        app.on_matrix(timeline(
+            &app,
+            vec![with_id("0", "$ev_other_mine", "me", "other mine")],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.composer.text(), "unsent draft");
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("Edit cancelled")),
+            "expected cancel toast, got {:?}",
+            app.toast.as_ref().map(|(m, _)| m)
+        );
+
+        // 3. A timeline rebuilt after `TimelineReset` (new prefix `t3-`) also keeps reply
+        //    and selection on the same event id (with a newer message after it so index 1
+        //    cannot pass via the last-message fallback).
+        app.compose_mode = ComposeMode::Reply(0);
+        app.set_focus(Pane::Timeline);
+        app.timeline.selected = Some(0);
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(
+            &app,
+            vec![
+                with_id("t3-0", "$ev_before", "ann", "before"),
+                with_id("t3-1", "$ev_other_mine", "me", "other mine"),
+                with_id("t3-2", "$ev_after", "bob", "after"),
+            ],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Reply(1));
+        assert_eq!(app.timeline.selected, Some(1));
+    }
+
+    #[test]
+    fn timeline_reset_keeps_transaction_target_and_toasts_on_cancel() {
+        let remote_msg = |id: &str, event: &str, body: &str| Message {
+            id: id.into(),
+            item: Some(ItemRef::Event(event.into())),
+            sender: "ann".into(),
+            time: "10:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        };
+        let sending_msg = |id: &str, txn: &str, body: &str| Message {
+            id: id.into(),
+            item: Some(ItemRef::Transaction(txn.into())),
+            sender: "me".into(),
+            own: true,
+            state: SendState::Sending,
+            time: "10:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        };
+
+        let (mut app, _terminal, mut commands) = connected();
+        app.rooms[0].messages = vec![
+            sending_msg("t1-0", "txn-sending", "still sending"),
+            remote_msg("t1-1", "$ev_after", "after"),
+        ];
+        app.timeline.generation = Some(app.generation);
+        app.composer.set_text("saved draft");
+        app.begin_edit(0, "still sending");
+        type_text(&mut app, " revised");
+        app.set_focus(Pane::Timeline);
+        app.timeline.selected = Some(0);
+        assert_eq!(app.compose_mode, ComposeMode::Edit(0));
+        drain(&mut commands);
+
+        // TimelineReset + rebuilt timeline (`t2-*`): edit, edited text, and selection all
+        // stay on `txn-sending` at index 1 (not last index 2).
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(
+            &app,
+            vec![
+                remote_msg("t2-0", "$ev_before", "before"),
+                sending_msg("t2-1", "txn-sending", "still sending"),
+                remote_msg("t2-2", "$ev_after", "after"),
+            ],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Edit(1));
+        assert_eq!(app.composer.text(), "still sending revised");
+        assert_eq!(app.timeline.selected, Some(1));
+
+        // Reply on the same `Transaction` target also survives a reset.
+        app.cancel_compose();
+        app.compose_mode = ComposeMode::Reply(1);
+        app.timeline.selected = Some(1);
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(
+            &app,
+            vec![
+                sending_msg("t3-0", "txn-sending", "still sending"),
+                remote_msg("t3-1", "$ev_after", "after"),
+            ],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Reply(0));
+        assert_eq!(app.timeline.selected, Some(0));
+
+        // When the reply target vanishes across a reset, cancelling shows a toast.
+        app.toast = None;
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(
+            &app,
+            vec![remote_msg("t4-0", "$ev_after", "after")],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("Reply cancelled")),
+            "expected reply-cancel toast, got {:?}",
+            app.toast.as_ref().map(|(m, _)| m)
         );
     }
 

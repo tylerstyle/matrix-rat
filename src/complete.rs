@@ -1,6 +1,7 @@
 //! Composer completions (`@` mentions, `:emoji:`, `#` rooms, `/` commands) and
 //! resolution of accepted mentions and room links into Matrix HTML + `m.mentions`.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ops::Range;
 
@@ -600,20 +601,52 @@ enum MentionEntry<'a> {
 }
 
 impl MentionEntry<'_> {
-    fn sort_name(&self, empty_query: bool) -> &str {
-        match self {
-            Self::Member(member) => &member.display_name,
-            // Keep `@room` below regular members on an empty query so hitting Enter
-            // accidentally after `@` does not ping the whole room.
-            Self::Room if empty_query => "\u{10ffff}room",
-            Self::Room => "@room",
-        }
-    }
-
     fn into_candidate(self) -> Candidate {
         match self {
             Self::Member(member) => member_candidate(member),
             Self::Room => room_mention_candidate(),
+        }
+    }
+}
+
+/// Sort key for a candidate name: pure ASCII stays borrowed and folds byte by byte
+/// without allocating, while non-ASCII is lowercased once per query with
+/// `str::to_lowercase`.
+enum SortKey<'a> {
+    Ascii(&'a str),
+    Lowered(Cow<'a, str>),
+}
+
+impl<'a> SortKey<'a> {
+    fn of(text: &'a str) -> Self {
+        if text.is_ascii() {
+            Self::Ascii(text)
+        } else {
+            Self::Lowered(Cow::Owned(text.to_lowercase()))
+        }
+    }
+
+    fn from_lowered(text: &'a str, already_lowered: Option<String>) -> Self {
+        match already_lowered {
+            Some(lowered) => Self::Lowered(Cow::Owned(lowered)),
+            None => Self::of(text),
+        }
+    }
+
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Ascii(a), Self::Ascii(b)) => a
+                .bytes()
+                .map(|byte| byte.to_ascii_lowercase())
+                .cmp(b.bytes().map(|byte| byte.to_ascii_lowercase())),
+            (Self::Ascii(a), Self::Lowered(b)) => a
+                .bytes()
+                .map(|byte| byte.to_ascii_lowercase())
+                .cmp(b.bytes()),
+            (Self::Lowered(a), Self::Ascii(b)) => a
+                .bytes()
+                .cmp(b.bytes().map(|byte| byte.to_ascii_lowercase())),
+            (Self::Lowered(a), Self::Lowered(b)) => a.as_ref().cmp(b.as_ref()),
         }
     }
 }
@@ -627,32 +660,46 @@ fn match_mentions(query: &str, ctx: &Context<'_>) -> Vec<Candidate> {
     };
 
     if query.is_empty() {
-        let mut ranked: Vec<(usize, MentionEntry<'_>)> = Vec::with_capacity(MAX_CANDIDATES);
-        let cmp = |a: &(usize, MentionEntry<'_>), b: &(usize, MentionEntry<'_>)| {
-            a.0.cmp(&b.0)
-                .then_with(|| cmp_lowercase(a.1.sort_name(true), b.1.sort_name(true)))
+        let mut ranked: Vec<(usize, SortKey<'_>, MentionEntry<'_>)> =
+            Vec::with_capacity(MAX_CANDIDATES);
+        let cmp = |a: &(usize, SortKey<'_>, MentionEntry<'_>),
+                   b: &(usize, SortKey<'_>, MentionEntry<'_>)| {
+            a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
         };
-        // Rank without allocating candidates or lowercase copies; build only the top 10.
+        // Rank without allocating candidates or ASCII lowercase copies; build only the top 10.
         for member in ctx.members {
             let r = recency(&member.display_name, &member.user_id);
+            if ranked.len() == MAX_CANDIDATES && r > ranked[MAX_CANDIDATES - 1].0 {
+                continue;
+            }
             push_top_k(
                 &mut ranked,
                 MAX_CANDIDATES,
-                (r, MentionEntry::Member(member)),
+                (
+                    r,
+                    SortKey::of(&member.display_name),
+                    MentionEntry::Member(member),
+                ),
                 cmp,
             );
         }
         if ctx.can_mention_room {
+            // Keep `@room` below regular members on an empty query so hitting Enter
+            // accidentally after `@` does not ping the whole room.
             push_top_k(
                 &mut ranked,
                 MAX_CANDIDATES,
-                (usize::MAX, MentionEntry::Room),
+                (
+                    usize::MAX,
+                    SortKey::Lowered(Cow::Borrowed("\u{10ffff}room")),
+                    MentionEntry::Room,
+                ),
                 cmp,
             );
         }
         return ranked
             .into_iter()
-            .map(|(_, entry)| entry.into_candidate())
+            .map(|(_, _, entry)| entry.into_candidate())
             .collect();
     }
 
@@ -666,15 +713,17 @@ fn match_mentions(query: &str, ctx: &Context<'_>) -> Vec<Candidate> {
     let mut buf = Vec::new();
     let mut lower_buf = String::new();
     let lowered = query.to_lowercase();
-    let mut top: Vec<(u32, usize, MentionEntry<'_>)> = Vec::with_capacity(MAX_CANDIDATES);
-    let cmp = |a: &(u32, usize, MentionEntry<'_>), b: &(u32, usize, MentionEntry<'_>)| {
+    let mut top: Vec<(u32, usize, SortKey<'_>, MentionEntry<'_>)> =
+        Vec::with_capacity(MAX_CANDIDATES);
+    let cmp = |a: &(u32, usize, SortKey<'_>, MentionEntry<'_>),
+               b: &(u32, usize, SortKey<'_>, MentionEntry<'_>)| {
         b.0.cmp(&a.0)
             .then_with(|| a.1.cmp(&b.1))
-            .then_with(|| cmp_lowercase(a.2.sort_name(false), b.2.sort_name(false)))
+            .then_with(|| a.2.cmp(&b.2))
     };
 
     for member in ctx.members {
-        let name_score = score_field(
+        let name_hit = score_field(
             &pattern,
             &mut matcher,
             &mut buf,
@@ -689,7 +738,12 @@ fn match_mentions(query: &str, ctx: &Context<'_>) -> Vec<Candidate> {
             &mut lower_buf,
             &member.user_id,
             &lowered,
-        );
+        )
+        .map(|(score, _)| score);
+        let (name_score, name_lowered) = match name_hit {
+            Some((score, lowered_name)) => (Some(score), lowered_name),
+            None => (None, None),
+        };
         let Some(score) = name_score.into_iter().chain(id_score).max() else {
             continue;
         };
@@ -697,16 +751,27 @@ fn match_mentions(query: &str, ctx: &Context<'_>) -> Vec<Candidate> {
             continue;
         }
         let r = recency(&member.display_name, &member.user_id);
+        if top.len() == MAX_CANDIDATES
+            && score == top[MAX_CANDIDATES - 1].0
+            && r > top[MAX_CANDIDATES - 1].1
+        {
+            continue;
+        }
         push_top_k(
             &mut top,
             MAX_CANDIDATES,
-            (score, r, MentionEntry::Member(member)),
+            (
+                score,
+                r,
+                SortKey::from_lowered(&member.display_name, name_lowered),
+                MentionEntry::Member(member),
+            ),
             cmp,
         );
     }
 
     if ctx.can_mention_room
-        && let Some(score) = score_field(
+        && let Some((score, _)) = score_field(
             &pattern,
             &mut matcher,
             &mut buf,
@@ -718,13 +783,18 @@ fn match_mentions(query: &str, ctx: &Context<'_>) -> Vec<Candidate> {
         push_top_k(
             &mut top,
             MAX_CANDIDATES,
-            (score, usize::MAX, MentionEntry::Room),
+            (
+                score,
+                usize::MAX,
+                SortKey::Ascii("@room"),
+                MentionEntry::Room,
+            ),
             cmp,
         );
     }
 
     top.into_iter()
-        .map(|(_, _, entry)| entry.into_candidate())
+        .map(|(_, _, _, entry)| entry.into_candidate())
         .collect()
 }
 
@@ -768,10 +838,10 @@ fn match_rooms(query: &str, rooms: &[RoomTarget]) -> Vec<Candidate> {
     let mut buf = Vec::new();
     let mut lower_buf = String::new();
     let lowered = query.to_lowercase();
-    let mut top: Vec<(u32, &RoomTarget)> = Vec::with_capacity(MAX_CANDIDATES);
+    let mut top: Vec<(u32, SortKey<'_>, &RoomTarget)> = Vec::with_capacity(MAX_CANDIDATES);
 
     for room in rooms {
-        let alias_score = room.alias.as_deref().and_then(|a| {
+        let alias_hit = room.alias.as_deref().and_then(|a| {
             score_field(
                 &pattern,
                 &mut matcher,
@@ -781,7 +851,7 @@ fn match_rooms(query: &str, rooms: &[RoomTarget]) -> Vec<Candidate> {
                 &lowered,
             )
         });
-        let name_score = score_field(
+        let name_hit = score_field(
             &pattern,
             &mut matcher,
             &mut buf,
@@ -789,21 +859,31 @@ fn match_rooms(query: &str, rooms: &[RoomTarget]) -> Vec<Candidate> {
             &room.name,
             &lowered,
         );
+        let (alias_score, alias_lowered) = match alias_hit {
+            Some((score, lowered_alias)) => (Some(score), lowered_alias),
+            None => (None, None),
+        };
+        let (name_score, name_lowered) = match name_hit {
+            Some((score, lowered_name)) => (Some(score), lowered_name),
+            None => (None, None),
+        };
         let Some(score) = alias_score.into_iter().chain(name_score).max() else {
             continue;
         };
-        push_top_k(&mut top, MAX_CANDIDATES, (score, room), |a, b| {
-            b.0.cmp(&a.0).then_with(|| {
-                cmp_lowercase(
-                    a.1.alias.as_deref().unwrap_or(&a.1.name),
-                    b.1.alias.as_deref().unwrap_or(&b.1.name),
-                )
-            })
+        if top.len() == MAX_CANDIDATES && score < top[MAX_CANDIDATES - 1].0 {
+            continue;
+        }
+        let sort_key = match room.alias.as_deref() {
+            Some(alias) => SortKey::from_lowered(alias, alias_lowered),
+            None => SortKey::from_lowered(&room.name, name_lowered),
+        };
+        push_top_k(&mut top, MAX_CANDIDATES, (score, sort_key, room), |a, b| {
+            b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1))
         });
     }
 
     top.into_iter()
-        .map(|(_, room)| room_candidate(room))
+        .map(|(_, _, room)| room_candidate(room))
         .collect()
 }
 
@@ -839,16 +919,6 @@ pub fn room_matrix_to_uri(alias: Option<&str>, room_id: &str) -> String {
     }
 }
 
-fn cmp_lowercase(a: &str, b: &str) -> std::cmp::Ordering {
-    if a.is_ascii() && b.is_ascii() {
-        return a
-            .bytes()
-            .map(|byte| byte.to_ascii_lowercase())
-            .cmp(b.bytes().map(|byte| byte.to_ascii_lowercase()));
-    }
-    a.to_lowercase().cmp(&b.to_lowercase())
-}
-
 fn score_field(
     pattern: &Pattern,
     matcher: &mut Matcher,
@@ -856,17 +926,16 @@ fn score_field(
     lower_buf: &mut String,
     field: &str,
     lowered_query: &str,
-) -> Option<u32> {
+) -> Option<(u32, Option<String>)> {
     let fuzzy = pattern.score(Utf32Str::new(field, buf), matcher)?;
-    let owned;
+    let mut owned = None;
     let lowered = if field.is_ascii() {
         lower_buf.clear();
         lower_buf.push_str(field);
         lower_buf.make_ascii_lowercase();
         lower_buf.as_str()
     } else {
-        owned = field.to_lowercase();
-        owned.as_str()
+        owned.insert(field.to_lowercase()).as_str()
     };
     let boost = if lowered == lowered_query {
         30_000
@@ -877,7 +946,7 @@ fn score_field(
     } else {
         0
     };
-    Some(boost + fuzzy)
+    Some((boost + fuzzy, owned))
 }
 
 fn push_top_k<T, F>(top: &mut Vec<T>, k: usize, item: T, cmp: F)
@@ -1013,6 +1082,78 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
     if marks.is_empty() || text.is_empty() {
         return (text.to_owned(), Mentions::new());
     }
+    let matched = match_marks(text, marks);
+
+    let mut user_ids: BTreeSet<OwnedUserId> = BTreeSet::new();
+    let mut room_mention = false;
+    let mut replacements: Vec<(Range<usize>, String)> = Vec::new();
+
+    for (idx, (mark, pos)) in marks.iter().zip(matched).enumerate() {
+        let Some(pos) = pos else {
+            continue;
+        };
+        let end = pos + mark.needle().len();
+        match &mark.kind {
+            MentionKind::User { label, user_id } => {
+                if let Ok(uid) = UserId::parse(user_id) {
+                    let uri = uid.matrix_to_uri().to_string();
+                    user_ids.insert(uid);
+                    replacements.push((pos..end, markdown_link(label, &uri)));
+                }
+            }
+            MentionKind::RoomNotification => {
+                room_mention = true;
+            }
+            MentionKind::RoomLink { label, uri } => {
+                if is_safe_matrix_to(uri) {
+                    replacements.push((pos..end, markdown_link(label, uri)));
+                }
+            }
+            MentionKind::Emoticon { .. } => replacements.push((pos..end, emote_placeholder(idx))),
+        }
+    }
+
+    replacements.sort_by_key(|(range, _)| range.start);
+    let mut linked = String::with_capacity(text.len() + replacements.len() * 32);
+    let mut last = 0;
+    for (range, rep) in replacements {
+        linked.push_str(&text[last..range.start]);
+        linked.push_str(&rep);
+        last = range.end;
+    }
+    linked.push_str(&text[last..]);
+
+    let mut mentions = Mentions::with_user_ids(user_ids);
+    mentions.room = room_mention;
+    (linked, mentions)
+}
+
+/// Anchors `marks` to their matched byte positions inside `text`, shifted by `shift`, and
+/// drops any mark that does not match in `text`. Used when prepending or appending
+/// another segment so unanchored (`at: None`) or drifted marks cannot bind to words in
+/// the other segment.
+pub(crate) fn anchor_marks_in_segment(text: &str, marks: &mut Vec<MentionMark>, shift: usize) {
+    if marks.is_empty() {
+        return;
+    }
+    if text.is_empty() {
+        marks.clear();
+        return;
+    }
+    let matched = match_marks(text, marks);
+    let mut anchored = Vec::with_capacity(marks.len());
+    for (mut mark, pos) in std::mem::take(marks).into_iter().zip(matched) {
+        if let Some(pos) = pos {
+            mark.at = Some(pos + shift);
+            anchored.push(mark);
+        }
+    }
+    *marks = anchored;
+}
+
+/// Matches each mark against `text` using exact accepted positions first, then left-to-right
+/// longest-needle matches outside code spans, returning the matched byte offset per mark.
+fn match_marks(text: &str, marks: &[MentionMark]) -> Vec<Option<usize>> {
     let mut occupied = code_mask(text, false);
 
     // Order marks longest-label first while keeping original index to disambiguate identical names.
@@ -1024,34 +1165,12 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
         .collect();
     ordered.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(a.0.cmp(&b.0)));
 
-    let mut used = vec![false; marks.len()];
-    let mut user_ids: BTreeSet<OwnedUserId> = BTreeSet::new();
-    let mut room_mention = false;
-    let mut replacements: Vec<(Range<usize>, String)> = Vec::new();
-
-    let mut apply = |pos: usize, end: usize, idx: usize, mark: &MentionMark| match &mark.kind {
-        MentionKind::User { label, user_id } => {
-            if let Ok(uid) = UserId::parse(user_id) {
-                let uri = uid.matrix_to_uri().to_string();
-                user_ids.insert(uid);
-                replacements.push((pos..end, markdown_link(label, &uri)));
-            }
-        }
-        MentionKind::RoomNotification => {
-            room_mention = true;
-        }
-        MentionKind::RoomLink { label, uri } => {
-            if is_safe_matrix_to(uri) {
-                replacements.push((pos..end, markdown_link(label, uri)));
-            }
-        }
-        MentionKind::Emoticon { .. } => replacements.push((pos..end, emote_placeholder(idx))),
-    };
+    let mut matched = vec![None; marks.len()];
 
     // Pass 1: honour exact accepted positions first so an earlier ordinary word (e.g. "May") does
     // not steal a completion accepted later in the message.
     for &(idx, mark, needle) in &ordered {
-        if used[idx] {
+        if matched[idx].is_some() {
             continue;
         }
         let Some(pos) = mark.at else {
@@ -1069,9 +1188,8 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
         {
             continue;
         }
-        used[idx] = true;
+        matched[idx] = Some(pos);
         occupied[pos..end].fill(true);
-        apply(pos, end, idx, mark);
     }
 
     // Pass 2: match any remaining unused mark against the first unused occurrence left to right.
@@ -1082,9 +1200,9 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
             pos += next_char_len(text, pos);
             continue;
         }
-        let mut chosen: Option<(usize, &MentionMark, &str)> = None;
+        let mut chosen: Option<(usize, &str)> = None;
         for &(idx, mark, needle) in &ordered {
-            if used[idx] {
+            if matched[idx].is_some() {
                 continue;
             }
             if !text[pos..].starts_with(needle) {
@@ -1097,33 +1215,20 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
             if !mark_fits(text, pos, end, mark) {
                 continue;
             }
-            chosen = Some((idx, mark, needle));
+            chosen = Some((idx, needle));
             break;
         }
-        if let Some((idx, mark, needle)) = chosen {
+        if let Some((idx, needle)) = chosen {
             let end = pos + needle.len();
-            used[idx] = true;
+            matched[idx] = Some(pos);
             occupied[pos..end].fill(true);
-            apply(pos, end, idx, mark);
             pos = end;
         } else {
             pos += next_char_len(text, pos);
         }
     }
 
-    replacements.sort_by_key(|(range, _)| range.start);
-    let mut linked = String::with_capacity(text.len() + replacements.len() * 32);
-    let mut last = 0;
-    for (range, rep) in replacements {
-        linked.push_str(&text[last..range.start]);
-        linked.push_str(&rep);
-        last = range.end;
-    }
-    linked.push_str(&text[last..]);
-
-    let mut mentions = Mentions::with_user_ids(user_ids);
-    mentions.room = room_mention;
-    (linked, mentions)
+    matched
 }
 
 /// Custom emoji are HTML that Markdown would escape, so [`resolve_marks`] leaves a

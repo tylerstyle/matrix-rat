@@ -573,6 +573,7 @@ impl App {
         self.complete.mark_namesakes(&room_id, &mut messages);
 
         let mut timeline = TimelineState {
+            generation: Some(generation),
             reached_start,
             detached: detached.is_some(),
             reached_end: detached.as_ref().is_some_and(|d| d.reached_end),
@@ -581,14 +582,14 @@ impl App {
         timeline.selected = find_target_message(&messages, target_id, false, self.thread_open());
         timeline.reveal_selected = timeline.selected.is_some();
 
-        // Capture any active reply or edit target by event id before replacing the slice
+        // Capture any active reply or edit target by `ItemRef` before replacing the slice
         // (cross-room or cross-thread switches above already reset `compose_mode`, and
         // a detached slice is a brand-new timeline with different local item ids).
-        let compose_event = self.compose_target_event_id();
+        let compose_item = self.compose_target_item();
 
         // The room is the open one now, whatever was open (or not) before.
         self.rooms[room_index].messages = messages;
-        self.remap_compose_mode_by_event(compose_event.as_deref());
+        self.remap_compose_mode_by_item(compose_item.as_ref());
         self.request_custom_reaction_emotes();
         self.follow_room_emotes();
         self.forget_notes_of_deleted();
@@ -1845,8 +1846,9 @@ mod tests {
             assert_eq!(app.compose_mode, ComposeMode::Reply(1));
         }
 
-        // 3. Target with no event id (local echo) cannot be matched across timelines and
-        //    is cancelled even if the new slice reuses the same local id.
+        // 3. A sending target (`ItemRef::Transaction`) does not match a remote event
+        //    (`ItemRef::Event`) across timelines, even if the new slice reuses the same
+        //    local id, and cancels with a toast.
         {
             let (mut app, _rx, _h) = test_app_with_matrix();
             app.rooms[0].messages = vec![Message {
@@ -1884,5 +1886,95 @@ mod tests {
             );
             assert_eq!(app.compose_mode, ComposeMode::Normal);
         }
+    }
+
+    #[test]
+    fn jump_arrived_sets_timeline_generation_for_followup_updates() {
+        let (mut app, _rx, _h) = test_app_with_matrix();
+        app.pending_jump = Some(PendingJump {
+            generation: 21,
+            room_id: "!a:example.org".into(),
+            event_id: "$ev_target".into(),
+            thread_root: None,
+        });
+        app.generation = 21;
+        app.on_jump_arrived(
+            21,
+            "!a:example.org".into(),
+            vec![
+                Message {
+                    id: "t2-0".into(),
+                    item: Some(ItemRef::Event("$ev_target".into())),
+                    sender: "alice".into(),
+                    body: "target".into(),
+                    ..Message::default()
+                },
+                Message {
+                    id: "t2-1".into(),
+                    item: None,
+                    sender: "bob".into(),
+                    body: "local note".into(),
+                    ..Message::default()
+                },
+                Message {
+                    id: "t2-2".into(),
+                    item: Some(ItemRef::Event("$ev_newer".into())),
+                    sender: "carol".into(),
+                    body: "newer".into(),
+                    ..Message::default()
+                },
+            ],
+            false,
+            Some(DetachedTimeline {
+                target_event: "$ev_target".into(),
+                reached_end: false,
+                thread_root: None,
+            }),
+        );
+        // Select the item with no `ItemRef` (only trackable by local id on the same timeline).
+        app.timeline.selected = Some(1);
+
+        // A follow-up `Timeline` on the same generation prepends an older message.
+        app.on_matrix(crate::matrix::MatrixEvent::Timeline {
+            room_id: "!a:example.org".into(),
+            generation: 21,
+            reached_start: false,
+            detached: Some(DetachedTimeline {
+                target_event: "$ev_target".into(),
+                reached_end: false,
+                thread_root: None,
+            }),
+            messages: vec![
+                Message {
+                    id: "t2-old".into(),
+                    item: Some(ItemRef::Event("$ev_older".into())),
+                    sender: "dan".into(),
+                    body: "older".into(),
+                    ..Message::default()
+                },
+                Message {
+                    id: "t2-0".into(),
+                    item: Some(ItemRef::Event("$ev_target".into())),
+                    sender: "alice".into(),
+                    body: "target".into(),
+                    ..Message::default()
+                },
+                Message {
+                    id: "t2-1".into(),
+                    item: None,
+                    sender: "bob".into(),
+                    body: "local note".into(),
+                    ..Message::default()
+                },
+                Message {
+                    id: "t2-2".into(),
+                    item: Some(ItemRef::Event("$ev_newer".into())),
+                    sender: "carol".into(),
+                    body: "newer".into(),
+                    ..Message::default()
+                },
+            ],
+        });
+        assert_eq!(app.timeline.selected, Some(2));
     }
 }

@@ -41,7 +41,9 @@ impl App {
             return true;
         };
         self.composer.set_text("");
-        self.sync_completion();
+        if !self.restore_aside_draft() {
+            self.sync_completion();
+        }
         self.open_modal(Modal::PollForm(PollFormPopup::create(room_id, arg)));
         true
     }

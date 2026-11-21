@@ -485,7 +485,7 @@ impl App {
         let mut messages = room.messages.clone();
         messages.retain(|message| message.id != LINE_ID);
         let updated = self.insert_unread_line(messages);
-        self.apply_timeline(updated);
+        self.apply_timeline(updated, true);
     }
 
     /// Puts the line, if it is placed, above its message among `messages`.
@@ -529,7 +529,7 @@ impl App {
             return;
         }
         if matches!(self.unread.line, Line::At(_)) {
-            self.apply_timeline(messages);
+            self.apply_timeline(messages, true);
         }
         // Drawn again: receipts wait for a frame that shows what is read.
         self.dirty = true;

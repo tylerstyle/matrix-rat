@@ -100,7 +100,9 @@ impl App {
         };
         if self.open_stickers(filter) {
             self.composer.set_text("");
-            self.sync_completion();
+            if !self.restore_aside_draft() {
+                self.sync_completion();
+            }
         }
         true
     }

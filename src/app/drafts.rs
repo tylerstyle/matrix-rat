@@ -19,6 +19,13 @@ use crate::model::RoomKind;
 /// kill loses little.
 pub(super) const IDLE: Duration = Duration::from_secs(3);
 
+/// A saved draft and its mention marks kept aside while a carried `/command` stays in
+/// the composer.
+struct AsideDraft {
+    text: String,
+    marks: Vec<crate::complete::MentionMark>,
+}
+
 #[derive(Default)]
 pub struct Drafts {
     /// What the store holds per conversation, as far as known: what the worker
@@ -30,6 +37,13 @@ pub struct Drafts {
     touched: bool,
     /// When the draft last changed, if that has not been dealt with yet.
     changed: Option<Instant>,
+    /// Conversation into which early composer text was carried on auto-open while
+    /// waiting for its stored draft from the worker.
+    carried: Option<Scope>,
+    /// Saved drafts (with their mention marks) kept aside while a carried `/command` is
+    /// still in the composer, so running, cancelling, or turning the command into plain
+    /// text puts the draft back untouched.
+    aside: HashMap<Scope, AsideDraft>,
 }
 
 /// Hand-written: drafts are what was typed, kept under the ids of rooms and threads.
@@ -40,8 +54,23 @@ impl std::fmt::Debug for Drafts {
             .field("seen", &self.seen.is_some())
             .field("touched", &self.touched)
             .field("changed", &self.changed.is_some())
+            .field("carried", &self.carried.is_some())
+            .field("aside", &self.aside.len())
             .finish()
     }
+}
+
+/// Whether `text` begins a slash command (excluding `//...`, which sends a literal `/`).
+pub(super) fn is_slash_command(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with('/') && !trimmed.starts_with("//")
+}
+
+/// Whether `text` starts with `/` (either a slash command or a `//` literal-slash escape,
+/// both of which only work at the start of the message and keep any aside draft aside
+/// until sent or cancelled).
+fn starts_with_slash(text: &str) -> bool {
+    text.trim_start().starts_with('/')
 }
 
 impl App {
@@ -67,6 +96,19 @@ impl App {
             Some(_) => self.attach.stashed(scope),
             None => text,
         };
+        // A saved draft kept aside for a carried slash command is never dropped: while
+        // the command (or an empty composer) stays, store the aside draft; if plain text
+        // somehow sits beside it (e.g. behind an edit), keep both.
+        if let Some(aside) = self.drafts.aside.get(scope) {
+            return if is_slash_command(text)
+                || text.trim().is_empty()
+                || text.trim() == aside.text.trim()
+            {
+                aside.text.clone()
+            } else {
+                format!("{}\n\n{text}", aside.text)
+            };
+        }
         if text.trim().is_empty() {
             String::new()
         } else {
@@ -74,9 +116,164 @@ impl App {
         }
     }
 
+    /// Remembers that early composer text was carried into `scope` on auto-open while
+    /// waiting for its stored draft from the worker.
+    pub(super) fn note_carried_draft(&mut self, scope: Scope) {
+        self.drafts.carried = (!self.drafts.stored.contains_key(&scope)).then_some(scope);
+    }
+
+    /// Clears any remembered auto-open carry-over scope.
+    pub(super) fn clear_carried_draft(&mut self) {
+        self.drafts.carried = None;
+    }
+
+    /// Prepends `draft` (with `draft_marks`) above the current composer text, preserving
+    /// cursor position, anchoring each segment's marks strictly inside its own text, and
+    /// explaining via a toast.
+    fn merge_draft_with_marks(
+        &mut self,
+        draft: &str,
+        mut draft_marks: Vec<crate::complete::MentionMark>,
+    ) {
+        if draft.is_empty() {
+            return;
+        }
+        if self.composer.text().trim() == draft.trim() {
+            if self.complete.marks.is_empty() && !draft_marks.is_empty() {
+                crate::complete::anchor_marks_in_segment(self.composer.text(), &mut draft_marks, 0);
+                self.complete.marks = draft_marks;
+            }
+            return;
+        }
+        let typed = self.composer.text().to_owned();
+        let old_cursor = self.composer.cursor();
+        let offset = draft.len() + 2;
+        let mut typed_marks = std::mem::take(&mut self.complete.marks);
+        crate::complete::anchor_marks_in_segment(&typed, &mut typed_marks, offset);
+        crate::complete::anchor_marks_in_segment(draft, &mut draft_marks, 0);
+        draft_marks.extend(typed_marks);
+        self.complete.marks = draft_marks;
+        self.complete.close_popup();
+        self.composer
+            .set_text_with_cursor(&format!("{draft}\n\n{typed}"), offset + old_cursor);
+        self.sync_completion();
+        self.show_toast("Restored saved draft above your text");
+    }
+
+    /// Combines an existing saved `draft` for `scope` with early text already in the
+    /// composer. Slash commands keep the saved draft (and its room marks) aside so the
+    /// command still runs without inheriting the draft's mentions; normal text merges
+    /// the saved draft above a blank line.
+    pub(super) fn merge_saved_draft(
+        &mut self,
+        scope: &Scope,
+        draft: &str,
+        restore_room_marks: bool,
+    ) {
+        if draft.is_empty() {
+            return;
+        }
+        let draft_marks = if restore_room_marks {
+            self.take_room_marks(&scope.0)
+        } else {
+            Vec::new()
+        };
+        if self.composer.text().trim() == draft.trim() {
+            if self.complete.marks.is_empty() && !draft_marks.is_empty() {
+                let mut marks = draft_marks;
+                crate::complete::anchor_marks_in_segment(self.composer.text(), &mut marks, 0);
+                self.complete.marks = marks;
+            }
+            return;
+        }
+        if crate::upload::command_argument(self.composer.text()).is_some() {
+            let had_stash = !self.attach.stashed(scope).trim().is_empty();
+            self.attach
+                .merge_stashed_draft(scope.clone(), draft.to_owned());
+            self.show_toast(if had_stash {
+                "Saved draft added to the waiting caption"
+            } else {
+                "Saved draft kept aside while you finish the command"
+            });
+            return;
+        }
+        if starts_with_slash(self.composer.text()) {
+            self.drafts.aside.insert(
+                scope.clone(),
+                AsideDraft {
+                    text: draft.to_owned(),
+                    marks: draft_marks,
+                },
+            );
+            self.show_toast("Saved draft kept aside while you finish the command");
+            return;
+        }
+        self.merge_draft_with_marks(draft, draft_marks);
+    }
+
+    /// Puts a saved draft (and its marks) kept aside for a carried `/command` back into
+    /// the composer: directly if the composer is empty, or merged above any plain text.
+    pub(super) fn restore_aside_draft(&mut self) -> bool {
+        let Some(scope) = self.attach_scope() else {
+            return false;
+        };
+        let Some(aside) = self.drafts.aside.remove(&scope) else {
+            return false;
+        };
+        if self.composer.text().trim().is_empty() {
+            self.composer.set_text(&aside.text);
+            self.complete.marks = aside.marks;
+            self.complete.close_popup();
+            self.sync_completion();
+        } else {
+            self.merge_draft_with_marks(&aside.text, aside.marks);
+        }
+        true
+    }
+
+    /// Once a carried `/command` is edited into plain text, puts the aside draft back
+    /// into the composer right away so leaving, quitting or sending can never lose it.
+    /// Text starting with `//` stays unmerged so the leading `//` escape still works on
+    /// send (while `draft_text` still saves both on leave or quit).
+    pub(super) fn reclaim_aside_if_plain(&mut self) {
+        if matches!(self.compose_mode, ComposeMode::Edit(_)) {
+            return;
+        }
+        let text = self.composer.text();
+        if text.trim().is_empty() || starts_with_slash(text) {
+            return;
+        }
+        let Some(scope) = self.attach_scope() else {
+            return;
+        };
+        if self.drafts.aside.contains_key(&scope) {
+            self.restore_aside_draft();
+        }
+    }
+
+    /// Esc in the composer: gives up a carried `/command` and restores the aside draft.
+    /// A `//` escape is a real message, not a command, so Esc leaves it alone.
+    pub(super) fn restore_aside_draft_on_cancel(&mut self) -> bool {
+        let text = self.composer.text();
+        if !is_slash_command(text) && !text.trim().is_empty() {
+            return false;
+        }
+        if !self
+            .attach_scope()
+            .as_ref()
+            .is_some_and(|scope| self.drafts.aside.contains_key(scope))
+        {
+            return false;
+        }
+        self.composer.set_text("");
+        self.clear_completion_marks();
+        self.restore_aside_draft()
+    }
+
     /// Looks at the draft again, to know whether and when it changed. Called after
     /// everything the user does, and before the draft is judged.
     pub(super) fn note_draft(&mut self) {
+        self.reclaim_aside_if_plain();
         let Some(scope) = self.draft_scope() else {
             self.drafts.seen = None;
             return;
@@ -108,6 +305,9 @@ impl App {
     /// After a message was sent: its text is no draft any more. Unlike `save_draft`
     /// this also clears a stored draft the worker has not reported yet.
     pub(super) fn forget_sent_draft(&mut self) {
+        if self.drafts.carried.as_ref() == self.draft_scope().as_ref() {
+            self.drafts.carried = None;
+        }
         self.write_draft(true);
     }
 
@@ -169,19 +369,85 @@ impl App {
     ) {
         self.note_draft();
         let scope = (room_id, thread);
+        let carried = self.drafts.carried.as_ref() == Some(&scope);
+        if carried {
+            self.drafts.carried = None;
+        }
         // Something was saved since the room was opened: that is newer than the answer.
         if self.drafts.stored.contains_key(&scope) {
             return;
         }
         self.drafts.stored.insert(scope.clone(), text.clone());
         if text.is_empty() {
+            if carried
+                && self.draft_scope().as_ref() == Some(&scope)
+                && !self.draft_text(&scope).is_empty()
+            {
+                self.drafts.changed = Some(Instant::now());
+            }
             return;
         }
         if self.draft_scope().as_ref() != Some(&scope) {
             let (room_id, thread) = scope;
             return self.keep_stored_draft(room_id, thread, text);
         }
-        if self.drafts.touched || !self.draft_text(&scope).is_empty() {
+        if carried {
+            let editing = matches!(self.compose_mode, ComposeMode::Edit(_));
+            let front = match editing {
+                true => self.edit_stash.as_deref().unwrap_or_default(),
+                false => self.composer.text(),
+            };
+            if crate::upload::command_argument(front).is_some() {
+                let had_stash = !self.attach.stashed(&scope).trim().is_empty();
+                self.attach.merge_stashed_draft(scope.clone(), text.clone());
+                let now = self.draft_text(&scope);
+                let differs = now != text;
+                self.drafts.seen = Some((scope, now));
+                if differs {
+                    self.drafts.touched = true;
+                    self.drafts.changed = Some(Instant::now());
+                }
+                self.show_toast(if had_stash {
+                    "Saved draft added to the waiting caption"
+                } else {
+                    "Saved draft kept aside while you finish the command"
+                });
+                return;
+            } else if !front.trim().is_empty() {
+                if front.trim() != text.trim() {
+                    if editing {
+                        let early = front.to_owned();
+                        if starts_with_slash(&early) {
+                            self.drafts.aside.insert(
+                                scope.clone(),
+                                AsideDraft {
+                                    text: text.clone(),
+                                    marks: Vec::new(),
+                                },
+                            );
+                            self.show_toast("Saved draft kept aside while you finish the command");
+                        } else {
+                            let offset = text.len() + 2;
+                            self.anchor_edit_stash_marks(&early, offset);
+                            self.edit_stash = Some(format!("{text}\n\n{early}"));
+                            self.show_toast("Restored saved draft above your text");
+                        }
+                    } else {
+                        self.merge_saved_draft(&scope, &text, false);
+                    }
+                }
+                let now = self.draft_text(&scope);
+                let differs = now != text;
+                self.drafts.seen = Some((scope, now));
+                if differs {
+                    self.drafts.touched = true;
+                    self.drafts.changed = Some(Instant::now());
+                }
+                return;
+            }
+            // Carried early text was cleared before the stored draft arrived: fall
+            // through and restore the stored draft as if untouched.
+        } else if self.drafts.touched || !self.draft_text(&scope).is_empty() {
             // What the user wrote instead takes its place in the store at the next
             // pause.
             self.drafts.changed = Some(Instant::now());
@@ -228,6 +494,10 @@ impl App {
         threads.sort();
         threads.dedup();
         self.drafts.stored.retain(|(room, _), _| room != room_id);
+        self.drafts.aside.retain(|(room, _), _| room != room_id);
+        if matches!(&self.drafts.carried, Some((room, _)) if room == room_id) {
+            self.drafts.carried = None;
+        }
         if matches!(&self.drafts.seen, Some(((room, _), _)) if room == room_id) {
             self.drafts.seen = None;
         }
@@ -789,5 +1059,256 @@ mod tests {
             threads: vec!["$e0".to_owned()],
         };
         assert_eq!(format!("{command:?}"), "ForgetDrafts(1 threads)");
+    }
+
+    #[test]
+    fn stored_draft_merges_with_early_typed_text_on_auto_switch() {
+        // 1. Startup with empty rooms -> early text typed -> first `Rooms` batch
+        //    auto-opens `!a` -> stored draft arrives after `OpenRoom`: both are kept,
+        //    cursor stays in the typed text, a toast explains, and idle save writes both.
+        let mut app = App::demo();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.matrix = Some(handle);
+        app.rooms.clear();
+        app.screen = ratatui::layout::Rect::new(0, 0, 100, 30);
+        app.perform(Action::Focus(Pane::Composer));
+        type_text(&mut app, "early");
+        // Put cursor between "ear" and "ly" (offset 3).
+        app.on_event(key(KeyCode::Left));
+        app.on_event(key(KeyCode::Left));
+        assert_eq!(app.composer.cursor(), 3);
+
+        app.on_matrix(MatrixEvent::Rooms(vec![listed("!a")]));
+        assert_eq!(app.room().map(|r| r.id.as_str()), Some("!a"));
+        app.on_matrix(stored("!a", "stored"));
+        assert_eq!(app.composer.text(), "stored\n\nearly");
+        assert_eq!(app.composer.cursor(), "stored".len() + 2 + 3);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("saved draft")),
+            "toast: {:?}",
+            app.toast.as_ref().map(|(m, _)| m)
+        );
+        app.save_idle_draft(Duration::ZERO);
+        assert_eq!(saves(&mut commands), ["!a=stored\n\nearly"]);
+
+        // 2. Startup with a pending invite -> early text typed -> auto-switch to real
+        //    room `!a` -> stored draft arrives with a mention in the early text.
+        let mut app = App::demo();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.matrix = Some(handle);
+        app.rooms.clear();
+        app.screen = ratatui::layout::Rect::new(0, 0, 100, 30);
+        app.perform(Action::Focus(Pane::Composer));
+        let mut invite = listed("!i");
+        invite.category = crate::matrix::RoomCategory::Invite;
+        app.on_matrix(MatrixEvent::Rooms(vec![invite.clone()]));
+        type_text(&mut app, "hi Alice");
+        app.complete.marks.push(
+            crate::complete::MentionMark::user("Alice", "@alice:example.org").with_at(Some(3)),
+        );
+        app.on_matrix(MatrixEvent::Rooms(vec![invite, listed("!a")]));
+        assert_eq!(app.room().map(|r| r.id.as_str()), Some("!a"));
+        app.on_matrix(stored("!a", "Alice left a note"));
+        assert_eq!(app.composer.text(), "Alice left a note\n\nhi Alice");
+        let outgoing = app.format_outgoing(app.composer.text());
+        let crate::format::Outgoing::Text {
+            html: Some(html),
+            mentions: Some(mentions),
+            ..
+        } = outgoing
+        else {
+            panic!("expected linked text with mentions, got {outgoing:?}");
+        };
+        assert!(mentions.user_ids.iter().any(|u| u == "@alice:example.org"));
+        assert!(
+            html.contains("<p>Alice left a note</p>")
+                && html.contains("hi <a href=\"https://matrix.to/#/@alice:example.org\">Alice</a>"),
+            "mention must stay at the shifted offset in typed text, got: {html}"
+        );
+        app.save_idle_draft(Duration::ZERO);
+        assert_eq!(saves(&mut commands), ["!a=Alice left a note\n\nhi Alice"]);
+    }
+
+    #[test]
+    fn aside_draft_is_not_lost_when_command_becomes_plain_text_on_leave_quit_or_send() {
+        let setup_aside = || {
+            let mut app = App::demo();
+            let (handle, mut commands) = MatrixHandle::for_test();
+            app.matrix = Some(handle);
+            app.rooms.clear();
+            app.screen = ratatui::layout::Rect::new(0, 0, 100, 30);
+            app.perform(Action::Focus(Pane::Composer));
+            type_text(&mut app, "/topic x");
+            app.on_matrix(MatrixEvent::Rooms(vec![listed("!a"), listed("!b")]));
+            app.on_matrix(stored("!a", "remember milk"));
+            assert_eq!(app.composer.text(), "/topic x");
+            let _ = saves(&mut commands);
+            (app, commands)
+        };
+
+        // 1. Leave: deleting `/` turns the command into plain text; switching rooms must
+        //    keep both the aside draft and the typed text in the store and on the room.
+        let (mut app, mut commands) = setup_aside();
+        app.on_event(key(KeyCode::Home));
+        app.on_event(key(KeyCode::Delete));
+        app.perform(Action::OpenRoom(1));
+        assert_eq!(saves(&mut commands), ["!a=remember milk\n\ntopic x"]);
+        assert_eq!(app.rooms[0].draft, "remember milk\n\ntopic x");
+        app.perform(Action::OpenRoom(0));
+        assert_eq!(app.composer.text(), "remember milk\n\ntopic x");
+
+        // 2. Quit: deleting `/` and quitting saves both instead of overwriting with "topic x".
+        let (mut app, mut commands) = setup_aside();
+        app.on_event(key(KeyCode::Home));
+        app.on_event(key(KeyCode::Delete));
+        app.shut_down_worker();
+        assert_eq!(saves(&mut commands), ["!a=remember milk\n\ntopic x"]);
+
+        // 3a. Send after deleting `/` via keyboard: the aside draft was already merged
+        //     visibly into the composer, so sending sends both (nothing silently lost).
+        let (mut app, mut commands) = setup_aside();
+        app.on_event(key(KeyCode::Home));
+        app.on_event(key(KeyCode::Delete));
+        assert_eq!(app.composer.text(), "remember milk\n\ntopic x");
+        app.perform(Action::Send);
+        let mut sent_plain = None;
+        while let Ok(cmd) = commands.try_recv() {
+            if let MatrixCmd::Send {
+                message: crate::format::Outgoing::Text { plain, .. },
+                ..
+            } = cmd
+            {
+                sent_plain = Some(plain);
+            }
+        }
+        assert_eq!(sent_plain.as_deref(), Some("remember milk\n\ntopic x"));
+
+        // 3b. Direct send while aside is still held restores the aside draft into the
+        //     composer without clearing the stored draft.
+        let (mut app, mut commands) = setup_aside();
+        app.composer.set_text("topic x");
+        app.perform(Action::Send);
+        let mut sent_plain = None;
+        let mut cleared = false;
+        while let Ok(cmd) = commands.try_recv() {
+            match cmd {
+                MatrixCmd::Send {
+                    message: crate::format::Outgoing::Text { plain, .. },
+                    ..
+                } => sent_plain = Some(plain),
+                MatrixCmd::SaveDraft { text, .. } if text.is_empty() => cleared = true,
+                _ => {}
+            }
+        }
+        assert_eq!(sent_plain.as_deref(), Some("topic x"));
+        assert!(!cleared, "sending must not wipe the aside draft");
+        assert_eq!(app.composer.text(), "remember milk");
+    }
+
+    #[test]
+    fn stored_draft_merges_into_existing_upload_stash_on_auto_switch() {
+        let mut app = App::demo();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.matrix = Some(handle);
+        app.rooms.clear();
+        app.screen = ratatui::layout::Rect::new(0, 0, 100, 30);
+        app.perform(Action::Focus(Pane::Composer));
+        type_text(&mut app, "early caption");
+        app.on_matrix(MatrixEvent::Rooms(vec![listed("!a")]));
+        // Begin `/upload` before the worker reports `!a`'s stored draft.
+        app.perform(Action::Attach);
+        assert_eq!(app.composer.text(), "/upload ");
+        assert_eq!(
+            app.attach.stashed(&("!a".to_owned(), None)),
+            "early caption"
+        );
+
+        app.on_matrix(stored("!a", "stored"));
+        assert_eq!(
+            app.attach.stashed(&("!a".to_owned(), None)),
+            "stored\n\nearly caption"
+        );
+        assert_eq!(
+            app.toast.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Saved draft added to the waiting caption")
+        );
+        app.save_idle_draft(Duration::ZERO);
+        assert_eq!(saves(&mut commands), ["!a=stored\n\nearly caption"]);
+        // Esc cancels `/upload ` and brings back both texts.
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "stored\n\nearly caption");
+    }
+
+    #[test]
+    fn double_slash_escape_stays_aside_until_sent_and_saves_both_on_leave_and_quit() {
+        let setup_escaped = || {
+            let mut app = App::demo();
+            let (handle, mut commands) = MatrixHandle::for_test();
+            app.matrix = Some(handle);
+            app.rooms.clear();
+            app.screen = ratatui::layout::Rect::new(0, 0, 100, 30);
+            app.perform(Action::Focus(Pane::Composer));
+            type_text(&mut app, "/topic x");
+            app.on_matrix(MatrixEvent::Rooms(vec![listed("!a"), listed("!b")]));
+            app.on_matrix(stored("!a", "remember milk"));
+            assert_eq!(app.composer.text(), "/topic x");
+            let _ = saves(&mut commands);
+            // Turn `/topic x` into `//topic x` (escaped literal leading `/`).
+            app.on_event(key(KeyCode::Home));
+            app.on_event(key(KeyCode::Char('/')));
+            app.on_event(key(KeyCode::End));
+            (app, commands)
+        };
+
+        // 1. Send: `//topic x` stays unmerged so `//` is stripped to literal `/topic x`,
+        //    and the aside draft returns to the composer afterwards.
+        let (mut app, mut commands) = setup_escaped();
+        assert_eq!(app.composer.text(), "//topic x");
+        app.perform(Action::Send);
+        let mut sent_plain = None;
+        let mut cleared = false;
+        while let Ok(cmd) = commands.try_recv() {
+            match cmd {
+                MatrixCmd::Send {
+                    message: crate::format::Outgoing::Text { plain, .. },
+                    ..
+                } => sent_plain = Some(plain),
+                MatrixCmd::SaveDraft { text, .. } if text.is_empty() => cleared = true,
+                _ => {}
+            }
+        }
+        assert_eq!(sent_plain.as_deref(), Some("/topic x"));
+        assert!(!cleared, "sending //escape must not wipe the aside draft");
+        assert_eq!(app.composer.text(), "remember milk");
+
+        // 2. Leave: store keeps both texts, while returning still has `//topic x` ready.
+        let (mut app, mut commands) = setup_escaped();
+        app.perform(Action::OpenRoom(1));
+        assert_eq!(saves(&mut commands), ["!a=remember milk\n\n//topic x"]);
+        app.perform(Action::OpenRoom(0));
+        assert_eq!(app.composer.text(), "//topic x");
+
+        // 3. Quit: store keeps both texts.
+        let (mut app, mut commands) = setup_escaped();
+        app.shut_down_worker();
+        assert_eq!(saves(&mut commands), ["!a=remember milk\n\n//topic x"]);
+
+        // 4. Esc on `//topic x` does not wipe the typed message (normal Esc behaviour,
+        //    and the saved draft stays aside until the escaped message is sent).
+        let (mut app, _commands) = setup_escaped();
+        app.esc_closes_chat = false;
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(app.composer.text(), "//topic x");
+        app.perform(Action::Send);
+        assert_eq!(app.composer.text(), "remember milk");
+
+        let (mut app, mut commands) = setup_escaped();
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed);
+        assert_eq!(saves(&mut commands), ["!a=remember milk\n\n//topic x"]);
+        app.perform(Action::OpenRoom(0));
+        assert_eq!(app.composer.text(), "//topic x");
     }
 }
