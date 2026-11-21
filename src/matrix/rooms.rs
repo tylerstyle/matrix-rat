@@ -2373,7 +2373,10 @@ async fn prepare_messages(
     dedup: &mut super::convert::EventDedup,
     reuse: &mut super::convert::Reuse,
 ) -> Vec<crate::model::Message> {
-    let mut messages = reuse.convert(items, own, &ignored.borrow());
+    // The set is taken out of the channel first: holding the borrow over a conversion of
+    // the whole room would hold the channel's lock, and a change of the list would wait.
+    let ignored = IgnoredSet::clone(&ignored.borrow());
+    let mut messages = reuse.convert(items, own, &ignored);
     let own_name = super::people::room_own_display_name(room, own_room_names).await;
     super::convert::apply_own_display_name(&mut messages, own_name.as_deref());
     readers.annotate(room, &mut messages, items, own).await;
