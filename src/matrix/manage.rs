@@ -1945,8 +1945,17 @@ struct MemberList {
 }
 
 impl MemberList {
-    fn agrees(&self, (joined, invited): (u64, u64)) -> bool {
+    /// Whether the list can stand for the room we are in: as many joined and invited
+    /// people as the room says it has, and we among the joined. A list without us is
+    /// not the room's even when the counts match: a room just joined, before a sync has
+    /// brought it, has no member stored and counts of (0, 0), which agree, and the list
+    /// would wait for that sync, however late it comes.
+    fn agrees(&self, (joined, invited): (u64, u64), own: &UserId) -> bool {
         entries_agree(&self.entries, (joined, invited))
+            && self
+                .entries
+                .iter()
+                .any(|entry| entry.user == own && entry.status == EntryStatus::Joined)
     }
 
     /// Fills the details' member list, admin count, error, and (once the list is
@@ -2629,7 +2638,7 @@ async fn watch(
                 list.complete = false;
             } else {
                 force_refresh = false;
-                match plan(list.agrees(counts), counts, list.gave_up, since) {
+                match plan(list.agrees(counts, &own), counts, list.gave_up, since) {
                     Plan::Fine => {
                         list.error = None;
                         list.complete = true;
@@ -2687,7 +2696,7 @@ async fn watch(
                         knocks_loaded = true;
                         list.error = None;
                         list.complete = true;
-                        if !list.agrees(counts) {
+                        if !list.agrees(counts, &own) {
                             list.gave_up = Some(counts);
                         }
                     }
@@ -2985,6 +2994,99 @@ mod tests {
             received.try_recv(),
             Ok(MatrixEvent::Manage(ManageEvent::Gone { room_id })) if room_id == "!gone:localhost"
         ));
+    }
+
+    /// A room just joined that no sync has brought since. Joined from an invitation
+    /// the sync brought, the stored list (the invitation's) and the counts disagree and
+    /// the server is asked. Joined without one (the sync had not told of the invitation
+    /// yet, or the room was joined by its address), the counts say that nobody is in it
+    /// and no member of it is stored, which agree, yet we are in it: the server is asked
+    /// too, rather than an empty room shown until a sync brings the room.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_info_of_a_room_just_joined_asks_the_server_for_its_members() {
+        use super::super::spaces::fake;
+        const ASKED: &str = "!asked:localhost";
+        const NEW: &str = "!new:localhost";
+        // What the server says of the room: Bob and us, joined.
+        fn members(room: &str) -> String {
+            let member = |user: &str| {
+                serde_json::json!({
+                    "type": "m.room.member",
+                    "state_key": user,
+                    "sender": user,
+                    "event_id": format!("$join{}{}", room.len(), user.len()),
+                    "origin_server_ts": 1,
+                    "room_id": room,
+                    "content": { "membership": "join" },
+                })
+            };
+            serde_json::json!({ "chunk": [member("@bob:localhost"), member(fake::ME)] }).to_string()
+        }
+        let server = fake::Server::answering(
+            serde_json::json!({ "invite": { ASKED: fake::invited(false) } }),
+            Box::new(move |request| {
+                let room = [ASKED, NEW]
+                    .into_iter()
+                    .find(|room| request.path.contains(room))?;
+                if request.method == "POST" && request.path.contains("/join") {
+                    Some(fake::Reply::Json(
+                        serde_json::json!({ "room_id": room }).to_string(),
+                    ))
+                } else if request.path.ends_with("/members") {
+                    Some(fake::Reply::Json(members(room)))
+                } else {
+                    None
+                }
+            }),
+        )
+        .await;
+        let client = fake::client(&server).await;
+        let settings = client.notification_settings().await;
+        for room_id in [ASKED, NEW] {
+            // Joined as `ManageCmd::Join` joins, and no sync since.
+            assert_eq!(
+                join(&client, &LeftRooms::default(), room_id, &[]).await,
+                Ok(room_id.to_owned())
+            );
+            let room = client
+                .get_room(<&RoomId>::try_from(room_id).unwrap())
+                .unwrap();
+            assert_eq!(room.state(), RoomState::Joined);
+            assert_eq!(
+                (room.joined_members_count(), room.invited_members_count()),
+                (0, 0)
+            );
+            let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+            let (_refresh, changes) = watch::channel(0u64);
+            let watcher = tokio::spawn(watch(
+                client.clone(),
+                room_id.into(),
+                events,
+                changes,
+                Default::default(),
+                settings.clone(),
+                LeftRooms::default(),
+            ));
+            let details = tokio::time::timeout(
+                Duration::from_secs(10),
+                info(&mut received, room_id, |d| {
+                    !d.members_loading && d.joined == 2
+                }),
+            )
+            .await
+            .expect("the members of the room were not asked for");
+            watcher.abort();
+            assert_eq!((details.joined, details.invited), (2, 0));
+            assert_eq!(details.members.len(), 2);
+            assert!(details.members.iter().any(|m| m.own && !m.invited));
+            let asked = format!("/rooms/{room_id}/members");
+            assert!(
+                server
+                    .requests()
+                    .iter()
+                    .any(|request| request.path.ends_with(&asked))
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3715,7 +3817,11 @@ mod tests {
         assert_eq!(list.present(None, &own)[0].name, "kept");
         list.entries.pop();
         assert_eq!(list.present(None, &own).len(), 3);
-        assert!(list.agrees((2, 1)));
+        // As many people as the room has, but not us: not the list of a room we are in.
+        assert!(!list.agrees((2, 1), &own));
+        list.entries.push(entry("Me", false));
+        assert!(list.agrees((3, 1), &own));
+        assert!(!list.agrees((2, 1), &own));
     }
 
     #[test]
@@ -4471,6 +4577,20 @@ mod tests {
         let mut cleanup_rooms = Vec::new();
         let bob_id = bob.user_id.clone();
 
+        // Shown when the test fails: what bob saw of the room each time (no ids).
+        let seen = |d: &RoomDetails| {
+            eprintln!(
+                "bob saw: in={} joined={} invited={} members={} loading={} error={} rule={:?} history={:?}",
+                d.history_visibility.is_some(),
+                d.joined,
+                d.invited,
+                d.members.len(),
+                d.members_loading,
+                d.members_error.is_some(),
+                d.join_rule,
+                d.history_visibility,
+            );
+        };
         let outcome = AssertUnwindSafe(async {
             let tag = std::process::id();
             alice.manage(ManageCmd::Create {
@@ -4499,7 +4619,13 @@ mod tests {
             bob.manage(ManageCmd::Info {
                 room_id: room_id.clone(),
             });
-            info(&mut bob.events, &room_id, |d| d.joined == 2).await;
+            // Until a sync brings bob's join, his counts are (0, 0): the server's
+            // member list answers that (see `MemberList::agrees`).
+            info(&mut bob.events, &room_id, |d| {
+                seen(d);
+                d.joined == 2
+            })
+            .await;
 
             alice.manage(ManageCmd::SetJoinRule {
                 room_id: room_id.clone(),
@@ -4507,6 +4633,7 @@ mod tests {
             });
             done(&mut alice.events, Change::JoinRule).await;
             info(&mut bob.events, &room_id, |d| {
+                seen(d);
                 d.join_rule == Some(RoomJoinRule::Knock)
             })
             .await;
@@ -4517,6 +4644,7 @@ mod tests {
             });
             done(&mut alice.events, Change::JoinRule).await;
             info(&mut bob.events, &room_id, |d| {
+                seen(d);
                 d.join_rule == Some(RoomJoinRule::Public)
             })
             .await;
@@ -4527,6 +4655,7 @@ mod tests {
             });
             done(&mut alice.events, Change::HistoryVisibility).await;
             info(&mut bob.events, &room_id, |d| {
+                seen(d);
                 d.history_visibility == Some(RoomHistory::Invited)
             })
             .await;
