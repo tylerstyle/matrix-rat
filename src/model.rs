@@ -797,6 +797,33 @@ pub fn disambiguated(name: &str, user_id: &str) -> String {
     format!("{name} ({})", crate::text::sanitize_line(user_id))
 }
 
+/// `shown`, a name as it is shown (told apart by [`disambiguated`] or not), in at most
+/// `columns` columns. Too wide, a told-apart name is shortened before its user ID,
+/// which is what tells the two apart and stays whole; where not even one letter of the
+/// name fits beside it, the ID alone is shown; where that does not fit either, the
+/// whole is cut from its end, as any other name is.
+pub fn fit_name(shown: &str, columns: usize) -> String {
+    use crate::text::{truncate, width};
+    if width(shown) <= columns {
+        return shown.to_owned();
+    }
+    if let Some(at) = shown.rfind(" (@")
+        && shown.ends_with(')')
+    {
+        let (name, id) = shown.split_at(at);
+        let id_width = width(id);
+        // A letter and "…" at least.
+        if columns >= id_width + 2 {
+            return truncate(name, columns - id_width) + id;
+        }
+        let bare = &id[2..id.len() - 1];
+        if width(bare) <= columns {
+            return bare.to_owned();
+        }
+    }
+    truncate(shown, columns)
+}
+
 #[derive(Clone)]
 pub struct Room {
     /// Stable identity (the Matrix room id); indices change as the list reorders.
@@ -1238,6 +1265,25 @@ pub fn demo_rooms() -> Vec<Room> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_told_apart_keeps_its_id_when_it_is_shortened() {
+        let shown = disambiguated("Alexander Hamilton", "@alexander:example.org");
+        // Wide enough: as it is.
+        assert_eq!(fit_name(&shown, 60), shown);
+        // The name gives way, down to a letter.
+        assert_eq!(fit_name(&shown, 30), "Alex… (@alexander:example.org)");
+        assert_eq!(fit_name(&shown, 27), "A… (@alexander:example.org)");
+        // Then the ID alone, then the whole cut from its end.
+        assert_eq!(fit_name(&shown, 26), "@alexander:example.org");
+        assert_eq!(fit_name(&shown, 22), "@alexander:example.org");
+        assert_eq!(fit_name(&shown, 12), "Alexander H…");
+        // A name not told apart is cut as before.
+        assert_eq!(fit_name("Alexander Hamilton", 10), "Alexander…");
+        for columns in 0..50 {
+            assert!(crate::text::width(&fit_name(&shown, columns)) <= columns);
+        }
+    }
 
     #[test]
     fn a_message_and_its_room_print_nothing_private() {

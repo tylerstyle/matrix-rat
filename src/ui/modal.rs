@@ -1218,7 +1218,7 @@ fn pinned(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut Pinned
         };
         let header_w = inner.width.saturating_sub(unpin_w + 1) as usize;
         let sender_w = header_w.saturating_sub(width(&date) + 3);
-        let sender_shown = truncate(&sender, sender_w);
+        let sender_shown = crate::model::fit_name(&sender, sender_w);
         let mut head_spans = vec![Span::styled(
             sender_shown,
             bg_style

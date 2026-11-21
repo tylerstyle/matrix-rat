@@ -655,7 +655,7 @@ pub fn read_by_items(read_by: &ReadBy) -> Vec<Item> {
         .readers
         .iter()
         .map(|reader| Item {
-            label: truncate(&sanitize_line(&reader.shown_name()), 30),
+            label: crate::model::fit_name(&sanitize_line(&reader.shown_name()), 30),
             hint: sanitize_line(&reader.time),
             run: None,
             confirm: None,
@@ -1292,6 +1292,23 @@ mod tests {
         assert_eq!(labels(&items), ["bob", "carol[2J", "and 3 more"]);
         assert_eq!(items[0].hint, "14:05");
         assert!(items.iter().all(|item| item.run.is_none()));
+    }
+
+    /// A long name someone else has too is shortened before the user ID, which tells
+    /// the two apart: the ID stays whole.
+    #[test]
+    fn a_reader_of_a_shared_long_name_keeps_the_id_whole() {
+        let read_by = ReadBy {
+            readers: vec![Reader {
+                name: "Alexander Hamilton".into(),
+                id: Some("@alexander:example.org".into()),
+                ambiguous: true,
+                time: "14:05".into(),
+            }],
+            total: 1,
+        };
+        let items = read_by_items(&read_by);
+        assert_eq!(labels(&items), ["Alex… (@alexander:example.org)"]);
     }
 
     #[test]

@@ -427,7 +427,7 @@ async fn short_name(
     user: &UserId,
     names: &mut HashMap<(OwnedRoomId, OwnedUserId), String>,
 ) -> String {
-    truncate(
+    crate::model::fit_name(
         &search::cached_sender_name(room, user, names).await,
         LIST_NAME,
     )

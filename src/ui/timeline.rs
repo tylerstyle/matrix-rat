@@ -586,7 +586,8 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
             let mut spans = vec![Span::styled("● ", color)];
             let sender = message.sender_name();
             let with_time = 2 + width(&sender) + 2 + width(&message.time) <= max_width;
-            let name = truncate(&sender, max_width.saturating_sub(2));
+            // A name told apart by its ID keeps the ID (see `fit_name`).
+            let name = crate::model::fit_name(&sender, max_width.saturating_sub(2));
             let hit_w = (2 + width(&name)).min(max_width) as u16;
             spans.push(Span::styled(name, color.add_modifier(Modifier::BOLD)));
             if with_time {
@@ -2407,13 +2408,16 @@ mod tests {
             let text: Vec<String> = rows.iter().map(|row| row.line.to_string()).collect();
             let action = format!("* {name} (@samuelsson:home2.test) from the other");
             assert!(text.iter().any(|row| row.contains(&action)), "{text:#?}");
-            // Narrower, the time goes first, then the end of the name; nothing is wider
-            // than the pane.
+            // Narrower, the time goes first, then the name gives way before the id
+            // does; nothing is wider than the pane.
             for max in [10, 20, 30, 40] {
                 for row in build_rows(&room, max, &theme, None, &images) {
                     assert!(row.line.width() <= max, "{max}: {:?}", row.line);
                 }
             }
+            let narrow = build_rows(&room, 30, &theme, None, &images);
+            let (header, _) = &headers(&narrow)[0];
+            assert!(header.ends_with(" (@samuelsson:home1.test)"), "{header:?}");
         }
 
         // Someone whose name nobody else has is named as before, and two messages of
