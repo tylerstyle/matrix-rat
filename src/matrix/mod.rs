@@ -1975,7 +1975,8 @@ impl Worker {
             ignored.clone(),
             left.clone(),
         );
-        let mut emote_mgr = emotes::EmoteManager::new(client.clone(), self.events.clone());
+        let mut emote_mgr =
+            emotes::EmoteManager::new(client.clone(), self.events.clone(), left.clone());
         let emote_handlers = emote_mgr.register_handlers(client);
         let power_events = self.events.clone();
         let manage_refresh = manager.refresh_signal();
