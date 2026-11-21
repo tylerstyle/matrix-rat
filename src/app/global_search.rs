@@ -509,6 +509,9 @@ impl App {
             return;
         }
         let Some(room_index) = self.rooms.iter().position(|r| r.id == room_id) else {
+            // The worker switched to the jump already and streams a room no longer
+            // listed: told the jump is off, it streams the view still shown again.
+            self.send_matrix(MatrixCmd::CancelOpenEvent { generation });
             self.show_toast("That room is no longer available");
             return;
         };
@@ -878,6 +881,44 @@ mod tests {
         assert!(app.timeline.detached);
         assert!(!app.timeline.reached_end);
         assert!(app.pending_jump.is_none());
+    }
+
+    /// A jump whose room went away while it was opening (the user was removed from it)
+    /// is called off, and the worker is told: it had switched to that room already, and
+    /// streams the view still shown again only on a cancel.
+    #[test]
+    fn a_jump_into_a_room_gone_meanwhile_is_cancelled_at_the_worker() {
+        let (mut app, mut rx, _handle) = test_app_with_matrix();
+        let shown = app.generation;
+        app.jump_to_event("!b:example.org".into(), "$older_b".into(), None);
+        let open_gen = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|cmd| match cmd {
+                MatrixCmd::OpenEvent { generation, .. } => Some(generation),
+                _ => None,
+            })
+            .expect("OpenEvent sent");
+        app.rooms.retain(|room| room.id != "!b:example.org");
+
+        app.on_matrix(crate::matrix::MatrixEvent::Timeline {
+            room_id: "!b:example.org".into(),
+            generation: open_gen,
+            messages: Vec::new(),
+            reached_start: false,
+            detached: Some(DetachedTimeline {
+                target_event: "$older_b".into(),
+                thread_root: None,
+                reached_end: false,
+            }),
+        });
+        assert!(app.pending_jump.is_none());
+        assert_eq!(app.generation, shown);
+        let cancels: Vec<u64> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|cmd| match cmd {
+                MatrixCmd::CancelOpenEvent { generation } => Some(generation),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cancels, [open_gen]);
     }
 
     #[test]
