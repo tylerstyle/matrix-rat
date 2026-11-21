@@ -86,8 +86,13 @@ impl PinnedCache {
     }
 
     pub(super) fn invalidate_room_event(&mut self, room_id: &str, event_id: &str) {
-        self.entries
-            .remove(&(room_id.to_owned(), event_id.to_owned()));
+        let key = (room_id.to_owned(), event_id.to_owned());
+        // Its place in the order goes too. Left behind, it would take up room as if it
+        // were an entry, and once at the front it would put out the entry the event
+        // got when it was looked up again, long before that one's turn.
+        if self.entries.remove(&key).is_some() {
+            self.order.retain(|kept| *kept != key);
+        }
     }
 }
 
@@ -768,6 +773,40 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    /// A pinned event looked up again after it changed (it was deleted, say) has one
+    /// place in the order of what is let go first: the place left behind by the old
+    /// entry would put the new one out long before its turn.
+    #[test]
+    fn a_pinned_event_looked_up_again_has_one_place() {
+        use super::{CachedPinned, PINNED_CACHE_MAX, PinnedCache};
+
+        let entry = || CachedPinned {
+            sender_id: None,
+            sender: String::new(),
+            day: String::new(),
+            time: String::new(),
+            snippet: String::new(),
+            redacted: false,
+            undecryptable: false,
+            no_text: false,
+        };
+        let mut cache = PinnedCache::default();
+        cache.insert("!r".into(), "$kept".into(), entry());
+        cache.invalidate_room_event("!r", "$kept");
+        cache.insert("!r".into(), "$kept".into(), entry());
+        assert_eq!(cache.order.len(), cache.entries.len());
+        // As many others as there is room for besides it: it stays.
+        for n in 1..PINNED_CACHE_MAX {
+            cache.insert("!r".into(), format!("${n}"), entry());
+        }
+        assert!(cache.get("!r", "$kept").is_some());
+        assert_eq!(cache.order.len(), PINNED_CACHE_MAX);
+        // One more: now it is the oldest, and goes.
+        cache.insert("!r".into(), "$last".into(), entry());
+        assert!(cache.get("!r", "$kept").is_none());
+        assert_eq!(cache.order.len(), cache.entries.len());
+    }
 
     fn hs() -> String {
         std::env::var("MATRIX_RAT_TEST_HOMESERVER")
