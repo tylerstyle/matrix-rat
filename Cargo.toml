@@ -65,7 +65,9 @@ insta = "1"
 opt-level = 1
 
 # Whole-program optimisation in one unit: the same code and speed as before, in a binary
-# about 30% smaller (about 92 MB -> 64 MB here), for a slightly longer link step.
+# about 27% smaller (measured 2026-11-21: 103 MB -> 76 MB stripped), for a longer build.
+# The smallest at opt-level 3 with unwinding; `panic = "abort"` would end the app on a
+# panic in a spawned task (a bad picture), so it stays off.
 [profile.release]
 lto = "fat"
 codegen-units = 1

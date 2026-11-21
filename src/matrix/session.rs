@@ -230,17 +230,45 @@ async fn discover_memory_client(homeserver: &str) -> Result<Client> {
         .with_context(|| format!("could not reach homeserver {homeserver:?}"))
 }
 
+/// Maximum SQLite connections per store (`state`, `event_cache`, `media`, `crypto`).
+/// `matrix-sdk-sqlite` defaults to `num_cpus::get_physical() * 4` (56 per store = 224
+/// across all four stores on a 14-core CPU), and `deadpool` keeps opened connections alive
+/// for the whole run (each holding 2–3 FDs and up to 2 MiB of SQLite page cache). SQLite
+/// WAL allows one writer plus concurrent readers; 4 connections per store (16 total) is
+/// double the SDK's minimum of 2 and keeps open FDs, caches, and blocking-pool bursts low.
+const SQLITE_POOL_MAX_SIZE: usize = 4;
+
+pub(crate) fn sqlite_store_config(
+    paths: &Paths,
+    passphrase: &str,
+) -> matrix_sdk::SqliteStoreConfig {
+    matrix_sdk::SqliteStoreConfig::new(paths.store_dir())
+        .passphrase(Some(passphrase))
+        .pool_max_size(SQLITE_POOL_MAX_SIZE)
+}
+
 /// For a saved session: uses the known URL and makes no network request, so the app
 /// starts from its local stores even when offline.
 async fn offline_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Result<Client> {
     Client::builder()
         .homeserver_url(homeserver)
-        .sqlite_store(paths.store_dir(), Some(passphrase))
+        .sqlite_store_with_config_and_cache_path(
+            sqlite_store_config(paths, passphrase),
+            None::<std::path::PathBuf>,
+        )
         .search_index_store(
             matrix_sdk::search_index::SearchIndexStoreKind::EncryptedDirectory(
                 paths.search_dir(),
                 passphrase.to_owned(),
             ),
+        )
+        // Only one process ever opens a profile's stores: the app and `serve` take the
+        // profile lock (`lock.rs`) before any store is opened, and the agent clients open
+        // none. The SDK's default lock between processes would renew a lease in SQLite
+        // every 50 ms for as long as the encryption sync holds it, so even at rest it
+        // writes 20 times a second and keeps blocking threads awake.
+        .cross_process_store_config(
+            matrix_sdk_base::cross_process_lock::CrossProcessLockConfig::SingleProcess,
         )
         .with_encryption_settings(encryption_settings())
         .with_threading_support(super::threads::SUPPORT)
@@ -1062,6 +1090,29 @@ mod tests {
         assert!(!paths.notes_file().exists());
         assert!(!half_written.exists());
 
+        let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_config_caps_pool_and_opens_offline_client() {
+        let paths = temp_paths("sqlite-pool-cap");
+        paths.create_dirs().unwrap();
+        let cfg = sqlite_store_config(&paths, "unit-test-secret");
+        let debug = format!("{cfg:?}");
+        assert!(
+            debug.contains(&format!("max_size: {SQLITE_POOL_MAX_SIZE}")),
+            "{debug}"
+        );
+        assert!(!debug.contains("unit-test-secret"));
+        let client = offline_client(&paths, "http://127.0.0.1:1", "unit-test-secret")
+            .await
+            .unwrap();
+        // One process per profile (the profile lock): no lease renewed in SQLite every 50 ms.
+        assert!(matches!(
+            client.cross_process_lock_config(),
+            matrix_sdk_base::cross_process_lock::CrossProcessLockConfig::SingleProcess
+        ));
+        drop(client);
         let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
     }
 }
