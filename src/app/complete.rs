@@ -103,12 +103,22 @@ impl App {
     }
 
     /// Stores the member list received from the worker and refreshes an active `@` popup.
+    ///
+    /// Only the lists that can still be read are kept: the open room's, and that of the
+    /// room asked for last (a chat closed and opened again does not ask again). Any
+    /// other room asks anew when it is opened, and the list of a big room is several MB:
+    /// kept for every room ever opened, they would add up over a long session.
     pub(super) fn on_room_members(
         &mut self,
         room_id: String,
         members: Vec<Member>,
         can_mention_room: bool,
     ) {
+        let open = self.room_id();
+        let asked = self.complete.opened_for_room.as_deref();
+        self.complete
+            .room_members
+            .retain(|id, _| open.as_deref() == Some(id.as_str()) || asked == Some(id.as_str()));
         self.complete.room_members.insert(
             room_id.clone(),
             RoomMembers {
@@ -832,6 +842,63 @@ mod tests {
             .filter(|c| matches!(c, MatrixCmd::FetchMembers { room_id } if room_id == "!b"))
             .count();
         assert_eq!(after_switch, 1);
+    }
+
+    /// The member lists of rooms that are no longer open are let go: each room asks for
+    /// its list again when it is opened, so only the open room's is ever read.
+    #[test]
+    fn member_lists_of_rooms_left_are_not_kept() {
+        let (mut app, _terminal, mut commands) = connected();
+        let members = |name: &str| {
+            vec![Member {
+                user_id: format!("@{}:hs", name.to_lowercase()),
+                display_name: name.into(),
+            }]
+        };
+        let fetches = |commands: &mut UnboundedReceiver<MatrixCmd>| {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|c| match c {
+                    MatrixCmd::FetchMembers { room_id } => Some(room_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fetches(&mut commands), ["!a"]);
+        app.on_room_members("!a".into(), members("Alice"), true);
+        assert_eq!(app.complete.room_members.len(), 1);
+
+        // Another room: its list comes, the first room's goes.
+        app.open_room(1);
+        assert_eq!(fetches(&mut commands), ["!b"]);
+        app.on_room_members("!b".into(), members("Bob"), true);
+        assert_eq!(app.complete.room_members.len(), 1);
+        type_text(&mut app, "@bo");
+        assert_eq!(app.complete.active.as_ref().unwrap().kind, Kind::Mention);
+        app.on_event(key(KeyCode::Tab));
+        assert_eq!(app.composer.text(), "Bob ");
+
+        // The chat closed and opened again: no new request, and the list is still there.
+        app.composer.take();
+        app.clear_completion_marks();
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.chat_closed());
+        app.on_event(key(KeyCode::Enter));
+        assert!(fetches(&mut commands).is_empty());
+        assert_eq!(app.room_id().as_deref(), Some("!b"));
+        type_text(&mut app, "@bo");
+        assert!(app.complete.active.is_some());
+
+        // Back in the first room: it asks again, and its answer is what completes there.
+        app.on_event(key(KeyCode::Esc));
+        app.composer.take();
+        app.clear_completion_marks();
+        app.open_room(0);
+        assert_eq!(fetches(&mut commands), ["!a"]);
+        app.on_room_members("!a".into(), members("Alice"), true);
+        assert_eq!(app.complete.room_members.len(), 1);
+        type_text(&mut app, "@al");
+        app.on_event(key(KeyCode::Tab));
+        assert_eq!(app.composer.text(), "Alice ");
     }
 
     #[test]
