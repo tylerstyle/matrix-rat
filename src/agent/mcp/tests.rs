@@ -1973,3 +1973,36 @@ async fn an_answer_found_while_the_point_is_lost_survives_a_cancelled_wait() {
     session.end().await;
     world.stop().await;
 }
+
+/// What was found and is gone again (deleted) leaves nothing to hold out for: the
+/// wait listens on in one piece, as before it found anything.
+#[tokio::test]
+async fn a_wait_whose_find_is_deleted_listens_on_in_one_piece() {
+    let world = World::start("mcp-settle", Vec::new()).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    let reads = world.reads();
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.post(locked("$sealed", ANN));
+    world.post(message("$answer", ANN, "merge"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    world.change("$answer", |changed| {
+        *changed = Msg {
+            kind: "redacted".into(),
+            ..doubted("$answer", ANN, "", None, "redacted")
+        };
+    });
+    // Longer than it would hold out for a key.
+    assert!(
+        session
+            .hear_within(Duration::from_millis(2500))
+            .await
+            .is_none()
+    );
+    assert_eq!(world.reads(), reads + 1, "the room was read again");
+    world.post(message("$again", ANN, "merge after all"));
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$again"]);
+    session.end().await;
+    world.stop().await;
+}

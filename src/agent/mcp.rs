@@ -1203,7 +1203,11 @@ impl Server {
         // when its key may still come.
         let mut settle: Option<Instant> = None;
         loop {
-            if !found.is_empty() {
+            if found.is_empty() {
+                // What was found is gone again (deleted): nothing is held out for,
+                // and the part goes on as before it found anything.
+                settle = None;
+            } else {
                 let unread = found.iter().any(|message| message.kind == "undecryptable")
                     || doubted.iter().any(|(_, why)| why == "undecryptable");
                 if !unread {
