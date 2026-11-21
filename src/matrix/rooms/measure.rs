@@ -986,10 +986,11 @@ fn event_id(message: &Message) -> Option<&str> {
 
 /// Not a measurement: a burst of new messages in the open room (one sync with many)
 /// reaches the interface in fewer snapshots than messages, and the last one has them
-/// all, newest last. (`forward` converts the whole timeline for every snapshot.) This
-/// pins the SDK's own batching: matrix-sdk-ui 0.19.1's subscriber merges every diff
-/// waiting in its channel at each poll, so `forward` takes no batches of its own; if a
-/// newer SDK stops doing that, this test says so.
+/// all, newest last. (`forward` converts the whole timeline for every snapshot.) It
+/// pins the outcome, not how it comes about: one sync is likely one diff batch anyway.
+/// That `forward` needs no batching of its own rests on matrix-sdk-ui 0.19.1's subscriber
+/// merging every diff waiting at each poll; `measure_snapshots_of_bursts` shows it (126
+/// pages back over 5000 messages: 2 to 4 snapshots).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_burst_of_messages_reaches_the_interface_in_fewer_snapshots() {
     const BURST: usize = 60;
