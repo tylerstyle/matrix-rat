@@ -1746,13 +1746,23 @@ impl App {
         }
         // What is unsent here goes to the store, in case we do not come back.
         self.save_draft();
+        self.clear_carried_draft();
         // An edit belongs to its room; a plain draft waits there until we come back.
         self.cancel_compose();
         let draft = self.composer.take();
+        let scope = self.attach_scope();
+        let (draft, save_marks) = match scope.as_ref() {
+            Some(scope) => self.take_leaving_aside(scope, draft),
+            None => (draft, true),
+        };
         if let Some(room) = self.open_index().and_then(|open| self.rooms.get_mut(open)) {
             let old_id = room.id.clone();
             room.draft = draft;
-            self.save_room_marks(&old_id);
+            if save_marks {
+                self.save_room_marks(&old_id);
+            } else {
+                self.clear_completion_marks();
+            }
         }
     }
 
@@ -2089,6 +2099,9 @@ impl App {
             if matches!(self.compose_mode, ComposeMode::Edit(_)) {
                 // The draft that waited behind the edit is back, and still unsent.
                 self.end_edit();
+            } else if self.restore_aside_draft() {
+                // The saved draft kept aside for a slash command is back, and still unsent.
+                self.note_draft();
             } else {
                 self.forget_sent_draft();
             }
@@ -2107,6 +2120,8 @@ impl App {
         let mode = self.compose_mode;
         if matches!(mode, ComposeMode::Edit(_)) {
             self.end_edit();
+        } else {
+            self.restore_aside_draft();
         }
         self.compose_mode = ComposeMode::Normal;
         let (body, html, mentions, kind) = match outgoing {
@@ -4172,6 +4187,7 @@ impl App {
                 self.compose_mode = ComposeMode::Normal;
                 self.typing_sent = None;
                 if open_id.is_some() {
+                    self.clear_carried_draft();
                     let (draft, new_id) = self
                         .rooms
                         .get_mut(self.active)
@@ -4183,37 +4199,38 @@ impl App {
                     } else {
                         self.clear_completion_marks();
                     }
-                } else if switched_from_pending {
-                    // Auto-switched off a pending invite or knock: restore the newly
-                    // opened room's draft when nothing was typed yet; if both early
-                    // typing and a saved room draft exist, merge them (saved draft,
-                    // blank line, typed text) so the cursor stays at the end of what
-                    // was just typed and neither text is lost on leaving the room;
-                    // clear the composer when no rooms remain.
+                } else {
+                    // First list or auto-switched off a pending invite or knock: restore
+                    // the newly opened room's draft when nothing was typed yet; merge
+                    // when both early typing and an in-memory draft exist; remember the
+                    // carried scope when the room has no in-memory draft yet so a stored
+                    // draft arriving after `OpenRoom` merges too; clear stale text when
+                    // an auto-opened pending room vanished leaving no rooms.
                     match self.rooms.get_mut(self.active) {
+                        Some(room) if room.is_pending() => {
+                            self.clear_carried_draft();
+                        }
                         Some(room) => {
                             let draft = std::mem::take(&mut room.draft);
                             let id = room.id.clone();
-                            if self.composer.is_empty() {
+                            let scope = (id.clone(), None);
+                            if self.composer.text().trim().is_empty() {
                                 self.composer.set_text(&draft);
                                 self.restore_room_marks(&id);
+                                self.clear_carried_draft();
                             } else if !draft.is_empty() {
-                                let typed = self.composer.text().to_owned();
-                                let offset = draft.len() + 2;
-                                let mut typed_marks = std::mem::take(&mut self.complete.marks);
-                                for mark in &mut typed_marks {
-                                    if let Some(at) = &mut mark.at {
-                                        *at += offset;
-                                    }
-                                }
-                                self.composer.set_text(&format!("{draft}\n\n{typed}"));
-                                self.restore_room_marks(&id);
-                                self.complete.marks.extend(typed_marks);
+                                self.merge_saved_draft(&scope, &draft, true);
+                                self.clear_carried_draft();
+                            } else {
+                                self.note_carried_draft(scope);
                             }
                         }
                         None => {
-                            self.composer.set_text("");
-                            self.clear_completion_marks();
+                            self.clear_carried_draft();
+                            if switched_from_pending {
+                                self.composer.set_text("");
+                                self.clear_completion_marks();
+                            }
                         }
                     }
                 }
@@ -4263,6 +4280,8 @@ impl App {
             self.set_focus(Pane::Composer);
         } else if self.compose_mode != ComposeMode::Normal {
             self.cancel_compose();
+        } else if self.restore_aside_draft_on_cancel() {
+            // Gives up the carried slash command and brings the saved draft back.
         } else if self.thread_open() {
             self.close_thread();
         } else if self.esc_closes_chat {
@@ -7966,6 +7985,225 @@ mod tests {
             app.composer.is_empty(),
             "vanishing auto-opened pending room must clear the composer"
         );
+    }
+
+    #[test]
+    fn merge_saved_draft_preserves_cursor_toast_marks_and_slash_commands() {
+        // 1. Cursor stays at `draft.len() + 2 + old_cursor`, toast is shown, and an
+        //    accepted mention in the typed text resolves at its shifted offset rather
+        //    than binding to the same word in the saved draft.
+        let (mut app, _terminal) = drawn();
+        let (handle, _commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        type_text(&mut app, "ping Alice now");
+        app.complete.marks.push(
+            crate::complete::MentionMark::user("Alice", "@alice:example.org").with_at(Some(5)),
+        );
+        // Move cursor left 4 bytes (" now") so old_cursor = 10 ("ping Alice| now").
+        for _ in 0..4 {
+            app.on_event(key(KeyCode::Left));
+        }
+        assert_eq!(app.composer.cursor(), 10);
+        app.rooms[1].draft = "Alice said hi".to_owned();
+        app.toast = None;
+
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!k");
+        assert_eq!(app.composer.text(), "Alice said hi\n\nping Alice now");
+        assert_eq!(app.composer.cursor(), "Alice said hi".len() + 2 + 10);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("saved draft")),
+            "expected merge toast, got {:?}",
+            app.toast.as_ref().map(|(m, _)| m)
+        );
+        let outgoing = app.format_outgoing(app.composer.text());
+        let Outgoing::Text {
+            html: Some(html),
+            mentions: Some(mentions),
+            ..
+        } = outgoing
+        else {
+            panic!("expected linked mention, got {outgoing:?}");
+        };
+        assert!(mentions.user_ids.iter().any(|u| u == "@alice:example.org"));
+        assert!(
+            html.contains("<p>Alice said hi</p>")
+                && html.contains(
+                    "ping <a href=\"https://matrix.to/#/@alice:example.org\">Alice</a> now"
+                ),
+            "accepted mention must resolve in typed part, got: {html}"
+        );
+
+        // 2a. An unanchored (`at: None`) mark in typed text must bind to the typed part,
+        //     not to an earlier matching word in the draft part.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.clear_completion_marks();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        type_text(&mut app, "tell Alice");
+        app.complete.marks.push(crate::complete::MentionMark::user(
+            "Alice",
+            "@alice:example.org",
+        ));
+        app.rooms[1].draft = "Alice said hi".to_owned();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        let Outgoing::Text {
+            html: Some(html), ..
+        } = app.format_outgoing(app.composer.text())
+        else {
+            panic!("expected html");
+        };
+        assert!(
+            html.contains("<p>Alice said hi</p>")
+                && html
+                    .contains("tell <a href=\"https://matrix.to/#/@alice:example.org\">Alice</a>"),
+            "unanchored typed mark must not bind into draft part, got: {html}"
+        );
+
+        // 2b. A stale unanchored (`at: None`) mark whose needle is only in the draft part
+        //     must NOT bind to the draft part.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.clear_completion_marks();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        type_text(&mut app, "tell Bob");
+        app.complete.marks.push(crate::complete::MentionMark::user(
+            "Alice",
+            "@alice:example.org",
+        ));
+        app.rooms[1].draft = "Alice said hi".to_owned();
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        let outgoing = app.format_outgoing(app.composer.text());
+        let Outgoing::Text { mentions, .. } = outgoing else {
+            panic!("expected text, got {outgoing:?}");
+        };
+        assert!(
+            mentions.is_none(),
+            "stale typed mark must not bind to draft part, got {mentions:?}"
+        );
+
+        // 3a. A typed `/command` (room command `/help`) keeps the saved draft aside, runs
+        //     normally on Enter, and restores the saved draft afterwards.
+        app.rooms.clear();
+        app.composer.set_text("");
+        app.clear_completion_marks();
+        app.help_open = false;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        type_text(&mut app, "/help");
+        app.rooms[1].draft = "remember milk".to_owned();
+        app.toast = None;
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.composer.text(), "/help");
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("aside")),
+            "expected aside toast, got {:?}",
+            app.toast.as_ref().map(|(m, _)| m)
+        );
+        app.perform(Action::Send);
+        assert!(app.help_open, "/help command must execute");
+        assert_eq!(app.composer.text(), "remember milk");
+
+        // 3b. A typed `/me` command with a stored draft keeps the stored draft aside,
+        //     sends only the emote, restores the draft, and never wipes the store.
+        let (mut app, _terminal) = drawn();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        type_text(&mut app, "/me waves");
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!a",
+            "Alpha",
+            RoomCategory::Room,
+            0,
+        )]));
+        app.on_matrix(MatrixEvent::Draft {
+            room_id: "!a".into(),
+            thread: None,
+            text: "keep me".into(),
+        });
+        assert_eq!(app.composer.text(), "/me waves");
+        app.save_idle_draft(Duration::ZERO);
+        let cmds = drain(&mut commands);
+        assert!(
+            !cmds.iter().any(|c| c.starts_with("SaveDraft")),
+            "idle save must not overwrite stored draft with /command: {cmds:?}"
+        );
+        app.on_event(key(KeyCode::Enter));
+        let mut sent_emote = false;
+        let mut cleared_draft = false;
+        while let Ok(cmd) = commands.try_recv() {
+            match cmd {
+                MatrixCmd::Send {
+                    message: Outgoing::Emote { plain, .. },
+                    ..
+                } => {
+                    assert_eq!(plain, "waves");
+                    sent_emote = true;
+                }
+                MatrixCmd::SaveDraft { text, .. } if text.is_empty() => {
+                    cleared_draft = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(sent_emote, "/me waves must send as an emote");
+        assert!(
+            !cleared_draft,
+            "sending /me must not forget the aside draft"
+        );
+        assert_eq!(app.composer.text(), "keep me");
+
+        // 3c. Pressing Esc on a carried `/command` cancels it and restores the aside draft.
+        let (mut app, _terminal) = drawn();
+        let (handle, _commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        type_text(&mut app, "/join #later");
+        app.on_matrix(MatrixEvent::Rooms(vec![summary(
+            "!a",
+            "Alpha",
+            RoomCategory::Room,
+            0,
+        )]));
+        app.on_matrix(MatrixEvent::Draft {
+            room_id: "!a".into(),
+            thread: None,
+            text: "back on esc".into(),
+        });
+        assert_eq!(app.composer.text(), "/join #later");
+        app.on_event(key(KeyCode::Esc));
+        assert!(!app.chat_closed);
+        assert_eq!(app.composer.text(), "back on esc");
     }
 
     #[test]

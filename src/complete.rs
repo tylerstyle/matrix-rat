@@ -1082,6 +1082,78 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
     if marks.is_empty() || text.is_empty() {
         return (text.to_owned(), Mentions::new());
     }
+    let matched = match_marks(text, marks);
+
+    let mut user_ids: BTreeSet<OwnedUserId> = BTreeSet::new();
+    let mut room_mention = false;
+    let mut replacements: Vec<(Range<usize>, String)> = Vec::new();
+
+    for (idx, (mark, pos)) in marks.iter().zip(matched).enumerate() {
+        let Some(pos) = pos else {
+            continue;
+        };
+        let end = pos + mark.needle().len();
+        match &mark.kind {
+            MentionKind::User { label, user_id } => {
+                if let Ok(uid) = UserId::parse(user_id) {
+                    let uri = uid.matrix_to_uri().to_string();
+                    user_ids.insert(uid);
+                    replacements.push((pos..end, markdown_link(label, &uri)));
+                }
+            }
+            MentionKind::RoomNotification => {
+                room_mention = true;
+            }
+            MentionKind::RoomLink { label, uri } => {
+                if is_safe_matrix_to(uri) {
+                    replacements.push((pos..end, markdown_link(label, uri)));
+                }
+            }
+            MentionKind::Emoticon { .. } => replacements.push((pos..end, emote_placeholder(idx))),
+        }
+    }
+
+    replacements.sort_by_key(|(range, _)| range.start);
+    let mut linked = String::with_capacity(text.len() + replacements.len() * 32);
+    let mut last = 0;
+    for (range, rep) in replacements {
+        linked.push_str(&text[last..range.start]);
+        linked.push_str(&rep);
+        last = range.end;
+    }
+    linked.push_str(&text[last..]);
+
+    let mut mentions = Mentions::with_user_ids(user_ids);
+    mentions.room = room_mention;
+    (linked, mentions)
+}
+
+/// Anchors `marks` to their matched byte positions inside `text`, shifted by `shift`, and
+/// drops any mark that does not match in `text`. Used when prepending or appending
+/// another segment so unanchored (`at: None`) or drifted marks cannot bind to words in
+/// the other segment.
+pub(crate) fn anchor_marks_in_segment(text: &str, marks: &mut Vec<MentionMark>, shift: usize) {
+    if marks.is_empty() {
+        return;
+    }
+    if text.is_empty() {
+        marks.clear();
+        return;
+    }
+    let matched = match_marks(text, marks);
+    let mut anchored = Vec::with_capacity(marks.len());
+    for (mut mark, pos) in std::mem::take(marks).into_iter().zip(matched) {
+        if let Some(pos) = pos {
+            mark.at = Some(pos + shift);
+            anchored.push(mark);
+        }
+    }
+    *marks = anchored;
+}
+
+/// Matches each mark against `text` using exact accepted positions first, then left-to-right
+/// longest-needle matches outside code spans, returning the matched byte offset per mark.
+fn match_marks(text: &str, marks: &[MentionMark]) -> Vec<Option<usize>> {
     let mut occupied = code_mask(text, false);
 
     // Order marks longest-label first while keeping original index to disambiguate identical names.
@@ -1093,34 +1165,12 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
         .collect();
     ordered.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(a.0.cmp(&b.0)));
 
-    let mut used = vec![false; marks.len()];
-    let mut user_ids: BTreeSet<OwnedUserId> = BTreeSet::new();
-    let mut room_mention = false;
-    let mut replacements: Vec<(Range<usize>, String)> = Vec::new();
-
-    let mut apply = |pos: usize, end: usize, idx: usize, mark: &MentionMark| match &mark.kind {
-        MentionKind::User { label, user_id } => {
-            if let Ok(uid) = UserId::parse(user_id) {
-                let uri = uid.matrix_to_uri().to_string();
-                user_ids.insert(uid);
-                replacements.push((pos..end, markdown_link(label, &uri)));
-            }
-        }
-        MentionKind::RoomNotification => {
-            room_mention = true;
-        }
-        MentionKind::RoomLink { label, uri } => {
-            if is_safe_matrix_to(uri) {
-                replacements.push((pos..end, markdown_link(label, uri)));
-            }
-        }
-        MentionKind::Emoticon { .. } => replacements.push((pos..end, emote_placeholder(idx))),
-    };
+    let mut matched = vec![None; marks.len()];
 
     // Pass 1: honour exact accepted positions first so an earlier ordinary word (e.g. "May") does
     // not steal a completion accepted later in the message.
     for &(idx, mark, needle) in &ordered {
-        if used[idx] {
+        if matched[idx].is_some() {
             continue;
         }
         let Some(pos) = mark.at else {
@@ -1138,9 +1188,8 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
         {
             continue;
         }
-        used[idx] = true;
+        matched[idx] = Some(pos);
         occupied[pos..end].fill(true);
-        apply(pos, end, idx, mark);
     }
 
     // Pass 2: match any remaining unused mark against the first unused occurrence left to right.
@@ -1151,9 +1200,9 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
             pos += next_char_len(text, pos);
             continue;
         }
-        let mut chosen: Option<(usize, &MentionMark, &str)> = None;
+        let mut chosen: Option<(usize, &str)> = None;
         for &(idx, mark, needle) in &ordered {
-            if used[idx] {
+            if matched[idx].is_some() {
                 continue;
             }
             if !text[pos..].starts_with(needle) {
@@ -1166,33 +1215,20 @@ pub fn resolve_marks(text: &str, marks: &[MentionMark]) -> (String, Mentions) {
             if !mark_fits(text, pos, end, mark) {
                 continue;
             }
-            chosen = Some((idx, mark, needle));
+            chosen = Some((idx, needle));
             break;
         }
-        if let Some((idx, mark, needle)) = chosen {
+        if let Some((idx, needle)) = chosen {
             let end = pos + needle.len();
-            used[idx] = true;
+            matched[idx] = Some(pos);
             occupied[pos..end].fill(true);
-            apply(pos, end, idx, mark);
             pos = end;
         } else {
             pos += next_char_len(text, pos);
         }
     }
 
-    replacements.sort_by_key(|(range, _)| range.start);
-    let mut linked = String::with_capacity(text.len() + replacements.len() * 32);
-    let mut last = 0;
-    for (range, rep) in replacements {
-        linked.push_str(&text[last..range.start]);
-        linked.push_str(&rep);
-        last = range.end;
-    }
-    linked.push_str(&text[last..]);
-
-    let mut mentions = Mentions::with_user_ids(user_ids);
-    mentions.room = room_mention;
-    (linked, mentions)
+    matched
 }
 
 /// Custom emoji are HTML that Markdown would escape, so [`resolve_marks`] leaves a

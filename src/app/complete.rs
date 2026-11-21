@@ -249,6 +249,12 @@ impl App {
         self.complete.close_popup();
     }
 
+    pub(super) fn anchor_edit_stash_marks(&mut self, text: &str, shift: usize) {
+        if let Some(marks) = &mut self.complete.edit_stash_marks {
+            crate::complete::anchor_marks_in_segment(text, marks, shift);
+        }
+    }
+
     /// Parses composer text together with accepted mention/room links and edit state.
     pub(super) fn format_outgoing(&self, text: &str) -> Outgoing {
         format::parse_with_mentions(text, &self.complete.marks, self.complete.edit_had_mentions)

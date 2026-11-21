@@ -296,10 +296,13 @@ impl App {
             }
         };
         if went_ahead {
-            // As after `/poll`: the emptied composer is saved as the draft in due course.
+            // As after `/poll`: the emptied composer is saved as the draft in due course,
+            // unless a saved draft was kept aside for this command.
             self.composer.set_text("");
             self.clear_completion_marks();
-            self.sync_completion();
+            if !self.restore_aside_draft() {
+                self.sync_completion();
+            }
         }
         true
     }
