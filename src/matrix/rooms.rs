@@ -2363,6 +2363,9 @@ async fn forward(
 }
 
 #[cfg(test)]
+pub(super) mod measure;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 

@@ -33,6 +33,8 @@ mod logging;
 mod logsafe;
 mod manage;
 mod matrix;
+#[cfg(test)]
+mod measure;
 mod menu;
 mod modal;
 mod model;

@@ -24,6 +24,8 @@ mod saved;
 pub(crate) mod search;
 mod session;
 #[cfg(test)]
+pub(crate) use rooms::measure::sample_messages;
+#[cfg(test)]
 pub(crate) use session::sqlite_store_config;
 mod source;
 mod spaces;

@@ -15,6 +15,8 @@ mod files;
 pub mod global_search;
 mod keybinds;
 mod keywords;
+#[cfg(test)]
+mod measure;
 mod media;
 mod menu;
 mod moderation;
