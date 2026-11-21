@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures::{StreamExt, pin_mut};
@@ -34,7 +35,20 @@ use crate::model::ItemRef;
 /// Recently used timelines stay alive so going back to a room is instant and keeps the
 /// history that was already loaded.
 const KEEP_TIMELINES: usize = 6;
+/// A cached timeline that was not used for this long, and is not shown, is dropped: it
+/// holds about 6 KB per message it has loaded (its items, and the SDK's event cache of
+/// the room, which cannot shrink while a timeline listens to it). The room's events
+/// stay in the store; opened again, it starts from its latest ones and pages back.
+const IDLE_TIMELINE: Duration = Duration::from_secs(20 * 60);
 const PAGE: u16 = 40;
+
+/// A timeline kept for a room (or the open thread), and when it was last used.
+struct Cached {
+    /// As `threads::key` names it.
+    key: String,
+    timeline: Arc<Timeline>,
+    last_used: Instant,
+}
 
 pub(super) enum OpenedTimeline {
     Detached {
@@ -70,7 +84,11 @@ struct DetachedForward {
 pub struct Timelines {
     client: Client,
     events: UnboundedSender<MatrixEvent>,
-    cache: VecDeque<(String, Arc<Timeline>)>,
+    /// Most recently used last.
+    cache: VecDeque<Cached>,
+    /// The cache keys of what is shown: the open room, and the open thread in it. Their
+    /// timelines are never dropped for being idle.
+    shown: Vec<String>,
     /// Forwards the open room's timeline to the UI.
     forwarder: Option<JoinHandle<()>>,
     /// The running request for older messages, if any.
@@ -128,6 +146,7 @@ impl Timelines {
             uploads: super::upload::Uploads::new(client.clone(), events.clone()),
             client,
             cache: VecDeque::new(),
+            shown: Vec::new(),
             forwarder: None,
             paginator: None,
             forward_paginator: None,
@@ -170,6 +189,13 @@ impl Timelines {
     pub fn close(&mut self) {
         self.cancel_open_event();
         self.detached = None;
+        // What was shown until now was in use until now.
+        let now = Instant::now();
+        for key in std::mem::take(&mut self.shown) {
+            if let Some(cached) = self.cache.iter_mut().find(|cached| cached.key == key) {
+                cached.last_used = now;
+            }
+        }
         for task in [
             self.forwarder.take(),
             self.paginator.take(),
@@ -207,7 +233,7 @@ impl Timelines {
         let mut timelines: Vec<Arc<Timeline>> = self
             .cache
             .iter()
-            .map(|(_, timeline)| timeline.clone())
+            .map(|cached| cached.timeline.clone())
             .collect();
         if let Some(detached) = &self.detached {
             timelines.push(detached.timeline.clone());
@@ -240,19 +266,15 @@ impl Timelines {
 
     async fn timeline(&mut self, room_id: &str) -> Result<Arc<Timeline>> {
         let key = threads::key(room_id, self.thread.as_deref());
-        if let Some(at) = self.cache.iter().position(|(id, _)| *id == key) {
-            // Move to the back: most recently used.
-            let entry = self.cache.remove(at).expect("position is valid");
-            let timeline = entry.1.clone();
-            self.cache.push_back(entry);
+        if let Some(timeline) = self.cached(&key) {
             return Ok(timeline);
         }
         let room = self.room(room_id)?;
         if let Some(root) = &self.thread {
             let timeline = Arc::new(threads::open(&room, root).await?);
             // One thread at a time stays alive; rooms keep their places.
-            self.cache.retain(|(id, _)| !threads::is_thread(id));
-            self.cache.push_back((key, timeline.clone()));
+            self.cache.retain(|cached| !threads::is_thread(&cached.key));
+            self.keep(key, timeline.clone());
             return Ok(timeline);
         }
         let timeline = Arc::new(room_timeline(&room).await?);
@@ -261,22 +283,83 @@ impl Timelines {
         // the timeline then fills in the names of what is already shown.
         // Skipped when the list is already complete, and stopped with the session.
         self.spawn_members_if_needed(&room, &timeline);
-        self.cache.push_back((key, timeline.clone()));
+        self.keep(key, timeline.clone());
         // The open thread's timeline does not take a room's place.
-        let rooms = |cache: &VecDeque<(String, Arc<Timeline>)>| {
+        let rooms = |cache: &VecDeque<Cached>| {
             cache
                 .iter()
-                .filter(|(id, _)| !threads::is_thread(id))
+                .filter(|cached| !threads::is_thread(&cached.key))
                 .count()
         };
         while rooms(&self.cache) > KEEP_TIMELINES {
             let oldest = self
                 .cache
                 .iter()
-                .position(|(id, _)| !threads::is_thread(id));
+                .position(|cached| !threads::is_thread(&cached.key));
             self.cache.remove(oldest.expect("there are rooms"));
         }
         Ok(timeline)
+    }
+
+    /// The cached timeline named `key` (see `threads::key`), now the most recently used.
+    fn cached(&mut self, key: &str) -> Option<Arc<Timeline>> {
+        let at = self.cache.iter().position(|cached| cached.key == key)?;
+        let mut cached = self.cache.remove(at).expect("position is valid");
+        cached.last_used = Instant::now();
+        let timeline = cached.timeline.clone();
+        self.cache.push_back(cached);
+        Some(timeline)
+    }
+
+    fn keep(&mut self, key: String, timeline: Arc<Timeline>) {
+        self.cache.push_back(Cached {
+            key,
+            timeline,
+            last_used: Instant::now(),
+        });
+    }
+
+    /// The room `room_id` and, if given, the thread at `thread` in it are what the UI
+    /// shows from now on (until [`Self::close`]).
+    fn show(&mut self, room_id: &str, thread: Option<&str>) {
+        self.shown = vec![room_id.to_owned()];
+        if thread.is_some() {
+            self.shown.push(threads::key(room_id, thread));
+        }
+    }
+
+    /// When a cached timeline that is not shown will have been idle for
+    /// [`IDLE_TIMELINE`], if there is one.
+    fn next_idle(&self) -> Option<Instant> {
+        self.cache
+            .iter()
+            .filter(|cached| !self.shown.contains(&cached.key))
+            .map(|cached| cached.last_used + IDLE_TIMELINE)
+            .min()
+    }
+
+    /// Ends when a cached timeline has been idle long enough to be dropped (by
+    /// [`Self::drop_idle`]); never while there is none. Borrows nothing: the session loop
+    /// makes it anew each time round.
+    pub(super) fn idle_due(&self) -> impl Future<Output = ()> + use<> {
+        let next = self.next_idle();
+        async move {
+            match next {
+                Some(at) => tokio::time::sleep_until(at.into()).await,
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    /// Drops the cached timelines that have not been used for [`IDLE_TIMELINE`] at `now`
+    /// and are not shown. A task still at work with one (a send, a page) keeps it until
+    /// it is done; the next command for the room opens a new one.
+    pub(super) fn drop_idle(&mut self, now: Instant) {
+        let shown = &self.shown;
+        self.cache.retain(|cached| {
+            shown.contains(&cached.key)
+                || now.saturating_duration_since(cached.last_used) < IDLE_TIMELINE
+        });
     }
 
     fn spawn_members_if_needed(&mut self, room: &Room, timeline: &Arc<Timeline>) {
@@ -449,8 +532,8 @@ impl Timelines {
         // Fast path: if the target event is already in a warm live timeline for this room
         // (or matching thread), switch straight to it without touching `/context`.
         let cache_key = threads::key(&room_id, thread_root.as_deref());
-        if let Some(at) = self.cache.iter().position(|(id, _)| *id == cache_key) {
-            let cached = self.cache[at].1.clone();
+        if let Some(at) = self.cache.iter().position(|cached| cached.key == cache_key) {
+            let cached = self.cache[at].timeline.clone();
             if let Some(item) = cached.item_by_event_id(&parsed_event).await {
                 if is_ignored_in(&self.ignored, item.sender()) {
                     return jump_failed("That message is from an ignored user.".to_owned());
@@ -458,10 +541,9 @@ impl Timelines {
                 if item.content().is_redacted() {
                     return jump_failed("That message was deleted.".to_owned());
                 }
-                let entry = self.cache.remove(at).expect("position is valid");
-                let timeline = entry.1.clone();
-                self.cache.push_back(entry);
+                let timeline = self.cached(&cache_key).unwrap_or(cached);
                 self.close();
+                self.show(&room_id, thread_root.as_deref());
                 self.tell_draft_for(&room, &room_id, thread_root.as_deref())
                     .await;
                 self.forwarder = Some(tokio::spawn(forward(
@@ -625,6 +707,8 @@ impl Timelines {
                 self.thread = thread.clone();
                 let live = self.timeline(&room_id).await.ok();
                 self.thread = prev_thread;
+                // The live timeline behind the slice counts what arrives meanwhile.
+                self.show(&room_id, thread.as_deref());
                 let reached_start = Arc::new(AtomicBool::new(false));
                 let reached_end = Arc::new(AtomicBool::new(false));
                 self.detached = Some(DetachedSlot {
@@ -699,6 +783,8 @@ impl Timelines {
                             Some(root) => thread_needs_page(&timeline.items().await, root),
                             None => false,
                         };
+                        let thread = self.thread.clone();
+                        self.show(&room_id, thread.as_deref());
                         self.forwarder = Some(tokio::spawn(forward(
                             room,
                             timeline.clone(),
@@ -1145,8 +1231,8 @@ impl Timelines {
                         let open = self
                             .cache
                             .iter()
-                            .find(|(id, _)| id == room_id)
-                            .map(|(_, timeline)| timeline.clone());
+                            .find(|cached| cached.key == *room_id)
+                            .map(|cached| cached.timeline.clone());
                         Some((room, open))
                     })
                     .collect();
