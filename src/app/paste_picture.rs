@@ -72,15 +72,18 @@ impl App {
                 return;
             }
             // Like a dropped file, it answers an `/upload` command being typed.
-            if upload::command_argument(self.composer.text()).is_some() {
-                self.restore_draft();
-            }
+            self.restore_draft_for(&scope);
         } else if self.rooms.iter().any(|room| room.id == scope.0) {
             // The user went elsewhere meanwhile: it waits where it was asked for.
             if let Some(reason) = upload::too_large(&file.name, file.size, self.attach.limit) {
                 return self.show_toast(reason);
             }
-            self.attach.pending.entry(scope).or_default().push(file);
+            self.attach
+                .pending
+                .entry(scope.clone())
+                .or_default()
+                .push(file);
+            self.restore_draft_for(&scope);
             self.show_toast("The picture waits in the chat you pasted it in");
         } else {
             // That room is gone.
@@ -547,5 +550,44 @@ mod tests {
         app.perform(Action::Focus(Pane::Sidebar));
         app.on_event(alt_i());
         assert!(app.attach.paste_request.is_none() && app.toast.is_none());
+    }
+
+    #[test]
+    fn paste_finishing_after_room_or_thread_switch_restores_stashed_draft() {
+        let dir = Scratch::new("paste-switch-stash");
+        let (mut app, _commands) = connected();
+        app.rooms[0].messages.push(remote("m1", "root"));
+
+        // Stash a draft via /upload, start a paste, then switch to another room.
+        app.composer.set_text("my caption");
+        app.perform(Action::Attach);
+        assert_eq!(app.composer.text(), "/upload ");
+        app.request_paste_with(vec![Tool::WlPaste]);
+        let request = app.take_paste_request().unwrap();
+        app.open_room(1);
+        assert_eq!(app.rooms[0].draft, "/upload ");
+
+        let result = clipboard::paste(&request, &dir.0, clipboard(png()));
+        app.finish_paste(Done {
+            id: request.id,
+            result,
+        });
+        assert_eq!(app.rooms[0].draft, "my caption");
+        app.open_room(0);
+        assert_eq!(app.composer.text(), "my caption");
+
+        // Same when the user opened a thread in the same room before paste finished.
+        app.perform(Action::Attach);
+        assert_eq!(app.composer.text(), "/upload ");
+        app.request_paste_with(vec![Tool::WlPaste]);
+        let request = app.take_paste_request().unwrap();
+        app.open_thread(0);
+        let result = clipboard::paste(&request, &dir.0, clipboard(png()));
+        app.finish_paste(Done {
+            id: request.id,
+            result,
+        });
+        app.close_thread();
+        assert_eq!(app.composer.text(), "my caption");
     }
 }

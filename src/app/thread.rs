@@ -42,6 +42,29 @@ impl Threads {
     pub fn open_root(&self) -> Option<&str> {
         self.open.as_ref()?.root.as_deref()
     }
+
+    /// Replaces a waiting thread draft with `replacement()` if it still holds `/upload`,
+    /// removing the entry when that leaves it empty.
+    pub(super) fn replace_draft_if_upload(
+        &mut self,
+        room_id: &str,
+        key: &str,
+        replacement: impl FnOnce() -> String,
+    ) {
+        let map_key = (room_id.to_owned(), key.to_owned());
+        let is_upload = self
+            .drafts
+            .get(&map_key)
+            .is_some_and(|draft| crate::upload::command_argument(draft).is_some());
+        if is_upload {
+            let restored = replacement();
+            if restored.trim().is_empty() {
+                self.drafts.remove(&map_key);
+            } else {
+                self.drafts.insert(map_key, restored);
+            }
+        }
+    }
 }
 
 pub struct ThreadView {
@@ -414,6 +437,14 @@ impl App {
         true
     }
 
+    /// The room's own draft, whether it sits on the room or aside on its open thread.
+    pub(super) fn room_draft_mut(&mut self, index: usize, open: Option<usize>) -> &mut String {
+        match &mut self.threads.open {
+            Some(view) if Some(index) == open => &mut view.room_draft,
+            _ => &mut self.rooms[index].draft,
+        }
+    }
+
     /// A draft from the store for a conversation that is not the one being written
     /// in: it waits where that conversation's unsent text waits, unless there is some
     /// already. `thread` is the event the thread starts at; `None` means the room.
@@ -433,10 +464,7 @@ impl App {
                 };
                 // The open room's draft is put aside while one of its threads is shown.
                 let open = self.open_index();
-                let draft = match &mut self.threads.open {
-                    Some(view) if Some(index) == open => &mut view.room_draft,
-                    _ => &mut self.rooms[index].draft,
-                };
+                let draft = self.room_draft_mut(index, open);
                 if draft.is_empty() {
                     *draft = text;
                 }
