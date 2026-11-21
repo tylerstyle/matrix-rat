@@ -7213,6 +7213,7 @@ mod tests {
         app.on_matrix(slice(&app, true));
         assert!(app.timeline.detached);
         assert!(app.timeline.reached_start && app.timeline.reached_end);
+        app.timeline.empty_forward_batches = 2;
 
         app.on_matrix(MatrixEvent::TimelineReset {
             room_id: "!a".into(),
