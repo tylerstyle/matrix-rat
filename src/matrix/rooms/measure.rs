@@ -363,14 +363,30 @@ async fn wait_indexed(room: &matrix_sdk::Room) {
 /// app has it) and synced once; and the sample room. The event cache stores what a sync
 /// brings on a task of its own, after the sync has returned: this waits until it has the
 /// sample room's messages, as the tests take for granted. (A room opened before that
-/// starts empty, and its first page waits for a token while the messages come in; the
-/// timeline shows only the last 20 items of what came into it while empty, and says it
-/// reached the start when the page ends, with the rest hidden. The idle timeline test
-/// waited for them for its whole minute now and then under load.)
+/// starts empty, and its first page waits 3 s for a token while the messages come in, see
+/// `messages_that_come_in_while_the_first_page_waits_are_all_shown`. Before the worker
+/// paged on after that, the idle timeline test waited for them for its whole minute now
+/// and then under load.)
 pub(super) async fn client_of(
     server: &fake::Server,
     search: SearchIndexStoreKind,
 ) -> (Client, matrix_sdk::Room) {
+    let client = signed_in(server, search).await;
+    let mut stored = client.event_cache().subscribe_to_room_generic_updates();
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while stored.recv().await.unwrap().room_id.as_str() != ROOM {}
+    })
+    .await
+    .expect("the event cache has the sample room's messages within a minute");
+    let room_id = <&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap();
+    let room = client.get_room(room_id).unwrap();
+    (client, room)
+}
+
+/// A client of `server`, signed in as `ME`, with the event cache subscribed to (as the
+/// app has it); not synced yet.
+async fn signed_in(server: &fake::Server, search: SearchIndexStoreKind) -> Client {
     let client = Client::builder()
         .homeserver_url(&server.url)
         .with_threading_support(super::super::threads::SUPPORT)
@@ -392,16 +408,7 @@ pub(super) async fn client_of(
         .await
         .unwrap();
     client.event_cache().subscribe().unwrap();
-    let mut stored = client.event_cache().subscribe_to_room_generic_updates();
-    client.sync_once(SyncSettings::default()).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(60), async {
-        while stored.recv().await.unwrap().room_id.as_str() != ROOM {}
-    })
-    .await
-    .expect("the event cache has the sample room's messages within a minute");
-    let room_id = <&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap();
-    let room = client.get_room(room_id).unwrap();
-    (client, room)
+    client
 }
 
 /// What `forward` keeps between changes of one open timeline.
@@ -1467,6 +1474,89 @@ async fn a_request_for_older_messages_right_after_an_answer_is_answered() {
         "the request right after the answer is answered"
     );
     drop(timelines);
+    drop(server);
+}
+
+/// Not a measurement: messages that come into a room's timeline while it is empty and
+/// its first page of older ones is on its way are all shown once the room has paged back
+/// to its start. The timeline shows only the last 20 items of what comes into it while
+/// empty, and a page that ends at the start shows no more of them (matrix-sdk-ui 0.19.1);
+/// the room said it had reached its start with all but its last messages hidden. The
+/// first page finds nothing and waits for a token (3 s) while the messages come in.
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_that_come_in_while_the_first_page_waits_are_all_shown() {
+    use crate::matrix::{MatrixCmd, MatrixEvent};
+    use matrix_sdk::event_cache::PaginationStatus;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const MESSAGES: usize = 300;
+    let mut room = sample_room(MESSAGES);
+    let messages = room["timeline"]["events"].take();
+    room["timeline"]["events"] = json!([]);
+    let syncs = AtomicUsize::new(0);
+    let server = fake::Server::answering(
+        json!({ "join": { ROOM: room } }),
+        Box::new(move |request| {
+            if !request.path.ends_with("/sync") || syncs.fetch_add(1, Ordering::SeqCst) == 0 {
+                return None;
+            }
+            let rooms = json!({ "join": { ROOM: {
+                "timeline": { "events": messages, "limited": false },
+            } } });
+            let sync = json!({ "next_batch": "s2", "rooms": rooms });
+            Some(fake::Reply::Json(sync.to_string()))
+        }),
+    )
+    .await;
+    let client = signed_in(&server, SearchIndexStoreKind::InMemory).await;
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    let room_id = <&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap();
+    let (cache, _cache_handles) = client
+        .get_room(room_id)
+        .unwrap()
+        .event_cache()
+        .await
+        .unwrap();
+    let mut status = cache.pagination().status();
+    let mut opened = Opened::new(client.clone()).await;
+    let paginate = || MatrixCmd::Paginate {
+        room_id: ROOM.to_owned(),
+        generation: 1,
+    };
+    opened.timelines.handle(paginate()).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while status.get() != PaginationStatus::Paginating {
+            status.next().await;
+        }
+    })
+    .await
+    .expect("the first page is on its way");
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    // Paging back as the app does, until a page says it reached the start.
+    let mut shown = 0;
+    loop {
+        match opened.next_event().await {
+            Some(MatrixEvent::Timeline { messages, .. }) => {
+                shown = messages.iter().filter(|m| m.item.is_some()).count();
+            }
+            Some(MatrixEvent::Paginated {
+                reached_start: false,
+                ..
+            }) => opened.timelines.handle(paginate()).await,
+            Some(MatrixEvent::Paginated { .. }) => break,
+            _ => {}
+        }
+    }
+    // The page that reached the start may be shown right after it said so.
+    let all = tokio::time::timeout(Duration::from_secs(10), async {
+        while shown < MESSAGES {
+            if let Some(MatrixEvent::Timeline { messages, .. }) = opened.next_event().await {
+                shown = messages.iter().filter(|m| m.item.is_some()).count();
+            }
+        }
+    })
+    .await;
+    assert!(all.is_ok(), "{shown} of {MESSAGES} messages shown");
+    drop(opened);
     drop(server);
 }
 

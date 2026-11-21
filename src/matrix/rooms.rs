@@ -25,6 +25,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use super::paging::Paging;
 use super::safety::{IgnoredSet, is_ignored_in};
 use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
 use crate::format::Outgoing;
@@ -101,39 +102,6 @@ struct DetachedForward {
     reached_end: Arc<AtomicBool>,
     /// Live timeline for the same room/thread, used only to count newly arriving tail messages.
     live: Option<Arc<Timeline>>,
-}
-
-/// A page (older messages, or newer ones of a detached slice) loading in the background,
-/// which answers the UI once it is loaded. A request for a page made while one is loading
-/// is answered by that one's answer, and dropped. A page counts as loading until it has
-/// answered, not until its task has ended: the UI asks for the next page as soon as it
-/// hears the answer, which can be before the task has ended, and that request would be
-/// dropped and never answered (the UI waits for an answer to every request, so the room
-/// would page no further).
-struct Paging {
-    task: JoinHandle<()>,
-    answered: Arc<AtomicBool>,
-}
-
-impl Paging {
-    /// Loads the page with `load`, and sends the UI the answer it gives.
-    fn spawn(
-        events: UnboundedSender<MatrixEvent>,
-        load: impl Future<Output = MatrixEvent> + Send + 'static,
-    ) -> Self {
-        let answered = Arc::new(AtomicBool::new(false));
-        let done = answered.clone();
-        let task = tokio::spawn(async move {
-            let answer = load.await;
-            done.store(true, Ordering::Release);
-            let _ = events.send(answer);
-        });
-        Self { task, answered }
-    }
-
-    fn loading(&self) -> bool {
-        !self.answered.load(Ordering::Acquire)
-    }
 }
 
 pub struct Timelines {
@@ -505,6 +473,17 @@ impl Timelines {
     ) {
         let paging = Paging::spawn(self.events.clone(), async move {
             let reached_start = match timeline.paginate_backwards(PAGE).await {
+                // A timeline not focused on an event shows only the last 20 items of what
+                // comes into it while it is empty (as while its first page waits for the
+                // server), and a page that ends at the start shows no more of them
+                // (matrix-sdk-ui 0.19.1). Asked once more, one that still hides some shows
+                // the next of them and says it is not at the start, so the UI pages on;
+                // one that hides none says the start again, from what the event cache
+                // knows, without asking the server.
+                Ok(true) if detached_start.is_none() => timeline.paginate_backwards(PAGE).await,
+                answer => answer,
+            };
+            let reached_start = match reached_start {
                 Ok(reached_start) => reached_start,
                 Err(err) => {
                     tracing::warn!(why = %logsafe::kind(&err), "could not load older messages");

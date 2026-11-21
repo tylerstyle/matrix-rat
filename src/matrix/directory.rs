@@ -11,11 +11,11 @@ use matrix_sdk::ruma::room::{JoinRuleKind, JoinRuleSummary, RoomType};
 use matrix_sdk::ruma::{OwnedRoomOrAliasId, OwnedServerName, RoomOrAliasId, ServerName};
 use matrix_sdk::{Client, EncryptionState, RoomState};
 use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
 
 use super::MatrixEvent;
 use super::left::LeftRooms;
 use super::manage::{failed, failed_saying};
+use super::paging::Paging;
 use super::safety::safe_mxc;
 use crate::text::{is_blank, sanitize, sanitize_line};
 
@@ -166,7 +166,9 @@ pub(super) struct DirectorySearcher {
     left: LeftRooms,
     current: Option<(u64, Arc<Mutex<RoomDirectorySearch>>)>,
     server_label: Option<String>,
-    task: Option<JoinHandle<()>>,
+    /// The search or the page of more rooms loading. A request for more until it answers
+    /// is dropped (see [`Paging`]).
+    task: Option<Paging>,
 }
 
 impl DirectorySearcher {
@@ -204,11 +206,10 @@ impl DirectorySearcher {
         self.current = Some((generation, Arc::clone(&search)));
         let server_label = self.server_label.clone();
         let client = self.client.clone();
-        let events = self.events.clone();
         let left = self.left.clone();
         let filter = clean_query(&query);
 
-        self.task = Some(tokio::spawn(async move {
+        self.task = Some(Paging::spawn(self.events.clone(), async move {
             let outcome = tokio::time::timeout(DIRECTORY_TIMEOUT, async move {
                 let mut guard = search.lock().await;
                 guard
@@ -228,12 +229,12 @@ impl DirectorySearcher {
             })
             .await;
 
-            send_directory_outcome(&events, generation, server_label.as_deref(), outcome);
+            directory_answer(generation, server_label.as_deref(), outcome)
         }));
     }
 
     pub(super) fn next_page(&mut self, generation: u64) {
-        if self.task.as_ref().is_some_and(|t| !t.is_finished()) {
+        if self.task.as_ref().is_some_and(Paging::loading) {
             return;
         }
         let Some((cur_gen, search)) = &self.current else {
@@ -245,10 +246,9 @@ impl DirectorySearcher {
         let search = Arc::clone(search);
         let server_label = self.server_label.clone();
         let client = self.client.clone();
-        let events = self.events.clone();
         let left = self.left.clone();
 
-        self.task = Some(tokio::spawn(async move {
+        self.task = Some(Paging::spawn(self.events.clone(), async move {
             let outcome = tokio::time::timeout(DIRECTORY_TIMEOUT, async move {
                 let mut guard = search.lock().await;
                 if guard.is_at_last_page() {
@@ -276,13 +276,13 @@ impl DirectorySearcher {
             })
             .await;
 
-            send_directory_outcome(&events, generation, server_label.as_deref(), outcome);
+            directory_answer(generation, server_label.as_deref(), outcome)
         }));
     }
 
     pub(super) fn cancel(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
+        if let Some(paging) = self.task.take() {
+            paging.task.abort();
         }
         self.current = None;
         self.server_label = None;
@@ -299,13 +299,12 @@ impl Drop for DirectorySearcher {
     }
 }
 
-fn send_directory_outcome(
-    events: &mpsc::UnboundedSender<MatrixEvent>,
+fn directory_answer(
     generation: u64,
     server: Option<&str>,
     outcome: Result<Result<DirectoryPage, matrix_sdk::Error>, tokio::time::error::Elapsed>,
-) {
-    let event = match outcome {
+) -> MatrixEvent {
+    match outcome {
         Ok(Ok(page)) => MatrixEvent::DirectoryResults(page),
         Ok(Err(err)) => MatrixEvent::DirectoryError {
             generation,
@@ -318,8 +317,7 @@ fn send_directory_outcome(
                 None => "The homeserver took too long to answer.".to_owned(),
             },
         },
-    };
-    let _ = events.send(event);
+    }
 }
 
 fn clean_query(query: &str) -> Option<String> {
@@ -677,6 +675,98 @@ mod tests {
         assert!(!prev_dbg.contains(secret_topic));
         assert!(!prev_dbg.contains(secret_mxc));
         assert!(!prev_dbg.contains(secret_via));
+    }
+
+    /// A request for more rooms made as soon as the page before was answered is answered
+    /// too (see `Paging`). The task that answered is held right as it sends the answer
+    /// (by the waker of the channel it sends on) until the next request is made, so that
+    /// request comes before the task has ended every time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_for_more_rooms_right_after_an_answer_is_answered() {
+        use crate::matrix::spaces::fake;
+        use serde_json::json;
+        use std::sync::mpsc as sync_mpsc;
+        use std::task::{Context, Wake, Waker};
+
+        /// Tells the test that it was woken, and holds whoever woke it until let go.
+        struct Hold {
+            woken: sync_mpsc::Sender<()>,
+            go: std::sync::Mutex<sync_mpsc::Receiver<()>>,
+        }
+        impl Wake for Hold {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                let go = self.go.lock().unwrap();
+                let _ = self.woken.send(());
+                let _ = go.recv_timeout(Duration::from_secs(10));
+            }
+        }
+
+        // Every page has more after it.
+        let server = fake::Server::answering(
+            json!({}),
+            Box::new(|request| {
+                request.path.ends_with("/publicRooms").then(|| {
+                    let page = json!({
+                        "chunk": [{
+                            "room_id": "!public:localhost",
+                            "num_joined_members": 2,
+                            "world_readable": false,
+                            "guest_can_join": false,
+                        }],
+                        "next_batch": "more",
+                    });
+                    fake::Reply::Json(page.to_string())
+                })
+            }),
+        )
+        .await;
+        let client = fake::client(&server).await;
+        let (events, mut received) = mpsc::unbounded_channel();
+        let mut searcher = DirectorySearcher::new(client, events, LeftRooms::default());
+        let (woken_tx, woken) = sync_mpsc::channel();
+        let (go, go_rx) = sync_mpsc::channel();
+        let hold = Waker::from(Arc::new(Hold {
+            woken: woken_tx,
+            go: std::sync::Mutex::new(go_rx),
+        }));
+        // Waiting for the answer before the search, so that what sends it wakes `hold`.
+        assert!(
+            received
+                .poll_recv(&mut Context::from_waker(&hold))
+                .is_pending()
+        );
+        searcher.start(1, "public".to_owned(), None);
+        woken
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the search is answered");
+        assert!(matches!(
+            received.try_recv(),
+            Ok(MatrixEvent::DirectoryResults(DirectoryPage {
+                append: false,
+                has_more: true,
+                ..
+            }))
+        ));
+        // Asked for more while the task that answered is held, before it could end.
+        searcher.next_page(1);
+        go.send(()).unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(10), received.recv()).await;
+        assert!(
+            matches!(
+                answer,
+                Ok(Some(MatrixEvent::DirectoryResults(DirectoryPage {
+                    generation: 1,
+                    append: true,
+                    ..
+                })))
+            ),
+            "the request right after the answer is answered"
+        );
+        drop(searcher);
+        drop(server);
     }
 
     /// End-to-end check against a local homeserver (`MATRIX_RAT_TEST_USER` +

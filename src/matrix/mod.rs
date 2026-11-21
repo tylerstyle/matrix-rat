@@ -15,6 +15,7 @@ mod manage;
 mod media;
 mod moderation;
 mod notify;
+mod paging;
 mod people;
 mod previews;
 mod receipts;
