@@ -70,7 +70,6 @@ pub(super) fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, form: &mut
         }
         let r = row(inner, row_idx as u16);
         let focused = form.focus == slot_idx;
-        let hovered = app.hover == Some(HitId::PollFormSlot(slot_idx));
 
         match slot {
             PollFormSlot::Question => {
@@ -110,19 +109,17 @@ pub(super) fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, form: &mut
                 }
                 if can_remove && r.width > field_w + 3 {
                     let rm_rect = Rect::new(r.x + field_w + 1, r.y, 3, 1);
-                    let rm_style = if app.hover == Some(HitId::PollFormRemove(i)) {
-                        theme.style(Role::Pill)
-                    } else {
-                        theme.style(Role::Muted)
-                    };
-                    frame.render_widget(Line::from(Span::styled(" × ", rm_style)), rm_rect);
+                    frame.render_widget(
+                        Line::from(Span::styled(" × ", theme.style(Role::Muted))),
+                        rm_rect,
+                    );
                     app.hits.add(rm_rect, HitId::PollFormRemove(i));
                 }
             }
             PollFormSlot::AddAnswer => {
                 app.hits.add(r, HitId::PollFormSlot(slot_idx));
                 let label = format!("+ Add answer ({}/{})", form.answers.len(), MAX_POLL_ANSWERS);
-                let style = if focused || hovered {
+                let style = if focused {
                     theme.style(Role::Pill)
                 } else {
                     theme.style(Role::StatusKey)
@@ -150,7 +147,7 @@ pub(super) fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, form: &mut
                 } else {
                     "Undisclosed (hidden until ended)"
                 };
-                let val_style = if focused || hovered {
+                let val_style = if focused {
                     theme.style(Role::Pill)
                 } else {
                     theme.style(Role::Text)
@@ -191,12 +188,10 @@ pub(super) fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, form: &mut
                 let rem = r.right().saturating_sub(x);
                 if rem >= 9 {
                     let minus_rect = Rect::new(x, r.y, 3, 1);
-                    let minus_style = if app.hover == Some(HitId::PollFormMaxStep(-1)) {
-                        theme.style(Role::Pill)
-                    } else {
-                        theme.style(Role::Muted)
-                    };
-                    frame.render_widget(Line::from(Span::styled(" - ", minus_style)), minus_rect);
+                    frame.render_widget(
+                        Line::from(Span::styled(" - ", theme.style(Role::Muted))),
+                        minus_rect,
+                    );
                     app.hits.add(minus_rect, HitId::PollFormMaxStep(-1));
                     x += 3;
 
@@ -215,12 +210,10 @@ pub(super) fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, form: &mut
                     let plus_x = (x + text_w + 2).min(r.right().saturating_sub(3));
                     if plus_x + 3 <= r.right() {
                         let plus_rect = Rect::new(plus_x, r.y, 3, 1);
-                        let plus_style = if app.hover == Some(HitId::PollFormMaxStep(1)) {
-                            theme.style(Role::Pill)
-                        } else {
-                            theme.style(Role::Muted)
-                        };
-                        frame.render_widget(Line::from(Span::styled(" + ", plus_style)), plus_rect);
+                        frame.render_widget(
+                            Line::from(Span::styled(" + ", theme.style(Role::Muted))),
+                            plus_rect,
+                        );
                         app.hits.add(plus_rect, HitId::PollFormMaxStep(1));
                     }
                 }
@@ -242,8 +235,7 @@ pub(super) fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, form: &mut
     let submit_w = (submit_label.len() + 2) as u16;
     let cancel_w = (cancel_label.len() + 2) as u16;
     let submit_rect = Rect::new(inner.x, inner.y + btn_y, submit_w.min(inner.width), 1);
-    let submit_focused =
-        form.focus == submit_slot || app.hover == Some(HitId::PollFormSlot(submit_slot));
+    let submit_focused = form.focus == submit_slot;
     button(frame, theme, submit_rect, submit_label, submit_focused);
     app.hits.add(submit_rect, HitId::PollFormSlot(submit_slot));
 
@@ -255,8 +247,7 @@ pub(super) fn draw_form(frame: &mut Frame, app: &mut App, area: Rect, form: &mut
             cancel_w.min(inner.right() - cancel_x),
             1,
         );
-        let cancel_focused =
-            form.focus == cancel_slot || app.hover == Some(HitId::PollFormSlot(cancel_slot));
+        let cancel_focused = form.focus == cancel_slot;
         button(frame, theme, cancel_rect, cancel_label, cancel_focused);
         app.hits.add(cancel_rect, HitId::PollFormSlot(cancel_slot));
     }
@@ -361,7 +352,6 @@ pub(super) fn draw_vote(
         let r = row(inner, (list_top + row_offset) as u16);
         let picked = popup_state.is_selected(&ans.id);
         let cursor_here = popup_state.cursor == idx;
-        let hovered = app.hover == Some(HitId::PollVoteAnswer(idx));
         let mark = match (popup_state.is_multi(), picked) {
             (false, true) => "● ",
             (false, false) => "○ ",
@@ -380,7 +370,7 @@ pub(super) fn draw_vote(
         };
         let text_avail = (r.width as usize).saturating_sub(width(mark) + width(&suffix));
         let label = truncate(&ans.text, text_avail);
-        let line_style = if cursor_here || hovered {
+        let line_style = if cursor_here {
             theme.style(Role::MessageSelected)
         } else {
             theme.style(Role::Text)
@@ -404,13 +394,7 @@ pub(super) fn draw_vote(
 
     let btn_y = inner.height - 2;
     let vote_rect = Rect::new(inner.x, inner.y + btn_y, 8.min(inner.width), 1);
-    button(
-        frame,
-        theme,
-        vote_rect,
-        "Vote",
-        app.hover == Some(HitId::PollVoteBtn(true)),
-    );
+    button(frame, theme, vote_rect, "Vote", false);
     app.hits.add(vote_rect, HitId::PollVoteBtn(true));
     let cancel_x = vote_rect.right().saturating_add(2);
     if cancel_x < inner.right() {
@@ -420,13 +404,7 @@ pub(super) fn draw_vote(
             8.min(inner.right() - cancel_x),
             1,
         );
-        button(
-            frame,
-            theme,
-            cancel_rect,
-            "Cancel",
-            app.hover == Some(HitId::PollVoteBtn(false)),
-        );
+        button(frame, theme, cancel_rect, "Cancel", false);
         app.hits.add(cancel_rect, HitId::PollVoteBtn(false));
     }
 

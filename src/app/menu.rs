@@ -380,20 +380,6 @@ impl App {
                 }
                 true
             }
-            MouseEventKind::Moved if open => {
-                if let (Some(HitId::Menu(index)), Some(Modal::Menu(menu))) = (hit, &mut self.modal)
-                    && menu.selected != index
-                    && index < menu.items.len()
-                {
-                    menu.select(index);
-                    self.dirty = true;
-                }
-                // What lies around the menu does not light up while it is open.
-                if self.hover.take().is_some() {
-                    self.dirty = true;
-                }
-                true
-            }
             _ => false,
         }
     }
@@ -1548,16 +1534,71 @@ mod tests {
         assert!(text.contains("│ Delete "), "{text}");
         app.on_event(left(rect.x + 2, rect.bottom() - 2));
         assert_eq!(open_menu(&app).armed, Some(count - 1));
-        // Moving the pointer to another entry selects it and takes the question
-        // back; what lies around the menu does not light up.
+        // Moving the pointer over another entry or outside the menu changes nothing.
+        app.dirty = false;
         app.on_event(mouse_event(MouseEventKind::Moved, rect.x + 2, rect.y + 1));
-        assert_eq!(open_menu(&app).selected, first);
-        assert_eq!(open_menu(&app).armed, None);
+        assert_eq!(open_menu(&app).selected, count - 1);
+        assert_eq!(open_menu(&app).armed, Some(count - 1));
+        assert!(!app.dirty);
         app.on_event(mouse_event(MouseEventKind::Moved, 0, 0));
-        assert_eq!(app.hover, None);
+        assert!(!app.dirty);
         // A right click on the menu itself only closes it.
         app.on_event(right(rect.x + 2, rect.y + 1));
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn mouse_moved_changes_nothing_with_or_without_open_menu() {
+        let mut app = App::demo();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let before = terminal.backend().buffer().clone();
+
+        // Sweep across sidebar, timeline messages, composer, and status line without a menu.
+        for (col, row) in [(5, 4), (40, 10), (40, 26), (10, 29)] {
+            app.dirty = false;
+            app.on_event(mouse_event(MouseEventKind::Moved, col, row));
+            assert!(!app.dirty, "Moved at ({col}, {row}) should not dirty");
+        }
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert_eq!(*terminal.backend().buffer(), before);
+
+        // Open a context menu on a message; moving over its items or outside does nothing.
+        app.on_event(key(KeyCode::Up));
+        app.on_event(key(KeyCode::Char('m')));
+        assert!(app.menu_open());
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let menu_before = terminal.backend().buffer().clone();
+        let selected_before = open_menu(&app).selected;
+        let (rect, _) = open_menu(&app).place(app.screen).unwrap();
+        for (col, row) in [
+            (rect.x + 2, rect.y + 1),
+            (rect.x + 2, rect.y + 2),
+            (rect.x + 2, rect.bottom().saturating_sub(2)),
+            (0, 0),
+        ] {
+            app.dirty = false;
+            app.on_event(mouse_event(MouseEventKind::Moved, col, row));
+            assert!(
+                !app.dirty,
+                "Moved with menu at ({col}, {row}) should not dirty"
+            );
+            assert_eq!(open_menu(&app).selected, selected_before);
+        }
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert_eq!(*terminal.backend().buffer(), menu_before);
+
+        // Clicking a menu item still runs it (Reply starts reply mode and closes the menu).
+        app.on_event(left(rect.x + 2, rect.y + 1));
+        assert!(!app.menu_open());
     }
 
     #[test]

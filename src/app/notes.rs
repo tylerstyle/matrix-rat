@@ -1931,8 +1931,8 @@ mod tests {
     }
 
     #[test]
-    fn a_button_stays_where_it_is_when_the_mouse_comes_onto_it() {
-        let dir = Dir::new("notes-hover");
+    fn a_button_stays_where_it_is_when_its_message_is_selected() {
+        let dir = Dir::new("notes-select-pos");
         let mut captioned = voice("v1");
         captioned.body.push_str("\nhör mal");
         let (mut app, mut commands) = app_with(vec![text("t", "eins"), captioned], &dir, true);
@@ -1958,14 +1958,24 @@ mod tests {
         terminal
             .draw(|frame| crate::ui::draw(frame, &mut app))
             .unwrap();
-        // Far from the mouse: the button that transcribes, and no other.
+        // Unselected: the button that transcribes, and no other.
         let before = spots(&app, NoteKind::Transcript);
         assert_eq!(before.len(), " transcribe ".len());
         assert!(spots(&app, NoteKind::Translation).is_empty());
 
-        // The mouse comes onto it: the message is lit and gets the button that
-        // translates, to the left; the one under the mouse has not moved.
+        // Moving the mouse onto it does nothing.
+        app.dirty = false;
         mouse(&mut app, MouseEventKind::Moved, before[0]);
+        assert!(!app.dirty);
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert_eq!(spots(&app, NoteKind::Transcript), before);
+        assert!(spots(&app, NoteKind::Translation).is_empty());
+
+        // Selecting the message adds the translate button to the left; the transcribe
+        // button stays in the same place.
+        select(&mut app, 1);
         terminal
             .draw(|frame| crate::ui::draw(frame, &mut app))
             .unwrap();

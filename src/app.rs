@@ -373,7 +373,6 @@ pub struct App {
     /// The user asked for no colours (`NO_COLOR`): every theme is shown without them.
     no_color: bool,
     pub hits: HitMap,
-    pub hover: Option<HitId>,
     dragging_splitter: bool,
     pub toast: Option<(String, Instant)>,
     pub toast_room: Option<(String, Instant)>,
@@ -721,7 +720,6 @@ impl App {
             truecolor: true,
             no_color: false,
             hits: HitMap::default(),
-            hover: None,
             dragging_splitter: false,
             toast: None,
             toast_room: None,
@@ -1182,8 +1180,7 @@ impl App {
             Setting::Mouse => {
                 self.mouse = !self.mouse;
                 if !self.mouse {
-                    // No more pointer events will come to clear these.
-                    self.hover = None;
+                    // No more pointer events will come to clear this.
                     self.dragging_splitter = false;
                 }
                 self.save_setting("mouse", self.mouse);
@@ -4909,12 +4906,6 @@ impl App {
                 self.release_mic();
                 if std::mem::take(&mut self.dragging_splitter) {
                     self.save_setting("sidebar_width", self.sidebar.width as i64);
-                }
-            }
-            MouseEventKind::Moved => {
-                if self.hover != hit {
-                    self.hover = hit;
-                    self.dirty = true;
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown

@@ -86,8 +86,6 @@ fn draw_archive(frame: &mut Frame, app: &mut App, area: Rect, archive: &ArchiveP
                 }
                 let style = if chosen {
                     theme.style(Role::Text).add_modifier(Modifier::BOLD)
-                } else if app.hover == Some(HitId::Collect(at as u8)) {
-                    theme.style(Role::Hover)
                 } else {
                     theme.style(Role::Text)
                 };
@@ -343,13 +341,11 @@ fn draw_buttons(frame: &mut Frame, app: &mut App, theme: &Theme, inner: Rect, bu
         }
         let rect = Rect::new(x, y, pill, 1);
         let id = HitId::Collect(*click);
-        let style = if app.hover == Some(id) {
-            theme.style(Role::Hover)
-        } else {
-            theme.style(Role::Pill)
-        };
         frame.render_widget(
-            Line::from(Span::styled(truncate(label, pill as usize), style)),
+            Line::from(Span::styled(
+                truncate(label, pill as usize),
+                theme.style(Role::Pill),
+            )),
             rect,
         );
         app.hits.add(rect, id);

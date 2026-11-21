@@ -6,8 +6,8 @@
 //! it was made safe and bounded when it became a note, and is drawn as plain text.
 //!
 //! The buttons are not laid out with the rows: they are painted into the free end of a
-//! row of their message when it is drawn, so what is selected or under the mouse can
-//! change them without the rows being laid out again.
+//! row of their message when it is drawn, so changing what is selected updates them
+//! without the rows being laid out again.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -18,7 +18,6 @@ use crate::model::Message;
 use crate::notes::{Note, NoteKind, NoteState, Notes};
 use crate::text::{truncate, width, wrap};
 use crate::theme::{Role, Theme};
-use crate::ui::hit::HitId;
 
 /// In front of every row of a note.
 const BAR: &str = "┊ ";
@@ -92,7 +91,7 @@ fn note_rows(
 ) -> Vec<Row> {
     let room = body_width.saturating_sub(width(BAR)).max(1);
     let quiet = theme.style(Role::Muted);
-    // Foreground only, so the row's background (selection, hover) shows through.
+    // Foreground only, so the row's selection background shows through.
     let fg = |role: Role| Style {
         fg: theme.style(role).fg,
         ..Style::new()
@@ -143,10 +142,10 @@ pub(super) struct NoteButton {
 }
 
 /// The buttons of a message: those that are always there, and those only there while
-/// the message is selected or under the mouse.
+/// the message is selected.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Buttons {
-    /// At the right end, wherever the mouse is.
+    /// At the right end, whether selected or not.
     fixed: Vec<NoteButton>,
     /// To the left of those, so that none of them moves when these come and go.
     lit: Vec<NoteButton>,
@@ -161,8 +160,8 @@ impl Buttons {
 
 /// The buttons of `message`. The one that transcribes shows on every voice or audio
 /// message it can be used on; the one that translates only while the message is `lit`
-/// (selected, or under the mouse), or every text would carry one. Neither shows where
-/// its program is not set up.
+/// (selected), or every text would carry one. Neither shows where its program is not
+/// set up.
 pub(super) fn buttons(app: &App, message: &Message, lit: bool) -> Buttons {
     let button = |kind: NoteKind| {
         let offer = app.note_offer(message, kind);
@@ -247,18 +246,13 @@ pub(super) fn place(
     Some(placed)
 }
 
-/// The look of a button: quiet until its message is selected or under the mouse.
-pub(super) fn button_style(theme: &Theme, lit: bool, hovered: bool) -> Style {
-    match (lit, hovered) {
-        (_, true) => theme.style(Role::Pill).add_modifier(Modifier::BOLD),
-        (true, false) => theme.style(Role::Pill),
-        (false, false) => theme.style(Role::Muted),
+/// The look of a button: quiet until its message is selected.
+pub(super) fn button_style(theme: &Theme, lit: bool) -> Style {
+    if lit {
+        theme.style(Role::Pill)
+    } else {
+        theme.style(Role::Muted)
     }
-}
-
-/// Whether the mouse is on this button.
-pub(super) fn is_hovered(hover: Option<HitId>, msg: usize, kind: NoteKind) -> bool {
-    hover == Some(HitId::NoteButton(msg, kind))
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    EnableFocusChange, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
@@ -97,6 +97,21 @@ impl TerminalGuard {
     }
 }
 
+/// Enables mouse button, wheel, and drag reporting (`?1000`, `?1002`, `?1015`, `?1006`)
+/// without any-event pointer-motion reporting (`?1003`).
+struct EnableMouseButtons;
+
+impl crossterm::Command for EnableMouseButtons {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 fn write_activation() -> Result<()> {
     let mut out = io::stdout();
     // Set first: if a write below fails halfway, `restore` must still undo it.
@@ -108,7 +123,7 @@ fn write_activation() -> Result<()> {
         EnableFocusChange
     )?;
     if MOUSE.load(Ordering::SeqCst) {
-        queue!(out, EnableMouseCapture)?;
+        queue!(out, EnableMouseButtons)?;
     }
     if KEYBOARD_ENHANCED.load(Ordering::SeqCst) && !KEYBOARD_PUSHED.swap(true, Ordering::SeqCst) {
         queue!(
@@ -130,7 +145,7 @@ pub fn set_mouse(on: bool) -> Result<()> {
     }
     let mut out = io::stdout();
     if on {
-        queue!(out, EnableMouseCapture)?;
+        queue!(out, EnableMouseButtons)?;
     } else {
         queue!(out, DisableMouseCapture)?;
     }
@@ -310,7 +325,20 @@ fn place(file: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{POP_TITLE, PUSH_TITLE, base64, place};
+    use crossterm::Command;
+
+    use super::{EnableMouseButtons, POP_TITLE, PUSH_TITLE, base64, place};
+
+    #[test]
+    fn mouse_capture_enables_buttons_and_drag_without_any_motion() {
+        let mut ansi = String::new();
+        EnableMouseButtons.write_ansi(&mut ansi).unwrap();
+        assert!(ansi.contains("\x1b[?1000h"));
+        assert!(ansi.contains("\x1b[?1002h"));
+        assert!(ansi.contains("\x1b[?1015h"));
+        assert!(ansi.contains("\x1b[?1006h"));
+        assert!(!ansi.contains("1003"));
+    }
 
     #[test]
     fn the_title_is_saved_and_put_back_on_the_terminals_title_stack() {
