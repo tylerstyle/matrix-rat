@@ -495,6 +495,16 @@ impl Timelines {
         }
     }
 
+    /// Tells the UI that what was loading for `view` stopped, when it cannot be shown again
+    /// (see [`Self::restore`]): a page it asked for may have been the one `close` aborted,
+    /// and it would wait for that page's answer for good.
+    fn tell_reset(&self, view: &ActiveStream) {
+        let _ = self.events.send(MatrixEvent::TimelineReset {
+            room_id: view.room_id.clone(),
+            generation: view.generation,
+        });
+    }
+
     /// Tells the UI the stored draft of a room (or of the thread a command is being
     /// handled for) when it is opened for the first time. After that the UI has the
     /// newer text, so it is told only once.
@@ -873,17 +883,18 @@ impl Timelines {
     /// after the jump already switched the worker over. Sends `TimelineReset` ahead of
     /// the new forwarder so the app does not keep stale `reached_start`/`reached_end` or
     /// pagination-in-flight flags from while the old forwarder was stopped.
+    ///
+    /// A view that cannot be opened again (its room gone or left, its timeline not to be
+    /// had) is told so too, as a reset.
     async fn restore(&mut self, previous: Option<ActiveStream>) {
         self.close();
         let Some(view) = previous else {
             return;
         };
-        let Ok(room) = self.room(&view.room_id) else {
-            return;
+        let room = match self.room(&view.room_id) {
+            Ok(room) if room.state() == matrix_sdk::RoomState::Joined => room,
+            _ => return self.tell_reset(&view),
         };
-        if room.state() != matrix_sdk::RoomState::Joined {
-            return;
-        }
         let ActiveStream {
             room_id,
             thread,
@@ -897,7 +908,12 @@ impl Timelines {
                 let timeline = self.timeline(&room_id).await;
                 self.thread = prev_thread;
                 let Ok(timeline) = timeline else {
-                    return;
+                    return self.tell_reset(&ActiveStream {
+                        room_id,
+                        thread,
+                        generation,
+                        kind: StreamKind::Live,
+                    });
                 };
                 let need_page = match &thread {
                     Some(root) => thread_needs_page(&timeline.items().await, root),
@@ -1142,9 +1158,6 @@ impl Timelines {
                 {
                     self.before_jump = None;
                 }
-                if self.forward_paginator.as_ref().is_some_and(Paging::loading) {
-                    return;
-                }
                 let Some(ActiveStream {
                     room_id: active_room,
                     thread,
@@ -1168,6 +1181,12 @@ impl Timelines {
                         generation,
                         reached_end: true,
                     });
+                    return;
+                }
+                // Only for the view shown (above: one for another is answered at once, as
+                // for older messages), the one running answers this one too, until it has
+                // answered (see `Paging`).
+                if self.forward_paginator.as_ref().is_some_and(Paging::loading) {
                     return;
                 }
                 let timeline = timeline.clone();
@@ -4781,6 +4800,86 @@ mod tests {
         })
         .await
         .expect("the earlier page was given up, and this one answered");
+        drop(server);
+    }
+
+    /// A jump cancelled after it took over goes back to the view before it, unless that
+    /// cannot be opened again (here: its room is gone). Then the UI is told of a reset
+    /// all the same: a page it asked for may have been the one stopped for the jump, and
+    /// it would wait for that page's answer for good.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_view_that_cannot_come_back_after_a_jump_is_told_of_a_reset() {
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+
+        let (server, _client, mut timelines, mut events, _watches) =
+            opened_with(serde_json::json!({})).await;
+        let gone = "!gone:localhost";
+        let earlier = super::Paging::spawn(
+            timelines.events.clone(),
+            std::future::pending::<MatrixEvent>(),
+        );
+        let earlier_ended = earlier.task.abort_handle();
+        timelines.paginator = Some((1, earlier));
+        timelines.before_jump = Some(super::BeforeJump {
+            jump_generation: 2,
+            previous: Some(super::ActiveStream {
+                room_id: gone.to_owned(),
+                thread: None,
+                generation: 1,
+                kind: super::StreamKind::Live,
+            }),
+            at: std::time::Instant::now(),
+        });
+        timelines
+            .handle(MatrixCmd::CancelOpenEvent { generation: 2 })
+            .await;
+        assert!(timelines.paginator.is_none());
+        let told = std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            matches!(
+                event,
+                MatrixEvent::TimelineReset { room_id, generation: 1 } if room_id == gone
+            )
+        });
+        assert!(told, "the view before the jump is told of a reset");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !earlier_ended.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the page of the view before the jump was stopped");
+        drop(server);
+    }
+
+    /// A request for newer messages for a view that is not the one shown is answered at
+    /// once, as done, even while a page of newer messages is loading: it is not taken
+    /// for one that page answers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn newer_messages_asked_for_a_view_no_longer_shown_are_answered_at_once() {
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+
+        let (server, _client, mut timelines, mut events, _watches) =
+            opened_with(serde_json::json!({})).await;
+        timelines.forward_paginator = Some(super::Paging::spawn(
+            timelines.events.clone(),
+            std::future::pending::<MatrixEvent>(),
+        ));
+        timelines
+            .handle(MatrixCmd::PaginateForwards {
+                room_id: "!gone:localhost".to_owned(),
+                generation: 1,
+            })
+            .await;
+        let answered = std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            matches!(
+                event,
+                MatrixEvent::PaginatedForwards {
+                    generation: 1,
+                    reached_end: true
+                }
+            )
+        });
+        assert!(answered, "answered at once, with nothing loaded");
         drop(server);
     }
 
