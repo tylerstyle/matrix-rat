@@ -11,11 +11,13 @@ use crate::action::Pane;
 use crate::complete::{self, Completion, Context, Member, MentionMark, RoomTarget};
 use crate::format::{self, Outgoing};
 use crate::matrix::MatrixCmd;
-use crate::model::{MsgKind, OWN_NAME, RoomKind};
+use crate::model::{Message, MsgKind, OWN_NAME, RoomKind};
 
 #[derive(Default)]
 struct RoomMembers {
     members: Vec<Member>,
+    /// The places of `members` in the order of their names, to find who goes by one.
+    by_name: Vec<u32>,
     can_mention_room: bool,
 }
 
@@ -25,7 +27,38 @@ impl std::fmt::Debug for RoomMembers {
         f.debug_struct("RoomMembers")
             .field("members", &self.members.len())
             .field("can_mention_room", &self.can_mention_room)
-            .finish()
+            .finish_non_exhaustive()
+    }
+}
+
+impl RoomMembers {
+    fn new(members: Vec<Member>, can_mention_room: bool) -> Self {
+        let mut by_name: Vec<u32> = (0..members.len())
+            .filter_map(|at| u32::try_from(at).ok())
+            .collect();
+        by_name.sort_unstable_by(|a, b| {
+            members[*a as usize]
+                .display_name
+                .cmp(&members[*b as usize].display_name)
+        });
+        Self {
+            members,
+            by_name,
+            can_mention_room,
+        }
+    }
+
+    /// Whether a member other than `id` goes by `name`.
+    fn others_named(&self, name: &str, id: &str) -> bool {
+        let named = |at: &u32| &self.members[*at as usize];
+        let first = self
+            .by_name
+            .partition_point(|at| named(at).display_name.as_str() < name);
+        self.by_name[first..]
+            .iter()
+            .map(named)
+            .take_while(|member| member.display_name == name)
+            .any(|member| member.user_id != id)
     }
 }
 
@@ -82,6 +115,20 @@ impl CompleteState {
         self.active = None;
         self.dismissed_start = None;
     }
+
+    /// [`crate::model::mark_namesakes`] on `messages` of the room `room_id`, where the
+    /// members the app holds of it (for `@` completion) count too: someone a line is
+    /// about who wrote nothing loaded (banned, say) and goes by a member's name is
+    /// named with the ID as well. Without them, only the messages count.
+    pub(super) fn mark_namesakes(&self, room_id: &str, messages: &mut [Message]) {
+        match self.room_members.get(room_id) {
+            Some(loaded) => crate::model::mark_namesakes_among(
+                messages,
+                Some(&|name: &str, id: &str| loaded.others_named(name, id)),
+            ),
+            None => crate::model::mark_namesakes(messages),
+        }
+    }
 }
 
 impl App {
@@ -123,13 +170,19 @@ impl App {
         if !readable(&room_id) {
             return;
         }
-        self.complete.room_members.insert(
-            room_id.clone(),
-            RoomMembers {
-                members,
-                can_mention_room,
-            },
-        );
+        self.complete
+            .room_members
+            .insert(room_id.clone(), RoomMembers::new(members, can_mention_room));
+        // Who goes by whose name is known better now.
+        if let Some(open) = self.open_index()
+            && let Some(room) = self.rooms.get_mut(open)
+            && room.id == room_id
+        {
+            self.complete.mark_namesakes(&room_id, &mut room.messages);
+            self.row_cache = None;
+            self.timeline_rev += 1;
+            self.repaint = true;
+        }
         if self.room_id().as_deref() == Some(room_id.as_str()) {
             self.sync_completion();
         }
@@ -729,6 +782,55 @@ mod tests {
         app.on_event(key(KeyCode::Tab));
         assert_eq!(app.composer.text(), "/upload ");
         assert!(app.complete.active.is_none());
+    }
+
+    /// Someone a line is about who wrote nothing loaded (banned, say) is named with
+    /// the ID where a member of the room goes by the same name, whether the members
+    /// come before the messages or after them.
+    #[test]
+    fn whom_a_line_is_about_is_told_apart_from_a_member_of_the_same_name() {
+        let banned = || {
+            let mut line = remote("1", "carol", "bob was banned by carol");
+            line.kind = MsgKind::System;
+            line.sender_id = Some("@carol:hs".into());
+            line.subject = Some(("bob".into(), "@bob:elsewhere".into()));
+            line
+        };
+        let timeline = || MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: 1,
+            messages: vec![banned()],
+            reached_start: true,
+            detached: None,
+        };
+        let member = |user_id: &str, display_name: &str| Member {
+            user_id: user_id.into(),
+            display_name: display_name.into(),
+        };
+        let members = || MatrixEvent::RoomMembers {
+            room_id: "!a".into(),
+            members: vec![member("@carol:hs", "carol"), member("@bob:hs", "bob")],
+            can_mention_room: false,
+        };
+        let told = "bob (@bob:elsewhere) was banned by carol";
+
+        // The messages first: nothing among them says that bob is two people.
+        let (mut app, _terminal, _commands) = connected();
+        app.on_matrix(timeline());
+        assert_eq!(app.messages()[0].body, "bob was banned by carol");
+        // Then the members: one of them is a bob too. Carol is the only one of hers.
+        app.on_matrix(members());
+        assert_eq!(app.messages()[0].body, told);
+        assert!(!app.messages()[0].sender_ambiguous);
+        // The worker's next list of messages is told apart as well.
+        app.on_matrix(timeline());
+        assert_eq!(app.messages()[0].body, told);
+
+        // The members first.
+        let (mut app, _terminal, _commands) = connected();
+        app.on_matrix(members());
+        app.on_matrix(timeline());
+        assert_eq!(app.messages()[0].body, told);
     }
 
     #[test]

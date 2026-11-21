@@ -145,9 +145,10 @@ impl ThreadView {
         self.room_rows = None;
     }
 
-    pub(super) fn rename_own_sender(&mut self, name: &str) {
-        // Whether the new name is someone else's too is worked out anew, as for the
-        // room (see `on_own_profile`).
+    /// `mark` tells apart who shares a name among the room's messages, as for the
+    /// room (see `on_own_profile`).
+    pub(super) fn rename_own_sender(&mut self, name: &str, mark: &dyn Fn(&mut [Message])) {
+        // Whether the new name is someone else's too is worked out anew.
         let mut renamed = false;
         for msg in &mut self.room_messages {
             if msg.own && msg.sender != name {
@@ -157,7 +158,7 @@ impl ThreadView {
             }
         }
         if renamed {
-            crate::model::mark_namesakes(&mut self.room_messages);
+            mark(&mut self.room_messages);
         }
         if self.root_message.own && self.root_message.sender != name {
             self.root_message.sender = name.to_owned();

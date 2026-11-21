@@ -910,7 +910,7 @@ impl App {
                 }
             }
             if room_changed {
-                crate::model::mark_namesakes(&mut room.messages);
+                self.complete.mark_namesakes(&room.id, &mut room.messages);
             }
             if room_changed && Some(idx) == open_active {
                 any_changed = true;
@@ -924,7 +924,10 @@ impl App {
             && let Some(eff) = profile.display_or_localpart(Some(active_id), uid.as_deref())
             && let Some(view) = &mut self.threads.open
         {
-            view.rename_own_sender(&eff);
+            let complete = &self.complete;
+            view.rename_own_sender(&eff, &|messages| {
+                complete.mark_namesakes(active_id, messages);
+            });
             any_changed = true;
         }
 

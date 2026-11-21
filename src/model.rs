@@ -866,15 +866,24 @@ fn told_apart<'a>(shown: &'a str, user_id: &str) -> Option<&'a str> {
 /// be made again on what it made. Costs a lookup per name given, and nothing more
 /// where nobody is to be told apart.
 pub fn mark_namesakes(messages: &mut [Message]) {
+    mark_namesakes_among(messages, None);
+}
+
+/// Says whether someone other than an ID (the second) goes by a name (the first)
+/// beyond the messages: among the room's members, as far as they are known.
+pub type Elsewhere<'a> = &'a dyn Fn(&str, &str) -> bool;
+
+/// [`mark_namesakes`], where `elsewhere` also says who else goes by a name.
+pub fn mark_namesakes_among(messages: &mut [Message], elsewhere: Option<Elsewhere<'_>>) {
     let mut namesakes = Namesakes::default();
     for message in messages.iter() {
         namesakes.learn(message);
     }
-    if namesakes.nobody() {
+    if elsewhere.is_none() && namesakes.nobody() {
         return;
     }
     for message in messages.iter_mut() {
-        namesakes.mark(message);
+        namesakes.mark_among(message, elsewhere);
     }
 }
 
@@ -929,14 +938,23 @@ impl Namesakes {
 
     /// Names with their IDs the people of `message` who are to be told apart.
     pub fn mark(&self, message: &mut Message) {
+        self.mark_among(message, None);
+    }
+
+    /// [`Namesakes::mark`], with `elsewhere` as for [`mark_namesakes_among`].
+    pub fn mark_among(&self, message: &mut Message, elsewhere: Option<Elsewhere<'_>>) {
         let shared = |name: &str| matches!(self.seen.get(name), Some(None));
-        let apart = |name: &str, id: &str| shared(name) || self.flagged.contains(id);
+        let elsewhere = |name: &str, id: &str| elsewhere.is_some_and(|other| other(name, id));
+        let apart =
+            |name: &str, id: &str| shared(name) || self.flagged.contains(id) || elsewhere(name, id);
         let tell = |shown: &mut String, id: &str| {
             if told_apart(shown.as_str(), id).is_none() && apart(shown.as_str(), id) {
                 *shown = disambiguated(shown.as_str(), id);
             }
         };
-        if message.sender_id.is_some() && shared(&message.sender) {
+        if let Some(id) = &message.sender_id
+            && (shared(&message.sender) || elsewhere(&message.sender, id))
+        {
             message.sender_ambiguous = true;
         }
         if let (Some((name, _)), Some(id)) = (&mut message.reply_to, &message.reply_sender) {

@@ -2633,7 +2633,12 @@ impl App {
 
     /// Replaces the open room's messages with the worker's current list, keeping the
     /// selection and a pending reply or edit on the same messages.
-    fn apply_timeline(&mut self, messages: Vec<Message>) {
+    fn apply_timeline(&mut self, mut messages: Vec<Message>) {
+        // The worker told apart who shares a name among the messages; the room's
+        // members, where the app holds them, may know of more.
+        if let Some(room_id) = self.room_id() {
+            self.complete.mark_namesakes(&room_id, &mut messages);
+        }
         let selected_id = self
             .timeline
             .selected
