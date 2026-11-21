@@ -8,8 +8,9 @@
 //! columns the end of the text gives way to it. No row is ever added.
 //!
 //! What a row has at its right end already, a code block's "copy", stays there and
-//! whole: the marker goes before it, as if the row ended there. Nothing that can be
-//! clicked lies under a marker.
+//! whole: the marker goes before it, as if the row ended there. Only where not even
+//! the smallest marker fits before it does it give way to the marker. Nothing that
+//! can be clicked lies under a marker.
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -74,7 +75,21 @@ pub(super) fn mark(row: &mut Row, read_by: &ReadBy, direct: bool, max_width: usi
         None => text,
     };
     let free = end.saturating_sub(taken + GAP);
-    let (said, at) = if let Some(spans) = marker(read_by, direct, theme, free) {
+    let fits = marker(read_by, direct, theme, free);
+    let cuts = row.image.is_none() && end >= CUT_MIN;
+    if fits.is_none()
+        && !cuts
+        && let Free::Before { at, .. } = row.free
+    {
+        // Too narrow for a marker before what is aligned to the row's end: that
+        // ("copy", which the menu has too) gives way, and the marker goes on the row
+        // as on any other.
+        take_aligned(row);
+        row.hits.retain(|(from, ..)| *from < at);
+        row.free = Free::End;
+        return mark(row, read_by, direct, max_width, theme);
+    }
+    let (said, at) = if let Some(spans) = fits {
         let marker_width: usize = spans.iter().map(|span| width(&span.content)).sum();
         let aligned = take_aligned(row);
         let at = end - marker_width;
@@ -86,7 +101,7 @@ pub(super) fn mark(row: &mut Row, read_by: &ReadBy, direct: bool, max_width: usi
             part.marker = marker_width as u16;
         }
         (text, at)
-    } else if row.image.is_none() && end >= CUT_MIN {
+    } else if cuts {
         // "… ✓" over the end of the text. (Nothing can be written over a
         // picture; who read that is in the menu.)
         let aligned = take_aligned(row);
@@ -542,6 +557,48 @@ mod tests {
             name.style.fg,
             Some(theme.user_color("@carol:elsewhere.org"))
         );
+    }
+
+    /// Where "copy" fits on a code block's row but a marker does not fit before it,
+    /// the marker is not left out: the label gives way to it.
+    #[test]
+    fn in_a_narrow_view_the_copy_label_gives_way_to_a_marker() {
+        use crate::ui::hit::HitId;
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        for max_width in 12..=20 {
+            // A line of code that leaves room for "copy" and no more.
+            let line = "x".repeat(max_width - 7);
+            let mut code = message("you", &line);
+            code.html = Some(format!("<pre><code>{line}\n</code></pre>"));
+            let mut room = room(RoomKind::Room, vec![code]);
+            room.messages[0].read_by = ReadBy::default();
+            let bare = build_rows(&room, max_width, &theme, None, &images);
+            room.messages[0].read_by = readers(&["bob"], 1);
+            let rows = add(
+                build_rows(&room, max_width, &theme, None, &images),
+                &room,
+                max_width,
+                &theme,
+            );
+            assert_eq!(rows.len(), bare.len(), "{max_width}");
+            let row = rows.last().unwrap();
+            let text = row.line.to_string();
+            assert!(text.contains('✓'), "{max_width}: {text:?}");
+            assert!(width(&text) <= max_width, "{max_width}: {text:?}");
+            let tick = width(&text[..text.find('✓').unwrap()]) as u16;
+            assert!(
+                row.hits.iter().all(|hit| !(hit.0..hit.1).contains(&tick)),
+                "{max_width}: {text:?} {:?}",
+                row.hits
+            );
+            // "copy" is either whole, with its button, or not there at all.
+            let copy = row
+                .hits
+                .iter()
+                .any(|hit| matches!(hit.2, HitId::CopyCode(0, 0)));
+            assert_eq!(copy, text.ends_with("copy"), "{max_width}: {text:?}");
+        }
     }
 
     /// Where the end of a row gives way to "… ✓", what could be clicked there stops

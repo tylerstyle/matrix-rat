@@ -1488,6 +1488,28 @@ mod tests {
         assert!(marked.contains(" translate   ✓ carol"), "{shown}");
     }
 
+    /// A message that is a code block has its button on the block's first row, to the
+    /// left of "copy" and two blanks from it: nothing is painted over the label.
+    #[test]
+    fn a_button_on_a_code_blocks_row_stays_left_of_copy() {
+        let dir = Dir::new("notes-copy");
+        let mut code = text("c", "Guten Morgen");
+        code.html = Some("<pre><code>Guten Morgen\n</code></pre>".into());
+        let (mut app, _commands) = app_with(vec![code], &dir, true);
+        select(&mut app, 0);
+        let shown = screen(&mut app, 100, 30);
+        let row = shown
+            .lines()
+            .find(|line| line.contains("Guten Morgen"))
+            .unwrap_or_else(|| panic!("{shown}"));
+        let (button, copy) = (row.find(" translate "), row.find("copy"));
+        assert!(
+            button.is_some() && copy.is_some() && button < copy,
+            "{shown}"
+        );
+        assert!(row.contains(" translate   copy"), "{shown}");
+    }
+
     #[test]
     fn the_buttons_on_a_message_do_what_the_keys_do() {
         let dir = Dir::new("notes-buttons");
