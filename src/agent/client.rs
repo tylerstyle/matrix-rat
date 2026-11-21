@@ -302,11 +302,30 @@ impl Listener {
 
 // ----- the commands ---------------------------------------------------------------------
 
-/// `--from`, and how much it takes for a message to count as that user's.
-#[derive(Debug, Clone, Copy)]
+/// `--from`: the accounts of the user (one or more), and how much it takes for a
+/// message to count as that user's. Each account is held to that on its own.
+#[derive(Clone, Copy)]
 pub struct Sender<'a> {
-    pub user: &'a str,
+    pub users: &'a [String],
     pub trust: Trust,
+}
+
+impl<'a> Sender<'a> {
+    /// `--from` as it was given: `None` when it was not (no user: every message is
+    /// printed).
+    pub fn of(users: &'a [String], trust: Trust) -> Option<Self> {
+        (!users.is_empty()).then_some(Self { users, trust })
+    }
+}
+
+/// Hand-written: the accounts are private; how many there are is not.
+impl std::fmt::Debug for Sender<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sender")
+            .field("users", &self.users.len())
+            .field("trust", &self.trust)
+            .finish()
+    }
 }
 
 /// What a message is to a command: printed without `--from`; with it, only what
@@ -315,7 +334,7 @@ pub struct Sender<'a> {
 fn standing<'a>(message: &'a Msg, from: Option<Sender<'_>>) -> Standing<'a> {
     match from {
         None => Standing::Theirs,
-        Some(sender) => message.standing(sender.user, sender.trust),
+        Some(sender) => message.standing_among(sender.users, sender.trust),
     }
 }
 
@@ -335,6 +354,19 @@ pub fn check_from_arg(from: &str) -> Result<(), String> {
         Ok(_) if from.starts_with('@') => Ok(()),
         _ => Err("--from needs a full Matrix user id, like @you:example.org".to_owned()),
     }
+}
+
+/// Checks every `--from` (it may be given once for each account of the user). The
+/// same account twice is refused: more likely a slip where another one was meant
+/// than something to pass over.
+pub fn check_from_args(from: &[String]) -> Result<(), String> {
+    for (at, user) in from.iter().enumerate() {
+        check_from_arg(user)?;
+        if from[..at].contains(user) {
+            return Err("--from names the same account twice".to_owned());
+        }
+    }
+    Ok(())
 }
 
 /// The text of a `send`: the words of the command line, or with `-` what standard
@@ -393,7 +425,8 @@ pub async fn send(
 }
 
 /// `matrix-rat read`: prints the latest `limit` messages, oldest first, a line of
-/// JSON each. With `from`: of what counts as that user's among the latest
+/// JSON each. With `from`: of what counts as that user's (from any of the accounts
+/// named) among the latest
 /// [`proto::READ_MAX`] of the room; if messages that name the user were left out
 /// because they do not count, `notes` (standard error) is told how many, without a
 /// word of what they say.
@@ -500,20 +533,30 @@ mod tests {
         }
     }
 
+    fn strict(users: &[String]) -> Option<Sender<'_>> {
+        Some(Sender {
+            users,
+            trust: Trust::Verified,
+        })
+    }
+
+    fn lax(users: &[String]) -> Option<Sender<'_>> {
+        Some(Sender {
+            users,
+            trust: Trust::AllowUnverified,
+        })
+    }
+
+    fn accounts(users: &[&str]) -> Vec<String> {
+        users.iter().map(|user| (*user).to_owned()).collect()
+    }
+
     #[test]
     fn from_keeps_what_counts_as_that_users_and_never_the_accounts_own() {
-        let strict = |user| {
-            Some(Sender {
-                user,
-                trust: Trust::Verified,
-            })
-        };
-        let lax = |user| {
-            Some(Sender {
-                user,
-                trust: Trust::AllowUnverified,
-            })
-        };
+        let (ann_only, bot_only) = (
+            accounts(&["@ann:example.org"]),
+            accounts(&["@bot:example.org"]),
+        );
         let ann = message("@ann:example.org", false);
         let bob = message("@bob:example.org", false);
         let own = message("@bot:example.org", true);
@@ -521,12 +564,12 @@ mod tests {
         for message in [&ann, &bob, &own] {
             assert_eq!(standing(message, None), Standing::Theirs);
         }
-        assert_eq!(standing(&ann, strict("@ann:example.org")), Standing::Theirs);
-        assert_eq!(standing(&bob, strict("@ann:example.org")), Standing::Other);
-        assert_eq!(standing(&own, strict("@ann:example.org")), Standing::Other);
+        assert_eq!(standing(&ann, strict(&ann_only)), Standing::Theirs);
+        assert_eq!(standing(&bob, strict(&ann_only)), Standing::Other);
+        assert_eq!(standing(&own, strict(&ann_only)), Standing::Other);
         // Naming the account itself gives nothing rather than everything of its own.
-        assert_eq!(standing(&own, strict("@bot:example.org")), Standing::Other);
-        assert_eq!(standing(&own, lax("@bot:example.org")), Standing::Other);
+        assert_eq!(standing(&own, strict(&bot_only)), Standing::Other);
+        assert_eq!(standing(&own, lax(&bot_only)), Standing::Other);
         // Not verified: left out unless that is allowed.
         let unverified = Msg {
             verified: false,
@@ -534,13 +577,10 @@ mod tests {
             ..message("@ann:example.org", false)
         };
         assert_eq!(
-            standing(&unverified, strict("@ann:example.org")),
+            standing(&unverified, strict(&ann_only)),
             Standing::Doubted("unverified_identity")
         );
-        assert_eq!(
-            standing(&unverified, lax("@ann:example.org")),
-            Standing::Theirs
-        );
+        assert_eq!(standing(&unverified, lax(&ann_only)), Standing::Theirs);
         // What contradicts the sender is left out either way.
         let forged = Msg {
             warning: Some("sender_mismatch".into()),
@@ -548,12 +588,45 @@ mod tests {
             untrusted: Some("sender_mismatch".into()),
             ..message("@ann:example.org", false)
         };
-        for from in [strict("@ann:example.org"), lax("@ann:example.org")] {
+        for from in [strict(&ann_only), lax(&ann_only)] {
             assert_eq!(
                 standing(&forged, from),
                 Standing::Doubted("sender_mismatch")
             );
         }
+    }
+
+    /// `--from` twice: the user's word comes from either account, each held to the
+    /// rule on its own; nobody else's ever counts.
+    #[test]
+    fn from_twice_takes_either_account_by_the_same_rule() {
+        let both = accounts(&["@ann:example.org", "@ann:beeper.example"]);
+        let first = message("@ann:example.org", false);
+        let second = message("@ann:beeper.example", false);
+        let third = message("@eve:example.org", false);
+        assert_eq!(standing(&first, strict(&both)), Standing::Theirs);
+        assert_eq!(standing(&second, strict(&both)), Standing::Theirs);
+        assert_eq!(standing(&third, strict(&both)), Standing::Other);
+        assert_eq!(standing(&third, lax(&both)), Standing::Other);
+        // Not verified from the second account: left out unless that is allowed,
+        // whatever came verified from the first.
+        let unverified = Msg {
+            verified: false,
+            untrusted: Some("unverified_identity".into()),
+            ..message("@ann:beeper.example", false)
+        };
+        assert_eq!(
+            standing(&unverified, strict(&both)),
+            Standing::Doubted("unverified_identity")
+        );
+        assert_eq!(standing(&unverified, lax(&both)), Standing::Theirs);
+        // The bot's own, even when it is named too.
+        let own = message("@bot:example.org", true);
+        let with_bot = accounts(&["@ann:example.org", "@bot:example.org"]);
+        assert_eq!(standing(&own, lax(&with_bot)), Standing::Other);
+        // What is shown of `--from` is how many accounts, never which.
+        let shown = format!("{:?}", strict(&both));
+        assert_eq!(shown, "Some(Sender { users: 2, trust: Verified })");
     }
 
     /// `read --from` and `listen --from` against a `serve`: only what counts as the
@@ -592,7 +665,13 @@ mod tests {
                 })
                 .collect()
         };
-        let from = |trust| Some(Sender { user: ANN, trust });
+        let ann_only = [ANN.to_owned()];
+        let from = |trust| {
+            Some(Sender {
+                users: &ann_only,
+                trust,
+            })
+        };
 
         // Without `--from`: everything, with what is known about each.
         let (mut out, mut notes) = (Vec::new(), Vec::new());
@@ -659,10 +738,10 @@ mod tests {
         // Listening: the same judgement, message by message.
         let listening = tokio::spawn({
             let socket = socket.clone();
+            let ann_only = ann_only.clone();
             async move {
                 let (mut out, mut notes) = (HeadOf(Vec::new(), 2), Vec::new());
-                let ended =
-                    listen(&socket, ROOM, from(Trust::Verified), &mut out, &mut notes).await;
+                let ended = listen(&socket, ROOM, strict(&ann_only), &mut out, &mut notes).await;
                 (ended, out.0, notes)
             }
         });
@@ -690,6 +769,95 @@ mod tests {
             [
                 "matrix-rat: a message that names this user as sender was left out: undecryptable",
                 "matrix-rat: a message that names this user as sender was left out: unverified_identity",
+            ]
+        );
+        assert!(world.odd().is_empty());
+        world.stop().await;
+    }
+
+    /// `read` and `listen` with `--from` given twice: what counts from either account,
+    /// in the room's order; what names the second account and does not count is left
+    /// out and told, as with one account; nobody else's is printed.
+    #[tokio::test]
+    async fn read_and_listen_with_two_accounts_print_what_counts_from_either() {
+        use crate::agent::testing::{ANN, ANN_TOO, EVE, ROOM, World, doubted, message};
+        let history = vec![
+            message("$1", ANN, "one"),
+            message("$2", ANN_TOO, "two, from the other account"),
+            message("$3", EVE, "I am Ann"),
+            doubted("$4", ANN_TOO, "SECRET-TEXT", None, "unverified_identity"),
+            message("$5", ANN, "five"),
+        ];
+        let world = World::start("cli-two", history).await;
+        let socket = world.socket();
+        let ids = |out: &[u8]| -> Vec<String> {
+            String::from_utf8(out.to_vec())
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let message: Msg = serde_json::from_str(line).expect("a message");
+                    message.event_id
+                })
+                .collect()
+        };
+        let both = accounts(&[ANN, ANN_TOO]);
+
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        read(&socket, ROOM, 20, strict(&both), &mut out, &mut notes)
+            .await
+            .unwrap();
+        assert_eq!(ids(&out), ["$1", "$2", "$5"]);
+        let told = String::from_utf8(notes).unwrap();
+        assert!(told.starts_with("matrix-rat: 1 of the messages"), "{told}");
+        assert!(!told.contains("SECRET-TEXT"), "{told}");
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        read(&socket, ROOM, 20, lax(&both), &mut out, &mut notes)
+            .await
+            .unwrap();
+        assert_eq!(ids(&out), ["$1", "$2", "$4", "$5"]);
+        assert!(notes.is_empty());
+        // One account named, as before: the other one is somebody else.
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        let ann_only = accounts(&[ANN]);
+        read(&socket, ROOM, 20, strict(&ann_only), &mut out, &mut notes)
+            .await
+            .unwrap();
+        assert_eq!(ids(&out), ["$1", "$5"]);
+        assert!(notes.is_empty());
+
+        let listening = tokio::spawn({
+            let socket = socket.clone();
+            let both = both.clone();
+            async move {
+                let (mut out, mut notes) = (HeadOf(Vec::new(), 2), Vec::new());
+                let ended = listen(&socket, ROOM, strict(&both), &mut out, &mut notes).await;
+                (ended, out.0, notes)
+            }
+        });
+        world.until_watched(true).await;
+        world.post(message("$a", ANN_TOO, "from the other account"));
+        world.post(message("$b", EVE, "not her"));
+        world.post(doubted(
+            "$c",
+            ANN_TOO,
+            "SECRET-TEXT",
+            None,
+            "unverified_identity",
+        ));
+        world.post(message("$d", ANN, "yes"));
+        // One more than the output takes: the command ends.
+        world.post(message("$e", ANN_TOO, "more"));
+        let (ended, out, notes) = tokio::time::timeout(Duration::from_secs(10), listening)
+            .await
+            .expect("listen ends when nobody reads its output any more")
+            .unwrap();
+        assert!(ended.is_ok());
+        assert_eq!(ids(&out), ["$a", "$d"]);
+        let told = String::from_utf8(notes).unwrap();
+        assert_eq!(
+            told.lines().collect::<Vec<_>>(),
+            [
+                "matrix-rat: a message that names this user as sender was left out: unverified_identity"
             ]
         );
         assert!(world.odd().is_empty());
@@ -765,6 +933,30 @@ mod tests {
                 .unwrap()
                 .len(),
             proto::MAX_TEXT
+        );
+    }
+
+    #[test]
+    fn from_given_several_times_is_checked_each_time() {
+        assert!(check_from_args(&[]).is_ok());
+        assert!(check_from_args(&accounts(&["@you:example.org"])).is_ok());
+        assert!(check_from_args(&accounts(&["@you:example.org", "@you:beeper.example"])).is_ok());
+        for bad in [
+            &["@you:example.org", ""][..],
+            &["", "@you:example.org"],
+            &["@you:example.org", "you"],
+            &["@you:example.org", "#room:example.org"],
+            &["@you:example.org", "@you:example.org"],
+            &["@a:example.org", "@b:example.org", "@a:example.org"],
+        ] {
+            assert!(check_from_args(&accounts(bad)).is_err(), "{bad:?}");
+        }
+        // The same account twice is said so, without naming it.
+        let told =
+            check_from_args(&accounts(&["@you:example.org", "@you:example.org"])).unwrap_err();
+        assert!(
+            told.contains("twice") && !told.contains("example"),
+            "{told}"
         );
     }
 

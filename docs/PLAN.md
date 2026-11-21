@@ -196,6 +196,10 @@ plays with its waveform in matrix-rat and in Element on iOS. 6 and 7 came as one
    included, work as they are. A README section on several accounts as several profiles.
    `matrix-rat mcp` takes the agent's name from an environment variable when `--name` is
    not given, so that two agents sharing one MCP entry sign with their own names.
+   `--from` (on `read`, `listen` and `mcp`) may be given more than once, for a user with
+   several accounts: a message from any of them counts, each account held to the same
+   rule on its own, so each needs its own identity verified from the bot account; one
+   `--from` works as before.
 
 ### 6.2 The passes before 1.0.0 (asked for by the user on 2026-11-17)
 
