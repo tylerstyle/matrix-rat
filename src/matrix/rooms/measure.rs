@@ -1408,25 +1408,27 @@ async fn a_request_for_older_messages_right_after_an_answer_is_answered() {
     use std::sync::{Mutex, mpsc};
     use std::task::{Context, Wake, Waker};
 
-    /// Tells the test that it was woken, and holds whoever woke it until let go.
+    /// Tells the test that it was woken, and holds whoever woke it until let go: the first
+    /// time only (the next answer may wake it too, before the test waits another way).
     struct Hold {
         woken: mpsc::Sender<()>,
-        go: Mutex<mpsc::Receiver<()>>,
+        go: Mutex<Option<mpsc::Receiver<()>>>,
     }
     impl Wake for Hold {
         fn wake(self: Arc<Self>) {
             self.wake_by_ref();
         }
         fn wake_by_ref(self: &Arc<Self>) {
-            let go = self.go.lock().unwrap();
-            let _ = self.woken.send(());
-            let _ = go.recv_timeout(Duration::from_secs(10));
+            let go = self.go.lock().unwrap().take();
+            if let Some(go) = go {
+                let _ = self.woken.send(());
+                let _ = go.recv_timeout(Duration::from_secs(10));
+            }
         }
     }
 
     let server = fake::Server::start(json!({ "join": { ROOM: sample_room(100) } })).await;
     let (client, _room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
-    // No room is opened: nothing but the pages says anything to the interface.
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let (_ignored, ignored) = tokio::sync::watch::channel(super::IgnoredSet::default());
     let (_own_refresh, own_refresh) = tokio::sync::watch::channel(0);
@@ -1438,6 +1440,14 @@ async fn a_request_for_older_messages_right_after_an_answer_is_answered() {
         super::super::people::OwnRoomNames::default(),
         super::super::left::LeftRooms::default(),
     );
+    // The room is shown (a page for a view not shown is answered at once), but nothing
+    // forwards its timeline: nothing but the pages says anything to the interface.
+    timelines.active = Some(super::ActiveStream {
+        room_id: ROOM.to_owned(),
+        thread: None,
+        generation: 1,
+        kind: super::StreamKind::Live,
+    });
     let paginate = || MatrixCmd::Paginate {
         room_id: ROOM.to_owned(),
         generation: 1,
@@ -1446,7 +1456,7 @@ async fn a_request_for_older_messages_right_after_an_answer_is_answered() {
     let (go, go_rx) = mpsc::channel();
     let hold = Waker::from(Arc::new(Hold {
         woken: woken_tx,
-        go: Mutex::new(go_rx),
+        go: Mutex::new(Some(go_rx)),
     }));
     // Waiting for the answer before the request, so that what sends it wakes `hold`.
     assert!(

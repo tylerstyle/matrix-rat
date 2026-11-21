@@ -688,19 +688,23 @@ mod tests {
         use std::sync::mpsc as sync_mpsc;
         use std::task::{Context, Wake, Waker};
 
-        /// Tells the test that it was woken, and holds whoever woke it until let go.
+        /// Tells the test that it was woken, and holds whoever woke it until let go:
+        /// the first time only (the next answer may wake it too, before the test waits
+        /// another way).
         struct Hold {
             woken: sync_mpsc::Sender<()>,
-            go: std::sync::Mutex<sync_mpsc::Receiver<()>>,
+            go: std::sync::Mutex<Option<sync_mpsc::Receiver<()>>>,
         }
         impl Wake for Hold {
             fn wake(self: Arc<Self>) {
                 self.wake_by_ref();
             }
             fn wake_by_ref(self: &Arc<Self>) {
-                let go = self.go.lock().unwrap();
-                let _ = self.woken.send(());
-                let _ = go.recv_timeout(Duration::from_secs(10));
+                let go = self.go.lock().unwrap().take();
+                if let Some(go) = go {
+                    let _ = self.woken.send(());
+                    let _ = go.recv_timeout(Duration::from_secs(10));
+                }
             }
         }
 
@@ -730,7 +734,7 @@ mod tests {
         let (go, go_rx) = sync_mpsc::channel();
         let hold = Waker::from(Arc::new(Hold {
             woken: woken_tx,
-            go: std::sync::Mutex::new(go_rx),
+            go: std::sync::Mutex::new(Some(go_rx)),
         }));
         // Waiting for the answer before the search, so that what sends it wakes `hold`.
         assert!(
