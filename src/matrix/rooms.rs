@@ -108,8 +108,8 @@ pub struct Timelines {
     shown: Vec<String>,
     /// Forwards the open room's timeline to the UI.
     forwarder: Option<JoinHandle<()>>,
-    /// The running request for older messages, if any.
-    paginator: Option<JoinHandle<()>>,
+    /// The running request for older messages, if any, and the generation it answers.
+    paginator: Option<(u64, JoinHandle<()>)>,
     /// The running request for newer messages on a detached timeline, if any.
     forward_paginator: Option<JoinHandle<()>>,
     /// What `forwarder` is currently streaming (`None` when no room is open).
@@ -214,7 +214,7 @@ impl Timelines {
         }
         for task in [
             self.forwarder.take(),
-            self.paginator.take(),
+            self.paginator.take().map(|(_, task)| task),
             self.forward_paginator.take(),
         ]
         .into_iter()
@@ -432,7 +432,7 @@ impl Timelines {
         generation: u64,
     ) {
         let events = self.events.clone();
-        self.paginator = Some(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let reached_start = match timeline.paginate_backwards(PAGE).await {
                 Ok(reached_start) => reached_start,
                 Err(err) => {
@@ -448,7 +448,11 @@ impl Timelines {
                 generation,
                 reached_start,
             });
-        }));
+        });
+        // One of an older generation would never answer this one: nobody waits for it.
+        if let Some((_, older)) = self.paginator.replace((generation, task)) {
+            older.abort();
+        }
     }
 
     /// Tells the UI the stored draft of a room (or of the thread a command is being
@@ -1045,11 +1049,29 @@ impl Timelines {
                 {
                     self.before_jump = None;
                 }
-                // One request at a time per open room.
+                // Asked for a view that is not the one shown (the UI had not yet heard
+                // that it changed): nothing is loaded for it, and it is answered at
+                // once, as done, so that nothing asks again. Paged, it would take the
+                // place of the shown view's own request, which would then never be
+                // answered and leave the UI waiting for older messages for good.
+                let shown = self.active.as_ref().is_some_and(|active| {
+                    active.room_id == room_id
+                        && active.thread == self.thread
+                        && active.generation == generation
+                });
+                if !shown {
+                    let _ = self.events.send(MatrixEvent::Paginated {
+                        generation,
+                        reached_start: true,
+                    });
+                    return;
+                }
+                // One request at a time per open room: the one running answers this
+                // one too. (One of another generation is replaced: see `spawn_paginate`.)
                 if self
                     .paginator
                     .as_ref()
-                    .is_some_and(|task| !task.is_finished())
+                    .is_some_and(|(running, task)| *running == generation && !task.is_finished())
                 {
                     return;
                 }
@@ -4517,6 +4539,74 @@ mod tests {
             .await
             .expect("the timeline started over");
         }
+        drop(server);
+    }
+
+    /// A page asked for under a generation that is not shown any more (the UI asked
+    /// before it heard of the switch) loads nothing and is answered at once. Paged, it
+    /// would hold the paginator, and the shown view's own request, coming next, would
+    /// never be answered: the UI would wait for older messages for good.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_page_asked_for_a_view_no_longer_shown_is_answered_at_once() {
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+
+        let (a, b) = ("!pagea:localhost", "!pageb:localhost");
+        let mut joined_a = fake::joined(false, vec![]);
+        joined_a["timeline"]["events"] =
+            serde_json::json!([said(a, "$a:localhost", fake::ME, "in a", None)]);
+        let mut joined_b = fake::joined(false, vec![]);
+        joined_b["timeline"]["events"] =
+            serde_json::json!([said(b, "$b:localhost", fake::ME, "in b", None)]);
+        let (server, _client, mut timelines, mut events, _watches) =
+            opened_with(serde_json::json!({ a: joined_a, b: joined_b })).await;
+        for (room, generation, body) in [(a, 1, "in a"), (b, 2, "in b")] {
+            timelines
+                .handle(MatrixCmd::OpenRoom {
+                    room_id: room.to_owned(),
+                    generation,
+                })
+                .await;
+            wait_for_timeline(&mut events, room, generation, body).await;
+        }
+        // Room A's page, asked for while it was shown, arrives after the switch to B.
+        timelines
+            .handle(MatrixCmd::Paginate {
+                room_id: a.to_owned(),
+                generation: 1,
+            })
+            .await;
+        assert!(timelines.paginator.is_none(), "nothing is paged for it");
+        let answered = std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, MatrixEvent::Paginated { generation: 1, .. }));
+        assert!(answered, "answered at once, with nothing loaded");
+
+        // A page for the view shown before, still on its way when the switch came, is
+        // given up for one of the view shown now: that one is answered.
+        let earlier = tokio::spawn(std::future::pending::<()>());
+        let earlier_ended = earlier.abort_handle();
+        timelines.paginator = Some((1, earlier));
+        timelines
+            .handle(MatrixCmd::Paginate {
+                room_id: b.to_owned(),
+                generation: 2,
+            })
+            .await;
+        assert!(matches!(timelines.paginator, Some((2, _))));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !earlier_ended.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            loop {
+                match events.recv().await {
+                    Some(MatrixEvent::Paginated { generation: 2, .. }) => return,
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .expect("the earlier page was given up, and this one answered");
         drop(server);
     }
 
