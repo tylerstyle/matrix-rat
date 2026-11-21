@@ -732,12 +732,26 @@ impl Server {
             .is_ok_and(|ledger| ledger.handed.has(&message.event_id) && !ledger.changed(message))
     }
 
-    /// The agent is owed this message: it is news until it is handed over.
-    fn owe(&self, message: &Msg) {
+    /// The agent is owed this message: it is news until it is handed over. Whether
+    /// it was not owed before.
+    fn owe(&self, message: &Msg) -> bool {
         if let Ok(mut ledger) = self.ledger.lock()
             && !ledger.handed.has(&message.event_id)
+            && !ledger.owed.has(&message.event_id)
         {
             ledger.owed.put(&message.event_id, ());
+            return true;
+        }
+        false
+    }
+
+    /// The messages `ids` are not owed any more (a wait owed them while it was on,
+    /// and is over).
+    fn release(&self, ids: &[String]) {
+        if let Ok(mut ledger) = self.ledger.lock() {
+            for id in ids {
+                ledger.owed.take(id);
+            }
         }
     }
 
@@ -928,7 +942,9 @@ impl Server {
                 (Some(_), None) => ever_looked && !was_known[at] && (turned_up[at] || none_known),
             };
             match self.weigh(message) {
-                Ok(()) if unseen => self.owe(message),
+                Ok(()) if unseen => {
+                    self.owe(message);
+                }
                 // (Not what the room held before the agent looked at it for the
                 // first time: a wait takes that for seen, too.)
                 Err(Some(_)) if unseen => self.doubt(message),
@@ -1126,21 +1142,32 @@ impl Server {
         // without counting as theirs (by id, with the reason).
         let mut found: Vec<Msg> = Vec::new();
         let mut doubted: Vec<(String, String)> = Vec::new();
+        // When the point is lost, what was read is known from now on (`look`), and a
+        // later look cannot tell what is found here from what was there before. So
+        // what is found is owed while the wait is on: should it end before it hands
+        // it over (cancelled, or out of time for this part), the next one does.
+        let mut owed_meanwhile: Vec<String> = Vec::new();
         // A message is in one of the two or in neither, by what it says now: one
         // that changes (decrypted at last, edited, deleted) changes its place.
-        let sort_in = |message: Msg, found: &mut Vec<Msg>, doubted: &mut Vec<(String, String)>| {
-            found.retain(|known| known.event_id != message.event_id);
-            doubted.retain(|(known, _)| *known != message.event_id);
-            match self.weigh(&message) {
-                Ok(()) => found.push(message),
-                Err(Some(why)) => {
-                    // At once, not at the end: a wait may be cancelled.
-                    self.doubt(&message);
-                    doubted.push((message.event_id, why));
+        let mut sort_in =
+            |message: Msg, found: &mut Vec<Msg>, doubted: &mut Vec<(String, String)>| {
+                found.retain(|known| known.event_id != message.event_id);
+                doubted.retain(|(known, _)| *known != message.event_id);
+                match self.weigh(&message) {
+                    Ok(()) => {
+                        if lost && self.owe(&message) {
+                            owed_meanwhile.push(message.event_id.clone());
+                        }
+                        found.push(message);
+                    }
+                    Err(Some(why)) => {
+                        // At once, not at the end: a wait may be cancelled.
+                        self.doubt(&message);
+                        doubted.push((message.event_id, why));
+                    }
+                    Err(None) => {}
                 }
-                Err(None) => {}
-            }
-        };
+            };
         for (at, message) in latest.iter().enumerate() {
             // From where the room has been seen.
             // (Not what the agent has as it is, should the point not have moved
@@ -1223,6 +1250,11 @@ impl Server {
                 () = progress.tick(seconds) => {}
             }
         }
+
+        // What is found is handed over now (or left out of a long backlog, as any
+        // other): it is not owed for this wait's sake any more.
+        owed_meanwhile.retain(|id| found.iter().any(|message| message.event_id == *id));
+        self.release(&owed_meanwhile);
 
         // In the room's order; a message from before `start` that changed comes
         // first.

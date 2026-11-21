@@ -1941,3 +1941,35 @@ async fn an_old_message_that_changes_beyond_a_read_is_not_news() {
     session.end().await;
     world.stop().await;
 }
+
+/// So much came that the point the room was seen up to is no longer among what is
+/// read. A wait finds the answer and holds out for the key of another message; it is
+/// cancelled meanwhile. The answer is not lost: the next wait hands it over.
+#[tokio::test]
+async fn an_answer_found_while_the_point_is_lost_survives_a_cancelled_wait() {
+    let world = World::start("mcp-lost-cancel", vec![message("$first", EVE, "hi")]).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    session.ok("read_messages", json!({})).await;
+    for n in 0..proto::READ_MAX - 2 {
+        world.post(message(&format!("$m{n}"), EVE, "chatter"));
+    }
+    world.post(locked("$sealed", ANN));
+    world.post(message("$answer", ANN, "merge"));
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    // Well within the time it holds out for the key.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    session
+        .say(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": id }
+        }))
+        .await;
+    world.until_watched(false).await;
+    let woken = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 3 }))
+        .await;
+    assert_eq!(ids(&woken), ["$answer"]);
+    session.end().await;
+    world.stop().await;
+}
