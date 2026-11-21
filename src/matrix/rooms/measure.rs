@@ -817,6 +817,26 @@ async fn measure_search_index_of_a_room() {
     }
 }
 
+/// Not a measurement: the list of messages that the interface keeps is made with room
+/// for the timeline's items and no more. Collected from a `filter_map`, it grew by
+/// doubling, and up to as many messages again (784 bytes each) were kept unused for
+/// every room shown: for 300 messages, room for 512.
+#[tokio::test]
+async fn messages_are_made_without_room_to_spare() {
+    let fixture = fixture(300).await;
+    let timeline = super::room_timeline(&fixture.room).await.unwrap();
+    let items = show_all(&timeline).await;
+    let own = fixture.room.own_user_id().to_owned();
+    let messages = super::super::convert::convert(&items, &own, &HashSet::new());
+    assert!(messages.len() >= 300, "{}", messages.len());
+    assert!(
+        messages.capacity() <= items.len(),
+        "room for {} messages, {} items",
+        messages.capacity(),
+        items.len()
+    );
+}
+
 /// The sample room is what it says: as many lines as messages, with the mix's parts.
 #[tokio::test]
 #[ignore = "a measurement: run alone and in release, see crate::measure"]

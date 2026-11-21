@@ -30,27 +30,28 @@ pub fn convert(
 ) -> Vec<Message> {
     let now = Local::now();
     let last = items.len().saturating_sub(1);
-    items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| {
-            let id = item.unique_id().0.clone();
-            if let Some(event) = item.as_event() {
-                return event_message(id, event, own, ignored, &now);
-            }
-            match item.as_virtual()? {
-                // Keep a trailing `ReadMarker` too when every item after it was
-                // hidden/ignored so the UI knows no visible unread messages follow it.
-                VirtualTimelineItem::ReadMarker if index < last => Some(Message {
-                    id,
-                    kind: MsgKind::ReadMarker,
-                    ..Message::default()
-                }),
-                // Day separators are derived from the messages' own dates.
-                _ => None,
-            }
-        })
-        .collect()
+    // Room for every item, made once: collected from a `filter_map`, the list grew by
+    // doubling, and the interface keeps this very list, with up to as many unused
+    // messages again (784 bytes each) for every room it has shown.
+    let mut messages = Vec::with_capacity(items.len());
+    messages.extend(items.iter().enumerate().filter_map(|(index, item)| {
+        let id = item.unique_id().0.clone();
+        if let Some(event) = item.as_event() {
+            return event_message(id, event, own, ignored, &now);
+        }
+        match item.as_virtual()? {
+            // Keep a trailing `ReadMarker` too when every item after it was
+            // hidden/ignored so the UI knows no visible unread messages follow it.
+            VirtualTimelineItem::ReadMarker if index < last => Some(Message {
+                id,
+                kind: MsgKind::ReadMarker,
+                ..Message::default()
+            }),
+            // Day separators are derived from the messages' own dates.
+            _ => None,
+        }
+    }));
+    messages
 }
 
 /// Why a message could not be decrypted, from what the SDK worked out.
