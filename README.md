@@ -20,8 +20,9 @@ anything to focus it, or never leave the keyboard: you start in the composer, `E
 sends, `↑` walks into the messages. Encrypted chats, pictures in the terminal, threads,
 notifications and themes that follow your desktop are all there.
 
-> **Status: early development.** It is used daily by its author, but it is young. Keep
-> another client at hand, and please report what breaks.
+> **Status: 1.0.** Used every day by its author, and checked against a real homeserver
+> before each release. Some things are still done in another client (creating a key backup
+> or recovery, see below); please report what breaks.
 
 ## Highlights
 
@@ -740,6 +741,8 @@ There is no command that lists or removes profiles; a profile is its two folders
     newest) are written to `notes.json` in the profile's data folder, readable by you
     only (mode 0600), and read again at the next start. **That file holds the text of
     messages, also of encrypted rooms, in plain form outside the encrypted store.**
+    The file belongs to the account: a session the server ended, after which you log in
+    again, keeps it, and a file another account left there is removed unread.
     Switching the setting off removes the file, and so does logging out. A message
     that is deleted loses its transcript and translation, in the file too.
 - **Recording a voice message**: `Alt-M` or the 🎤 at the end of the composer's first
@@ -1027,7 +1030,7 @@ nix-shell                      # toolchain and C dependencies (or bring your own
 scripts/check.sh               # fmt, clippy -D warnings, tests, build
 scripts/dev-homeserver.sh      # a throwaway local homeserver for the server-backed tests
 MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass \
-  cargo test matrix:: -- --ignored --test-threads=1
+  cargo test matrix:: -- --ignored --test-threads=1 --skip measure_
 cargo test write_screenshots -- --ignored   # regenerate the pictures above
 ```
 
