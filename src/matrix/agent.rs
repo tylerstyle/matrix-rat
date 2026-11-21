@@ -417,11 +417,9 @@ async fn read_latest(
                 diff.apply(&mut items);
             }
         }
-        let mut found = messages(&items, &own, &ignored.borrow());
+        let found = messages(&items, &own, &ignored.borrow(), limit);
         let at_start = items.iter().any(|item| item.is_timeline_start());
         if done || at_start || found.len() >= limit || pages == READ_PAGES {
-            let skip = found.len().saturating_sub(limit);
-            found.drain(..skip);
             return Ok(found);
         }
         pages += 1;
@@ -477,7 +475,7 @@ async fn watch_room(
                 diff.apply(&mut items);
             }
         }
-        if !messages(&items, &own, &ignored.borrow()).is_empty()
+        if !messages(&items, &own, &ignored.borrow(), 1).is_empty()
             || items.iter().any(|item| item.is_timeline_start())
         {
             break;
@@ -506,16 +504,21 @@ async fn watch_room(
             diff.apply(&mut items);
         }
     }
+    // What was told last. Most changes of a timeline change no message as it is
+    // handed out (a read receipt, a date divider, an ignored user who said nothing
+    // here): those are not told.
+    let mut told: Option<Vec<Msg>> = None;
     loop {
-        let mut newest = messages(&items, &own, &ignored.borrow());
-        let skip = newest.len().saturating_sub(WATCH_TAIL);
-        newest.drain(..skip);
-        let told = events.send(MatrixEvent::Agent(AgentEvent::Watched {
-            room_id: room_id.clone(),
-            messages: newest,
-        }));
-        if told.is_err() {
-            return;
+        let newest = messages(&items, &own, &ignored.borrow(), WATCH_TAIL);
+        if told.as_ref() != Some(&newest) {
+            let sent = events.send(MatrixEvent::Agent(AgentEvent::Watched {
+                room_id: room_id.clone(),
+                messages: newest.clone(),
+            }));
+            if sent.is_err() {
+                return;
+            }
+            told = Some(newest);
         }
         tokio::select! {
             diffs = changes.next() => {
@@ -524,6 +527,20 @@ async fn watch_room(
                 };
                 for diff in diffs {
                     diff.apply(&mut items);
+                }
+                // What came meanwhile is taken in with it: one look for all of it.
+                loop {
+                    match changes.next().now_or_never() {
+                        Some(Some(diffs)) => {
+                            for diff in diffs {
+                                diff.apply(&mut items);
+                            }
+                        }
+                        Some(None) => {
+                            return ended("the room's messages are no longer followed");
+                        }
+                        None => break,
+                    }
                 }
             }
             changed = ignored.changed() => {
@@ -535,22 +552,27 @@ async fn watch_room(
     }
 }
 
-/// The messages among `items` as they are handed out: what people (and programs)
-/// said, not who joined or what was set. A message of ours that the server has not
-/// confirmed has no id yet and is left out until it has one. Deleted and unreadable
-/// messages are told as such. Everything is cleaned for a terminal and bounded; a
-/// message whose own id or whose sender's id cannot be handed out as it is, is left
-/// out (an id is never cut or changed). Each message is told once, also when the
-/// timeline shows it twice (see [`events_once`]).
+/// The newest `most` messages among `items`, oldest first, as they are handed out:
+/// what people (and programs) said, not who joined or what was set. A message of
+/// ours that the server has not confirmed has no id yet and is left out until it has
+/// one. Deleted and unreadable messages are told as such. Everything is cleaned for a
+/// terminal and bounded; a message whose own id or whose sender's id cannot be
+/// handed out as it is, is left out (an id is never cut or changed). Each message is
+/// told once, also when the timeline shows it twice (see [`events_once`]).
+///
+/// Only those are made: a timeline can hold far more (what a read loaded, a long
+/// day), and this runs on every change of a watched room.
 pub(super) fn messages(
     items: &Vector<Arc<TimelineItem>>,
     own: &UserId,
     ignored: &IgnoredSet,
+    most: usize,
 ) -> Vec<Msg> {
     let now = chrono::Local::now();
     let mut left_out = 0usize;
-    let messages = events_once(items)
+    let mut messages: Vec<Msg> = events_once(items)
         .into_iter()
+        .rev()
         .filter_map(|item| {
             let event = item.as_event()?;
             let event_id = event.event_id()?;
@@ -591,7 +613,9 @@ pub(super) fn messages(
                 untrusted: untrusted.map(str::to_owned),
             })
         })
+        .take(most)
         .collect();
+    messages.reverse();
     if left_out > 0 {
         tracing::debug!(
             left_out,
@@ -1066,9 +1090,14 @@ mod tests {
         }
     }
 
-    /// The items of a timeline of a room that holds the texts `said` (each an event id
-    /// and what it says, all by the account itself), as the SDK shows them.
-    async fn shown(said: &[(&str, &str)]) -> Vector<Arc<TimelineItem>> {
+    /// The room of the tests below that run on a fake homeserver.
+    const SAID: &str = "!said:localhost";
+
+    /// A joined room whose messages are the texts `said` (each an event id, its sender
+    /// and what it says), on a fake homeserver that runs as long as it is kept.
+    async fn room_saying(
+        said: &[(&str, &str, &str)],
+    ) -> (crate::matrix::spaces::fake::Server, Room) {
         use matrix_sdk::authentication::SessionTokens;
         use matrix_sdk::authentication::matrix::MatrixSession;
         use matrix_sdk::config::SyncSettings;
@@ -1076,14 +1105,13 @@ mod tests {
 
         use crate::matrix::spaces::fake;
 
-        const ROOM: &str = "!said:localhost";
         let create = json!({ "creator": fake::ME, "room_version": "10" });
         let events: Vec<_> = said
             .iter()
             .zip(10u64..)
-            .map(|((id, body), at)| {
+            .map(|((id, sender, body), at)| {
                 json!({
-                    "type": "m.room.message", "event_id": id, "sender": fake::ME,
+                    "type": "m.room.message", "event_id": id, "sender": sender,
                     "origin_server_ts": at,
                     "content": { "msgtype": "m.text", "body": body },
                 })
@@ -1096,7 +1124,7 @@ mod tests {
             ] },
             "timeline": { "events": events, "limited": false },
         });
-        let server = fake::Server::start(json!({ "join": { ROOM: room } })).await;
+        let server = fake::Server::start(json!({ "join": { SAID: room } })).await;
         let client = Client::builder()
             .homeserver_url(&server.url)
             .build()
@@ -1118,11 +1146,20 @@ mod tests {
         // Before the sync, so that the room's events reach its timeline.
         client.event_cache().subscribe().unwrap();
         client.sync_once(SyncSettings::default()).await.unwrap();
-        let room = client.get_room(<&RoomId>::try_from(ROOM).unwrap()).unwrap();
+        let room = client.get_room(<&RoomId>::try_from(SAID).unwrap()).unwrap();
+        (server, room)
+    }
+
+    /// The items of a timeline of a room that holds the texts `said` (each an event id
+    /// and what it says, all by the account itself), as the SDK shows them.
+    async fn shown(said: &[(&str, &str)]) -> Vector<Arc<TimelineItem>> {
+        let me = crate::matrix::spaces::fake::ME;
+        let said: Vec<_> = said.iter().map(|(id, body)| (*id, me, *body)).collect();
+        let (_server, room) = room_saying(&said).await;
         let timeline = open(&room).await.unwrap();
         for _ in 0..500 {
             let items = timeline.items().await;
-            let there = said.iter().all(|(id, _)| {
+            let there = said.iter().all(|(id, _, _)| {
                 items.iter().any(|item| {
                     item.as_event()
                         .and_then(|event| event.event_id())
@@ -1135,6 +1172,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("the messages did not show within five seconds");
+    }
+
+    /// The ids and texts of `messages`.
+    fn said(messages: &[Msg]) -> Vec<(&str, &str)> {
+        messages
+            .iter()
+            .map(|message| (message.event_id.as_str(), message.body.as_str()))
+            .collect()
     }
 
     #[tokio::test]
@@ -1150,12 +1195,52 @@ mod tests {
                 .cloned(),
         );
         let own = UserId::parse(crate::matrix::spaces::fake::ME).unwrap();
-        let told = messages(&items, &own, &IgnoredSet::default());
-        let told: Vec<_> = told
-            .iter()
-            .map(|message| (message.event_id.as_str(), message.body.as_str()))
-            .collect();
-        assert_eq!(told, [("$a", "first"), ("$b", "as it is now")]);
+        let none = IgnoredSet::default();
+        assert_eq!(
+            said(&messages(&items, &own, &none, 10)),
+            [("$a", "first"), ("$b", "as it is now")]
+        );
+        // Only the newest are made, when no more are wanted.
+        assert_eq!(
+            said(&messages(&items, &own, &none, 1)),
+            [("$b", "as it is now")]
+        );
+    }
+
+    /// A watched room is told when what its messages say changes, and not for every
+    /// change of its timeline.
+    #[tokio::test]
+    async fn a_watched_room_is_told_again_only_when_a_message_changed() {
+        use matrix_sdk::ruma::OwnedUserId;
+
+        const BOB: &str = "@bob:localhost";
+        let (_server, room) = room_saying(&[("$a", BOB, "hello")]).await;
+        let (events, mut told) = unbounded_channel();
+        let (ignore, ignored) = watch::channel(IgnoredSet::default());
+        let watching = tokio::spawn(watch_room(room, SAID.to_owned(), events, ignored));
+        loop {
+            match next(&mut told).await {
+                AgentEvent::Watched { messages, .. } if !messages.is_empty() => {
+                    assert_eq!(said(&messages), [("$a", "hello")]);
+                    break;
+                }
+                AgentEvent::Watched { .. } => {}
+                other => panic!("not watched: {other:?}"),
+            }
+        }
+        // Someone who said nothing here is ignored: no message changes.
+        let nobody: OwnedUserId = "@nobody:localhost".try_into().unwrap();
+        ignore.send_replace(Arc::new([nobody.clone()].into()));
+        let again = tokio::time::timeout(Duration::from_millis(500), told.recv()).await;
+        assert!(again.is_err(), "told again although nothing changed");
+        // The one who said something is: their message is gone.
+        let bob: OwnedUserId = BOB.try_into().unwrap();
+        ignore.send_replace(Arc::new([nobody, bob].into()));
+        match next(&mut told).await {
+            AgentEvent::Watched { messages, .. } => assert!(messages.is_empty()),
+            other => panic!("not watched: {other:?}"),
+        }
+        watching.abort();
     }
 
     // ----- against a real homeserver ----------------------------------------------------
