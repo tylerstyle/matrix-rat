@@ -1243,15 +1243,9 @@ fn find_close_tag(s: &str, name: &str) -> Option<usize> {
 }
 
 fn extract_href(tag: &str) -> Option<String> {
-    let lower = tag.to_ascii_lowercase();
-    let idx = lower.find("href=")?;
-    let val = tag[idx + 5..].trim_start();
-    let quote = val.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let inner = val[1..].split(quote).next()?;
-    Some(decode_entities(inner.trim()))
+    let (_, attributes) = tag.split_once(char::is_whitespace)?;
+    let href = crate::rich::attribute(attributes, "href")?.trim();
+    (!href.is_empty()).then(|| crate::rich::decode_entities(href))
 }
 
 fn strip_tags(s: &str) -> String {
@@ -1615,5 +1609,27 @@ mod tests {
         );
         let (linked, _) = resolve_marks("hi :blob:", &marks_from_message(Some(html), None));
         assert_eq!(linked, format!("hi {EMOTE_OPEN}0{EMOTE_CLOSE}"));
+    }
+
+    #[test]
+    fn extract_href_uses_attribute_parser_not_substring_match() {
+        let html = concat!(
+            r#"<a data-href="https://matrix.to/#/@wrong:example.org" href="https://matrix.to/#/@alice:example.org">Alice</a> "#,
+            r#"<a title="href='https://matrix.to/#/@wrong:example.org'" href="https://matrix.to/#/@bob:example.org">Bob</a>"#,
+        );
+        let links = extract_matrix_to_links(html);
+        assert_eq!(
+            links,
+            vec![
+                (
+                    "https://matrix.to/#/@alice:example.org".to_owned(),
+                    "Alice".to_owned(),
+                ),
+                (
+                    "https://matrix.to/#/@bob:example.org".to_owned(),
+                    "Bob".to_owned(),
+                ),
+            ]
+        );
     }
 }
