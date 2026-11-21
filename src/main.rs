@@ -138,12 +138,14 @@ enum Command {
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
         /// Only messages that count as this user's (`@user:server`), among the
-        /// latest 100.
+        /// latest 100. Give it again for each other account of the same person: a
+        /// message from any of them counts, each held to the same rule on its own.
         #[arg(long, value_name = "USER")]
-        from: Option<String>,
+        from: Vec<String>,
         /// With `--from`: also take messages whose sender is not verified (see the
-        /// README). Without this, a message counts as that user's only if it came
-        /// end-to-end encrypted from a device and an identity that are verified.
+        /// README), from each account alike. Without this, a message counts as that
+        /// user's only if it came end-to-end encrypted from a device and an identity
+        /// that are verified (each account's own).
         #[arg(long, requires = "from")]
         allow_unverified: bool,
     },
@@ -153,12 +155,15 @@ enum Command {
         /// The room: its id, its exact name, or its address.
         #[arg(long)]
         room: String,
-        /// Only messages that count as this user's (`@user:server`).
+        /// Only messages that count as this user's (`@user:server`). Give it again
+        /// for each other account of the same person: a message from any of them
+        /// counts, each held to the same rule on its own.
         #[arg(long, value_name = "USER")]
-        from: Option<String>,
+        from: Vec<String>,
         /// With `--from`: also take messages whose sender is not verified (see the
-        /// README). Without this, a message counts as that user's only if it came
-        /// end-to-end encrypted from a device and an identity that are verified.
+        /// README), from each account alike. Without this, a message counts as that
+        /// user's only if it came end-to-end encrypted from a device and an identity
+        /// that are verified (each account's own).
         #[arg(long, requires = "from")]
         allow_unverified: bool,
     },
@@ -174,13 +179,16 @@ enum Command {
         /// that agents sharing one command line sign with their own names.
         #[arg(long)]
         name: Option<String>,
-        /// The user whose messages count as answers (`@user:server`). Everything
-        /// else in the room is marked as not from the user.
+        /// The user whose messages count as answers (`@user:server`). Give it again
+        /// for each other account of the same person: a message from any of them
+        /// counts, each held to the same rule on its own. Everything else in the
+        /// room is marked as not from the user.
         #[arg(long, value_name = "USER")]
-        from: Option<String>,
+        from: Vec<String>,
         /// With `--from`: also take messages whose sender is not verified (see the
-        /// README). Without this, a message counts as that user's only if it came
-        /// end-to-end encrypted from a device and an identity that are verified.
+        /// README), from each account alike. Without this, a message counts as that
+        /// user's only if it came end-to-end encrypted from a device and an identity
+        /// that are verified (each account's own).
         #[arg(long, requires = "from")]
         allow_unverified: bool,
     },
@@ -347,11 +355,11 @@ fn client_command(
     };
     // The arguments are checked before anything is connected.
     let (room, from) = match &command {
-        Command::Rooms => (None, None),
-        Command::Send { room, .. } => (Some(room), None),
+        Command::Rooms => (None, &[][..]),
+        Command::Send { room, .. } => (Some(room), &[][..]),
         Command::Read { room, from, .. }
         | Command::Listen { room, from, .. }
-        | Command::Mcp { room, from, .. } => (Some(room), from.as_ref()),
+        | Command::Mcp { room, from, .. } => (Some(room), from.as_slice()),
         Command::Doctor | Command::Serve => return exit::USAGE,
     };
     if let Some(room) = room
@@ -359,9 +367,7 @@ fn client_command(
     {
         return usage(what);
     }
-    if let Some(from) = from
-        && let Err(what) = client::check_from_arg(from)
-    {
+    if let Err(what) = client::check_from_args(from) {
         return usage(what);
     }
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -399,10 +405,7 @@ fn client_command(
             from,
             allow_unverified,
         } => {
-            let from = from.as_deref().map(|user| client::Sender {
-                user,
-                trust: trust(allow_unverified),
-            });
+            let from = client::Sender::of(&from, trust(allow_unverified));
             runtime.block_on(client::read(
                 &socket,
                 &room,
@@ -417,10 +420,7 @@ fn client_command(
             from,
             allow_unverified,
         } => {
-            let from = from.as_deref().map(|user| client::Sender {
-                user,
-                trust: trust(allow_unverified),
-            });
+            let from = client::Sender::of(&from, trust(allow_unverified));
             runtime.block_on(client::listen(&socket, &room, from, &mut out, &mut notes))
         }
         Command::Mcp {
@@ -531,7 +531,7 @@ mod tests {
             Some(Command::Read {
                 room: "Agents".into(),
                 limit: 20,
-                from: None,
+                from: Vec::new(),
                 allow_unverified: false,
             })
         );
@@ -549,7 +549,7 @@ mod tests {
             Some(Command::Read {
                 room: "Agents".into(),
                 limit: 100,
-                from: Some("@ann:example.org".into()),
+                from: vec!["@ann:example.org".into()],
                 allow_unverified: false,
             })
         );
@@ -557,7 +557,7 @@ mod tests {
             parse(&["listen", "--room", "Agents", "--from", "@ann:example.org"]).command,
             Some(Command::Listen {
                 room: "Agents".into(),
-                from: Some("@ann:example.org".into()),
+                from: vec!["@ann:example.org".into()],
                 allow_unverified: false,
             })
         );
@@ -566,7 +566,7 @@ mod tests {
             Some(Command::Mcp {
                 room: "Agents".into(),
                 name: Some("builder".into()),
-                from: None,
+                from: Vec::new(),
                 allow_unverified: false,
             })
         );
@@ -587,7 +587,7 @@ mod tests {
             Some(Command::Mcp {
                 room: "Agents".into(),
                 name: Some("builder".into()),
-                from: Some("@ann:example.org".into()),
+                from: vec!["@ann:example.org".into()],
                 allow_unverified: true,
             })
         );
@@ -692,10 +692,134 @@ mod tests {
             Some(Command::Mcp {
                 room: "Agents".into(),
                 name: None,
-                from: None,
+                from: Vec::new(),
                 allow_unverified: false,
             })
         );
+    }
+
+    /// `--from` once for each account of the user: none, one (as it always was) or
+    /// several, on `read`, `listen` and `mcp` alike, in the order given.
+    #[test]
+    fn from_may_name_several_accounts_of_the_user() {
+        let from = |words: &[&str]| -> (Vec<String>, bool) {
+            match parse(words).command {
+                Some(
+                    Command::Read {
+                        from,
+                        allow_unverified,
+                        ..
+                    }
+                    | Command::Listen {
+                        from,
+                        allow_unverified,
+                        ..
+                    }
+                    | Command::Mcp {
+                        from,
+                        allow_unverified,
+                        ..
+                    },
+                ) => (from, allow_unverified),
+                other => panic!("{words:?}: {other:?}"),
+            }
+        };
+        let (ann, beeper) = ("@ann:example.org", "@ann:beeper.example");
+        for command in ["read", "listen", "mcp"] {
+            let base = [command, "--room", "Agents"];
+            let with = |extra: &[&'static str]| -> Vec<&str> {
+                base.iter().chain(extra).copied().collect()
+            };
+            assert_eq!(from(&base), (Vec::new(), false), "{command}");
+            assert_eq!(
+                from(&with(&["--from", ann])),
+                (vec![ann.to_owned()], false),
+                "{command}"
+            );
+            assert_eq!(
+                from(&with(&["--from", ann, "--from", beeper])),
+                (vec![ann.to_owned(), beeper.to_owned()], false),
+                "{command}"
+            );
+            // In the order given, also around other options.
+            assert_eq!(
+                from(&with(&[
+                    "--from",
+                    beeper,
+                    "--allow-unverified",
+                    "--from",
+                    ann
+                ])),
+                (vec![beeper.to_owned(), ann.to_owned()], true),
+                "{command}"
+            );
+            // One value each time: a second word is not taken for an account.
+            let words = with(&["--from", ann, beeper]);
+            let parsed =
+                Args::try_parse_from(std::iter::once("matrix-rat").chain(words.iter().copied()));
+            assert!(parsed.is_err(), "{words:?}");
+            // A `--from` without a value is a usage error.
+            let words = with(&["--from"]);
+            let err =
+                Args::try_parse_from(std::iter::once("matrix-rat").chain(words.iter().copied()))
+                    .expect_err(&format!("{words:?}"));
+            assert_eq!(err.exit_code(), 2, "{words:?}");
+        }
+        // Both accounts stay out of debug output.
+        let shown = format!(
+            "{:?}",
+            parse(&[
+                "mcp", "--room", "Agents", "--name", "n", "--from", ann, "--from", beeper
+            ])
+        );
+        assert!(
+            !shown.contains("ann") && !shown.contains("beeper") && !shown.contains("example"),
+            "{shown}"
+        );
+    }
+
+    /// Every `--from` is checked, and the same account twice is a usage error too,
+    /// before anything is connected; two good ones go on to look for `serve`.
+    #[test]
+    fn every_from_is_checked_before_connecting() {
+        let root = std::env::temp_dir().join(format!("mr-main-from-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = paths::Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "bot".into(),
+        };
+        let (ann, beeper) = ("@ann:example.org", "@ann:beeper.example");
+        for command in ["read", "listen", "mcp"] {
+            let base = [command, "--room", "Agents", "--name", "builder"];
+            let base = if command == "mcp" {
+                &base[..]
+            } else {
+                &base[..3]
+            };
+            for (from, code) in [
+                (&[ann, beeper][..], 3),
+                (&[ann, ""], 2),
+                (&["", ann], 2),
+                (&[ann, "beeper"], 2),
+                (&[ann, ann], 2),
+                (&[ann, beeper, ann], 2),
+            ] {
+                // (`mcp` with good arguments would go on to serve on standard input.)
+                if command == "mcp" && code != 2 {
+                    continue;
+                }
+                let mut words = base.to_vec();
+                for user in from {
+                    words.extend(["--from", *user]);
+                }
+                let command = parse(&words).command.unwrap();
+                assert_eq!(client_command(command, &paths, None), code, "{words:?}");
+            }
+        }
+        assert!(!root.exists(), "a client made a folder");
     }
 
     #[test]

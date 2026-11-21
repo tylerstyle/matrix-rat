@@ -133,6 +133,8 @@ pub fn own(event_id: &str, body: &str) -> Msg {
 pub const BOT: &str = "@bot:example.org";
 /// The person the agents ask.
 pub const ANN: &str = "@ann:example.org";
+/// Another account of the same person, on another server.
+pub const ANN_TOO: &str = "@ann:beeper.example";
 /// Someone else in the room.
 pub const EVE: &str = "@eve:example.org";
 /// The room the tests talk in, and its name.

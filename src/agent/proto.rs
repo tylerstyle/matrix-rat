@@ -184,6 +184,18 @@ impl Msg {
             Some(why) => Standing::Doubted(why),
         }
     }
+
+    /// What this message is to someone who waits for the word of one person with
+    /// several accounts, `users`: it is judged as [`Self::standing`] for the account
+    /// that is its sender, and for that one only. What came verified from one of the
+    /// accounts says nothing about another; a sender that is none of them is someone
+    /// else.
+    pub fn standing_among<S: AsRef<str>>(&self, users: &[S], trust: Trust) -> Standing<'_> {
+        match users.iter().find(|user| user.as_ref() == self.sender) {
+            Some(user) => self.standing(user.as_ref(), trust),
+            None => Standing::Other,
+        }
+    }
 }
 
 /// A joined room, as `rooms` lists it.
@@ -857,6 +869,68 @@ mod tests {
             unverified.standing("@eve:example.org", Verified),
             Standing::Other
         );
+    }
+
+    /// One person, two accounts: a message is judged for the account that sent it,
+    /// by the same rule as with one account, and never on the other's word.
+    #[test]
+    fn each_account_of_the_user_is_judged_on_its_own() {
+        use Trust::{AllowUnverified, Verified};
+        let users = ["@ann:example.org", "@ann:beeper.example"];
+        let from = |sender: &str, message: Msg| Msg {
+            sender: sender.into(),
+            ..message
+        };
+        // Verified from either account: theirs.
+        for sender in users {
+            let verified = from(sender, judged("text", None, None));
+            assert_eq!(verified.standing_among(&users, Verified), Standing::Theirs);
+            // One account alone is the rule as it was.
+            assert_eq!(
+                verified.standing_among(&[sender], Verified),
+                verified.standing(sender, Verified)
+            );
+        }
+        // Not verified from the second: doubted, as it would be with that account
+        // alone; taken when the unverified are allowed.
+        let second = from(users[1], judged("text", None, Some("unverified_identity")));
+        assert_eq!(
+            second.standing_among(&users, Verified),
+            Standing::Doubted("unverified_identity")
+        );
+        assert_eq!(
+            second.standing_among(&users, AllowUnverified),
+            Standing::Theirs
+        );
+        // What contradicts its sender is left out either way, on either account.
+        let forged = from(
+            users[1],
+            judged("text", Some("sender_mismatch"), Some("sender_mismatch")),
+        );
+        for trust in [Verified, AllowUnverified] {
+            assert_eq!(
+                forged.standing_among(&users, trust),
+                Standing::Doubted("sender_mismatch")
+            );
+        }
+        // A third sender never counts, verified or not, nor does the account's own.
+        for message in [
+            from("@eve:example.org", judged("text", None, None)),
+            from("@ann:example.org.evil", judged("text", None, None)),
+            from("@ANN:example.org", judged("text", None, None)),
+            Msg {
+                own: true,
+                ..from(users[1], judged("text", None, None))
+            },
+        ] {
+            for trust in [Verified, AllowUnverified] {
+                assert_eq!(message.standing_among(&users, trust), Standing::Other);
+            }
+        }
+        // Naming no account takes nobody's word.
+        let none: [&str; 0] = [];
+        let ann = judged("text", None, None);
+        assert_eq!(ann.standing_among(&none, Verified), Standing::Other);
     }
 
     #[test]
