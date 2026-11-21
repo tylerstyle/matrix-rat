@@ -869,6 +869,15 @@ pub enum MatrixEvent {
         /// `Some` when this timeline is a detached `/context` view rather than live.
         detached: Option<DetachedTimeline>,
     },
+    /// The open room's timeline lost what it had loaded and starts again from its
+    /// latest messages: the SDK cleared it (a sync that missed messages keeps only
+    /// those after the gap; an ignore-list change empties it). Sent right before the
+    /// timeline that follows, which says afresh whether the start is loaded: a
+    /// `Timeline` alone only ever adds to that, and the start loaded before is not.
+    TimelineReset {
+        room_id: String,
+        generation: u64,
+    },
     /// A request for older messages finished.
     Paginated {
         generation: u64,
@@ -1153,6 +1162,10 @@ impl MatrixEvent {
                     Some(format!("detached: {}", detached.is_some())),
                 ],
             ),
+            Self::TimelineReset {
+                room_id,
+                generation: g,
+            } => ("TimelineReset", vec![id(room_id), generation(g)]),
             Self::Paginated {
                 generation: g,
                 reached_start,

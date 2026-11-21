@@ -2167,6 +2167,19 @@ fn thread_page_needed<'a>(
     true
 }
 
+/// Whether the oldest message of a live timeline (`thread`: of that thread) is loaded.
+fn start_loaded(items: &Vector<Arc<TimelineItem>>, thread: Option<&str>) -> bool {
+    match thread {
+        // A thread's timeline has no start marker. Its first message is the last thing
+        // loaded, when there is nothing older left.
+        Some(root) => items
+            .iter()
+            .filter_map(|item| item.as_event()?.event_id())
+            .any(|id| id == root),
+        None => items.iter().any(|item| item.is_timeline_start()),
+    }
+}
+
 /// Sends the whole timeline to the UI whenever it changes, and who is typing.
 /// `thread`: the timeline is not the room's but that of the thread starting at this event.
 #[allow(clippy::too_many_arguments)]
@@ -2212,15 +2225,7 @@ async fn forward(
             messages,
             reached_start: match &detached {
                 Some(d) => d.reached_start.load(Ordering::Acquire),
-                None => match &thread {
-                    // A thread's timeline has no start marker. Its first message is the
-                    // last thing loaded, when there is nothing older left.
-                    Some(root) => items
-                        .iter()
-                        .filter_map(|item| item.as_event()?.event_id())
-                        .any(|id| id == root.as_str()),
-                    None => items.iter().any(|item| item.is_timeline_start()),
-                },
+                None => start_loaded(items, thread.as_deref()),
             },
             detached: detached.as_ref().map(|d| DetachedTimeline {
                 target_event: d.target_event.clone(),
@@ -2305,8 +2310,27 @@ async fn forward(
             diffs = changes.next() => {
                 let Some(diffs) = diffs else { return };
                 let saw_clear = diffs.iter().any(|diff| matches!(diff, VectorDiff::Clear));
+                let had_start = detached.is_none() && start_loaded(&items, thread.as_deref());
                 for diff in diffs {
                     diff.apply(&mut items);
+                }
+                // The SDK cleared the timeline, or the start that was loaded is gone (a
+                // clear with local echoes comes as removals): the interface forgets that
+                // the start was reached, which the timeline after this cannot tell it,
+                // since one that is not at the start says nothing of what came before.
+                // A sync that missed messages comes as a clear and the latest messages
+                // in one batch, so the timeline after it is not empty.
+                let reset = saw_clear
+                    || (had_start && !start_loaded(&items, thread.as_deref()));
+                if reset
+                    && events
+                        .send(MatrixEvent::TimelineReset {
+                            room_id: room_id.clone(),
+                            generation,
+                        })
+                        .is_err()
+                {
+                    return;
                 }
                 while clear_paginators.try_join_next().is_some() {}
                 if saw_clear

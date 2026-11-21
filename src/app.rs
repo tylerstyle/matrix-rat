@@ -3654,7 +3654,6 @@ impl App {
                 } else if generation == self.generation
                     && self.room_id().as_deref() == Some(&room_id)
                 {
-                    let empty_reset = messages.is_empty() && !reached_start;
                     let messages = self.place_unread_line(messages, detached.is_some());
                     let messages = self.thread_snapshot(messages, reached_start);
                     self.apply_timeline(messages);
@@ -3662,10 +3661,8 @@ impl App {
                     self.sync_pinned_flags(&room_id);
                     self.sync_saved_flags(&room_id);
                     self.search_sync();
-                    if empty_reset {
-                        self.timeline.reached_start = false;
-                        self.timeline.empty_batches = 0;
-                    }
+                    // Only adds: a timeline short of the start says nothing of what was
+                    // loaded before. Forgetting it takes a `TimelineReset`.
                     self.timeline.reached_start |= reached_start;
                     match detached {
                         Some(info) => {
@@ -3680,6 +3677,16 @@ impl App {
                             self.timeline.want_newer = false;
                         }
                     }
+                }
+            }
+            MatrixEvent::TimelineReset {
+                room_id,
+                generation,
+            } => {
+                // The timeline that follows says afresh whether the start is loaded.
+                if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
+                    self.timeline.reached_start = false;
+                    self.timeline.empty_batches = 0;
                 }
             }
             MatrixEvent::DetachedNew { generation, count } => {
@@ -7128,6 +7135,55 @@ mod tests {
         redraw(&mut app, &mut terminal);
         app.after_draw();
         assert!(!drain(&mut commands).contains(&"Paginate(!a)".to_owned()));
+    }
+
+    /// The start of the room was reached, then the SDK cleared it and kept only its
+    /// latest messages (a sync that missed some): the worker says so before the timeline
+    /// that follows, which is not empty, and the app asks for older messages again. A
+    /// reset of another room or opening is not this one's.
+    #[test]
+    fn a_reset_timeline_asks_for_older_messages_again() {
+        let (mut app, mut terminal, mut commands) = connected();
+        drain(&mut commands);
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: app.generation,
+            messages: vec![remote("1", "ann", "hello")],
+            reached_start: true,
+            detached: None,
+        });
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        assert!(!drain(&mut commands).contains(&"Paginate(!a)".to_owned()));
+
+        // Not this opening's, nor this room's: nothing changes.
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation - 1,
+        });
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!b".into(),
+            generation: app.generation,
+        });
+        // A timeline short of the start alone says nothing of what was loaded.
+        app.on_matrix(timeline(&app, vec![remote("1", "ann", "hello")]));
+        assert!(app.timeline.reached_start);
+
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(&app, vec![remote("9", "ann", "after the gap")]));
+        assert!(!app.timeline.reached_start);
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        assert!(drain(&mut commands).contains(&"Paginate(!a)".to_owned()));
+        // And the start, once loaded again, is known again.
+        app.on_matrix(MatrixEvent::Paginated {
+            generation: app.generation,
+            reached_start: true,
+        });
+        assert!(app.timeline.reached_start);
     }
 
     #[test]

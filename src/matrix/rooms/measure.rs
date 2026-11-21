@@ -1220,6 +1220,101 @@ async fn a_timeline_idle_for_long_is_dropped_and_opens_again_from_the_store() {
     drop(server);
 }
 
+/// Not a measurement: a room whose start was loaded gets a sync that says it missed
+/// messages (limited, with a gap). The SDK then keeps only the latest messages, and
+/// the room's start is no longer loaded: the interface must be told, or it never pages
+/// back again (it asks for older messages only while the start is not reached).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_limited_sync_after_the_start_was_loaded_says_the_timeline_was_reset() {
+    use crate::matrix::{MatrixCmd, MatrixEvent};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const MESSAGES: usize = 30;
+    let people = people(&mut Lcg(0x5eed));
+    let (missed, new_ids) = sample_timeline(&mut Lcg(0x9a9), &people, 1_800_000_000_000, 1000, 5);
+    let syncs = AtomicUsize::new(0);
+    let server = fake::Server::answering(
+        json!({ "join": { ROOM: sample_room(MESSAGES) } }),
+        Box::new(move |request| {
+            if !request.path.ends_with("/sync") || syncs.fetch_add(1, Ordering::SeqCst) == 0 {
+                return None;
+            }
+            let rooms = json!({ "join": { ROOM: {
+                "timeline": { "events": missed, "limited": true, "prev_batch": "gap" },
+            } } });
+            let sync = json!({ "next_batch": "s2", "rooms": rooms });
+            Some(fake::Reply::Json(sync.to_string()))
+        }),
+    )
+    .await;
+    let (client, _room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
+    let mut opened = Opened::new(client.clone()).await;
+
+    // Paged back to the start, which the interface is told.
+    let mut at_start = false;
+    for _ in 0..20 {
+        opened
+            .timelines
+            .handle(MatrixCmd::Paginate {
+                room_id: ROOM.to_owned(),
+                generation: 1,
+            })
+            .await;
+        loop {
+            match opened.next_event().await {
+                Some(MatrixEvent::Timeline { reached_start, .. }) => at_start |= reached_start,
+                Some(MatrixEvent::Paginated { reached_start, .. }) => {
+                    at_start |= reached_start;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if at_start {
+            break;
+        }
+    }
+    assert!(at_start);
+
+    // What was on its way from paging back.
+    while let Ok(Some(_)) =
+        tokio::time::timeout(Duration::from_millis(300), opened.events.recv()).await
+    {}
+
+    // The limited sync: the SDK keeps only the messages after the gap, and the
+    // interface hears of it before the timeline that has them, which is not empty and
+    // not at the start (so it cannot tell that the start was lost).
+    client.sync_once(SyncSettings::default()).await.unwrap();
+    let mut reset = false;
+    loop {
+        match opened.next_event().await {
+            Some(MatrixEvent::TimelineReset {
+                room_id,
+                generation,
+            }) => {
+                assert_eq!((room_id.as_str(), generation), (ROOM, 1));
+                reset = true;
+            }
+            Some(MatrixEvent::Timeline {
+                messages,
+                reached_start,
+                ..
+            }) => {
+                let shown: HashSet<&str> = messages.iter().filter_map(event_id).collect();
+                if new_ids.iter().all(|id| shown.contains(id.as_str())) {
+                    assert!(reset, "the timeline came without a reset before it");
+                    assert!(!reached_start);
+                    assert_eq!(shown.len(), new_ids.len());
+                    break;
+                }
+            }
+            Some(_) => {}
+            None => panic!("the worker stopped"),
+        }
+    }
+    drop(opened);
+    drop(server);
+}
+
 /// What dropping an idle timeline gives back: the sample room of 5000 messages opened as
 /// the app opens it and scrolled to the top, then left for another room. Before
 /// `IDLE_TIMELINE` its timeline stayed cached for as long as it was among the last six

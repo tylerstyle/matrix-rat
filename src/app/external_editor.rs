@@ -51,10 +51,16 @@ enum Snapshot<'a> {
 
 fn snapshot_of(event: &MatrixEvent) -> Option<Snapshot<'_>> {
     match event {
+        // A reset is of its timeline too: a timeline after it is held after it (see
+        // `resets_a_timeline`).
         MatrixEvent::Timeline {
             room_id,
             generation,
             ..
+        }
+        | MatrixEvent::TimelineReset {
+            room_id,
+            generation,
         } => Some(Snapshot::Timeline(room_id, *generation)),
         MatrixEvent::Rooms(_) => Some(Snapshot::Rooms),
         MatrixEvent::Spaces(_) => Some(Snapshot::Spaces),
@@ -74,21 +80,14 @@ fn begins_or_ends_a_session(event: &MatrixEvent) -> bool {
     )
 }
 
-/// An empty timeline that has not reached the start: the worker sends it when the SDK
-/// cleared the room (an ignore-list change does), and the app takes it as a reset (it
-/// forgets that the start was reached) where any other timeline only adds to what it
-/// knows. So it is no snapshot of the same as the timelines around it: it neither takes
-/// an earlier one's place (it would come before what came between) nor gives its own up
-/// to a later one (the reset would be lost, and the room stuck short of its start).
+/// The worker says so when the SDK cleared the room (a sync that missed messages, an
+/// ignore-list change): the app forgets that the start was reached, where a timeline
+/// only adds to what it knows. So it takes no earlier timeline's place (it would come
+/// before what came between) and gives its own up to no later one (the reset would be
+/// lost, and the room stuck short of its start, never asking for older messages): a
+/// timeline after it is held after it.
 fn resets_a_timeline(event: &MatrixEvent) -> bool {
-    matches!(
-        event,
-        MatrixEvent::Timeline {
-            messages,
-            reached_start: false,
-            ..
-        } if messages.is_empty()
-    )
+    matches!(event, MatrixEvent::TimelineReset { .. })
 }
 
 impl HeldEvents {
@@ -604,9 +603,11 @@ mod tests {
         assert_eq!(drain(&mut held), ["NeedLogin(None)", "Rooms(7)"]);
     }
 
-    /// An empty timeline short of the start (the SDK cleared the room) is a reset to the
-    /// app: it is held where it came, after what came before it, and the timeline after it
-    /// does not take its place, so the app still forgets that the start was reached.
+    /// A reset of the timeline (the SDK cleared the room) is held where it came, after
+    /// what came before it, and the timeline after it does not take its place, nor the
+    /// one before: so the app still forgets that the start was reached, and only then
+    /// hears whether the latest timeline has it. A timeline after it may take the place
+    /// of the one after it.
     #[test]
     fn a_reset_timeline_is_held_where_it_came_and_never_replaced() {
         let start = |mut event: MatrixEvent| {
@@ -615,24 +616,36 @@ mod tests {
             }
             event
         };
+        let reset = |room: &str, generation| MatrixEvent::TimelineReset {
+            room_id: room.to_owned(),
+            generation,
+        };
         let mut held = HeldEvents::default();
         held.push(start(timeline("!a", 1, 100)));
         held.push(MatrixEvent::Paginated {
             generation: 1,
             reached_start: true,
         });
+        held.push(reset("!a", 1));
+        held.push(timeline("!a", 1, 5));
+        held.push(timeline("!a", 1, 6));
+        held.push(reset("!a", 1));
+        held.push(reset("!a", 1));
         held.push(timeline("!a", 1, 0));
-        held.push(timeline("!a", 1, 40));
-        held.push(timeline("!a", 1, 41));
-        held.push(timeline("!a", 1, 0));
+        // Another room's timeline is no timeline of this reset.
+        held.push(timeline("!b", 2, 3));
+        held.push(timeline("!b", 2, 4));
         assert_eq!(
             drain(&mut held),
             [
                 "Timeline(!a, generation 1, 100 messages, start: true, detached: false)",
                 "Paginated(generation 1, start: true)",
+                "TimelineReset(!a, generation 1)",
+                "Timeline(!a, generation 1, 6 messages, start: false, detached: false)",
+                "TimelineReset(!a, generation 1)",
+                "TimelineReset(!a, generation 1)",
                 "Timeline(!a, generation 1, 0 messages, start: false, detached: false)",
-                "Timeline(!a, generation 1, 41 messages, start: false, detached: false)",
-                "Timeline(!a, generation 1, 0 messages, start: false, detached: false)",
+                "Timeline(!b, generation 2, 4 messages, start: false, detached: false)",
             ]
         );
     }
