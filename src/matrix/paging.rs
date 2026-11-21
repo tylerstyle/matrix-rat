@@ -38,8 +38,9 @@ impl Paging {
         Self { task, answered }
     }
 
-    /// Whether the page has yet to answer.
+    /// Whether the page has yet to answer. One whose task ended without answering (it
+    /// panicked) never will, and the next request is not left to wait for it.
     pub(super) fn loading(&self) -> bool {
-        !self.answered.load(Ordering::Acquire)
+        !self.answered.load(Ordering::Acquire) && !self.task.is_finished()
     }
 }
