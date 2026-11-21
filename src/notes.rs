@@ -174,6 +174,11 @@ impl Notes {
         })
     }
 
+    /// The event ids of the messages that have notes (one with two is named twice).
+    pub fn events(&self) -> impl Iterator<Item = &str> {
+        self.map.keys().map(|(event, _)| event.as_str())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }

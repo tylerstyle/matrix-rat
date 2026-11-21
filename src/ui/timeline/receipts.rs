@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 
 use super::{INDENT, Row};
 use crate::images::EMOTE_CELLS;
-use crate::model::{ReadBy, Room, RoomKind};
+use crate::model::ReadBy;
 use crate::text::{truncate, width};
 use crate::theme::{Role, Theme};
 use crate::ui::sidebar::initial;
@@ -32,57 +32,69 @@ const NAME: usize = 16;
 /// read it, so nothing moves when receipts do. Where the last row is full to the
 /// last columns, its end gives way to the smallest marker ("… ✓") for as long as
 /// a receipt sits there.
-pub(super) fn add(mut rows: Vec<Row>, room: &Room, max_width: usize, theme: &Theme) -> Vec<Row> {
-    let direct = room.kind == RoomKind::Person;
+#[cfg(test)]
+pub(super) fn add(
+    mut rows: Vec<Row>,
+    room: &crate::model::Room,
+    max_width: usize,
+    theme: &Theme,
+) -> Vec<Row> {
+    let direct = room.kind == crate::model::RoomKind::Person;
     for at in 0..rows.len() {
         let source = rows[at].source;
         if rows.get(at + 1).is_some_and(|next| next.source == source) {
             continue;
         }
-        let read_by = match room.messages.get(source) {
-            Some(message) if !message.read_by.is_empty() => &message.read_by,
-            _ => continue,
-        };
-        let row = &mut rows[at];
-        // A picture is painted over its rows: its width counts as taken.
-        let text = row.line.width();
-        let taken = match row.image {
-            Some(image) => text.max(INDENT.len() + image.cols as usize),
-            None => text,
-        };
-        let free = max_width.saturating_sub(taken + GAP);
-        if let Some(spans) = marker(read_by, direct, theme, free) {
-            let marker_width: usize = spans.iter().map(|span| width(&span.content)).sum();
-            let pad = max_width - text - marker_width;
-            row.line.spans.push(Span::raw(" ".repeat(pad)));
-            row.line.spans.extend(spans);
-            // A voice or audio message that plays keeps it (see `draw`).
-            if let Some(part) = &mut row.audio {
-                part.marker = marker_width as u16;
-            }
-        } else if row.image.is_none() && max_width >= CUT_MIN {
-            // "… ✓" over the end of the text. (Nothing can be written over a
-            // picture; who read that is in the menu.)
-            cut(&mut row.line, max_width - 3);
-            // An emoji's picture cut into is not drawn over the marker.
-            row.emotes
-                .retain(|spot| usize::from(spot.col) + usize::from(EMOTE_CELLS.0) <= max_width - 3);
-            let muted = Style {
-                fg: theme.style(Role::Muted).fg,
-                ..Style::new()
-            };
-            let pad = max_width - 3 - row.line.width();
-            row.line
-                .spans
-                .push(Span::styled(format!("…{} ✓", " ".repeat(pad)), muted));
-            // Of that, a voice or audio message that plays keeps the tick: what was cut
-            // is not shown meanwhile.
-            if let Some(part) = &mut row.audio {
-                part.marker = 2;
-            }
+        if let Some(message) = room.messages.get(source) {
+            mark(&mut rows[at], &message.read_by, direct, max_width, theme);
         }
     }
     rows
+}
+
+/// Adds the read marker of a message (those who read up to it: `read_by`) to `row`,
+/// its last row. `direct`: in a chat with one person.
+pub(super) fn mark(row: &mut Row, read_by: &ReadBy, direct: bool, max_width: usize, theme: &Theme) {
+    if read_by.is_empty() {
+        return;
+    }
+    // A picture is painted over its rows: its width counts as taken.
+    let text = row.line.width();
+    let taken = match row.image {
+        Some(image) => text.max(INDENT.len() + image.cols as usize),
+        None => text,
+    };
+    let free = max_width.saturating_sub(taken + GAP);
+    if let Some(spans) = marker(read_by, direct, theme, free) {
+        let marker_width: usize = spans.iter().map(|span| width(&span.content)).sum();
+        let pad = max_width - text - marker_width;
+        row.line.spans.push(Span::raw(" ".repeat(pad)));
+        row.line.spans.extend(spans);
+        // A voice or audio message that plays keeps it (see `draw`).
+        if let Some(part) = &mut row.audio {
+            part.marker = marker_width as u16;
+        }
+    } else if row.image.is_none() && max_width >= CUT_MIN {
+        // "… ✓" over the end of the text. (Nothing can be written over a
+        // picture; who read that is in the menu.)
+        cut(&mut row.line, max_width - 3);
+        // An emoji's picture cut into is not drawn over the marker.
+        row.emotes
+            .retain(|spot| usize::from(spot.col) + usize::from(EMOTE_CELLS.0) <= max_width - 3);
+        let muted = Style {
+            fg: theme.style(Role::Muted).fg,
+            ..Style::new()
+        };
+        let pad = max_width - 3 - row.line.width();
+        row.line
+            .spans
+            .push(Span::styled(format!("…{} ✓", " ".repeat(pad)), muted));
+        // Of that, a voice or audio message that plays keeps the tick: what was cut
+        // is not shown meanwhile.
+        if let Some(part) = &mut row.audio {
+            part.marker = 2;
+        }
+    }
 }
 
 /// Shortens `line` to at most `columns` columns, cutting between characters.
@@ -170,7 +182,7 @@ mod tests {
     use super::super::build_rows;
     use super::*;
     use crate::images::{Graphics, ImageStore};
-    use crate::model::{Message, Reader};
+    use crate::model::{Message, Reader, Room, RoomKind};
     use crate::theme::DEFAULT_THEME;
 
     fn readers(names: &[&str], total: u32) -> ReadBy {
