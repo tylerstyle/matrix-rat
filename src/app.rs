@@ -5403,6 +5403,9 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // Without these, a kill or a closed terminal window would skip all cleanup.
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sighup = signal(SignalKind::hangup())?;
+    // Before the worker starts, as the signals above: an error from here on is returned
+    // only after the worker was shut down (see `outcome` below).
+    let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
     let (matrix, mut matrix_events) = if demo {
         (None, None)
     } else {
@@ -5440,7 +5443,6 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let _notify_cache_guard = NotifyCacheGuard(Arc::clone(&notify_icons));
     app.set_notify_icons(notify_icons);
     let mut encoded_images = app.start_images(graphics);
-    let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
     // Clicks on desktop notifications come back here, as the room to open.
     let (notice_clicks, mut clicked) =
         tokio::sync::mpsc::unbounded_channel::<crate::notify::Click>();
