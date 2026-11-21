@@ -205,8 +205,18 @@ fn draw_labelled(frame: &mut Frame, app: &mut App, area: Rect, label: &str) {
             Span::styled(count.as_str(), theme.style(badge_role(room.mention))),
         ]);
         frame.render_widget(&line, rect);
+        // Under the pointer, the count and the gap behind it are marked, not the tile:
+        // a picture is drawn over the tile anyway, and a letter's tile keeps its own
+        // colours, which its letter was chosen to stand out from.
         if app.hover == Some(HitId::BarRoom(*index)) {
-            frame.buffer_mut().set_style(rect, theme.style(Role::Hover));
+            let marked = Rect {
+                x: rect.x.saturating_add(TILE),
+                width: rect.width.saturating_sub(TILE),
+                ..rect
+            };
+            frame
+                .buffer_mut()
+                .set_style(marked, theme.style(Role::Hover));
         }
         // The room's picture goes over the tile where the terminal can show one.
         if rect.width >= TILE
@@ -723,11 +733,18 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             })
         };
+        let bg = |terminal: &Terminal<TestBackend>, x: u16| terminal.backend().buffer()[(x, 0)].bg;
+        let fg = |terminal: &Terminal<TestBackend>, x: u16| terminal.backend().buffer()[(x, 0)].fg;
         app.on_event(moved(design));
         let over_room = terminal(&mut app, 50, 20);
-        let bg = |terminal: &Terminal<TestBackend>, x: u16| terminal.backend().buffer()[(x, 0)].bg;
         assert_eq!(Some(bg(&over_room, design + 2)), hover.bg);
         assert_ne!(Some(bg(&over_room, label)), hover.bg);
+        // The letter's tile keeps its colours, as a picture over it would.
+        for x in [design, design + 1] {
+            assert_eq!(bg(&over_room, x), bg(&shown, x));
+            assert_eq!(fg(&over_room, x), fg(&shown, x));
+            assert_ne!(Some(bg(&over_room, x)), hover.bg);
+        }
         app.on_event(moved(label));
         let over_label = terminal(&mut app, 50, 20);
         assert_eq!(Some(bg(&over_label, label)), hover.bg);
