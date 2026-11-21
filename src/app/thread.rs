@@ -146,13 +146,27 @@ impl ThreadView {
     }
 
     pub(super) fn rename_own_sender(&mut self, name: &str) {
-        if self.root_message.own && self.root_message.sender != name {
-            self.root_message.sender = name.to_owned();
-        }
+        // Whether the new name is someone else's too is worked out anew, as for the
+        // room (see `on_own_profile`).
+        let mut renamed = false;
         for msg in &mut self.room_messages {
             if msg.own && msg.sender != name {
                 msg.sender = name.to_owned();
+                msg.sender_ambiguous = false;
+                renamed = true;
             }
+        }
+        if renamed {
+            crate::model::mark_namesakes(&mut self.room_messages);
+        }
+        if self.root_message.own && self.root_message.sender != name {
+            self.root_message.sender = name.to_owned();
+            let root = &self.root_message.id;
+            self.root_message.sender_ambiguous = self
+                .room_messages
+                .iter()
+                .find(|msg| msg.id == *root)
+                .is_some_and(|msg| msg.sender_ambiguous);
         }
         self.room_rows = None;
     }

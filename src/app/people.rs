@@ -902,8 +902,15 @@ impl App {
                     && msg.sender != eff
                 {
                     msg.sender = eff.clone();
+                    // What the SDK found was about the name the message had: whether
+                    // the new one is someone else's too is worked out anew from what
+                    // is loaded (the SDK says it with its next update).
+                    msg.sender_ambiguous = false;
                     room_changed = true;
                 }
+            }
+            if room_changed {
+                crate::model::mark_namesakes(&mut room.messages);
             }
             if room_changed && Some(idx) == open_active {
                 any_changed = true;
@@ -2137,44 +2144,68 @@ mod tests {
         assert_eq!(other.messages[0].sender, "alice");
     }
 
-    /// Our own name, put on our messages when the profile arrives, stays told apart
-    /// from someone else's of the same name (as the SDK said it is).
+    /// Our own name, put on our messages when our profile arrives, is told apart as
+    /// it is now: what the SDK found about the name the messages had is not kept for
+    /// another one.
     #[test]
-    fn an_own_name_that_someone_else_has_too_keeps_the_id() {
+    fn an_own_name_put_on_our_messages_is_told_apart_as_it_is_now() {
         let (mut app, mut terminal, _commands) = connected();
-        let said = |id: &str, sender_id: &str, own: bool| Message {
+        let said = |id: &str, sender: &str, sender_id: &str, ambiguous: bool| Message {
             id: id.into(),
             item: Some(ItemRef::Event(format!("${id}:example.org"))),
-            sender: "alice".into(),
+            sender: sender.into(),
             sender_id: Some(sender_id.into()),
-            sender_ambiguous: true,
+            sender_ambiguous: ambiguous,
             body: format!("said {id}"),
             day: "Today".into(),
             time: "12:00".into(),
-            own,
+            own: sender_id == "@alice:example.org",
             ..Message::default()
         };
-        app.on_matrix(MatrixEvent::Timeline {
-            room_id: ROOM.into(),
-            generation: app.generation,
-            messages: vec![
-                said("t1", "@alice:example.org", true),
-                said("t2", "@alice:elsewhere.org", false),
+        let renamed = |app: &mut App, messages: Vec<Message>| {
+            app.on_matrix(MatrixEvent::Timeline {
+                room_id: ROOM.into(),
+                generation: app.generation,
+                messages,
+                reached_start: false,
+                detached: None,
+            });
+            app.on_matrix(MatrixEvent::OwnProfile(OwnProfile {
+                display_name: Some("Sammy".to_owned()),
+                avatar: None,
+                room_names: std::collections::BTreeMap::new(),
+            }));
+        };
+        let name_of = |app: &App, id: &str| -> String {
+            let messages = &app.room().unwrap().messages;
+            let message = messages.iter().find(|m| m.id == id).unwrap();
+            message.sender_name().into_owned()
+        };
+
+        // The SDK found "alice" to be the name of two: us and someone else.
+        renamed(
+            &mut app,
+            vec![
+                said("t1", "alice", "@alice:example.org", true),
+                said("t2", "alice", "@alice:elsewhere.org", true),
             ],
-            reached_start: false,
-            detached: None,
-        });
-        app.on_matrix(MatrixEvent::OwnProfile(OwnProfile {
-            display_name: None,
-            avatar: None,
-            room_names: std::collections::BTreeMap::new(),
-        }));
+        );
+        // Nobody else here goes by "Sammy": our messages say just that.
+        assert_eq!(name_of(&app, "t1"), "Sammy");
         let text = screen(&mut app, &mut terminal);
-        find(&text, "● alice (@alice:example.org)");
+        find(&text, "● Sammy  12:00");
         find(&text, "● alice (@alice:elsewhere.org)");
-        let messages = &app.room().unwrap().messages;
-        let own = messages.iter().find(|m| m.id == "t1").unwrap();
-        assert_eq!(own.sender_name(), "alice (@alice:example.org)");
+
+        // Someone here goes by "Sammy" already: both are told apart.
+        renamed(
+            &mut app,
+            vec![
+                said("t1", "alice", "@alice:example.org", false),
+                said("t3", "Sammy", "@sammy:elsewhere.org", false),
+            ],
+        );
+        assert_eq!(name_of(&app, "t1"), "Sammy (@alice:example.org)");
+        assert_eq!(name_of(&app, "t3"), "Sammy (@sammy:elsewhere.org)");
     }
 
     #[test]
