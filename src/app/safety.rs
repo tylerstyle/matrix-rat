@@ -818,11 +818,17 @@ mod tests {
         }
     }
 
+    /// Ignoring someone makes the SDK clear the room: the worker says so, then sends
+    /// the empty timeline, and the app forgets that the start was reached.
     #[test]
-    fn empty_timeline_reset_clears_reached_start() {
+    fn timeline_reset_clears_reached_start() {
         let (mut app, _terminal, _commands) = connected();
         app.timeline.reached_start = true;
         app.timeline.empty_batches = 3;
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: ROOM.into(),
+            generation: app.generation,
+        });
         app.on_matrix(MatrixEvent::Timeline {
             room_id: ROOM.into(),
             generation: app.generation,

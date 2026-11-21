@@ -3654,7 +3654,6 @@ impl App {
                 } else if generation == self.generation
                     && self.room_id().as_deref() == Some(&room_id)
                 {
-                    let empty_reset = messages.is_empty() && !reached_start;
                     let messages = self.place_unread_line(messages, detached.is_some());
                     let messages = self.thread_snapshot(messages, reached_start);
                     self.apply_timeline(messages);
@@ -3662,10 +3661,8 @@ impl App {
                     self.sync_pinned_flags(&room_id);
                     self.sync_saved_flags(&room_id);
                     self.search_sync();
-                    if empty_reset {
-                        self.timeline.reached_start = false;
-                        self.timeline.empty_batches = 0;
-                    }
+                    // Only adds: a timeline short of the start says nothing of what was
+                    // loaded before. Forgetting it takes a `TimelineReset`.
                     self.timeline.reached_start |= reached_start;
                     match detached {
                         Some(info) => {
@@ -3680,6 +3677,20 @@ impl App {
                             self.timeline.want_newer = false;
                         }
                     }
+                }
+            }
+            MatrixEvent::TimelineReset {
+                room_id,
+                generation,
+            } => {
+                // The timeline that follows says afresh whether the start is loaded, and,
+                // for a slice around an event, whether the end is (a live view's end is
+                // never asked for, and stays unreached).
+                if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
+                    self.timeline.reached_start = false;
+                    self.timeline.empty_batches = 0;
+                    self.timeline.reached_end = false;
+                    self.timeline.empty_forward_batches = 0;
                 }
             }
             MatrixEvent::DetachedNew { generation, count } => {
@@ -7128,6 +7139,91 @@ mod tests {
         redraw(&mut app, &mut terminal);
         app.after_draw();
         assert!(!drain(&mut commands).contains(&"Paginate(!a)".to_owned()));
+    }
+
+    /// The start of the room was reached, then the SDK cleared it and kept only its
+    /// latest messages (a sync that missed some): the worker says so before the timeline
+    /// that follows, which is not empty, and the app asks for older messages again. A
+    /// reset of another room or opening is not this one's.
+    #[test]
+    fn a_reset_timeline_asks_for_older_messages_again() {
+        let (mut app, mut terminal, mut commands) = connected();
+        drain(&mut commands);
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: "!a".into(),
+            generation: app.generation,
+            messages: vec![remote("1", "ann", "hello")],
+            reached_start: true,
+            detached: None,
+        });
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        assert!(!drain(&mut commands).contains(&"Paginate(!a)".to_owned()));
+
+        // Not this opening's, nor this room's: nothing changes.
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation - 1,
+        });
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!b".into(),
+            generation: app.generation,
+        });
+        // A timeline short of the start alone says nothing of what was loaded.
+        app.on_matrix(timeline(&app, vec![remote("1", "ann", "hello")]));
+        assert!(app.timeline.reached_start);
+
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(&app, vec![remote("9", "ann", "after the gap")]));
+        assert!(!app.timeline.reached_start);
+        redraw(&mut app, &mut terminal);
+        app.after_draw();
+        assert!(drain(&mut commands).contains(&"Paginate(!a)".to_owned()));
+        // And the start, once loaded again, is known again.
+        app.on_matrix(MatrixEvent::Paginated {
+            generation: app.generation,
+            reached_start: true,
+        });
+        assert!(app.timeline.reached_start);
+    }
+
+    /// A slice around an event that the SDK reloads is back to its first window: the
+    /// reset forgets the end as well as the start, and the slice after it (whose
+    /// flags the worker forgot too) leaves both unreached.
+    #[test]
+    fn a_reset_slice_around_an_event_forgets_its_end_too() {
+        let (mut app, _terminal, _commands) = connected();
+        let slice = |app: &App, reached_end: bool| {
+            let mut event = detached_timeline(
+                "!a",
+                app.generation,
+                "$5",
+                None,
+                reached_end,
+                vec![remote("5", "ann", "the event")],
+            );
+            if let MatrixEvent::Timeline { reached_start, .. } = &mut event {
+                *reached_start = reached_end;
+            }
+            event
+        };
+        app.on_matrix(slice(&app, true));
+        assert!(app.timeline.detached);
+        assert!(app.timeline.reached_start && app.timeline.reached_end);
+        app.timeline.empty_forward_batches = 2;
+
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        assert!(!app.timeline.reached_start && !app.timeline.reached_end);
+        assert_eq!(app.timeline.empty_forward_batches, 0);
+        app.on_matrix(slice(&app, false));
+        assert!(app.timeline.detached);
+        assert!(!app.timeline.reached_start && !app.timeline.reached_end);
     }
 
     #[test]
