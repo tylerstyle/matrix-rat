@@ -476,6 +476,7 @@ impl App {
                 }
                 MatrixCmd::VotePoll { poll_event_id, .. }
                 | MatrixCmd::EndPoll { poll_event_id, .. } => poll_event_id == root,
+                MatrixCmd::RetryDecryption { event_id, .. } => event_id == root,
                 MatrixCmd::LoginPassword { .. }
                 | MatrixCmd::LoginBrowser { .. }
                 | MatrixCmd::CancelLogin
@@ -532,7 +533,6 @@ impl App {
                 | MatrixCmd::Devices(_)
                 | MatrixCmd::Keywords(_)
                 | MatrixCmd::Saved(_)
-                | MatrixCmd::RetryDecryption { .. }
                 | MatrixCmd::FetchUserProfile { .. }
                 | MatrixCmd::SetOwnDisplayName { .. }
                 | MatrixCmd::SetOwnAvatar { .. }
@@ -1238,5 +1238,63 @@ mod tests {
         screen(&mut app, &mut terminal);
         app.after_draw();
         assert_eq!(drain(&mut commands), ["InThread($ev5, MarkRead(!a))"]);
+    }
+
+    #[test]
+    fn retry_decryption_of_an_unloaded_thread_root_goes_to_the_room() {
+        use crate::model::{MsgKind, UtdWhy};
+
+        let (mut app, _terminal, mut commands) = connected();
+        app.rooms[0].messages[5].kind = MsgKind::Undecryptable;
+        app.rooms[0].messages[5].utd = Some(UtdWhy::NoKey);
+        app.open_thread(5);
+        drain(&mut commands);
+
+        // Replies arrive before the thread timeline holds its own copy of the root.
+        let mut replies = thread_messages().split_off(1);
+        replies[0].kind = MsgKind::Undecryptable;
+        replies[0].utd = Some(UtdWhy::NoKey);
+        app.on_matrix(update(&app, 2, replies));
+
+        // Retrying the root must go to the room timeline; retrying a reply stays in the thread.
+        app.timeline.selected = Some(0);
+        app.perform(Action::RetryDecryption);
+        assert!(matches!(
+            next(&mut commands),
+            Some(MatrixCmd::RetryDecryption { ref room_id, ref event_id })
+                if room_id == "!a" && event_id == "$ev5"
+        ));
+
+        app.timeline.selected = Some(1);
+        app.perform(Action::RetryDecryption);
+        assert!(matches!(
+            next(&mut commands),
+            Some(MatrixCmd::InThread { ref root, ref command })
+                if root == "$ev5"
+                    && matches!(
+                        command.as_ref(),
+                        MatrixCmd::RetryDecryption { room_id, event_id }
+                            if room_id == "!a" && event_id == "$reply1"
+                    )
+        ));
+
+        // Once the thread timeline holds the root itself, retrying it routes to the thread.
+        let mut loaded = thread_messages();
+        loaded[0].kind = MsgKind::Undecryptable;
+        loaded[0].utd = Some(UtdWhy::NoKey);
+        app.on_matrix(update(&app, 2, loaded));
+
+        app.timeline.selected = Some(0);
+        app.perform(Action::RetryDecryption);
+        assert!(matches!(
+            next(&mut commands),
+            Some(MatrixCmd::InThread { ref root, ref command })
+                if root == "$ev5"
+                    && matches!(
+                        command.as_ref(),
+                        MatrixCmd::RetryDecryption { room_id, event_id }
+                            if room_id == "!a" && event_id == "$ev5"
+                    )
+        ));
     }
 }
