@@ -1744,25 +1744,23 @@ impl App {
                 typing: false,
             });
         }
-        // What is unsent here goes to the store, in case we do not come back.
+        // An edit belongs to its room; any aside draft whose command became plain text
+        // returns to the composer before the draft is saved to the store.
+        self.cancel_compose();
+        self.reclaim_aside_if_plain();
         self.save_draft();
         self.clear_carried_draft();
-        // An edit belongs to its room; a plain draft waits there until we come back.
-        self.cancel_compose();
+        // If the carried command was cleared to empty, put its aside draft (and marks)
+        // back onto the room; if a command is still typed, its own marks stay with it
+        // while the aside draft and its marks stay together in `drafts.aside`.
+        if self.composer.text().trim().is_empty() {
+            self.restore_aside_draft();
+        }
         let draft = self.composer.take();
-        let scope = self.attach_scope();
-        let (draft, save_marks) = match scope.as_ref() {
-            Some(scope) => self.take_leaving_aside(scope, draft),
-            None => (draft, true),
-        };
         if let Some(room) = self.open_index().and_then(|open| self.rooms.get_mut(open)) {
             let old_id = room.id.clone();
             room.draft = draft;
-            if save_marks {
-                self.save_room_marks(&old_id);
-            } else {
-                self.clear_completion_marks();
-            }
+            self.save_room_marks(&old_id);
         }
     }
 
@@ -8204,6 +8202,84 @@ mod tests {
         app.on_event(key(KeyCode::Esc));
         assert!(!app.chat_closed);
         assert_eq!(app.composer.text(), "back on esc");
+    }
+
+    #[test]
+    fn aside_draft_marks_stay_with_aside_draft_not_command() {
+        let (mut app, _terminal) = drawn();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        app.rooms.clear();
+        app.matrix = Some(handle);
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Knock, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!i");
+        // Suppose `!k` already had an in-memory draft with a mention mark for Alice.
+        app.rooms[1].draft = "ping Alice".to_owned();
+        app.complete.marks.push(
+            crate::complete::MentionMark::user("Alice", "@alice:example.org").with_at(Some(5)),
+        );
+        app.save_room_marks("!k");
+
+        // User is on pending `!i` and types a `/me` command mentioning "Alice" as plain text.
+        type_text(&mut app, "/me waves at Alice");
+        app.on_matrix(MatrixEvent::Rooms(vec![
+            summary("!i", "Invited", RoomCategory::Invite, 0),
+            summary("!k", "Knocked", RoomCategory::Room, 0),
+            summary("!other", "Other", RoomCategory::Room, 0),
+        ]));
+        assert_eq!(app.rooms[app.active].id, "!k");
+        assert_eq!(app.composer.text(), "/me waves at Alice");
+
+        // Leave `!k` and come back: the aside draft's mention mark must NOT attach to `/me`.
+        app.open_room(2);
+        app.open_room(1);
+        assert_eq!(app.composer.text(), "/me waves at Alice");
+        let Outgoing::Emote { mentions, .. } = app.format_outgoing(app.composer.text()) else {
+            panic!("expected emote");
+        };
+        assert!(
+            mentions.is_none(),
+            "aside draft's mention marks must not land on the command: {mentions:?}"
+        );
+
+        // Sending `/me waves at Alice` sends no mention and restores "ping Alice" WITH its mark.
+        let _ = drain(&mut commands);
+        app.perform(Action::Send);
+        let mut emote_mentions = None;
+        while let Ok(cmd) = commands.try_recv() {
+            if let MatrixCmd::Send {
+                message: Outgoing::Emote { mentions, .. },
+                ..
+            } = cmd
+            {
+                emote_mentions = Some(mentions);
+            }
+        }
+        assert!(
+            matches!(emote_mentions, Some(None)),
+            "expected emote with no mentions, got {emote_mentions:?}"
+        );
+        assert_eq!(app.composer.text(), "ping Alice");
+        let Outgoing::Text {
+            html: Some(html),
+            mentions: Some(restored_mentions),
+            ..
+        } = app.format_outgoing(app.composer.text())
+        else {
+            panic!("restored aside draft must keep its mention mark");
+        };
+        assert!(
+            restored_mentions
+                .user_ids
+                .iter()
+                .any(|u| u == "@alice:example.org")
+        );
+        assert!(
+            html.contains("<a href=\"https://matrix.to/#/@alice:example.org\">Alice</a>"),
+            "{html}"
+        );
     }
 
     #[test]

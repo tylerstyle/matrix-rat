@@ -121,6 +121,24 @@ impl AttachState {
         self.stash.entry(scope).or_insert(draft);
     }
 
+    /// Prepends `draft` above any draft already stashed for `/upload` in `scope` (or
+    /// stashes `draft` alone if the slot is empty), without duplicating identical text.
+    pub fn merge_stashed_draft(&mut self, scope: Scope, draft: String) {
+        if draft.is_empty() {
+            return;
+        }
+        match self.stash.get_mut(&scope) {
+            Some(existing) if !existing.trim().is_empty() => {
+                if existing.trim() != draft.trim() {
+                    *existing = format!("{draft}\n\n{existing}");
+                }
+            }
+            _ => {
+                self.stash.insert(scope, draft);
+            }
+        }
+    }
+
     /// Drops what waits in a room and its threads: the room is gone.
     pub fn forget_room(&mut self, room_id: &str) {
         self.pending.retain(|(room, _), _| room != room_id);

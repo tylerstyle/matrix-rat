@@ -198,12 +198,15 @@ impl App {
         }
     }
 
-    pub(super) fn restore_room_marks(&mut self, room_id: &str) {
-        self.complete.marks = self
-            .complete
+    pub(super) fn take_room_marks(&mut self, room_id: &str) -> Vec<MentionMark> {
+        self.complete
             .draft_marks
             .remove(room_id)
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    pub(super) fn restore_room_marks(&mut self, room_id: &str) {
+        self.complete.marks = self.take_room_marks(room_id);
         self.complete.close_popup();
     }
 
