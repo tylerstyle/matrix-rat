@@ -3685,12 +3685,16 @@ impl App {
             } => {
                 // The timeline that follows says afresh whether the start is loaded, and,
                 // for a slice around an event, whether the end is (a live view's end is
-                // never asked for, and stays unreached).
+                // never asked for, and stays unreached). Any pagination request the worker
+                // was running for this view may have been aborted across a reset or
+                // restore, so the app can ask again.
                 if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
                     self.timeline.reached_start = false;
                     self.timeline.empty_batches = 0;
+                    self.timeline.loading_older = false;
                     self.timeline.reached_end = false;
                     self.timeline.empty_forward_batches = 0;
+                    self.timeline.loading_newer = false;
                 }
             }
             MatrixEvent::DetachedNew { generation, count } => {
@@ -7213,14 +7217,19 @@ mod tests {
         app.on_matrix(slice(&app, true));
         assert!(app.timeline.detached);
         assert!(app.timeline.reached_start && app.timeline.reached_end);
+        app.timeline.empty_batches = 3;
         app.timeline.empty_forward_batches = 2;
+        app.timeline.loading_older = true;
+        app.timeline.loading_newer = true;
 
         app.on_matrix(MatrixEvent::TimelineReset {
             room_id: "!a".into(),
             generation: app.generation,
         });
         assert!(!app.timeline.reached_start && !app.timeline.reached_end);
+        assert_eq!(app.timeline.empty_batches, 0);
         assert_eq!(app.timeline.empty_forward_batches, 0);
+        assert!(!app.timeline.loading_older && !app.timeline.loading_newer);
         app.on_matrix(slice(&app, false));
         assert!(app.timeline.detached);
         assert!(!app.timeline.reached_start && !app.timeline.reached_end);

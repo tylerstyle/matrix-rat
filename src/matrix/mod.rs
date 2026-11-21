@@ -132,8 +132,9 @@ pub enum MatrixCmd {
         thread_root: Option<String>,
         generation: u64,
     },
-    /// Abort an in-flight [`MatrixCmd::OpenEvent`] if its `generation` is still pending,
-    /// leaving whatever timeline is currently active untouched.
+    /// Abort an [`MatrixCmd::OpenEvent`] for `generation`. If it is still pending, the
+    /// active timeline is left untouched; if the worker already switched to it, the view
+    /// that was streaming before the jump is restored under its original generation.
     CancelOpenEvent {
         generation: u64,
     },

@@ -64,13 +64,31 @@ pub(super) enum OpenedTimeline {
     },
 }
 
-struct DetachedSlot {
+/// What the forwarder is streaming to the UI: a live room/thread timeline, or a
+/// detached `/context` slice around an event.
+enum StreamKind {
+    Live,
+    Detached {
+        target_event: String,
+        timeline: Arc<Timeline>,
+        reached_start: Arc<AtomicBool>,
+        reached_end: Arc<AtomicBool>,
+    },
+}
+
+struct ActiveStream {
     room_id: String,
     thread: Option<String>,
     generation: u64,
-    timeline: Arc<Timeline>,
-    reached_start: Arc<AtomicBool>,
-    reached_end: Arc<AtomicBool>,
+    kind: StreamKind,
+}
+
+/// The view the worker was streaming right before a jump took over, kept in case the UI
+/// had already cancelled that jump (`CancelOpenEvent`) before hearing of the switch.
+struct BeforeJump {
+    jump_generation: u64,
+    previous: Option<ActiveStream>,
+    at: Instant,
 }
 
 struct DetachedForward {
@@ -95,8 +113,10 @@ pub struct Timelines {
     paginator: Option<JoinHandle<()>>,
     /// The running request for newer messages on a detached timeline, if any.
     forward_paginator: Option<JoinHandle<()>>,
-    /// Active event-focused timeline when viewing older history via `/context`.
-    detached: Option<DetachedSlot>,
+    /// What `forwarder` is currently streaming (`None` when no room is open).
+    active: Option<ActiveStream>,
+    /// Saved when a jump replaces `active`, so a late `CancelOpenEvent` can restore it.
+    before_jump: Option<BeforeJump>,
     /// Background `/context` request for `OpenEvent`, so slow servers never block sync.
     event_opener: Option<JoinHandle<()>>,
     pending_open_event_gen: Option<u64>,
@@ -150,7 +170,8 @@ impl Timelines {
             forwarder: None,
             paginator: None,
             forward_paginator: None,
-            detached: None,
+            active: None,
+            before_jump: None,
             event_opener: None,
             pending_open_event_gen: None,
             open_tx,
@@ -188,7 +209,8 @@ impl Timelines {
 
     pub fn close(&mut self) {
         self.cancel_open_event();
-        self.detached = None;
+        self.active = None;
+        self.before_jump = None;
         // What was shown until now was in use until now.
         let now = Instant::now();
         for key in std::mem::take(&mut self.shown) {
@@ -235,8 +257,12 @@ impl Timelines {
             .iter()
             .map(|cached| cached.timeline.clone())
             .collect();
-        if let Some(detached) = &self.detached {
-            timelines.push(detached.timeline.clone());
+        if let Some(ActiveStream {
+            kind: StreamKind::Detached { timeline, .. },
+            ..
+        }) = &self.active
+        {
+            timelines.push(timeline.clone());
         }
         tokio::spawn(async move {
             for timeline in timelines {
@@ -334,14 +360,32 @@ impl Timelines {
         }
     }
 
-    /// When a cached timeline that is not shown will have been idle for
-    /// [`IDLE_TIMELINE`], if there is one.
+    /// When a cached timeline that is not shown (or a detached slice stashed across a
+    /// jump) will have been idle for [`IDLE_TIMELINE`], if there is one.
     fn next_idle(&self) -> Option<Instant> {
-        self.cache
+        let cached = self
+            .cache
             .iter()
             .filter(|cached| !self.shown.contains(&cached.key))
             .map(|cached| cached.last_used + IDLE_TIMELINE)
-            .min()
+            .min();
+        let stashed = self
+            .before_jump
+            .as_ref()
+            .filter(|saved| {
+                matches!(
+                    &saved.previous,
+                    Some(ActiveStream {
+                        kind: StreamKind::Detached { .. },
+                        ..
+                    })
+                )
+            })
+            .map(|saved| saved.at + IDLE_TIMELINE);
+        match (cached, stashed) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Ends when a cached timeline has been idle long enough to be dropped (by
@@ -358,14 +402,22 @@ impl Timelines {
     }
 
     /// Drops the cached timelines that have not been used for [`IDLE_TIMELINE`] at `now`
-    /// and are not shown. A task still at work with one (a send, a page) keeps it until
-    /// it is done; the next command for the room opens a new one.
+    /// and are not shown, and any pre-jump view stashed for at least that long. A task
+    /// still at work with a timeline (a send, a page) keeps it until it is done; the next
+    /// command for the room opens a new one.
     pub(super) fn drop_idle(&mut self, now: Instant) {
         let shown = &self.shown;
         self.cache.retain(|cached| {
             shown.contains(&cached.key)
                 || now.saturating_duration_since(cached.last_used) < IDLE_TIMELINE
         });
+        if self
+            .before_jump
+            .as_ref()
+            .is_some_and(|saved| now.saturating_duration_since(saved.at) >= IDLE_TIMELINE)
+        {
+            self.before_jump = None;
+        }
     }
 
     fn spawn_members_if_needed(&mut self, room: &Room, timeline: &Arc<Timeline>) {
@@ -481,14 +533,21 @@ impl Timelines {
         &mut self,
         room_id: &str,
     ) -> Result<(Arc<Timeline>, Option<Arc<AtomicBool>>)> {
-        if let Some(detached) = &self.detached
-            && detached.room_id == room_id
-            && detached.thread == self.thread
+        if let Some(ActiveStream {
+            room_id: active_room,
+            thread,
+            kind:
+                StreamKind::Detached {
+                    timeline,
+                    reached_start,
+                    ..
+                },
+            ..
+        }) = &self.active
+            && active_room == room_id
+            && *thread == self.thread
         {
-            return Ok((
-                detached.timeline.clone(),
-                Some(detached.reached_start.clone()),
-            ));
+            return Ok((timeline.clone(), Some(reached_start.clone())));
         }
         Ok((self.timeline(room_id).await?, None))
     }
@@ -548,8 +607,20 @@ impl Timelines {
                     return jump_failed("That message was deleted.".to_owned());
                 }
                 let timeline = self.cached(&cache_key).unwrap_or(cached);
+                let previous = self.active.take();
                 self.close();
                 self.show(&room_id, thread_root.as_deref());
+                self.before_jump = Some(BeforeJump {
+                    jump_generation: generation,
+                    previous,
+                    at: Instant::now(),
+                });
+                self.active = Some(ActiveStream {
+                    room_id: room_id.clone(),
+                    thread: thread_root.clone(),
+                    generation,
+                    kind: StreamKind::Live,
+                });
                 self.tell_draft_for(&room, &room_id, thread_root.as_deref())
                     .await;
                 self.forwarder = Some(tokio::spawn(forward(
@@ -708,6 +779,7 @@ impl Timelines {
                         return;
                     }
                 };
+                let previous = self.active.take();
                 self.close();
                 let prev_thread = self.thread.take();
                 self.thread = thread.clone();
@@ -717,17 +789,138 @@ impl Timelines {
                 self.show(&room_id, thread.as_deref());
                 let reached_start = Arc::new(AtomicBool::new(false));
                 let reached_end = Arc::new(AtomicBool::new(false));
-                self.detached = Some(DetachedSlot {
+                self.before_jump = Some(BeforeJump {
+                    jump_generation: generation,
+                    previous,
+                    at: Instant::now(),
+                });
+                self.active = Some(ActiveStream {
                     room_id: room_id.clone(),
                     thread: thread.clone(),
                     generation,
-                    timeline: timeline.clone(),
-                    reached_start: reached_start.clone(),
-                    reached_end: reached_end.clone(),
+                    kind: StreamKind::Detached {
+                        target_event: target_event.clone(),
+                        timeline: timeline.clone(),
+                        reached_start: reached_start.clone(),
+                        reached_end: reached_end.clone(),
+                    },
                 });
                 self.spawn_members_if_needed(&room, &timeline);
                 self.tell_draft_for(&room, &room_id, thread.as_deref())
                     .await;
+                self.forwarder = Some(tokio::spawn(forward(
+                    room,
+                    timeline,
+                    room_id,
+                    generation,
+                    self.events.clone(),
+                    thread,
+                    self.read_marks.clone(),
+                    Some(DetachedForward {
+                        target_event,
+                        reached_start,
+                        reached_end,
+                        live,
+                    }),
+                    self.ignored.clone(),
+                    self.own_refresh.clone(),
+                    self.own_room_names.clone(),
+                )));
+            }
+        }
+    }
+
+    /// Reopens the view that was streaming before a jump when `CancelOpenEvent` arrives
+    /// after the jump already switched the worker over. Sends `TimelineReset` ahead of
+    /// the new forwarder so the app does not keep stale `reached_start`/`reached_end` or
+    /// pagination-in-flight flags from while the old forwarder was stopped.
+    async fn restore(&mut self, previous: Option<ActiveStream>) {
+        self.close();
+        let Some(view) = previous else {
+            return;
+        };
+        let Ok(room) = self.room(&view.room_id) else {
+            return;
+        };
+        if room.state() != matrix_sdk::RoomState::Joined {
+            return;
+        }
+        let ActiveStream {
+            room_id,
+            thread,
+            generation,
+            kind,
+        } = view;
+        match kind {
+            StreamKind::Live => {
+                let prev_thread = self.thread.take();
+                self.thread = thread.clone();
+                let timeline = self.timeline(&room_id).await;
+                self.thread = prev_thread;
+                let Ok(timeline) = timeline else {
+                    return;
+                };
+                let need_page = match &thread {
+                    Some(root) => thread_needs_page(&timeline.items().await, root),
+                    None => false,
+                };
+                self.show(&room_id, thread.as_deref());
+                self.active = Some(ActiveStream {
+                    room_id: room_id.clone(),
+                    thread: thread.clone(),
+                    generation,
+                    kind: StreamKind::Live,
+                });
+                let _ = self.events.send(MatrixEvent::TimelineReset {
+                    room_id: room_id.clone(),
+                    generation,
+                });
+                self.forwarder = Some(tokio::spawn(forward(
+                    room,
+                    timeline.clone(),
+                    room_id,
+                    generation,
+                    self.events.clone(),
+                    thread,
+                    self.read_marks.clone(),
+                    None,
+                    self.ignored.clone(),
+                    self.own_refresh.clone(),
+                    self.own_room_names.clone(),
+                )));
+                if need_page {
+                    self.spawn_paginate(timeline, None, generation);
+                }
+            }
+            StreamKind::Detached {
+                target_event,
+                timeline,
+                reached_start,
+                reached_end,
+            } => {
+                let prev_thread = self.thread.take();
+                self.thread = thread.clone();
+                let live = self.timeline(&room_id).await.ok();
+                self.thread = prev_thread;
+                self.show(&room_id, thread.as_deref());
+                // The cache may have reloaded while the forwarder was down; start afresh.
+                reached_start.store(false, Ordering::Release);
+                reached_end.store(false, Ordering::Release);
+                self.active = Some(ActiveStream {
+                    room_id: room_id.clone(),
+                    thread: thread.clone(),
+                    generation,
+                    kind: StreamKind::Detached {
+                        target_event: target_event.clone(),
+                        timeline: timeline.clone(),
+                        reached_start: reached_start.clone(),
+                        reached_end: reached_end.clone(),
+                    },
+                });
+                let _ = self.events.send(MatrixEvent::TimelineReset {
+                    room_id: room_id.clone(),
+                    generation,
+                });
                 self.forwarder = Some(tokio::spawn(forward(
                     room,
                     timeline,
@@ -791,6 +984,12 @@ impl Timelines {
                         };
                         let thread = self.thread.clone();
                         self.show(&room_id, thread.as_deref());
+                        self.active = Some(ActiveStream {
+                            room_id: room_id.clone(),
+                            thread: thread.clone(),
+                            generation,
+                            kind: StreamKind::Live,
+                        });
                         self.forwarder = Some(tokio::spawn(forward(
                             room,
                             timeline.clone(),
@@ -832,12 +1031,26 @@ impl Timelines {
             MatrixCmd::CancelOpenEvent { generation } => {
                 if self.pending_open_event_gen == Some(generation) {
                     self.cancel_open_event();
+                } else if let Some(saved) = self
+                    .before_jump
+                    .take_if(|saved| saved.jump_generation == generation)
+                {
+                    self.restore(saved.previous).await;
                 }
             }
             MatrixCmd::Paginate {
                 room_id,
                 generation,
             } => {
+                // Asking to page the jump's generation means the UI adopted it; drop any
+                // stashed pre-jump view right away.
+                if self
+                    .before_jump
+                    .as_ref()
+                    .is_some_and(|saved| saved.jump_generation == generation)
+                {
+                    self.before_jump = None;
+                }
                 // One request at a time per open room.
                 if self
                     .paginator
@@ -865,31 +1078,46 @@ impl Timelines {
                 generation,
             } => {
                 if self
+                    .before_jump
+                    .as_ref()
+                    .is_some_and(|saved| saved.jump_generation == generation)
+                {
+                    self.before_jump = None;
+                }
+                if self
                     .forward_paginator
                     .as_ref()
                     .is_some_and(|task| !task.is_finished())
                 {
                     return;
                 }
-                let Some(detached) = &self.detached else {
+                let Some(ActiveStream {
+                    room_id: active_room,
+                    thread,
+                    generation: active_gen,
+                    kind:
+                        StreamKind::Detached {
+                            timeline,
+                            reached_end,
+                            ..
+                        },
+                }) = &self.active
+                else {
                     let _ = self.events.send(MatrixEvent::PaginatedForwards {
                         generation,
                         reached_end: true,
                     });
                     return;
                 };
-                if detached.room_id != room_id
-                    || detached.thread != self.thread
-                    || detached.generation != generation
-                {
+                if *active_room != room_id || *thread != self.thread || *active_gen != generation {
                     let _ = self.events.send(MatrixEvent::PaginatedForwards {
                         generation,
                         reached_end: true,
                     });
                     return;
                 }
-                let timeline = detached.timeline.clone();
-                let reached_end_flag = detached.reached_end.clone();
+                let timeline = timeline.clone();
+                let reached_end_flag = reached_end.clone();
                 let events = self.events.clone();
                 self.forward_paginator = Some(tokio::spawn(async move {
                     let reached_end = match timeline.paginate_forwards(PAGE).await {
@@ -2642,7 +2870,11 @@ mod tests {
         // The UI shows no room any more.
         timelines.handle(MatrixCmd::CloseRoom).await;
         assert!(timelines.forwarder.is_none());
-        assert!(timelines.paginator.is_none() && timelines.detached.is_none());
+        assert!(
+            timelines.paginator.is_none()
+                && timelines.active.is_none()
+                && timelines.before_jump.is_none()
+        );
         tokio::time::timeout(Duration::from_secs(10), async {
             while !forwarder.is_finished() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3111,6 +3343,1041 @@ mod tests {
         assert_eq!(threads(&timelines), [key(b), key(c)]);
         let now = timeline_of(&timelines, b).expect("the thread shown is still cached");
         assert!(Arc::ptr_eq(&shown, &now));
+        drop(server);
+    }
+
+    /// A jump that finishes on the fast path switches the worker before the UI's
+    /// `CancelOpenEvent` arrives. Once the cancel arrives, the worker must restore the
+    /// room the UI still shows (under its original generation and back in `shown`), so
+    /// subsequent synced messages keep reaching it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_cancel_after_a_fast_path_jump_restores_the_open_room() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+        use matrix_sdk::authentication::SessionTokens;
+        use matrix_sdk::authentication::matrix::MatrixSession;
+        use matrix_sdk::{AuthSession, Client, SessionMeta};
+        use serde_json::json;
+
+        let room_a = "!a:localhost";
+        let room_b = "!b:localhost";
+        let msg = |room: &str, id: &str, ts: u64, body: &str| {
+            json!({
+                "type": "m.room.message",
+                "room_id": room,
+                "event_id": id,
+                "sender": fake::ME,
+                "origin_server_ts": ts,
+                "content": { "msgtype": "m.text", "body": body }
+            })
+        };
+        let mut joined_a = fake::joined(false, vec![]);
+        joined_a["timeline"]["events"] = json!([msg(room_a, "$a1:localhost", 1_000, "in a")]);
+        let mut joined_b = fake::joined(false, vec![]);
+        joined_b["timeline"]["events"] = json!([msg(room_b, "$b1:localhost", 1_000, "in b")]);
+        let later_a = msg(room_a, "$a2:localhost", 2_000, "later in a");
+        let syncs = AtomicUsize::new(0);
+        let server = fake::Server::answering(
+            json!({ "join": { room_a: joined_a, room_b: joined_b } }),
+            Box::new(move |request| {
+                if !request.path.ends_with("/sync") || syncs.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return None;
+                }
+                let sync = json!({
+                    "next_batch": "s2",
+                    "rooms": {
+                        "join": {
+                            room_a: {
+                                "timeline": { "events": [later_a], "limited": false }
+                            }
+                        }
+                    }
+                });
+                Some(fake::Reply::Json(sync.to_string()))
+            }),
+        )
+        .await;
+        let client = Client::builder()
+            .homeserver_url(&server.url)
+            .with_threading_support(super::threads::SUPPORT)
+            .build()
+            .await
+            .unwrap();
+        client
+            .restore_session(AuthSession::Matrix(MatrixSession {
+                meta: SessionMeta {
+                    user_id: fake::ME.try_into().unwrap(),
+                    device_id: "FAKE".into(),
+                },
+                tokens: SessionTokens {
+                    access_token: "token".into(),
+                    refresh_token: None,
+                },
+            }))
+            .await
+            .unwrap();
+        client.event_cache().subscribe().unwrap();
+        client.sync_once(SyncSettings::default()).await.unwrap();
+
+        let (mut timelines, mut events, _watches) =
+            live_timelines_of(client.clone(), &LeftRooms::default());
+        let wait_body = async |events: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixEvent>,
+                               want_room: &str,
+                               want_gen: u64,
+                               needle: &str| {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match events.recv().await {
+                        Some(MatrixEvent::Timeline {
+                            room_id,
+                            generation,
+                            messages,
+                            ..
+                        }) if room_id == want_room
+                            && generation == want_gen
+                            && messages.iter().any(|m| m.body == needle) =>
+                        {
+                            return;
+                        }
+                        Some(_) => {}
+                        None => panic!("the worker stopped"),
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("timed out waiting for {needle:?} in {want_room} gen {want_gen}")
+            });
+        };
+
+        // Warm room B in cache, then open room A (gen 2).
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room_b.to_owned(),
+                generation: 1,
+            })
+            .await;
+        wait_body(&mut events, room_b, 1, "in b").await;
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room_a.to_owned(),
+                generation: 2,
+            })
+            .await;
+        wait_body(&mut events, room_a, 2, "in a").await;
+
+        // Jump to $b1 in warm room B: the fast path switches the worker to gen 3 at once.
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_b.to_owned(),
+                event_id: "$b1:localhost".to_owned(),
+                thread_root: None,
+                generation: 3,
+            })
+            .await;
+        wait_body(&mut events, room_b, 3, "in b").await;
+        assert_eq!(timelines.shown, [room_b]);
+
+        // Cancel arrives late, after the worker already switched to room B.
+        timelines
+            .handle(MatrixCmd::CancelOpenEvent { generation: 3 })
+            .await;
+        assert_eq!(
+            timelines.shown,
+            [room_a],
+            "late cancel must put the old room back in shown"
+        );
+
+        // Expect TimelineReset then Timeline for room A under gen 2.
+        let mut saw_reset = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Some(MatrixEvent::TimelineReset {
+                        room_id,
+                        generation,
+                    }) if room_id == room_a && generation == 2 => {
+                        saw_reset = true;
+                    }
+                    Some(MatrixEvent::Timeline {
+                        room_id,
+                        generation,
+                        messages,
+                        ..
+                    }) if room_id == room_a
+                        && generation == 2
+                        && messages.iter().any(|m| m.body == "in a") =>
+                    {
+                        assert!(saw_reset, "restored timeline must follow TimelineReset");
+                        return;
+                    }
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .expect("late cancel must restore room A under gen 2");
+
+        // Live sync updates in room A must keep arriving under gen 2.
+        client.sync_once(SyncSettings::default()).await.unwrap();
+        wait_body(&mut events, room_a, 2, "later in a").await;
+
+        // `drop_idle` drops unshown room B while keeping restored room A.
+        timelines
+            .drop_idle(std::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
+        let cached: Vec<&str> = timelines.cache.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(cached, [room_a]);
+        drop(server);
+    }
+
+    /// Like [`timelines_of`], keeping the `ignored` and `own_refresh` watch senders
+    /// alive so `forward` stays in its select loop across subsequent syncs and pages.
+    fn live_timelines_of(
+        client: matrix_sdk::Client,
+        left: &crate::matrix::left::LeftRooms,
+    ) -> (
+        super::Timelines,
+        tokio::sync::mpsc::UnboundedReceiver<crate::matrix::MatrixEvent>,
+        (
+            tokio::sync::watch::Sender<super::IgnoredSet>,
+            tokio::sync::watch::Sender<u64>,
+        ),
+    ) {
+        let (events, received) = tokio::sync::mpsc::unbounded_channel();
+        let (ignored_tx, ignored) = tokio::sync::watch::channel(super::IgnoredSet::default());
+        let (own_refresh_tx, own_refresh) = tokio::sync::watch::channel(0);
+        let timelines = super::Timelines::new(
+            client,
+            events,
+            ignored,
+            own_refresh,
+            crate::matrix::people::OwnRoomNames::default(),
+            left.clone(),
+        );
+        (timelines, received, (ignored_tx, own_refresh_tx))
+    }
+
+    async fn fake_client_with_cache(url: &str) -> matrix_sdk::Client {
+        use crate::matrix::spaces::fake;
+        use matrix_sdk::authentication::SessionTokens;
+        use matrix_sdk::authentication::matrix::MatrixSession;
+        use matrix_sdk::{AuthSession, Client, SessionMeta};
+
+        let client = Client::builder()
+            .homeserver_url(url)
+            .with_threading_support(super::threads::SUPPORT)
+            .build()
+            .await
+            .unwrap();
+        client
+            .restore_session(AuthSession::Matrix(MatrixSession {
+                meta: SessionMeta {
+                    user_id: fake::ME.try_into().unwrap(),
+                    device_id: "FAKE".into(),
+                },
+                tokens: SessionTokens {
+                    access_token: "token".into(),
+                    refresh_token: None,
+                },
+            }))
+            .await
+            .unwrap();
+        client.event_cache().subscribe().unwrap();
+        client.sync_once(SyncSettings::default()).await.unwrap();
+        client
+    }
+
+    async fn wait_for_timeline(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<crate::matrix::MatrixEvent>,
+        want_room: &str,
+        want_gen: u64,
+        needle: &str,
+    ) -> (bool, Option<crate::matrix::DetachedTimeline>) {
+        use crate::matrix::MatrixEvent;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Some(MatrixEvent::Timeline {
+                        room_id,
+                        generation,
+                        messages,
+                        reached_start,
+                        detached,
+                    }) if room_id == want_room
+                        && generation == want_gen
+                        && messages.iter().any(|m| m.body == needle) =>
+                    {
+                        return (reached_start, detached);
+                    }
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("timed out waiting for {needle:?} in {want_room} gen {want_gen}")
+        })
+    }
+
+    async fn wait_for_restored_timeline(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<crate::matrix::MatrixEvent>,
+        want_room: &str,
+        want_gen: u64,
+        needle: &str,
+    ) -> (bool, Option<crate::matrix::DetachedTimeline>) {
+        use crate::matrix::MatrixEvent;
+
+        let mut saw_reset = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Some(MatrixEvent::TimelineReset {
+                        room_id,
+                        generation,
+                    }) if room_id == want_room && generation == want_gen => {
+                        saw_reset = true;
+                    }
+                    Some(MatrixEvent::Timeline {
+                        room_id,
+                        generation,
+                        messages,
+                        reached_start,
+                        detached,
+                    }) if room_id == want_room
+                        && generation == want_gen
+                        && messages.iter().any(|m| m.body == needle) =>
+                    {
+                        assert!(saw_reset, "restored timeline must follow TimelineReset");
+                        return (reached_start, detached);
+                    }
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("timed out waiting for restored {needle:?} in {want_room} gen {want_gen}")
+        })
+    }
+
+    /// A `/context` jump that finishes (`on_opened`) before a late `CancelOpenEvent`
+    /// arrives must restore the open thread (back in `shown`, with `TimelineReset` ahead
+    /// of its timeline) so newly synced replies keep arriving in the thread.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_cancel_after_context_switch_restores_a_thread() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use serde_json::json;
+
+        let room_a = "!a:localhost";
+        let room_b = "!b:localhost";
+        let root_a = "$roota:localhost";
+        let event_b = "$targetb:localhost";
+        let root_ev = json!({
+            "type": "m.room.message",
+            "room_id": room_a,
+            "event_id": root_a,
+            "sender": fake::ME,
+            "origin_server_ts": 1_000,
+            "content": { "msgtype": "m.text", "body": "thread root" }
+        });
+        let target_ev = json!({
+            "type": "m.room.message",
+            "room_id": room_b,
+            "event_id": event_b,
+            "sender": fake::ME,
+            "origin_server_ts": 1_000,
+            "content": { "msgtype": "m.text", "body": "in b via context" }
+        });
+        let thread_reply = json!({
+            "type": "m.room.message",
+            "room_id": room_a,
+            "event_id": "$reply1:localhost",
+            "sender": fake::ME,
+            "origin_server_ts": 2_000,
+            "content": {
+                "msgtype": "m.text",
+                "body": "reply after restore",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": root_a,
+                    "is_falling_back": true,
+                    "m.in_reply_to": { "event_id": root_a }
+                }
+            }
+        });
+        let mut joined_a = fake::joined(false, vec![]);
+        joined_a["timeline"]["events"] = json!([root_ev.clone()]);
+        let joined_b = fake::joined(false, vec![]);
+        let root_json = root_ev.to_string();
+        let target_json = target_ev.to_string();
+        let context_b = json!({
+            "event": target_ev,
+            "events_before": [],
+            "events_after": [],
+            "start": "prev_b",
+            "end": "next_b",
+            "state": []
+        })
+        .to_string();
+        let syncs = AtomicUsize::new(0);
+        let server = fake::Server::answering(
+            json!({ "join": { room_a: joined_a, room_b: joined_b } }),
+            Box::new(move |request| {
+                if request.path.ends_with("/sync") {
+                    if syncs.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return None;
+                    }
+                    let sync = json!({
+                        "next_batch": "s2",
+                        "rooms": {
+                            "join": {
+                                room_a: {
+                                    "timeline": { "events": [thread_reply], "limited": false }
+                                }
+                            }
+                        }
+                    });
+                    return Some(fake::Reply::Json(sync.to_string()));
+                }
+                if request.path.contains("/relations/") {
+                    return Some(fake::Reply::Json(r#"{"chunk":[]}"#.to_owned()));
+                }
+                if request.path.contains("/context/") && request.path.contains("targetb") {
+                    return Some(fake::Reply::Json(context_b.clone()));
+                }
+                if request.path.contains("/event/") {
+                    if request.path.contains("roota") {
+                        return Some(fake::Reply::Json(root_json.clone()));
+                    }
+                    if request.path.contains("targetb") {
+                        return Some(fake::Reply::Json(target_json.clone()));
+                    }
+                }
+                None
+            }),
+        )
+        .await;
+
+        let client = fake_client_with_cache(&server.url).await;
+        let (mut timelines, mut events, _watches) =
+            live_timelines_of(client.clone(), &LeftRooms::default());
+
+        // Open the thread in room A under gen 1.
+        timelines
+            .handle(MatrixCmd::OpenThread {
+                room_id: room_a.to_owned(),
+                root: root_a.to_owned(),
+                generation: 1,
+            })
+            .await;
+        wait_for_timeline(&mut events, room_a, 1, "thread root").await;
+        assert_eq!(
+            timelines.shown,
+            [room_a.to_owned(), super::threads::key(room_a, Some(root_a))]
+        );
+
+        // Start a `/context` jump to room B (not in cache) and let `on_opened` switch.
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_b.to_owned(),
+                event_id: event_b.to_owned(),
+                thread_root: None,
+                generation: 2,
+            })
+            .await;
+        let opened = tokio::time::timeout(Duration::from_secs(10), timelines.next_opened())
+            .await
+            .expect("context jump finished")
+            .expect("open channel stayed open");
+        timelines.on_opened(opened).await;
+        wait_for_timeline(&mut events, room_b, 2, "in b via context").await;
+        assert_eq!(timelines.shown, [room_b]);
+
+        // Cancel arrives late: worker restores thread A under gen 1 and puts it back in shown.
+        timelines
+            .handle(MatrixCmd::CancelOpenEvent { generation: 2 })
+            .await;
+        assert_eq!(
+            timelines.shown,
+            [room_a.to_owned(), super::threads::key(room_a, Some(root_a))]
+        );
+        wait_for_restored_timeline(&mut events, room_a, 1, "thread root").await;
+
+        // A reply synced into the thread reaches gen 1.
+        client.sync_once(SyncSettings::default()).await.unwrap();
+        wait_for_timeline(&mut events, room_a, 1, "reply after restore").await;
+        drop(server);
+    }
+
+    /// A late cancel while viewing a detached `/context` slice restores that slice under
+    /// its original generation, resets its `reached_start`/`reached_end` flags (so
+    /// pagination works again), and keeps `PaginateForwards` wired to it. When a jump is
+    /// accepted instead of cancelled, `drop_idle` and matching `Paginate` clear the
+    /// stashed slice so it is never leaked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_cancel_from_a_detached_slice_restores_the_slice_and_forgets_its_bounds() {
+        use std::sync::atomic::Ordering;
+
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+        use serde_json::json;
+
+        let room_a = "!a:localhost";
+        let room_b = "!b:localhost";
+        let a_old = "$aold:localhost";
+        let b_old = "$bold:localhost";
+        let ev = |room: &str, id: &str, ts: u64, body: &str| {
+            json!({
+                "type": "m.room.message",
+                "room_id": room,
+                "event_id": id,
+                "sender": fake::ME,
+                "origin_server_ts": ts,
+                "content": { "msgtype": "m.text", "body": body }
+            })
+        };
+        let a_old_ev = ev(room_a, a_old, 1_000, "old in a");
+        let a_newer_ev = ev(room_a, "$anewer:localhost", 1_500, "newer in a");
+        let b_old_ev = ev(room_b, b_old, 1_000, "old in b");
+        let a_old_json = a_old_ev.to_string();
+        let b_old_json = b_old_ev.to_string();
+        let ctx_a = json!({
+            "event": a_old_ev,
+            "events_before": [],
+            "events_after": [],
+            "start": "prev_a",
+            "end": "next_a",
+            "state": []
+        })
+        .to_string();
+        let ctx_b = json!({
+            "event": b_old_ev,
+            "events_before": [],
+            "events_after": [],
+            "start": "prev_b",
+            "end": "next_b",
+            "state": []
+        })
+        .to_string();
+        let fwd_a = json!({ "chunk": [a_newer_ev], "start": "next_a" }).to_string();
+        let empty_page = json!({ "chunk": [], "start": "prev_a" }).to_string();
+        let server = fake::Server::answering(
+            json!({
+                "join": {
+                    room_a: fake::joined(false, vec![]),
+                    room_b: fake::joined(false, vec![]),
+                }
+            }),
+            Box::new(move |request| {
+                if request.path.contains("/context/") {
+                    if request.path.contains("aold") {
+                        return Some(fake::Reply::Json(ctx_a.clone()));
+                    }
+                    if request.path.contains("bold") {
+                        return Some(fake::Reply::Json(ctx_b.clone()));
+                    }
+                }
+                if request.path.contains("/event/") {
+                    if request.path.contains("aold") {
+                        return Some(fake::Reply::Json(a_old_json.clone()));
+                    }
+                    if request.path.contains("bold") {
+                        return Some(fake::Reply::Json(b_old_json.clone()));
+                    }
+                }
+                if request.path.contains("/messages") {
+                    if request.query.contains("dir=f") {
+                        return Some(fake::Reply::Json(fwd_a.clone()));
+                    }
+                    return Some(fake::Reply::Json(empty_page.clone()));
+                }
+                None
+            }),
+        )
+        .await;
+
+        let client = fake_client_with_cache(&server.url).await;
+        let (mut timelines, mut events, _watches) =
+            live_timelines_of(client, &LeftRooms::default());
+
+        // Jump 1: open detached slice `$aold` in room A (gen 1).
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_a.to_owned(),
+                event_id: a_old.to_owned(),
+                thread_root: None,
+                generation: 1,
+            })
+            .await;
+        let opened = tokio::time::timeout(Duration::from_secs(10), timelines.next_opened())
+            .await
+            .unwrap()
+            .unwrap();
+        timelines.on_opened(opened).await;
+        let (_, detached) = wait_for_timeline(&mut events, room_a, 1, "old in a").await;
+        assert_eq!(
+            detached.as_ref().map(|d| d.target_event.as_str()),
+            Some(a_old)
+        );
+        // Simulate that both bounds had been marked reached before the next jump.
+        if let Some(super::ActiveStream {
+            kind:
+                super::StreamKind::Detached {
+                    reached_start,
+                    reached_end,
+                    ..
+                },
+            ..
+        }) = &timelines.active
+        {
+            reached_start.store(true, Ordering::Release);
+            reached_end.store(true, Ordering::Release);
+        } else {
+            panic!("expected active detached slice");
+        }
+
+        // Jump 2: switch to detached slice `$bold` in room B (gen 2), stashing slice 1.
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_b.to_owned(),
+                event_id: b_old.to_owned(),
+                thread_root: None,
+                generation: 2,
+            })
+            .await;
+        let opened = tokio::time::timeout(Duration::from_secs(10), timelines.next_opened())
+            .await
+            .unwrap()
+            .unwrap();
+        timelines.on_opened(opened).await;
+        wait_for_timeline(&mut events, room_b, 2, "old in b").await;
+        assert!(timelines.before_jump.is_some());
+        assert!(timelines.next_idle().is_some());
+
+        // Late cancel of gen 2 restores slice 1 with fresh bounds and `shown == [room_a]`.
+        timelines
+            .handle(MatrixCmd::CancelOpenEvent { generation: 2 })
+            .await;
+        assert_eq!(timelines.shown, [room_a]);
+        let (reached_start, detached) =
+            wait_for_restored_timeline(&mut events, room_a, 1, "old in a").await;
+        assert!(!reached_start);
+        let detached = detached.expect("restored view stays detached");
+        assert_eq!(detached.target_event, a_old);
+        assert!(!detached.reached_end);
+
+        // Forward pagination still works on the restored slice.
+        timelines
+            .handle(MatrixCmd::PaginateForwards {
+                room_id: room_a.to_owned(),
+                generation: 1,
+            })
+            .await;
+        let mut saw_newer = false;
+        let mut saw_done = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !(saw_newer && saw_done) {
+                match events.recv().await {
+                    Some(MatrixEvent::Timeline {
+                        room_id,
+                        generation: 1,
+                        messages,
+                        ..
+                    }) if room_id == room_a && messages.iter().any(|m| m.body == "newer in a") => {
+                        saw_newer = true;
+                    }
+                    Some(MatrixEvent::PaginatedForwards {
+                        generation: 1,
+                        reached_end: true,
+                    }) => {
+                        saw_done = true;
+                    }
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .expect("forward pagination worked on the restored detached slice");
+
+        // An accepted jump drops `before_jump` on `drop_idle`...
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_b.to_owned(),
+                event_id: b_old.to_owned(),
+                thread_root: None,
+                generation: 3,
+            })
+            .await;
+        let opened = tokio::time::timeout(Duration::from_secs(10), timelines.next_opened())
+            .await
+            .unwrap()
+            .unwrap();
+        timelines.on_opened(opened).await;
+        assert!(timelines.before_jump.is_some());
+        timelines
+            .drop_idle(std::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
+        assert!(timelines.before_jump.is_none());
+
+        // ...and drops it immediately when the UI paginates the jump's generation.
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_a.to_owned(),
+                event_id: a_old.to_owned(),
+                thread_root: None,
+                generation: 4,
+            })
+            .await;
+        let opened = tokio::time::timeout(Duration::from_secs(10), timelines.next_opened())
+            .await
+            .unwrap()
+            .unwrap();
+        timelines.on_opened(opened).await;
+        assert!(timelines.before_jump.is_some());
+        timelines
+            .handle(MatrixCmd::Paginate {
+                room_id: room_a.to_owned(),
+                generation: 4,
+            })
+            .await;
+        assert!(timelines.before_jump.is_none());
+        drop(server);
+    }
+
+    /// A late cancel when no room was open stops the jump's forwarder and empties `shown`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_cancel_with_no_room_open_stops_the_jumps_forwarder() {
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use serde_json::json;
+
+        let room_a = "!a:localhost";
+        let mut joined_a = fake::joined(false, vec![]);
+        joined_a["timeline"]["events"] = json!([{
+            "type": "m.room.message",
+            "room_id": room_a,
+            "event_id": "$a1:localhost",
+            "sender": fake::ME,
+            "origin_server_ts": 1_000,
+            "content": { "msgtype": "m.text", "body": "in a" }
+        }]);
+        let server = fake::Server::start(json!({ "join": { room_a: joined_a } })).await;
+        let client = fake_client_with_cache(&server.url).await;
+        let (mut timelines, mut events, _watches) =
+            live_timelines_of(client, &LeftRooms::default());
+
+        // Warm room A, then close the chat so no room is open.
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room_a.to_owned(),
+                generation: 1,
+            })
+            .await;
+        wait_for_timeline(&mut events, room_a, 1, "in a").await;
+        timelines.handle(MatrixCmd::CloseRoom).await;
+        assert!(timelines.active.is_none() && timelines.shown.is_empty());
+
+        // Fast-path jump switches to room A under gen 2, then cancel arrives late.
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_a.to_owned(),
+                event_id: "$a1:localhost".to_owned(),
+                thread_root: None,
+                generation: 2,
+            })
+            .await;
+        wait_for_timeline(&mut events, room_a, 2, "in a").await;
+        let jump_forwarder = timelines
+            .forwarder
+            .as_ref()
+            .expect("jump forwarder running")
+            .abort_handle();
+
+        timelines
+            .handle(MatrixCmd::CancelOpenEvent { generation: 2 })
+            .await;
+        assert!(timelines.forwarder.is_none());
+        assert!(timelines.active.is_none());
+        assert!(timelines.before_jump.is_none());
+        assert!(timelines.shown.is_empty());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !jump_forwarder.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("jump forwarder stopped");
+        drop(server);
+    }
+
+    /// A cancel that arrives while the jump is still pending (or after a jump failed)
+    /// leaves the open room's forwarder running without restarting or resetting it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancel_in_time_and_a_cancel_after_failure_leave_the_open_room_alone() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+        use serde_json::json;
+
+        let room_a = "!a:localhost";
+        let room_b = "!b:localhost";
+        let msg = |room: &str, id: &str, ts: u64, body: &str| {
+            json!({
+                "type": "m.room.message",
+                "room_id": room,
+                "event_id": id,
+                "sender": fake::ME,
+                "origin_server_ts": ts,
+                "content": { "msgtype": "m.text", "body": body }
+            })
+        };
+        let mut joined_a = fake::joined(false, vec![]);
+        joined_a["timeline"]["events"] = json!([msg(room_a, "$a1:localhost", 1_000, "in a")]);
+        let later_a = msg(room_a, "$a2:localhost", 2_000, "later in a");
+        let syncs = AtomicUsize::new(0);
+        let server = fake::Server::answering(
+            json!({
+                "join": {
+                    room_a: joined_a,
+                    room_b: fake::joined(false, vec![]),
+                }
+            }),
+            Box::new(move |request| {
+                if request.path.ends_with("/sync") {
+                    if syncs.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return None;
+                    }
+                    let sync = json!({
+                        "next_batch": "s2",
+                        "rooms": {
+                            "join": {
+                                room_a: {
+                                    "timeline": { "events": [later_a], "limited": false }
+                                }
+                            }
+                        }
+                    });
+                    return Some(fake::Reply::Json(sync.to_string()));
+                }
+                if request.path.contains("/event/") {
+                    // Hold `/event/` indefinitely so the jump stays pending.
+                    return Some(fake::Reply::Never);
+                }
+                None
+            }),
+        )
+        .await;
+
+        let client = fake_client_with_cache(&server.url).await;
+        let (mut timelines, mut events, _watches) =
+            live_timelines_of(client.clone(), &LeftRooms::default());
+
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room_a.to_owned(),
+                generation: 1,
+            })
+            .await;
+        wait_for_timeline(&mut events, room_a, 1, "in a").await;
+        let original = timelines
+            .forwarder
+            .as_ref()
+            .expect("room A forwarder running")
+            .abort_handle();
+
+        // 1. Cancel arrives in time while `/event/` is still in flight.
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_b.to_owned(),
+                event_id: "$b1:localhost".to_owned(),
+                thread_root: None,
+                generation: 2,
+            })
+            .await;
+        assert_eq!(timelines.pending_open_event_gen, Some(2));
+        timelines
+            .handle(MatrixCmd::CancelOpenEvent { generation: 2 })
+            .await;
+        assert!(timelines.pending_open_event_gen.is_none());
+        assert!(!original.is_finished(), "original forwarder stayed running");
+        assert_eq!(timelines.shown, [room_a]);
+
+        // 2. Jump fails (`JumpFailed`), then a late cancel arrives for it.
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: "!missing:localhost".to_owned(),
+                event_id: "$x:localhost".to_owned(),
+                thread_root: None,
+                generation: 3,
+            })
+            .await;
+        timelines
+            .handle(MatrixCmd::CancelOpenEvent { generation: 3 })
+            .await;
+        assert!(!original.is_finished(), "original forwarder stayed running");
+        assert_eq!(timelines.shown, [room_a]);
+
+        // Drain queued events: we saw JumpFailed(3), and no TimelineReset was emitted.
+        let mut saw_failed = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                MatrixEvent::JumpFailed { generation: 3, .. } => saw_failed = true,
+                MatrixEvent::TimelineReset { .. } => {
+                    panic!("in-time / post-failure cancel must not reset the open room")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_failed);
+
+        // Live updates keep flowing on the original forwarder.
+        client.sync_once(SyncSettings::default()).await.unwrap();
+        wait_for_timeline(&mut events, room_a, 1, "later in a").await;
+        drop(server);
+    }
+
+    /// Two jumps in a row that both switch before the UI cancels them still restore the
+    /// original room the UI never left.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chained_jumps_cancelled_late_restore_the_original_room() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use serde_json::json;
+
+        let (room_a, room_b, room_c) = ("!a:localhost", "!b:localhost", "!c:localhost");
+        let msg = |room: &str, id: &str, ts: u64, body: &str| {
+            json!({
+                "type": "m.room.message",
+                "room_id": room,
+                "event_id": id,
+                "sender": fake::ME,
+                "origin_server_ts": ts,
+                "content": { "msgtype": "m.text", "body": body }
+            })
+        };
+        let joined = |room: &str, id: &str, body: &str| {
+            let mut j = fake::joined(false, vec![]);
+            j["timeline"]["events"] = json!([msg(room, id, 1_000, body)]);
+            j
+        };
+        let later_a = msg(room_a, "$a2:localhost", 2_000, "later in a");
+        let syncs = AtomicUsize::new(0);
+        let server = fake::Server::answering(
+            json!({
+                "join": {
+                    room_a: joined(room_a, "$a1:localhost", "in a"),
+                    room_b: joined(room_b, "$b1:localhost", "in b"),
+                    room_c: joined(room_c, "$c1:localhost", "in c"),
+                }
+            }),
+            Box::new(move |request| {
+                if !request.path.ends_with("/sync") || syncs.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return None;
+                }
+                let sync = json!({
+                    "next_batch": "s2",
+                    "rooms": {
+                        "join": {
+                            room_a: {
+                                "timeline": { "events": [later_a], "limited": false }
+                            }
+                        }
+                    }
+                });
+                Some(fake::Reply::Json(sync.to_string()))
+            }),
+        )
+        .await;
+
+        let client = fake_client_with_cache(&server.url).await;
+        let (mut timelines, mut events, _watches) =
+            live_timelines_of(client.clone(), &LeftRooms::default());
+
+        // Warm B and C, then open A (gen 3).
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room_b.to_owned(),
+                generation: 1,
+            })
+            .await;
+        wait_for_timeline(&mut events, room_b, 1, "in b").await;
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room_c.to_owned(),
+                generation: 2,
+            })
+            .await;
+        wait_for_timeline(&mut events, room_c, 2, "in c").await;
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room_a.to_owned(),
+                generation: 3,
+            })
+            .await;
+        wait_for_timeline(&mut events, room_a, 3, "in a").await;
+
+        // Jump 1 (gen 4) switches to B; before the UI hears it, jump 2 cancels gen 4 and
+        // asks for C (gen 5), which also switches fast; then the UI cancels gen 5 late.
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_b.to_owned(),
+                event_id: "$b1:localhost".to_owned(),
+                thread_root: None,
+                generation: 4,
+            })
+            .await;
+        wait_for_timeline(&mut events, room_b, 4, "in b").await;
+        timelines
+            .handle(MatrixCmd::CancelOpenEvent { generation: 4 })
+            .await;
+        let mid_forwarder = timelines
+            .forwarder
+            .as_ref()
+            .expect("mid-restore forwarder running")
+            .abort_handle();
+        timelines
+            .handle(MatrixCmd::OpenEvent {
+                room_id: room_c.to_owned(),
+                event_id: "$c1:localhost".to_owned(),
+                thread_root: None,
+                generation: 5,
+            })
+            .await;
+        wait_for_timeline(&mut events, room_c, 5, "in c").await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !mid_forwarder.is_finished() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("superseded forwarder finished");
+        while events.try_recv().is_ok() {}
+        timelines
+            .handle(MatrixCmd::CancelOpenEvent { generation: 5 })
+            .await;
+
+        assert_eq!(timelines.shown, [room_a]);
+        wait_for_restored_timeline(&mut events, room_a, 3, "in a").await;
+        client.sync_once(SyncSettings::default()).await.unwrap();
+        wait_for_timeline(&mut events, room_a, 3, "later in a").await;
         drop(server);
     }
 
