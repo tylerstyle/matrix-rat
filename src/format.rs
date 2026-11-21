@@ -92,6 +92,8 @@ impl PartialEq for Outgoing {
 impl Eq for Outgoing {}
 
 const SHRUG: &str = "¯\\_(ツ)_/¯";
+/// [`SHRUG`] escaped for Markdown so `\` stays visible and `_` is not read as emphasis.
+const SHRUG_MD: &str = r"¯\\\_(ツ)\_/¯";
 const TABLEFLIP: &str = "(╯°□°)╯︵ ┻━┻";
 const LENNY: &str = "( ͡° ͜ʖ ͡°)";
 
@@ -182,9 +184,21 @@ pub fn parse_with_mentions(
             })
         }
         "code" => needs_text(code_message(argument, preserve_empty_mentions)),
-        "shrug" => face_message(SHRUG, argument, &arg_marks, preserve_empty_mentions),
-        "tableflip" => face_message(TABLEFLIP, argument, &arg_marks, preserve_empty_mentions),
-        "lenny" => face_message(LENNY, argument, &arg_marks, preserve_empty_mentions),
+        "shrug" => face_message(
+            SHRUG,
+            SHRUG_MD,
+            argument,
+            &arg_marks,
+            preserve_empty_mentions,
+        ),
+        "tableflip" => face_message(
+            TABLEFLIP,
+            TABLEFLIP,
+            argument,
+            &arg_marks,
+            preserve_empty_mentions,
+        ),
+        "lenny" => face_message(LENNY, LENNY, argument, &arg_marks, preserve_empty_mentions),
         _ => Outgoing::Rejected(format!(
             "Unknown command /{name}. Start with // to send it as text."
         )),
@@ -226,6 +240,7 @@ fn finish_mentions(mentions: Mentions, preserve_empty: bool) -> Option<Mentions>
 
 fn face_message(
     face: &str,
+    face_md: &str,
     argument: &str,
     marks: &[MentionMark],
     preserve_empty: bool,
@@ -233,7 +248,7 @@ fn face_message(
     let (linked, mentions) = resolve_marks(argument, marks);
     Outgoing::Text {
         plain: prepend(face, argument),
-        html: message_html(&prepend(face, &linked), marks),
+        html: message_html(&prepend(face_md, &linked), marks),
         mentions: finish_mentions(mentions, preserve_empty),
     }
 }
@@ -955,6 +970,35 @@ mod tests {
         assert_eq!(
             parse("/shrug oh well"),
             text(&format!("{SHRUG} oh well"), None)
+        );
+        // When HTML is emitted (formatting or autolink in the rest), /shrug keeps its
+        // backslash and its underscores never pair into emphasis with the rest.
+        assert_eq!(
+            parse("/shrug **bold**"),
+            text(
+                &format!("{SHRUG} **bold**"),
+                Some(&format!("{SHRUG} <strong>bold</strong>"))
+            )
+        );
+        assert_eq!(
+            parse("/shrug see https://example.org"),
+            text(
+                &format!("{SHRUG} see https://example.org"),
+                Some(&format!(
+                    "{SHRUG} see <a href=\"https://example.org\">https://example.org</a>"
+                ))
+            )
+        );
+        assert_eq!(
+            parse("/shrug check snake_case"),
+            text(&format!("{SHRUG} check snake_case"), None)
+        );
+        assert_eq!(
+            parse("/shrug _one_ and _two"),
+            text(
+                &format!("{SHRUG} _one_ and _two"),
+                Some(&format!("{SHRUG} <em>one</em> and _two"))
+            )
         );
         assert_eq!(parse("//not a command"), text("/not a command", None));
         assert!(matches!(parse("/me"), Outgoing::Rejected(_)));
