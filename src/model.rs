@@ -866,47 +866,77 @@ fn told_apart<'a>(shown: &'a str, user_id: &str) -> Option<&'a str> {
 /// be made again on what it made. Costs a lookup per name given, and nothing more
 /// where nobody is to be told apart.
 pub fn mark_namesakes(messages: &mut [Message]) {
-    use std::collections::HashSet;
-    use std::collections::hash_map::Entry;
-    // Each name with the one ID seen under it, `None` once there is a second.
-    let mut seen: HashMap<&str, Option<&str>> = HashMap::new();
-    let mut flagged: HashSet<&str> = HashSet::new();
+    let mut namesakes = Namesakes::default();
     for message in messages.iter() {
+        namesakes.learn(message);
+    }
+    if namesakes.nobody() {
+        return;
+    }
+    for message in messages.iter_mut() {
+        namesakes.mark(message);
+    }
+}
+
+/// Who shares a name with someone else among the messages it was shown, for
+/// [`mark_namesakes`]; what it knows can be put on other messages too (an archive's,
+/// written one by one after it has seen them all).
+#[derive(Default)]
+pub struct Namesakes {
+    /// Each name with the one ID seen under it, `None` once there is a second.
+    seen: HashMap<String, Option<String>>,
+    /// Those the SDK found ambiguous on one of their messages.
+    flagged: std::collections::HashSet<String>,
+}
+
+/// Hand-written: names and IDs stay out of logs.
+impl fmt::Debug for Namesakes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Namesakes")
+            .field("seen", &self.seen.len())
+            .field("flagged", &self.flagged.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Namesakes {
+    /// Takes in the people of `message`.
+    pub fn learn(&mut self, message: &Message) {
         for (name, id) in message.people() {
-            match seen.entry(name) {
-                Entry::Vacant(free) => {
-                    free.insert(Some(id));
-                }
-                Entry::Occupied(mut found) => {
-                    if *found.get() != Some(id) {
-                        found.insert(None);
+            match self.seen.get_mut(name) {
+                Some(only) => {
+                    if only.as_deref() != Some(id) {
+                        *only = None;
                     }
+                }
+                None => {
+                    self.seen.insert(name.to_owned(), Some(id.to_owned()));
                 }
             }
         }
         if message.sender_ambiguous
             && let Some(id) = &message.sender_id
+            && !self.flagged.contains(id)
         {
-            flagged.insert(id);
+            self.flagged.insert(id.clone());
         }
     }
-    let shared: HashSet<String> = seen
-        .into_iter()
-        .filter(|(_, id)| id.is_none())
-        .map(|(name, _)| name.to_owned())
-        .collect();
-    if shared.is_empty() && flagged.is_empty() {
-        return;
+
+    /// Nobody seen is to be told apart.
+    fn nobody(&self) -> bool {
+        self.flagged.is_empty() && self.seen.values().all(Option::is_some)
     }
-    let flagged: HashSet<String> = flagged.into_iter().map(str::to_owned).collect();
-    let apart = |name: &str, id: &str| shared.contains(name) || flagged.contains(id);
-    let tell = |shown: &mut String, id: &str| {
-        if told_apart(shown.as_str(), id).is_none() && apart(shown.as_str(), id) {
-            *shown = disambiguated(shown.as_str(), id);
-        }
-    };
-    for message in messages.iter_mut() {
-        if message.sender_id.is_some() && shared.contains(&message.sender) {
+
+    /// Names with their IDs the people of `message` who are to be told apart.
+    pub fn mark(&self, message: &mut Message) {
+        let shared = |name: &str| matches!(self.seen.get(name), Some(None));
+        let apart = |name: &str, id: &str| shared(name) || self.flagged.contains(id);
+        let tell = |shown: &mut String, id: &str| {
+            if told_apart(shown.as_str(), id).is_none() && apart(shown.as_str(), id) {
+                *shown = disambiguated(shown.as_str(), id);
+            }
+        };
+        if message.sender_id.is_some() && shared(&message.sender) {
             message.sender_ambiguous = true;
         }
         if let (Some((name, _)), Some(id)) = (&mut message.reply_to, &message.reply_sender) {

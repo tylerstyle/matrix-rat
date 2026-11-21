@@ -44,7 +44,7 @@ use super::MatrixEvent;
 use super::safety::IgnoredSet;
 use crate::collect::{self, Cut, Span};
 use crate::logsafe;
-use crate::model::Message;
+use crate::model::{Message, Namesakes};
 
 /// The most events one archive takes; of a room with more, the newest.
 pub const ARCHIVE_EVENTS: usize = 5_000;
@@ -897,9 +897,18 @@ where
         let read = read.iter().filter_map(|id| place(id));
         line.into_iter().chain(read).max().map(|at| at + 1)
     });
+    // Two people of one name among what is loaded are told apart, as in the timeline.
+    let mut namesakes = Namesakes::default();
+    for message in slots.iter().filter_map(|slot| slot.message.as_ref()) {
+        namesakes.learn(message);
+    }
     let mut lines: Vec<String> = slots[start.unwrap_or(0)..]
         .iter()
-        .filter_map(|slot| collect::entry(slot.message.as_ref()?))
+        .filter_map(|slot| {
+            let mut message = slot.message.clone()?;
+            namesakes.mark(&mut message);
+            collect::entry(&message)
+        })
         .map(|entry| collect::summary_line(zone, &entry))
         .collect();
     if start.is_none() {
@@ -1006,17 +1015,24 @@ where
 {
     let too_old =
         |message: &Message| since.is_some_and(|since| message.sent_at.is_none_or(|at| at < since));
-    let entries = || {
-        messages()
-            .skip_while(|message| too_old(message))
-            .filter_map(|message| collect::entry(&message))
-    };
-    // Once through for the days the heading names; nothing is kept of it.
+    let kept = || messages().skip_while(|message| too_old(message));
+    // Once through for the days the heading names, and for who shares a name with
+    // someone else in it (told apart as in the timeline); nothing else is kept of it.
     let (mut first, mut last) = (None, None);
-    for at in entries().filter_map(|entry| entry.at) {
-        first = Some(first.map_or(at, |first: u64| first.min(at)));
-        last = Some(last.map_or(at, |last: u64| last.max(at)));
+    let mut namesakes = Namesakes::default();
+    for message in kept() {
+        namesakes.learn(&message);
+        if let Some(at) = collect::entry(&message).and_then(|entry| entry.at) {
+            first = Some(first.map_or(at, |first: u64| first.min(at)));
+            last = Some(last.map_or(at, |last: u64| last.max(at)));
+        }
     }
+    let entries = || {
+        kept().filter_map(|mut message| {
+            namesakes.mark(&mut message);
+            collect::entry(&message)
+        })
+    };
     let given_up = || std::io::Error::other("given up");
     let mut writer = crate::archive::Writer::new(file, now.timezone());
     writer.header(room_name, now, first, last, cut)?;
@@ -1326,6 +1342,65 @@ mod tests {
             "{all}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two people of one name, as the SDK may not tell apart (both without a display
+    /// name, say): one by the timeline's `sender` and `sender_id`.
+    fn namesakes() -> [Message; 2] {
+        let named = |id: &str, body: &str| Message {
+            sender_id: Some(id.to_owned()),
+            ..said("bob", body)
+        };
+        [
+            named("@bob:example.org", "here"),
+            named("@bob:elsewhere.org", "there"),
+        ]
+    }
+
+    /// What is unread names two people of one name with their IDs, as the timeline
+    /// does: among all that is loaded, not only what is unread.
+    #[test]
+    fn unread_tells_apart_two_people_of_one_name() {
+        let [here, there] = namesakes();
+        let slot = |id: &str, message: Message| Slot {
+            id: Some(id.to_owned()),
+            line: false,
+            message: Some(message),
+        };
+        let slots = [slot("$1", here), slot("$2", there)];
+        let unread = unread_text(&slots, None, &["$1"], 50, &Utc);
+        assert_eq!(
+            unread.text,
+            "[2026-11-20 14:03] bob (@bob:elsewhere.org): there\n"
+        );
+    }
+
+    /// An archive names two people of one name with their IDs, as the timeline does.
+    #[test]
+    fn an_archive_tells_apart_two_people_of_one_name() {
+        let dir = temp("archive-namesakes");
+        let messages = namesakes();
+        let now = collect::local(&Utc, AT).unwrap();
+        let (path, _) = write(
+            NewFile::create(&dir, "namesakes.md").unwrap(),
+            || messages.clone().into_iter(),
+            None,
+            None,
+            "Room",
+            &now,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("**14:03 bob (@bob:example.org)**\\\nhere\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("**14:03 bob (@bob:elsewhere.org)**\\\nthere\n"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
