@@ -1321,6 +1321,7 @@ impl App {
                     self.send_matrix(MatrixCmd::Logout);
                     // Nothing may be sent for the old session from here on.
                     self.reset_session();
+                    self.remove_notes_file();
                     self.show_toast("Logging out…");
                 } else {
                     menu.confirm_logout = true;
@@ -3648,9 +3649,11 @@ impl App {
         match event {
             MatrixEvent::NeedLogin { reason } => {
                 self.reset_session();
+                self.remove_notes_file();
                 self.open_modal(Modal::Login(LoginForm::new(reason)));
             }
             MatrixEvent::NeedReauth { target, reason } => {
+                // Soft logout: keep notes.json on disk until reauth, as with saved.json.
                 self.reset_session();
                 self.open_modal(Modal::Login(LoginForm::reauth(target, reason)));
             }
@@ -3674,6 +3677,7 @@ impl App {
                 if let Some(file) = self.bookmarks.file.clone() {
                     self.load_saved(file, &user_id);
                 }
+                self.load_notes(&user_id);
                 self.user_id = Some(user_id);
                 self.send_matrix(MatrixCmd::Previews(self.room_previews));
                 self.logged_out = false;

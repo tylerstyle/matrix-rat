@@ -271,11 +271,12 @@ impl Notes {
             .collect()
     }
 
-    /// Writes the finished notes to `file`, owner-only, in one step. They are message
-    /// text in plain form: only done where the user turned `keep_notes` on.
-    pub fn save(&self, file: &Path) -> io::Result<()> {
-        let kept = File {
+    /// Writes the finished notes of `owner` to `file`, owner-only, in one step. They
+    /// are message text in plain form: only done where the user turned `keep_notes` on.
+    pub fn save(&self, file: &Path, owner: &str) -> io::Result<()> {
+        let kept = FileOut {
             version: FILE_VERSION,
+            owner,
             notes: self.kept(),
         };
         let json = serde_json::to_vec(&kept).map_err(io::Error::other)?;
@@ -298,11 +299,18 @@ impl Notes {
         written
     }
 
-    /// Takes in the notes of `file`, as far as they are sound: bounded in number and
-    /// size, and made safe for the screen again (the file may have been written by
-    /// anything). A file that is not there, not a plain file (a link is not followed),
-    /// too large, of another version or not readable gives none.
-    pub fn load(&mut self, file: &Path) {
+    /// Takes in the notes of `owner` from `file`, as far as they are sound: bounded in
+    /// number and size, and made safe for the screen again (the file may have been
+    /// written by anything). A file that is not there, not a plain file (a link is not
+    /// followed), too large, of another version or not readable gives none.
+    ///
+    /// A file without an owner (from before notes named their account) or belonging to
+    /// another account is ignored and removed from disk, so its plain message text is
+    /// never shown to the wrong person.
+    pub fn load(&mut self, file: &Path, owner: &str) {
+        if owner.is_empty() {
+            return;
+        }
         let plain = std::fs::symlink_metadata(file)
             .is_ok_and(|meta| meta.file_type().is_file() && meta.len() <= MAX_FILE);
         if !plain {
@@ -311,13 +319,18 @@ impl Notes {
         let Ok(bytes) = std::fs::read(file) else {
             return;
         };
-        let kept = match serde_json::from_slice::<File>(&bytes) {
+        let kept = match serde_json::from_slice::<FileIn>(&bytes) {
             Ok(kept) if kept.version == FILE_VERSION => kept,
             _ => {
                 tracing::debug!("the file of kept notes could not be read");
                 return;
             }
         };
+        if kept.owner.as_deref() != Some(owner) {
+            tracing::debug!("dropping kept notes file without a matching owner");
+            let _ = remove_file(file);
+            return;
+        }
         // Only what is sound counts toward the bound, and the newest of that stay.
         let sound: Vec<(Kept, String)> = kept
             .notes
@@ -351,9 +364,18 @@ pub fn remove_file(file: &Path) -> io::Result<()> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct File {
+#[derive(Serialize)]
+struct FileOut<'a> {
     version: u32,
+    owner: &'a str,
+    notes: Vec<Kept>,
+}
+
+#[derive(Deserialize)]
+struct FileIn {
+    version: u32,
+    #[serde(default)]
+    owner: Option<String>,
     notes: Vec<Kept>,
 }
 
@@ -977,15 +999,16 @@ mod tests {
         notes.toggle_hidden("$a", NoteKind::Translation);
         notes.set("$b", NoteKind::Translation, NoteState::Running);
         notes.set("$c", NoteKind::Translation, NoteState::Failed("no".into()));
+        let owner = "@alice:example.org";
         // Something lying where the new file is made first is not written through.
         std::fs::write(dir.0.join("notes.json.new"), b"old").unwrap();
-        notes.save(&file).unwrap();
+        notes.save(&file, owner).unwrap();
         let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert!(!dir.0.join("notes.json.new").exists());
 
         let mut back = Notes::default();
-        back.load(&file);
+        back.load(&file, owner);
         assert_eq!(back.map.len(), 2, "only what was finished is kept");
         assert_eq!(
             back.get("$a", NoteKind::Transcript).unwrap().state,
@@ -995,6 +1018,23 @@ mod tests {
         assert_eq!(translation.state, NoteState::Done("read\nthat".into()));
         assert!(translation.hidden);
 
+        // Another account's file is dropped (not loaded, and removed).
+        let mut wrong = Notes::default();
+        wrong.load(&file, "@bob:example.org");
+        assert!(wrong.is_empty());
+        assert!(!file.exists());
+
+        // An old v1 file without an owner cannot be attributed and is dropped.
+        std::fs::write(
+            &file,
+            r#"{"version":1,"notes":[{"event":"$old","kind":"transcript","text":"legacy"}]}"#,
+        )
+        .unwrap();
+        let mut legacy = Notes::default();
+        legacy.load(&file, owner);
+        assert!(legacy.is_empty());
+        assert!(!file.exists());
+
         // A file written by anything: escapes go, nonsense is skipped, the newest stay.
         let mut many: Vec<String> = (0..MAX_NOTES + 3)
             .map(|n| format!(r#"{{"event":"${n}","kind":"translation","text":"t"}}"#))
@@ -1002,10 +1042,13 @@ mod tests {
         many.push(r#"{"event":"$esc","kind":"transcript","text":"a\u001b[2Jb"}"#.to_owned());
         many.push(r#"{"event":"","kind":"transcript","text":"x"}"#.to_owned());
         many.push(r#"{"event":"$blank","kind":"transcript","text":" \n "}"#.to_owned());
-        let json = format!(r#"{{"version":1,"notes":[{}]}}"#, many.join(","));
+        let json = format!(
+            r#"{{"version":1,"owner":"{owner}","notes":[{}]}}"#,
+            many.join(",")
+        );
         std::fs::write(&file, json).unwrap();
         let mut back = Notes::default();
-        back.load(&file);
+        back.load(&file, owner);
         // 204 of them are sound: the two that are not take nobody's place.
         assert_eq!(back.map.len(), MAX_NOTES);
         assert_eq!(
@@ -1016,18 +1059,21 @@ mod tests {
         assert!(back.get("$3", NoteKind::Translation).is_none());
         assert!(back.get("$4", NoteKind::Translation).is_some());
 
-        // A file of a version this one does not know: no notes.
-        let json = r#"{"version":2,"notes":[{"event":"$a","kind":"transcript","text":"t"}]}"#;
-        std::fs::write(&file, json).unwrap();
+        // A file of a version this one does not know: no notes, left untouched.
+        let json = format!(
+            r#"{{"version":2,"owner":"{owner}","notes":[{{"event":"$a","kind":"transcript","text":"t"}}]}}"#
+        );
+        std::fs::write(&file, &json).unwrap();
         let mut back = Notes::default();
-        back.load(&file);
+        back.load(&file, owner);
         assert!(back.is_empty());
+        assert!(file.exists());
 
         // Not JSON, or not there: no notes, no error.
         std::fs::write(&file, b"not json").unwrap();
         let mut back = Notes::default();
-        back.load(&file);
-        back.load(&dir.0.join("missing.json"));
+        back.load(&file, owner);
+        back.load(&dir.0.join("missing.json"), owner);
         assert!(back.is_empty());
 
         remove_file(&file).unwrap();
@@ -1039,7 +1085,10 @@ mod tests {
     fn a_link_a_folder_or_a_huge_file_in_place_of_the_notes_is_not_read_or_written_through() {
         let dir = Dir::new("notes-odd");
         let file = dir.0.join("notes.json");
-        let good = r#"{"version":1,"notes":[{"event":"$a","kind":"transcript","text":"t"}]}"#;
+        let owner = "@alice:example.org";
+        let good = format!(
+            r#"{{"version":1,"owner":"{owner}","notes":[{{"event":"$a","kind":"transcript","text":"t"}}]}}"#
+        );
         let mut notes = Notes::default();
         notes.set(
             "$mine",
@@ -1050,12 +1099,12 @@ mod tests {
         // A link to a file elsewhere: not followed when reading; writing puts a file
         // of our own in the link's place and leaves the other file as it was.
         let elsewhere = dir.0.join("elsewhere.json");
-        std::fs::write(&elsewhere, good).unwrap();
+        std::fs::write(&elsewhere, &good).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
         let mut back = Notes::default();
-        back.load(&file);
+        back.load(&file, owner);
         assert!(back.is_empty());
-        notes.save(&file).unwrap();
+        notes.save(&file, owner).unwrap();
         assert!(
             std::fs::symlink_metadata(&file)
                 .unwrap()
@@ -1066,7 +1115,7 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
 
         // Larger than anything we write: not read into memory.
-        std::fs::write(&file, good).unwrap();
+        std::fs::write(&file, &good).unwrap();
         std::fs::OpenOptions::new()
             .write(true)
             .open(&file)
@@ -1074,7 +1123,7 @@ mod tests {
             .set_len(MAX_FILE + 1)
             .unwrap();
         let mut back = Notes::default();
-        back.load(&file);
+        back.load(&file, owner);
         assert!(back.is_empty());
         std::fs::remove_file(&file).unwrap();
 
@@ -1082,9 +1131,9 @@ mod tests {
         std::fs::create_dir(&file).unwrap();
         std::fs::write(file.join("inside"), b"kept").unwrap();
         let mut back = Notes::default();
-        back.load(&file);
+        back.load(&file, owner);
         assert!(back.is_empty());
-        assert!(notes.save(&file).is_err());
+        assert!(notes.save(&file, owner).is_err());
         assert_eq!(std::fs::read(file.join("inside")).unwrap(), b"kept");
         assert!(!dir.0.join("notes.json.new").exists());
         assert!(remove_file(&file).is_err());
@@ -1108,9 +1157,9 @@ mod tests {
         // Kept with the note.
         let dir = Dir::new("notes-source");
         let file = dir.0.join("notes.json");
-        notes.save(&file).unwrap();
+        notes.save(&file, "@alice:example.org").unwrap();
         let mut back = Notes::default();
-        back.load(&file);
+        back.load(&file, "@alice:example.org");
         assert_eq!(back.get("$a", NoteKind::Translation).unwrap().source, 7);
         // One of which nothing is known is taken as it is.
         notes.set_from("$b", NoteKind::Translation, NoteState::Done("t".into()), 0);
