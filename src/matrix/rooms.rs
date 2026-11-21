@@ -2315,7 +2315,11 @@ async fn forward(
         tokio::select! {
             diffs = changes.next() => {
                 let Some(diffs) = diffs else { return };
-                let saw_clear = diffs.iter().any(|diff| matches!(diff, VectorDiff::Clear));
+                // A subscriber that fell behind gets the whole list again as a `Reset` in
+                // place of the diffs it missed, a clear among them perhaps: taken as one.
+                let saw_clear = diffs
+                    .iter()
+                    .any(|diff| matches!(diff, VectorDiff::Clear | VectorDiff::Reset { .. }));
                 let had_start = detached.is_none() && start_loaded(&items, thread.as_deref());
                 for diff in diffs {
                     diff.apply(&mut items);
@@ -2328,6 +2332,14 @@ async fn forward(
                 // in one batch, so the timeline after it is not empty.
                 let reset = saw_clear
                     || (had_start && !start_loaded(&items, thread.as_deref()));
+                // A slice around an event that the SDK reloads (it does so for every room
+                // when the ignore list changes) is back to its first window, with gaps on
+                // both sides again: what the pages had reached is forgotten, or the
+                // timeline after the reset would say start and end were still reached.
+                if reset && let Some(d) = &detached {
+                    d.reached_start.store(false, Ordering::Release);
+                    d.reached_end.store(false, Ordering::Release);
+                }
                 if reset
                     && events
                         .send(MatrixEvent::TimelineReset {

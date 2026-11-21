@@ -3683,10 +3683,14 @@ impl App {
                 room_id,
                 generation,
             } => {
-                // The timeline that follows says afresh whether the start is loaded.
+                // The timeline that follows says afresh whether the start is loaded, and,
+                // for a slice around an event, whether the end is (a live view's end is
+                // never asked for, and stays unreached).
                 if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
                     self.timeline.reached_start = false;
                     self.timeline.empty_batches = 0;
+                    self.timeline.reached_end = false;
+                    self.timeline.empty_forward_batches = 0;
                 }
             }
             MatrixEvent::DetachedNew { generation, count } => {
@@ -7184,6 +7188,41 @@ mod tests {
             reached_start: true,
         });
         assert!(app.timeline.reached_start);
+    }
+
+    /// A slice around an event that the SDK reloads is back to its first window: the
+    /// reset forgets the end as well as the start, and the slice after it (whose
+    /// flags the worker forgot too) leaves both unreached.
+    #[test]
+    fn a_reset_slice_around_an_event_forgets_its_end_too() {
+        let (mut app, _terminal, _commands) = connected();
+        let slice = |app: &App, reached_end: bool| {
+            let mut event = detached_timeline(
+                "!a",
+                app.generation,
+                "$5",
+                None,
+                reached_end,
+                vec![remote("5", "ann", "the event")],
+            );
+            if let MatrixEvent::Timeline { reached_start, .. } = &mut event {
+                *reached_start = reached_end;
+            }
+            event
+        };
+        app.on_matrix(slice(&app, true));
+        assert!(app.timeline.detached);
+        assert!(app.timeline.reached_start && app.timeline.reached_end);
+
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        assert!(!app.timeline.reached_start && !app.timeline.reached_end);
+        assert_eq!(app.timeline.empty_forward_batches, 0);
+        app.on_matrix(slice(&app, false));
+        assert!(app.timeline.detached);
+        assert!(!app.timeline.reached_start && !app.timeline.reached_end);
     }
 
     #[test]
