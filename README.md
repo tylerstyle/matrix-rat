@@ -29,8 +29,8 @@ notifications and themes that follow your desktop are all there.
 |---|---|
 | 🔐 **Private by default** | End-to-end encryption, device verification by emoji comparison, recovery key, and warnings on messages that cannot be fully trusted. See where your account is logged in and sign sessions out, check your key backup, move message keys between devices in a file, and read why a message could not be decrypted. |
 | 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list and custom emoji in the text (kitty graphics only; coloured initials and `:names:` otherwise). |
-| 💬 **Everything a chat needs** | Replies, edits, reactions, threads, polls, stickers and custom emoji, mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
-| 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread to come back to it later (your other clients see that too), or everything as read. |
+| 💬 **Everything a chat needs** | Replies, edits, reactions, threads, polls, stickers and custom emoji, voice messages (record and play in the app, with optional local transcripts and message translations), mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
+| 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread (your other clients see that too) or everything as read, save messages for later with reminders (`b`, `B`), summarise what is unread (`/catchup`), or archive a room as Markdown (`/archive`). |
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, or `Alt-I` for the picture in the clipboard; `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
@@ -99,7 +99,7 @@ The archive also holds the launcher entry and the icon (`share/`), to copy if yo
 them: see [`assets/`](assets/README.md). The binaries are built by the workflow in
 `.github/workflows/release-binaries.yml` from the tagged source.
 
-**With Cargo** (Rust 1.96 or newer, plus a C compiler, `make`, `cmake` and `perl`):
+**With Cargo** (Rust 1.96 or newer, plus a C compiler, `make`, `cmake`, `perl` and `pkg-config`):
 
 ```sh
 git clone https://github.com/tylerstyle/matrix-rat && cd matrix-rat
@@ -166,7 +166,7 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 |---|---|
 | `Enter` / `Shift-Enter` | send / line break |
 | `↑` from the composer | walk into the messages (from the first line of the composer); then `Enter` reply, `e` edit, `r` react, `t` thread, `p` replied message, `P` pinned messages, `T` the room's threads, `b` save for later, `B` saved messages and reminders, `o` open, `v` view picture, `s` save, `O` open a picture or file in the system's viewer, `x` play or stop a voice or audio message (with mpv: `Space` pause, `←` `→` 5 seconds back or on), `W` transcribe a voice or audio message, `L` translate a message (both only once set up, see Good to know), `c` copy, `C` copy a code block, `d` try decrypting again, `i` details, `m` menu, `Del` delete, `End` newest |
-| `Tab`, `Alt-1`…`3`, `Alt-←↑↓` | move between room list, messages and composer |
+| `Tab`, `Alt-1`…`3`, `Alt-←→↑↓` | move between room list, messages and composer |
 | `Ctrl-↑` / `Ctrl-↓` | previous / next room |
 | `Alt-N` | open the room with the newest notifications (the first one in the rooms bar); again for the next one, round through all of them |
 | `Esc` | one step back at a time: closes the help or a popup, clears the room list's filter, goes back to the composer, gives up a reply or an edit, leaves a thread. In the composer with nothing left to cancel it closes the chat: no room is open (nothing in it counts as read, and its messages notify you like any other room's), your draft waits there, and the room list has the focus; `Enter` or a click opens a room again. Set `esc_closes_chat = false` (or switch off "Esc closes the chat" in the settings) to have `Esc` stop at the composer |
@@ -403,7 +403,9 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `record_voice`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `room_active`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `close_chat` (unbound by default: close the chat and show the room list, what a click on **Rooms** in the rooms bar does), `doctor`, `archive_room`, `catch_up` (these three unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
 - **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `save_for_later`, `remind_me` (unbound by default), `saved_messages`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`, `transcribe`, `translate`, `transcribe_again`, `translate_again` (these two unbound by default).
-- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `play_voice_note`, `edit_last` (edit your last message; it has no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
+- **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `play_voice_note`, `edit_last` (edit your last message; no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
+
+Many of these have no key by default and are reached from menus or `Ctrl-P` (open `F1` or **Settings → Key bindings** to see which ones are bound); give any of them a key here.
 
 **The `vim` preset**
 
@@ -423,7 +425,6 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `link_previews` | `"off"` (default), `"unencrypted"` or `"all"`: a preview (title and two lines) under messages with a link, for the first link. **Your homeserver fetches the link**, see Good to know |
 | `do_not_disturb` | `true`: no notifications for now. The switch "Do not disturb" in the settings and the command palette (type `dnd`) changes it; the status line says when it is on |
 | `window_title` | `true` (default): the terminal's title is `matrix-rat (3)` while 3 messages wait, `matrix-rat` when none do: the numbers on the room list's badges added up (messages, not rooms; muted rooms, invitations and join requests do not count; do not disturb changes nothing), never a room's name. The title from before is put back when matrix-rat ends, and around `Ctrl-Z` and the editor, in terminals that keep a stack of titles (xterm, kitty, foot, Alacritty and others; elsewhere the shell usually sets its own again). `false` (or "Unread count in title" in the settings): the title is left alone |
-| `notification_icon` | the program's icon in desktop notifications: `"color"` (default), `"outline"` (a line drawing in one colour) or `"generic"` (the desktop's own new-message icon). matrix-rat's icons are used when they are installed (the Nix package does that, see [`assets/`](assets/README.md)), else the desktop's own |
 | `sidebar_hidden` | `true`: the room list is put away (`Ctrl-B` changes it) |
 | `sidebar_width` | width of the room list (or drag the divider) |
 | `rooms_bar` | `true` (default): while the room list is out of sight (put away with `Ctrl-B`, or a chat is open in a window below 60 columns), a line above the chat with **☰ Rooms** and the rooms that have new notifications. `false` (or "Rooms bar" in the settings): no such line, the chat has it |
@@ -441,6 +442,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `summary_command` | the program that summarises unread messages for **Catch up**: a command line of your own (split into words like `$EDITOR`, no shell). It gets the unread text on its standard input, one message a line, and must print the summary and end with exit code 0. Empty (default): catching up is not offered. Also **Summary command** in the settings. With an online service the text of encrypted rooms leaves your machine: see Good to know |
 | `mouse` | turn off to use the terminal's own text selection |
 | `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
+| `notification_icon` (file only) | the program's icon in desktop notifications: `"color"` (default), `"outline"` (a line drawing in one colour) or `"generic"` (the desktop's own new-message icon). matrix-rat's icons are used when they are installed (the Nix package does that, see [`assets/`](assets/README.md)), else the desktop's own |
 | `notification_preview` (file only) | `false` hides message text, names and pictures in notifications |
 | `notification_click_command` (file only) | a shell command run when a notification is clicked, to bring the terminal window to the front (see Good to know) |
 | `secret_store` (file only) | `"file"` (default), `"keyring"` to keep the store's key in the system keyring, or `"auto"` |
@@ -574,7 +576,7 @@ There is no command that lists or removes profiles; a profile is its two folders
   (install the one for your desktop; over SSH there is none to ask unless the X display
   is forwarded). PNG is taken if the clipboard offers it, else JPEG, WebP or GIF. The
   picture is checked, put into a file readable by you only in
-  `$XDG_RUNTIME_DIR/matrix-rat/`, named after the time in UTC
+  `$XDG_RUNTIME_DIR/matrix-rat/` (else under your state folder), named after the time in UTC
   (`pasted-20261115-143012.png`, the name the room sees), and attached like a dropped
   file: `Enter` sends it, its `✕` (or `Backspace` in an empty message) takes it off. The
   file is removed once it is sent or taken off, and when matrix-rat ends (if it is
@@ -787,12 +789,12 @@ There is no command that lists or removes profiles; a profile is its two folders
   into a crash dump.
 - **Something not working?** (no pictures, `Shift-Enter` sends, no notifications,
   pasting a picture fails, a key does nothing): "What the app found here" in the command
-  palette (`Ctrl-P`, type `doctor`) or in the settings (`F2`) shows what matrix-rat
-  found: the terminal and its colours, keyboard and mouse, how pictures are shown and
-  why, the notification service, the clipboard tool, `xdg-open` and the editor, what plays
-  and what would record voice messages (or what is missing for that), where
-  the store's key is kept, and key bindings or settings in the config that were not
-  understood or took a key away. Lines marked `!` need seeing to, `~` are limits worth
+  palette (`Ctrl-P`, type `doctor`), or "What the app found" in the settings (`F2`), shows
+  what matrix-rat found: the terminal and its colours, keyboard and mouse, how pictures are
+  shown and why, the notification service, the clipboard tool, `xdg-open` and the editor,
+  what plays, records, transcribes, translates and summarises (or what is missing for any
+  of them), where the store's key is kept, and key bindings or settings in the config that
+  were not understood or took a key away. Lines marked `!` need seeing to, `~` are limits worth
   knowing. `c` (or "Copy as text") copies it for a bug report. Nothing private is in
   it: no account, server, room, path or file name. The same report comes from
   `matrix-rat doctor` in a shell, which needs no login and also runs beside a running
