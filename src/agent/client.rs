@@ -341,25 +341,32 @@ pub fn check_from_arg(from: &str) -> Result<(), String> {
 /// input holds (without the line end a shell adds).
 pub fn text_arg(words: &[String], stdin: &mut impl std::io::Read) -> Result<String, String> {
     use std::io::Read as _;
+    let refused = || {
+        format!(
+            "send needs some text, at most {} bytes (as words, or `-` to read it \
+             from standard input)",
+            proto::MAX_TEXT
+        )
+    };
     let text = if words.len() == 1 && words[0] == "-" {
         let mut bytes = Vec::new();
         stdin
             .take(proto::MAX_TEXT as u64 + 2)
             .read_to_end(&mut bytes)
             .map_err(|err| format!("could not read the text from standard input: {err}"))?;
-        let text = String::from_utf8(bytes)
-            .map_err(|_| "the text on standard input is not UTF-8".to_owned())?;
-        text.strip_suffix('\n').unwrap_or(&text).to_owned()
+        if bytes.last() == Some(&b'\n') {
+            bytes.pop();
+        }
+        // Too long first: where the reading stopped, a character may be cut in two.
+        if bytes.len() > proto::MAX_TEXT {
+            return Err(refused());
+        }
+        String::from_utf8(bytes)
+            .map_err(|_| "the text on standard input is not UTF-8".to_owned())?
     } else {
         words.join(" ")
     };
-    proto::check_text(&text).map_err(|_| {
-        format!(
-            "send needs some text, at most {} bytes (as words, or `-` to read it \
-             from standard input)",
-            proto::MAX_TEXT
-        )
-    })?;
+    proto::check_text(&text).map_err(|_| refused())?;
     Ok(text)
 }
 
@@ -748,6 +755,10 @@ mod tests {
         let mut source = long.as_bytes();
         assert!(text_arg(&words(&["-"]), &mut source).is_err());
         assert!(source.len() >= proto::MAX_TEXT * 2, "read too far");
+        // Also when what is read ends in the middle of a character.
+        let long = format!("{}ü and more", "x".repeat(proto::MAX_TEXT + 1));
+        let told = text_arg(&words(&["-"]), &mut long.as_bytes()).unwrap_err();
+        assert!(told.contains("at most"), "{told}");
         let fits = format!("{}\n", "x".repeat(proto::MAX_TEXT));
         assert_eq!(
             text_arg(&words(&["-"]), &mut fits.as_bytes())
