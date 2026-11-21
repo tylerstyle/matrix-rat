@@ -169,9 +169,12 @@ fn render(frame: &mut Frame, theme: &Theme, encoded: &Encoded, area: Rect, skip:
     if matches!(encoded.protocol, SlicedProtocol::Halfblocks(_)) {
         // Half blocks are 24-bit colours; bring them down where the terminal has fewer.
         let buffer = frame.buffer_mut();
-        let downgrade = |color: Color| match color {
-            Color::Rgb(r, g, b) => theme.color(r, g, b),
-            other => other,
+        let downgrade = |color: Color| {
+            if let Color::Rgb(r, g, b) = color {
+                theme.color(r, g, b)
+            } else {
+                color
+            }
         };
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {

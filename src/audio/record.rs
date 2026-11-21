@@ -213,7 +213,9 @@ pub async fn run(request: RecordRequest, events: UnboundedSender<RecordUpdate>) 
     match &event {
         RecordEvent::Failed(why) => tracing::debug!(?why, "a recording failed"),
         RecordEvent::Cancelled => tracing::debug!("a recording was given up"),
-        _ => tracing::debug!("a recording ended"),
+        RecordEvent::Started | RecordEvent::Level { .. } | RecordEvent::Done(_) => {
+            tracing::debug!("a recording ended")
+        }
     }
     send(event);
 }

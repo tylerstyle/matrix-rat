@@ -43,7 +43,9 @@ impl RoomKind {
     pub fn pending_hint(self) -> &'static str {
         match self {
             Self::Knock => "Wait for your join request to be accepted first",
-            _ => "Accept the invitation first",
+            Self::Invite | Self::Favourite | Self::Person | Self::Room | Self::LowPriority => {
+                "Accept the invitation first"
+            }
         }
     }
 }

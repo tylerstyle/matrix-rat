@@ -74,7 +74,7 @@ pub fn head_row(
     let (mut spans, used) = status(view, file, indent, first_width, spinner, theme);
     let icon = match file.kind {
         MediaKind::Voice => "🎤",
-        _ => "🔊",
+        MediaKind::File | MediaKind::Audio | MediaKind::Video | MediaKind::Picture => "🔊",
     };
     let room = first_width.saturating_sub(used);
     // Only where a few letters of it fit: an icon and a cut alone say nothing.

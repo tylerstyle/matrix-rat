@@ -2045,7 +2045,7 @@ impl App {
         let outgoing = match self.format_outgoing(self.composer.text()) {
             // The draft stays, so a typo in a command is easy to fix.
             Outgoing::Rejected(reason) => return self.show_toast(reason),
-            outgoing => outgoing,
+            outgoing @ (Outgoing::Text { .. } | Outgoing::Emote { .. }) => outgoing,
         };
 
         if self.matrix.is_some() {
@@ -2143,7 +2143,9 @@ impl App {
                 message.reply_to = Some((target.sender.clone(), target.body.clone()));
                 self.push_message(message);
             }
-            _ => self.push_message(message),
+            ComposeMode::Normal | ComposeMode::Reply(_) | ComposeMode::Edit(_) => {
+                self.push_message(message)
+            }
         }
         self.timeline.scroll = 0;
     }
@@ -2773,7 +2775,7 @@ impl App {
             }
             ComposeMode::Reply(i) if i > index => ComposeMode::Reply(i - 1),
             ComposeMode::Edit(i) if i > index => ComposeMode::Edit(i - 1),
-            other => other,
+            other @ (ComposeMode::Normal | ComposeMode::Reply(_) | ComposeMode::Edit(_)) => other,
         };
         if self.messages().is_empty() {
             self.set_focus(Pane::Composer);
@@ -3445,6 +3447,10 @@ impl App {
                     }
                     return;
                 }
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Tab | KeyCode::Down => form.next(),
                     KeyCode::BackTab | KeyCode::Up => form.previous(),
@@ -3464,16 +3470,27 @@ impl App {
                     }
                 }
             }
-            Some(Modal::Recovery(form)) => match code {
-                KeyCode::Esc => self.close_modal(),
-                _ if form.busy => {}
-                KeyCode::Enter => self.submit_recovery(),
-                _ => {
-                    form.key.handle_key(code, mods, EditKeys::FULL);
+            Some(Modal::Recovery(form)) =>
+            {
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
+                match code {
+                    KeyCode::Esc => self.close_modal(),
+                    _ if form.busy => {}
+                    KeyCode::Enter => self.submit_recovery(),
+                    _ => {
+                        form.key.handle_key(code, mods, EditKeys::FULL);
+                    }
                 }
-            },
+            }
             Some(Modal::Emoji(picker)) => {
                 let page = picker.rows.max(1) as isize;
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Esc => self.modal = None,
                     KeyCode::Enter => {
@@ -3499,29 +3516,67 @@ impl App {
                     }
                 }
             }
-            Some(Modal::Settings(menu)) if menu.editing.is_some() => match code {
-                KeyCode::Esc => menu.editing = None,
-                KeyCode::Enter => {
-                    let text = menu.editing.take().unwrap_or_default();
-                    match menu.current() {
-                        Setting::AudioPlayer => self.set_audio_player(&text),
-                        Setting::AudioRecorder => self.set_audio_recorder(&text),
-                        Setting::TranscribeCommand => self.set_transcribe_command(&text),
-                        Setting::TranscribeModel => self.set_transcribe_model(&text),
-                        Setting::TranslateCommand => self.set_translate_command(&text),
-                        Setting::TranslateLanguage => self.set_translate_language(&text),
-                        Setting::SummaryCommand => self.set_summary_command(&text),
-                        _ => self.set_download_dir(&text),
+            Some(Modal::Settings(menu)) if menu.editing.is_some() =>
+            {
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
+                match code {
+                    KeyCode::Esc => menu.editing = None,
+                    KeyCode::Enter => {
+                        let text = menu.editing.take().unwrap_or_default();
+                        #[warn(clippy::wildcard_enum_match_arm)]
+                        match menu.current() {
+                            Setting::AudioPlayer => self.set_audio_player(&text),
+                            Setting::AudioRecorder => self.set_audio_recorder(&text),
+                            Setting::TranscribeCommand => self.set_transcribe_command(&text),
+                            Setting::TranscribeModel => self.set_transcribe_model(&text),
+                            Setting::TranslateCommand => self.set_translate_command(&text),
+                            Setting::TranslateLanguage => self.set_translate_language(&text),
+                            Setting::SummaryCommand => self.set_summary_command(&text),
+                            Setting::DownloadDir
+                            | Setting::Theme
+                            | Setting::SidebarWidth
+                            | Setting::RoomPreviews
+                            | Setting::LinkPreviews
+                            | Setting::Mouse
+                            | Setting::EscClosesChat
+                            | Setting::RoomsBar
+                            | Setting::TypingNotices
+                            | Setting::ReadReceipts
+                            | Setting::DoNotDisturb
+                            | Setting::Notifications
+                            | Setting::Keywords
+                            | Setting::KeepNotes
+                            | Setting::Keys
+                            | Setting::Encryption
+                            | Setting::Profile
+                            | Setting::Logout
+                            | Setting::ReadMarkers
+                            | Setting::ThemeDark
+                            | Setting::ThemeLight
+                            | Setting::ThemePairing
+                            | Setting::IgnoredUsers
+                            | Setting::Sessions
+                            | Setting::KeyBackup
+                            | Setting::WindowTitle
+                            | Setting::Doctor => self.set_download_dir(&text),
+                        }
+                    }
+                    _ => {
+                        if let Some(text) = &mut menu.editing {
+                            text.handle_key(code, mods, EditKeys::FULL);
+                        }
                     }
                 }
-                _ => {
-                    if let Some(text) = &mut menu.editing {
-                        text.handle_key(code, mods, EditKeys::FULL);
-                    }
-                }
-            },
+            }
             Some(Modal::Settings(menu)) => {
                 let setting = menu.current();
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Esc | KeyCode::F(2) => self.modal = None,
                     KeyCode::Up | KeyCode::BackTab => menu.step(-1),
@@ -4290,6 +4345,10 @@ impl App {
         let before = self.composer.text().to_owned();
         let before_cursor = self.composer.cursor();
         let mut handled = true;
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         match code {
             KeyCode::Char(c) if !ctrl && !alt => self.type_char(c),
             KeyCode::Char('b') if alt => self.composer.word_left(),
@@ -4407,7 +4466,7 @@ impl App {
                     self.sidebar.reveal_cursor = true;
                 }
             }
-            _ => {
+            Pane::Timeline | Pane::Composer => {
                 self.set_focus(Pane::Composer);
                 self.insert_composer_text(&text);
                 self.allow_text_edit_reopen_completion();
@@ -4426,6 +4485,10 @@ impl App {
         if self.menu_mouse(&mouse, hit) {
             return;
         }
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::MouseEventKind"
+        )]
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.dirty = true;
@@ -4576,15 +4639,19 @@ impl App {
                         self.sync_completion();
                     }
                     Some(HitId::Button(Button::OwnProfile)) => self.open_own_profile(),
-                    Some(HitId::Button(button)) => self.perform(match button {
-                        Button::Help => Action::ToggleHelp,
-                        Button::Settings => Action::OpenSettings,
-                        Button::Theme => Action::CycleTheme,
-                        Button::CancelCompose => Action::CancelCompose,
-                        Button::JumpToNewest => Action::JumpToNewest,
-                        Button::Palette => Action::OpenPalette,
-                        Button::OwnProfile => unreachable!(),
-                    }),
+                    Some(HitId::Button(button)) => {
+                        #[warn(clippy::wildcard_enum_match_arm)]
+                        let action = match button {
+                            Button::Help => Action::ToggleHelp,
+                            Button::Settings => Action::OpenSettings,
+                            Button::Theme => Action::CycleTheme,
+                            Button::CancelCompose => Action::CancelCompose,
+                            Button::JumpToNewest => Action::JumpToNewest,
+                            Button::Palette => Action::OpenPalette,
+                            Button::OwnProfile => unreachable!(),
+                        };
+                        self.perform(action);
+                    }
                     // The microphone is held, not clicked: its own way in.
                     Some(HitId::Do(Action::RecordVoice)) => self.press_mic(),
                     Some(HitId::Do(action)) => self.perform(action),

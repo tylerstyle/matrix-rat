@@ -194,7 +194,7 @@ impl Conn {
             .into_iter()
             .filter_map(|item| match item {
                 Item::Room(room) => Some(room),
-                _ => None,
+                Item::Message(_) | Item::End(_) => None,
             })
             .collect())
     }
@@ -234,7 +234,7 @@ impl Conn {
             .into_iter()
             .filter_map(|item| match item {
                 Item::Message(message) => Some(*message),
-                _ => None,
+                Item::Room(_) | Item::End(_) => None,
             })
             .collect();
         Ok((room_id, messages))

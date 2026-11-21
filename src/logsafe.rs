@@ -176,12 +176,14 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
         return Some(dbus(err));
     }
     if let Some(err) = find::<notify::Error>(err) {
-        return Some(match &err.kind {
+        #[expect(clippy::wildcard_enum_match_arm, reason = "foreign notify::ErrorKind")]
+        let why = match &err.kind {
             notify::ErrorKind::Io(err) => Why::Io(err.kind()),
             notify::ErrorKind::PathNotFound => Why::Io(std::io::ErrorKind::NotFound),
             notify::ErrorKind::MaxFilesWatch => Why::Word("too many watched files"),
             _ => Why::Word("file watch"),
-        });
+        };
+        return Some(why);
     }
     if let Some(err) = find::<KeyringError>(err) {
         return Some(Why::Word(match err {
@@ -191,9 +193,10 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
         }));
     }
     if let Some(err) = find::<image::ImageError>(err) {
-        return Some(match err {
-            image::ImageError::IoError(err) => Why::Io(err.kind()),
-            _ => Why::Word("image"),
+        return Some(if let image::ImageError::IoError(err) = err {
+            Why::Io(err.kind())
+        } else {
+            Why::Word("image")
         });
     }
     if find::<toml::de::Error>(err).is_some() || find::<toml_edit::TomlError>(err).is_some() {
@@ -204,6 +207,7 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
 
 fn sdk(err: &matrix_sdk::Error) -> Why {
     use matrix_sdk::Error as E;
+    #[expect(clippy::wildcard_enum_match_arm, reason = "foreign matrix_sdk::Error")]
     match err {
         E::Http(err) => http(err),
         E::Io(err) => Why::Io(err.kind()),
@@ -281,6 +285,10 @@ fn network(err: &matrix_sdk::reqwest::Error) -> Why {
 
 fn timeline(err: &matrix_sdk_ui::timeline::Error) -> Why {
     use matrix_sdk_ui::timeline::Error as T;
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign matrix_sdk_ui::timeline::Error"
+    )]
     match err {
         T::Sdk(err) => sdk(err),
         T::EventCacheError(_) => Why::Word("event cache"),
@@ -292,6 +300,7 @@ fn timeline(err: &matrix_sdk_ui::timeline::Error) -> Why {
 
 /// D-Bus errors can carry the bus address and the other side's own words.
 fn dbus(err: &zbus::Error) -> Why {
+    #[expect(clippy::wildcard_enum_match_arm, reason = "foreign zbus::Error")]
     match err {
         zbus::Error::InputOutput(err) => Why::Io(err.kind()),
         zbus::Error::MethodError(..) | zbus::Error::FDO(_) => Why::Word("D-Bus error reply"),

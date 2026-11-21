@@ -39,16 +39,17 @@ pub fn convert(
         if let Some(event) = item.as_event() {
             return event_message(id, event, own, ignored, &now);
         }
-        match item.as_virtual()? {
-            // Keep a trailing `ReadMarker` too when every item after it was
-            // hidden/ignored so the UI knows no visible unread messages follow it.
-            VirtualTimelineItem::ReadMarker if index < last => Some(Message {
+        // Keep a trailing `ReadMarker` too when every item after it was
+        // hidden/ignored so the UI knows no visible unread messages follow it.
+        // Day separators are derived from the messages' own dates.
+        if matches!(item.as_virtual()?, VirtualTimelineItem::ReadMarker) && index < last {
+            Some(Message {
                 id,
                 kind: MsgKind::ReadMarker,
                 ..Message::default()
-            }),
-            // Day separators are derived from the messages' own dates.
-            _ => None,
+            })
+        } else {
+            None
         }
     }));
     messages
@@ -246,6 +247,10 @@ pub(super) fn apply_own_display_name(messages: &mut [Message], own_name: Option<
 
 /// One line saying what a message is, for the room list.
 pub(super) fn preview(content: &TimelineItemContent) -> String {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign matrix_sdk_ui TimelineItemContent, MsgLikeKind, and ruma MessageType"
+    )]
     let text = match content {
         TimelineItemContent::MsgLike(content) => match &content.kind {
             MsgLikeKind::Message(message) => match message.msgtype() {
@@ -288,12 +293,15 @@ pub(super) fn preview(content: &TimelineItemContent) -> String {
 }
 
 pub(super) fn display_name(profile: &TimelineDetails<Profile>, user: &UserId) -> String {
-    match profile {
-        TimelineDetails::Ready(Profile {
-            display_name: Some(name),
-            ..
-        }) if !crate::text::is_blank(&sanitize_line(name)) => sanitize_line(name),
-        _ => user.localpart().to_owned(),
+    if let TimelineDetails::Ready(Profile {
+        display_name: Some(name),
+        ..
+    }) = profile
+        && !crate::text::is_blank(&sanitize_line(name))
+    {
+        sanitize_line(name)
+    } else {
+        user.localpart().to_owned()
     }
 }
 
@@ -361,6 +369,10 @@ pub(super) fn event_message(
         _ => {}
     }
 
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign matrix_sdk_ui TimelineItemContent, TimelineDetails, MsgLikeKind, and ruma MessageType"
+    )]
     match event.content() {
         TimelineItemContent::MsgLike(content) => {
             message.thread = super::threads::summary(content);

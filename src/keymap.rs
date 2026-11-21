@@ -1009,6 +1009,10 @@ pub const VIM_EXTRA: &[Binding] = &[
 /// Shift, symbols typed with Shift (like `?`) ignore Shift, Shift-Tab is BackTab.
 pub fn normalize(key: KeyEvent) -> (KeyCode, KeyModifiers) {
     let mut mods = key.modifiers & (CTRL | ALT | SHIFT);
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign crossterm::event::KeyCode"
+    )]
     let code = match key.code {
         Char(c) => {
             mods -= SHIFT;
@@ -1034,6 +1038,10 @@ pub fn normalize(key: KeyEvent) -> (KeyCode, KeyModifiers) {
 /// Validates that `(code, mods)` is representable cleanly in terminal input and allowed in `context`.
 pub fn validate_binding(context: Context, code: KeyCode, mods: KeyModifiers) -> Result<(), String> {
     if mods == CTRL {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         match code {
             Char('i') => return Err("Ctrl-I collides with Tab in terminal input".to_owned()),
             Char('m') => return Err("Ctrl-M collides with Enter in terminal input".to_owned()),
@@ -1151,6 +1159,10 @@ pub fn from_key_event(context: Context, key: KeyEvent) -> Result<(KeyCode, KeyMo
         return Err("control character cannot be bound".to_owned());
     }
     let (code, mods) = normalize(key);
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign crossterm::event::KeyCode"
+    )]
     match code {
         Char(_)
         | KeyCode::Enter
@@ -1188,6 +1200,10 @@ pub fn format_label(code: KeyCode, mods: KeyModifiers) -> String {
     if mods.contains(SHIFT) && code != KeyCode::BackTab {
         out.push_str("Shift-");
     }
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign crossterm::event::KeyCode"
+    )]
     match code {
         KeyCode::Enter => out.push_str("Enter"),
         KeyCode::Esc => out.push_str("Esc"),
@@ -1231,6 +1247,10 @@ pub fn format_config_key(code: KeyCode, mods: KeyModifiers) -> String {
     if mods.contains(SHIFT) && code != KeyCode::BackTab {
         out.push_str("shift-");
     }
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign crossterm::event::KeyCode"
+    )]
     match code {
         KeyCode::Enter => out.push_str("enter"),
         KeyCode::Esc => out.push_str("esc"),

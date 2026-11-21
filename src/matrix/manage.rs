@@ -1598,6 +1598,10 @@ fn explain_kind(
 
 /// Notification settings fail without saying why; none of it is worth quoting.
 fn explain_notify(err: &NotificationSettingsError) -> &'static str {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign matrix_sdk NotificationSettingsError"
+    )]
     match err {
         NotificationSettingsError::UnableToAddPushRule
         | NotificationSettingsError::UnableToRemovePushRule
@@ -2020,6 +2024,10 @@ fn entries_agree(entries: &[Entry], counts: (u64, u64)) -> bool {
 }
 
 pub(super) fn role(level: UserPowerLevel) -> MemberRole {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign ruma UserPowerLevel"
+    )]
     match level {
         UserPowerLevel::Infinite => MemberRole::Owner,
         UserPowerLevel::Int(level) if level >= Int::from(100) => MemberRole::Admin,
@@ -2100,6 +2108,10 @@ async fn stored_members(room: &Room) -> Result<Vec<Entry>, String> {
     Ok(members
         .iter()
         .filter_map(|member| {
+            #[expect(
+                clippy::wildcard_enum_match_arm,
+                reason = "foreign ruma MembershipState"
+            )]
             let status = match *member.membership() {
                 MembershipState::Join => EntryStatus::Joined,
                 MembershipState::Invite => EntryStatus::Invited,
@@ -2132,6 +2144,10 @@ fn parse_member_events(chunk: &[Raw<RoomMemberEvent>]) -> ServerMembers {
             continue;
         };
         let user = event.state_key().to_owned();
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign ruma MembershipState"
+        )]
         let status = match event.membership() {
             MembershipState::Join => EntryStatus::Joined,
             MembershipState::Invite => EntryStatus::Invited,

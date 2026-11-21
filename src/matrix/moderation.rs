@@ -446,6 +446,7 @@ fn source_is_encrypted(source: &MediaSource) -> bool {
 }
 
 fn extract_media_forward(msgtype: &MessageType) -> Option<MediaForward> {
+    #[expect(clippy::wildcard_enum_match_arm, reason = "foreign ruma MessageType")]
     match msgtype {
         MessageType::Image(c) => {
             let thumb_src = c.info.as_ref().and_then(|i| i.thumbnail_source.clone());
@@ -617,6 +618,7 @@ pub(super) async fn forward_message(
             let SyncStickerEvent::Original(orig) = sticker else {
                 return Err("Cannot forward a deleted sticker.".to_owned());
             };
+            #[expect(clippy::wildcard_enum_match_arm, reason = "foreign ruma MediaSource")]
             match MediaSource::from(orig.content.source.clone()) {
                 MediaSource::Plain(url) if !to_encrypted => {
                     let content = StickerEventContent::new(

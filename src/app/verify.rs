@@ -154,6 +154,10 @@ impl App {
         };
         let state = &self.verify;
         let typing = popup.field_focused && popup.has_field(state);
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         let pressed = match code {
             KeyCode::Esc => {
                 let button = popup.escape(state);
@@ -274,7 +278,12 @@ impl App {
             }
             VerifyStage::Done => Some(format!("Verified {}", update.peer)),
             VerifyStage::Cancelled { reason } => Some(format!("Verification ended: {reason}")),
-            _ => None,
+            VerifyStage::Requested
+            | VerifyStage::Waiting
+            | VerifyStage::Ready
+            | VerifyStage::Starting
+            | VerifyStage::Compare { .. }
+            | VerifyStage::Confirmed => None,
         };
         let incoming = update.stage == VerifyStage::Requested;
         self.verify.flow = Some(update);

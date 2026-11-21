@@ -2,6 +2,11 @@
 // A test may wait for what it tests; everywhere else `clippy.toml` refuses calls that
 // block their thread unless the place says why it may.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+// Every match on one of our own enums names its variants, so adding one flags every
+// place that must decide about it. Foreign enums (and tests) are exempt via `#[expect]`
+// or the test-only allow below.
+#![warn(clippy::wildcard_enum_match_arm)]
+#![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
 //! matrix-rat — a mouse-friendly Matrix client for the terminal.
 
 mod action;

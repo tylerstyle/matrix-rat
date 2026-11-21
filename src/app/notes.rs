@@ -246,7 +246,7 @@ impl App {
             let event = message.event_id().filter(|_| message.is_sound())?;
             match &self.notes.notes.get(event, NoteKind::Transcript)?.state {
                 NoteState::Done(text) => Some(text.clone()),
-                _ => None,
+                NoteState::Running | NoteState::Failed(_) => None,
             }
         })
     }
@@ -278,7 +278,7 @@ impl App {
         }
         match note.state {
             NoteState::Running => true,
-            _ => self
+            NoteState::Done(_) | NoteState::Failed(_) => self
                 .note_source(message, kind)
                 .is_some_and(|source| note.is_of(source)),
         }
@@ -716,7 +716,35 @@ impl App {
             Setting::TranscribeModel => self.notes.transcribe_model.clone(),
             Setting::TranslateCommand => self.notes.translate_command.clone(),
             Setting::TranslateLanguage => notes::language(&self.notes.translate_language),
-            _ => String::new(),
+            Setting::Theme
+            | Setting::SidebarWidth
+            | Setting::RoomPreviews
+            | Setting::LinkPreviews
+            | Setting::Mouse
+            | Setting::EscClosesChat
+            | Setting::RoomsBar
+            | Setting::TypingNotices
+            | Setting::ReadReceipts
+            | Setting::DoNotDisturb
+            | Setting::Notifications
+            | Setting::Keywords
+            | Setting::DownloadDir
+            | Setting::AudioRecorder
+            | Setting::KeepNotes
+            | Setting::SummaryCommand
+            | Setting::Keys
+            | Setting::Encryption
+            | Setting::Profile
+            | Setting::Logout
+            | Setting::ReadMarkers
+            | Setting::ThemeDark
+            | Setting::ThemeLight
+            | Setting::ThemePairing
+            | Setting::IgnoredUsers
+            | Setting::Sessions
+            | Setting::KeyBackup
+            | Setting::WindowTitle
+            | Setting::Doctor => String::new(),
         }
     }
 

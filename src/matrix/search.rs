@@ -548,6 +548,10 @@ pub(super) fn extract_event_text(
     let Ok(AnySyncTimelineEvent::MessageLike(msg)) = event.raw().deserialize() else {
         return None;
     };
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign ruma AnySyncMessageLikeEvent"
+    )]
     match msg {
         AnySyncMessageLikeEvent::RoomMessage(msg) => {
             let orig = msg.as_original()?;

@@ -270,6 +270,10 @@ async fn remove(settings: NotificationSettings, keyword: String) -> Result<(), S
 
 /// The SDK's errors do not say why; none of what they carry is worth quoting.
 fn explain(err: &NotificationSettingsError) -> &'static str {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign matrix_sdk NotificationSettingsError"
+    )]
     match err {
         NotificationSettingsError::UnableToAddPushRule
         | NotificationSettingsError::UnableToRemovePushRule

@@ -206,7 +206,12 @@ fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) 
             "User ID",
             " Invite ",
         ),
-        _ => (
+        Stage::Direct
+        | Stage::Choose
+        | Stage::Create
+        | Stage::CreateSpace
+        | Stage::Browse
+        | Stage::Preview => (
             "Search by name or enter a user ID like @name:server. Any existing chat is opened."
                 .to_owned(),
             "User ID",
@@ -224,7 +229,13 @@ fn one_field(frame: &mut Frame, app: &mut App, area: Rect, form: &mut NewPopup) 
     app.hits.add(input, hit(Click::Slot(0)));
     let value = match form.stage {
         Stage::Join => &mut form.address,
-        _ => &mut form.user,
+        Stage::Direct
+        | Stage::Invite
+        | Stage::Choose
+        | Stage::Create
+        | Stage::CreateSpace
+        | Stage::Browse
+        | Stage::Preview => &mut form.user,
     };
     let (cursor, value_rect) = field(frame, &theme, input, label, value, false, !busy);
     if !busy {
@@ -1675,7 +1686,21 @@ fn info_row(
         let label = match row {
             InfoRow::Name => "Name",
             InfoRow::OwnName => "Your name",
-            _ => "Topic",
+            InfoRow::Topic
+            | InfoRow::Favourite
+            | InfoRow::LowPriority
+            | InfoRow::Pinned
+            | InfoRow::Notify
+            | InfoRow::Invite
+            | InfoRow::AddToSpace
+            | InfoRow::RemoveFromSpace
+            | InfoRow::Leave
+            | InfoRow::KnockRequest(_)
+            | InfoRow::AddChild
+            | InfoRow::Child(_)
+            | InfoRow::SettingsToggle
+            | InfoRow::Setting(_)
+            | InfoRow::Member(_) => "Topic",
         };
         let value_x = rect.x + 2 + ACTION_LABEL as u16;
         let space = (rect.width as usize).saturating_sub(2 + ACTION_LABEL + 1);
@@ -1913,7 +1938,17 @@ fn info_row(
                 );
             }
         }
-        _ => {}
+        InfoRow::Pinned
+        | InfoRow::Name
+        | InfoRow::Topic
+        | InfoRow::Invite
+        | InfoRow::AddToSpace
+        | InfoRow::Leave
+        | InfoRow::KnockRequest(_)
+        | InfoRow::AddChild
+        | InfoRow::Child(_)
+        | InfoRow::SettingsToggle
+        | InfoRow::Member(_) => {}
     }
     finish(frame, spans);
     None

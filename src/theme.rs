@@ -428,7 +428,45 @@ impl Theme {
                     // Under the mouse or the cursor all the time: a quiet mark.
                     Role::Hover | Role::RoomCursor => style.add_modifier(Modifier::UNDERLINED),
                     Role::Text => *style,
-                    _ => style.add_modifier(Modifier::REVERSED),
+                    Role::Muted
+                    | Role::Border
+                    | Role::BorderFocused
+                    | Role::Title
+                    | Role::TitleFocused
+                    | Role::SidebarSection
+                    | Role::Room
+                    | Role::RoomUnread
+                    | Role::RoomActive
+                    | Role::UnreadBadge
+                    | Role::MentionBadge
+                    | Role::Online
+                    | Role::Timestamp
+                    | Role::DateDivider
+                    | Role::MessageSelected
+                    | Role::Reaction
+                    | Role::ReactionOwn
+                    | Role::ReplyQuote
+                    | Role::Placeholder
+                    | Role::Banner
+                    | Role::Status
+                    | Role::StatusKey
+                    | Role::StatusOk
+                    | Role::Toast
+                    | Role::Error
+                    | Role::OverlayBorder
+                    | Role::Scrollbar
+                    | Role::ScrollbarThumb
+                    | Role::Pill
+                    | Role::Code
+                    | Role::CodeText
+                    | Role::CodeKeyword
+                    | Role::CodeString
+                    | Role::CodeComment
+                    | Role::CodeConstant
+                    | Role::CodeType
+                    | Role::CodeFunction
+                    | Role::Link
+                    | Role::Spoiler => style.add_modifier(Modifier::REVERSED),
                 };
             }
             style.fg = None;

@@ -71,18 +71,17 @@ pub fn summary(content: &MsgLikeContent) -> Option<ThreadSummary> {
     if summary.num_replies == 0 {
         return None;
     }
-    let latest = match &summary.latest_event {
-        TimelineDetails::Ready(event) => {
-            let text = match event.content.as_message() {
-                Some(message) => sanitize_line(message.body()),
-                None => "a message".to_owned(),
-            };
-            Some((
-                sanitize_line(&display_name(&event.sender_profile, &event.sender)),
-                truncate(text.trim(), PREVIEW),
-            ))
-        }
-        _ => None,
+    let latest = if let TimelineDetails::Ready(event) = &summary.latest_event {
+        let text = match event.content.as_message() {
+            Some(message) => sanitize_line(message.body()),
+            None => "a message".to_owned(),
+        };
+        Some((
+            sanitize_line(&display_name(&event.sender_profile, &event.sender)),
+            truncate(text.trim(), PREVIEW),
+        ))
+    } else {
+        None
     };
     Some(ThreadSummary {
         replies: summary.num_replies,

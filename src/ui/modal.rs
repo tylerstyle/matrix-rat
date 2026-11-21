@@ -365,7 +365,7 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
                 // Red only for what needs doing; in progress or unknown is not that.
                 let role = match crate::devices::backup_setting(app.verify.security).1 {
                     crate::devices::Tone::Warn => Role::Error,
-                    _ => Role::Muted,
+                    crate::devices::Tone::Good | crate::devices::Tone::Plain => Role::Muted,
                 };
                 spans.push(Span::styled(truncate(&value, room), theme.style(role)));
             }

@@ -667,13 +667,23 @@ impl App {
             },
             Popup::CatchUp(popup) => {
                 let page = popup.page.saturating_sub(1).max(1) as isize;
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Esc => self.close_collect(),
-                    KeyCode::Enter => match popup.stage {
-                        CatchUpStage::Asking { .. } => self.confirm_catch_up(),
-                        CatchUpStage::Collecting { .. } | CatchUpStage::Summarising { .. } => {}
-                        _ => self.close_collect(),
-                    },
+                    KeyCode::Enter =>
+                    {
+                        #[warn(clippy::wildcard_enum_match_arm)]
+                        match popup.stage {
+                            CatchUpStage::Asking { .. } => self.confirm_catch_up(),
+                            CatchUpStage::Collecting { .. } | CatchUpStage::Summarising { .. } => {}
+                            CatchUpStage::Done { .. }
+                            | CatchUpStage::Nothing
+                            | CatchUpStage::Failed(_) => self.close_collect(),
+                        }
+                    }
                     KeyCode::Up => self.scroll_collect(-1),
                     KeyCode::Char('k') if plain => self.scroll_collect(-1),
                     KeyCode::Down => self.scroll_collect(1),
@@ -705,7 +715,9 @@ impl App {
             (_, CLICK_CLOSE) => self.close_collect(),
             (Popup::Archive(popup), CLICK_GO) => match popup.stage {
                 ArchiveStage::Asking => self.start_archive(),
-                _ => self.close_collect(),
+                ArchiveStage::Running { .. } | ArchiveStage::Done(_) | ArchiveStage::Failed(_) => {
+                    self.close_collect()
+                }
             },
             (Popup::Archive(popup), row)
                 if popup.stage == ArchiveStage::Asking

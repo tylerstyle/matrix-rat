@@ -114,6 +114,7 @@ pub fn parse_portal_color_scheme(value: u32) -> Option<ColorScheme> {
 }
 
 fn variant_u32(value: &Variant<'_>) -> Option<u32> {
+    #[expect(clippy::wildcard_enum_match_arm, reason = "foreign zvariant::Variant")]
     match value {
         Variant::U32(n) => Some(*n),
         Variant::Variant(inner) => variant_u32(inner),

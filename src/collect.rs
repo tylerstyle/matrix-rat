@@ -240,7 +240,9 @@ where
     match entry.kind {
         Kind::Emote => format!("[{when}] * {}{reply} {said}", entry.sender),
         Kind::Event => format!("[{when}] ({said})"),
-        _ => format!("[{when}] {}{reply}: {said}", entry.sender),
+        Kind::Text | Kind::Deleted | Kind::Undecryptable | Kind::Poll | Kind::Media(_) => {
+            format!("[{when}] {}{reply}: {said}", entry.sender)
+        }
     }
 }
 

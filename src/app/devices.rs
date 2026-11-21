@@ -267,6 +267,10 @@ impl App {
         let click = match &mut popup.stage {
             SessionStage::List => {
                 let page = popup.page.max(1) as isize;
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 match code {
                     KeyCode::Esc => Some(Click::Cancel),
                     KeyCode::Up => {
@@ -300,42 +304,55 @@ impl App {
                     _ => None,
                 }
             }
-            SessionStage::Rename(rename) => match code {
-                KeyCode::Esc => Some(Click::Cancel),
-                _ if rename.request.is_some() => None,
-                KeyCode::Enter => Some(Click::Confirm),
-                _ => {
-                    if rename.name.handle_key(code, mods, EditKeys::FULL).changed() {
-                        rename.error = None;
+            SessionStage::Rename(rename) =>
+            {
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
+                match code {
+                    KeyCode::Esc => Some(Click::Cancel),
+                    _ if rename.request.is_some() => None,
+                    KeyCode::Enter => Some(Click::Confirm),
+                    _ => {
+                        if rename.name.handle_key(code, mods, EditKeys::FULL).changed() {
+                            rename.error = None;
+                        }
+                        None
                     }
-                    None
                 }
-            },
-            SessionStage::SignOut(sign_out) => match code {
-                KeyCode::Esc => Some(Click::Cancel),
-                _ if sign_out.request.is_some() => None,
-                KeyCode::Enter if sign_out.typing() => Some(Click::Confirm),
-                _ if sign_out.typing() => {
-                    if let Some(password) = &mut sign_out.password
-                        && password.handle_key(code, mods, EditKeys::FULL).changed()
-                    {
-                        sign_out.error = None;
+            }
+            SessionStage::SignOut(sign_out) => {
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
+                match code {
+                    KeyCode::Esc => Some(Click::Cancel),
+                    _ if sign_out.request.is_some() => None,
+                    KeyCode::Enter if sign_out.typing() => Some(Click::Confirm),
+                    _ if sign_out.typing() => {
+                        if let Some(password) = &mut sign_out.password
+                            && password.handle_key(code, mods, EditKeys::FULL).changed()
+                        {
+                            sign_out.error = None;
+                        }
+                        None
                     }
-                    None
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                        sign_out.on_confirm = !sign_out.on_confirm;
+                        None
+                    }
+                    // Enter says yes only after the focus was moved there.
+                    KeyCode::Enter if sign_out.on_confirm => match &sign_out.web {
+                        None => Some(Click::Confirm),
+                        Some(Some(_)) => Some(Click::OpenWeb),
+                        Some(None) => Some(Click::Cancel),
+                    },
+                    KeyCode::Enter => Some(Click::Cancel),
+                    _ => None,
                 }
-                KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
-                    sign_out.on_confirm = !sign_out.on_confirm;
-                    None
-                }
-                // Enter says yes only after the focus was moved there.
-                KeyCode::Enter if sign_out.on_confirm => match &sign_out.web {
-                    None => Some(Click::Confirm),
-                    Some(Some(_)) => Some(Click::OpenWeb),
-                    Some(None) => Some(Click::Cancel),
-                },
-                KeyCode::Enter => Some(Click::Cancel),
-                _ => None,
-            },
+            }
         };
         if let Some(click) = click {
             self.devices_click(click);
@@ -499,6 +516,10 @@ impl App {
         // A form: where the focus is, how many places it has, and whether it is busy.
         let (focus, slots, fields, busy) = match &mut popup.stage {
             KeysStage::Status => {
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign crossterm::event::KeyCode"
+                )]
                 let click = match code {
                     KeyCode::Esc => Some(Click::Cancel),
                     KeyCode::Enter => Some(popup.focused()),
@@ -536,6 +557,10 @@ impl App {
         let step = |focus: &mut usize, delta: isize| {
             *focus = (*focus as isize + delta).rem_euclid(slots as isize) as usize;
         };
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "foreign crossterm::event::KeyCode"
+        )]
         let click = match code {
             KeyCode::Esc => Some(Click::Cancel),
             _ if busy => None,
@@ -564,6 +589,7 @@ impl App {
                     field
                         .is_some_and(|field| field.handle_key(code, mods, EditKeys::FULL).changed())
                 };
+                #[warn(clippy::wildcard_enum_match_arm)]
                 match &mut popup.stage {
                     KeysStage::Export(form) => {
                         if typed(form.field_mut(slot)) {
@@ -597,7 +623,7 @@ impl App {
                         password.place(rel_col, true);
                     }
                 }
-                _ => {}
+                SessionStage::List | SessionStage::Rename(_) | SessionStage::SignOut(_) => {}
             },
             Some(Modal::Keys(popup)) => match &mut popup.stage {
                 KeysStage::Export(form) if form.request.is_none() => {
@@ -612,7 +638,7 @@ impl App {
                         form.focus = slot;
                     }
                 }
-                _ => {}
+                KeysStage::Status | KeysStage::Export(_) | KeysStage::Import(_) => {}
             },
             _ => {}
         }
@@ -636,7 +662,7 @@ impl App {
                     sign_out.error = None;
                     sign_out.password.as_mut()
                 }
-                _ => None,
+                SessionStage::List | SessionStage::Rename(_) | SessionStage::SignOut(_) => None,
             },
             Some(Modal::Keys(popup)) => match &mut popup.stage {
                 KeysStage::Export(form) if form.request.is_none() && form.focus > 0 => {
@@ -648,7 +674,7 @@ impl App {
                     form.error = None;
                     Some(&mut form.passphrase)
                 }
-                _ => None,
+                KeysStage::Status | KeysStage::Export(_) | KeysStage::Import(_) => None,
             },
             _ => None,
         };
@@ -671,7 +697,7 @@ impl App {
                         rename.error = None;
                     }
                 }
-                _ => {}
+                SessionStage::List | SessionStage::Rename(_) | SessionStage::SignOut(_) => {}
             },
             Some(Modal::Keys(popup)) => match &mut popup.stage {
                 KeysStage::Export(form) if form.request.is_none() && form.focus == 0 => {
@@ -690,7 +716,7 @@ impl App {
                     }
                     form.error = None;
                 }
-                _ => {}
+                KeysStage::Status | KeysStage::Export(_) | KeysStage::Import(_) => {}
             },
             _ => {}
         }
@@ -725,7 +751,9 @@ impl App {
                             }
                             true
                         }
-                        _ => false,
+                        SessionStage::List | SessionStage::Rename(_) | SessionStage::SignOut(_) => {
+                            false
+                        }
                     },
                     _ => false,
                 };
@@ -750,7 +778,7 @@ impl App {
                             }
                             true
                         }
-                        _ => false,
+                        KeysStage::Status | KeysStage::Export(_) | KeysStage::Import(_) => false,
                     },
                     _ => false,
                 };
@@ -778,7 +806,7 @@ impl App {
                             }
                             true
                         }
-                        _ => false,
+                        KeysStage::Status | KeysStage::Export(_) | KeysStage::Import(_) => false,
                     },
                     _ => false,
                 };
@@ -805,7 +833,7 @@ impl App {
                     let name = sign_out.label.clone();
                     Some((popup, name))
                 }
-                _ => None,
+                SessionStage::List | SessionStage::Rename(_) | SessionStage::SignOut(_) => None,
             },
             _ => None,
         };

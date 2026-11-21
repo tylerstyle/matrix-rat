@@ -644,7 +644,36 @@ impl Setting {
             Setting::Mouse => Some("Behaviour"),
             Setting::Keys => Some("Help"),
             Setting::Profile => Some("Account"),
-            _ => None,
+            Setting::SidebarWidth
+            | Setting::RoomPreviews
+            | Setting::LinkPreviews
+            | Setting::EscClosesChat
+            | Setting::RoomsBar
+            | Setting::TypingNotices
+            | Setting::ReadReceipts
+            | Setting::DoNotDisturb
+            | Setting::Notifications
+            | Setting::Keywords
+            | Setting::DownloadDir
+            | Setting::AudioPlayer
+            | Setting::AudioRecorder
+            | Setting::TranscribeCommand
+            | Setting::TranscribeModel
+            | Setting::TranslateCommand
+            | Setting::TranslateLanguage
+            | Setting::KeepNotes
+            | Setting::SummaryCommand
+            | Setting::Encryption
+            | Setting::Logout
+            | Setting::ReadMarkers
+            | Setting::ThemeDark
+            | Setting::ThemeLight
+            | Setting::ThemePairing
+            | Setting::IgnoredUsers
+            | Setting::Sessions
+            | Setting::KeyBackup
+            | Setting::WindowTitle
+            | Setting::Doctor => None,
         }
     }
 
@@ -1680,7 +1709,11 @@ impl PollFormPopup {
         match self.current_slot() {
             PollFormSlot::Question => Some(&mut self.question),
             PollFormSlot::Answer(i) => self.answers.get_mut(i),
-            _ => None,
+            PollFormSlot::AddAnswer
+            | PollFormSlot::Kind
+            | PollFormSlot::MaxSelections
+            | PollFormSlot::Submit
+            | PollFormSlot::Cancel => None,
         }
     }
 

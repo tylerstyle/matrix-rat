@@ -1629,9 +1629,81 @@ impl Worker {
                 | MatrixCmd::ReauthPassword { .. }
                 | MatrixCmd::ReauthBrowser) => request,
                 // Anything else was meant for a session that has ended.
-                _ => continue,
+                MatrixCmd::CancelLogin
+                | MatrixCmd::Recover { .. }
+                | MatrixCmd::OpenRoom { .. }
+                | MatrixCmd::CloseRoom
+                | MatrixCmd::OpenEvent { .. }
+                | MatrixCmd::CancelOpenEvent { .. }
+                | MatrixCmd::Paginate { .. }
+                | MatrixCmd::PaginateForwards { .. }
+                | MatrixCmd::Send { .. }
+                | MatrixCmd::Edit { .. }
+                | MatrixCmd::SendPoll { .. }
+                | MatrixCmd::EditPoll { .. }
+                | MatrixCmd::VotePoll { .. }
+                | MatrixCmd::EndPoll { .. }
+                | MatrixCmd::EnsureEmotePacks { .. }
+                | MatrixCmd::SendSticker { .. }
+                | MatrixCmd::ToggleReaction { .. }
+                | MatrixCmd::Redact { .. }
+                | MatrixCmd::Pin { .. }
+                | MatrixCmd::FetchPinned { .. }
+                | MatrixCmd::Forward { .. }
+                | MatrixCmd::Retry { .. }
+                | MatrixCmd::Typing { .. }
+                | MatrixCmd::MarkRead { .. }
+                | MatrixCmd::SetUnread { .. }
+                | MatrixCmd::MarkRoomsRead { .. }
+                | MatrixCmd::Join { .. }
+                | MatrixCmd::Leave { .. }
+                | MatrixCmd::Logout
+                | MatrixCmd::Previews(_)
+                | MatrixCmd::FetchImage { .. }
+                | MatrixCmd::Verification(_)
+                | MatrixCmd::SaveFile { .. }
+                | MatrixCmd::FetchAudio { .. }
+                | MatrixCmd::CancelAudio
+                | MatrixCmd::FetchSpeech { .. }
+                | MatrixCmd::CancelSpeech { .. }
+                | MatrixCmd::LinkPreview { .. }
+                | MatrixCmd::FetchAvatar { .. }
+                | MatrixCmd::FetchEmotePicture { .. }
+                | MatrixCmd::OpenThread { .. }
+                | MatrixCmd::InThread { .. }
+                | MatrixCmd::SendFiles { .. }
+                | MatrixCmd::FetchMembers { .. }
+                | MatrixCmd::Manage(_)
+                | MatrixCmd::SearchMessages { .. }
+                | MatrixCmd::CancelSearch
+                | MatrixCmd::SaveDraft { .. }
+                | MatrixCmd::ForgetDrafts { .. }
+                | MatrixCmd::IgnoreUser { .. }
+                | MatrixCmd::UnignoreUser { .. }
+                | MatrixCmd::ReportContent { .. }
+                | MatrixCmd::SearchUsers { .. }
+                | MatrixCmd::CancelUserSearch
+                | MatrixCmd::Devices(_)
+                | MatrixCmd::Keywords(_)
+                | MatrixCmd::Saved(_)
+                | MatrixCmd::RetryDecryption { .. }
+                | MatrixCmd::FetchSource { .. }
+                | MatrixCmd::FetchUserProfile { .. }
+                | MatrixCmd::SetOwnDisplayName { .. }
+                | MatrixCmd::SetOwnAvatar { .. }
+                | MatrixCmd::RemoveOwnAvatar
+                | MatrixCmd::SearchDirectory { .. }
+                | MatrixCmd::DirectoryNextPage { .. }
+                | MatrixCmd::CancelDirectorySearch
+                | MatrixCmd::ListThreads { .. }
+                | MatrixCmd::Agent(_)
+                | MatrixCmd::Collect(_) => continue,
             };
             let login = async {
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "filtered to login and reauth commands immediately above"
+                )]
                 match &request {
                     MatrixCmd::LoginPassword {
                         homeserver,

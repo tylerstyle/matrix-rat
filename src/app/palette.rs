@@ -225,7 +225,7 @@ impl App {
             // On the row the picker was opened from.
             let row = match pick {
                 Pick::IntoSpace { .. } => crate::manage::InfoRow::AddChild,
-                _ => crate::manage::InfoRow::AddToSpace,
+                Pick::ToSpace { .. } | Pick::Forward(_) => crate::manage::InfoRow::AddToSpace,
             };
             self.reopen_info(back, Some(row));
         }
@@ -322,7 +322,37 @@ impl App {
                     Setting::DownloadDir => self.download_dir.clone(),
                     Setting::AudioRecorder => self.audio.recorder_setting.clone(),
                     Setting::SummaryCommand => self.collect.summary_setting().to_owned(),
-                    _ => self.setting_text(setting),
+                    Setting::AudioPlayer
+                    | Setting::TranscribeCommand
+                    | Setting::TranscribeModel
+                    | Setting::TranslateCommand
+                    | Setting::TranslateLanguage
+                    | Setting::Theme
+                    | Setting::SidebarWidth
+                    | Setting::RoomPreviews
+                    | Setting::LinkPreviews
+                    | Setting::Mouse
+                    | Setting::EscClosesChat
+                    | Setting::RoomsBar
+                    | Setting::TypingNotices
+                    | Setting::ReadReceipts
+                    | Setting::DoNotDisturb
+                    | Setting::Notifications
+                    | Setting::Keywords
+                    | Setting::KeepNotes
+                    | Setting::Keys
+                    | Setting::Encryption
+                    | Setting::Profile
+                    | Setting::Logout
+                    | Setting::ReadMarkers
+                    | Setting::ThemeDark
+                    | Setting::ThemeLight
+                    | Setting::ThemePairing
+                    | Setting::IgnoredUsers
+                    | Setting::Sessions
+                    | Setting::KeyBackup
+                    | Setting::WindowTitle
+                    | Setting::Doctor => self.setting_text(setting),
                 };
                 menu.editing = Some(LineEdit::from(text.as_str()));
                 self.open_modal(Modal::Settings(menu));

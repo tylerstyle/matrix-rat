@@ -1267,13 +1267,20 @@ impl Timelines {
                         // A room the account has left is known still, but not for
                         // reading. One that is not known at all may yet come.
                         let place = match self.room(&room_id) {
-                            Ok(room) => match room.state() {
-                                matrix_sdk::RoomState::Joined => Place::Joined(room),
-                                matrix_sdk::RoomState::Left | matrix_sdk::RoomState::Banned => {
-                                    Place::Left
+                            Ok(room) =>
+                            {
+                                #[expect(
+                                    clippy::wildcard_enum_match_arm,
+                                    reason = "foreign matrix_sdk::RoomState"
+                                )]
+                                match room.state() {
+                                    matrix_sdk::RoomState::Joined => Place::Joined(room),
+                                    matrix_sdk::RoomState::Left | matrix_sdk::RoomState::Banned => {
+                                        Place::Left
+                                    }
+                                    _ => Place::Unknown,
                                 }
-                                _ => Place::Unknown,
-                            },
+                            }
                             Err(_) => Place::Unknown,
                         };
                         (room_id, event_id, place)
@@ -1696,6 +1703,10 @@ impl Timelines {
     }
 
     async fn handle_poll_or_sticker(&mut self, command: MatrixCmd) {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "only called from handle for poll and sticker commands"
+        )]
         match command {
             MatrixCmd::SendSticker {
                 room_id,

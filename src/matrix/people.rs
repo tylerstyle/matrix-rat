@@ -231,6 +231,10 @@ pub(super) fn record_own_member_event(
     room_id: &str,
     ev: &SyncRoomMemberEvent,
 ) {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign ruma MembershipState"
+    )]
     match ev.membership() {
         MembershipState::Join | MembershipState::Knock => {
             let name = ev
@@ -1176,6 +1180,10 @@ async fn room_display_name(room: &Room) -> String {
 }
 
 fn member_status(state: MembershipState) -> Option<MemberStatus> {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "foreign ruma MembershipState"
+    )]
     match state {
         MembershipState::Join => Some(MemberStatus::Joined),
         MembershipState::Invite => Some(MemberStatus::Invited),

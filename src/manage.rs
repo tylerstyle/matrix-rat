@@ -1450,9 +1450,10 @@ impl InfoPopup {
     }
 
     pub fn child(&self, row: InfoRow) -> Option<&SpaceChild> {
-        match row {
-            InfoRow::Child(index) => self.children().get(index),
-            _ => None,
+        if let InfoRow::Child(index) = row {
+            self.children().get(index)
+        } else {
+            None
         }
     }
 
@@ -1534,9 +1535,10 @@ impl InfoPopup {
     }
 
     pub fn knock_request(&self, row: InfoRow) -> Option<&RoomKnockRequest> {
-        match row {
-            InfoRow::KnockRequest(index) => self.details.as_ref()?.knock_requests.get(index),
-            _ => None,
+        if let InfoRow::KnockRequest(index) = row {
+            self.details.as_ref()?.knock_requests.get(index)
+        } else {
+            None
         }
     }
 
@@ -1545,9 +1547,10 @@ impl InfoPopup {
     }
 
     pub fn member(&self, row: InfoRow) -> Option<&RoomMember> {
-        match row {
-            InfoRow::Member(index) => self.details.as_ref()?.members.get(index),
-            _ => None,
+        if let InfoRow::Member(index) = row {
+            self.details.as_ref()?.members.get(index)
+        } else {
+            None
         }
     }
 
@@ -1879,10 +1882,12 @@ pub fn member_role_display(role: MemberRole, power_level: i64) -> std::borrow::C
     use std::borrow::Cow;
     match role {
         MemberRole::Owner => Cow::Borrowed("owner"),
-        _ if power_level == 100 => Cow::Borrowed("admin"),
-        _ if power_level == 50 => Cow::Borrowed("moderator"),
-        _ if power_level == 0 => Cow::Borrowed(""),
-        _ => Cow::Owned(power_level.to_string()),
+        MemberRole::Admin | MemberRole::Moderator | MemberRole::User => match power_level {
+            100 => Cow::Borrowed("admin"),
+            50 => Cow::Borrowed("moderator"),
+            0 => Cow::Borrowed(""),
+            _ => Cow::Owned(power_level.to_string()),
+        },
     }
 }
 

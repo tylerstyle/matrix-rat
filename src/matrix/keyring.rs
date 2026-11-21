@@ -703,6 +703,7 @@ async fn dismiss_prompt(conn: &Connection, prompt_path: &OwnedObjectPath) {
 }
 
 fn map_zbus_error(err: ZbusError) -> KeyringError {
+    #[expect(clippy::wildcard_enum_match_arm, reason = "foreign zbus::Error")]
     match &err {
         ZbusError::FDO(fdo_err)
             if matches!(
