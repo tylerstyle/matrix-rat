@@ -699,13 +699,16 @@ mod tests {
         }
     }
 
+    /// The number in the file at `path`, if it is there now.
+    fn noted(path: &Path) -> Option<libc::pid_t> {
+        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    }
+
     /// The number in the file at `path`, once it is there.
     async fn number(path: &Path) -> libc::pid_t {
         let wait = async {
             loop {
-                if let Ok(text) = std::fs::read_to_string(path)
-                    && let Ok(number) = text.trim().parse()
-                {
+                if let Some(number) = noted(path) {
                     return number;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1010,10 +1013,16 @@ mod tests {
             encoder(&dir),
             limits,
         );
-        let (first, second) = both(&dir).await;
+        // Not waited for before the end: the wait for sound can be over (and both put
+        // down) before a shell has noted its number, on a busy machine. One that was
+        // noted is gone; one that was not was put down before its script ran.
         let (last, _folder) = session.end().await;
         assert_eq!(failure(last), Failure::NoSound);
-        assert!(reaped(first) && reaped(second));
+        for name in ["capture.pid", "encoder.pid"] {
+            if let Some(pid) = noted(&dir.0.join(name)) {
+                assert!(reaped(pid), "{name}: the program does not stay behind");
+            }
+        }
 
         // It is not there at all.
         let dir = Dir::new("record-missing");
@@ -1025,12 +1034,19 @@ mod tests {
 
     #[tokio::test]
     async fn an_encoder_that_ends_early_or_badly_fails_the_recording() {
-        // It ends before the recording does.
+        // It ends before the recording does. It waits for the capture to note its number
+        // first: ended at once, it gets the capture put down before the capture's shell
+        // has written it (on a busy machine), and the test would wait for it in vain.
         let dir = Dir::new("record-encoder-gone");
+        let capture_pid = dir.0.join("capture.pid");
+        let body = format!(
+            "while [ ! -s '{}' ]; do sleep 0.01; done\nexit 3",
+            capture_pid.display()
+        );
         let session = start(
             &dir,
             capture(&dir, 1, "exec sleep 60"),
-            tool(&dir, "encoder", "exit 3"),
+            tool(&dir, "encoder", &body),
             Limits::default(),
         );
         let (started, _) = both(&dir).await;
