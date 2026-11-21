@@ -174,6 +174,10 @@ pub struct TimelineState {
     pub empty_forward_batches: u8,
     /// New remote messages arrived on the room/thread's live timeline while detached.
     pub detached_new: u32,
+    /// Which timeline generation last supplied the shown messages. Cleared on reset
+    /// or when another timeline is requested so the next snapshot matches selection
+    /// and pending replies or edits by event id instead of local timeline id.
+    pub generation: Option<u64>,
 }
 
 /// Hand-written: what was marked read names an event and a room; only whether there is
@@ -204,6 +208,7 @@ impl std::fmt::Debug for TimelineState {
             .field("forward_count_at_request", &self.forward_count_at_request)
             .field("empty_forward_batches", &self.empty_forward_batches)
             .field("detached_new", &self.detached_new)
+            .field("generation", &self.generation)
             .finish()
     }
 }
@@ -2566,7 +2571,7 @@ impl App {
 
     /// The timeline id of the message a pending reply or edit points at, before the list
     /// is replaced.
-    pub(super) fn compose_target_id(&self) -> Option<String> {
+    fn compose_target_id(&self) -> Option<String> {
         match self.compose_mode {
             ComposeMode::Reply(i) | ComposeMode::Edit(i) => {
                 self.messages().get(i).map(|m| m.id.clone())
@@ -2584,13 +2589,6 @@ impl App {
                 .and_then(|m| m.event_id().map(str::to_owned)),
             ComposeMode::Normal => None,
         }
-    }
-
-    /// Keeps a pending reply or edit on the same message after the list changes, or
-    /// cancels it if that message is gone.
-    pub(super) fn remap_compose_mode(&mut self, compose_id: Option<String>) {
-        let compose_at = compose_id.and_then(|id| self.messages().iter().position(|m| m.id == id));
-        self.apply_remapped_compose(compose_at);
     }
 
     /// Keeps a pending reply or edit on the message with `event_id` after switching to
@@ -2631,25 +2629,48 @@ impl App {
         }
     }
 
-    /// Replaces the open room's messages with the worker's current list, keeping the
-    /// selection and a pending reply or edit on the same messages.
-    fn apply_timeline(&mut self, mut messages: Vec<Message>) {
+    /// Replaces the open conversation's messages with `messages`, keeping the selection
+    /// and any pending reply or edit on the same messages. On updates from the same
+    /// timeline, messages match by their local timeline id (falling back to event id if
+    /// rebuilt in place); across a timeline change or reset, they match only by event id
+    /// so local ids from another timeline can never collide.
+    fn apply_timeline(&mut self, mut messages: Vec<Message>, same_timeline: bool) {
         // The worker told apart who shares a name among the messages; the room's
         // members, where the app holds them, may know of more.
         if let Some(room_id) = self.room_id() {
             self.complete.mark_namesakes(&room_id, &mut messages);
         }
-        let selected_id = self
+        let selected_id = same_timeline
+            .then(|| {
+                self.timeline
+                    .selected
+                    .and_then(|i| self.messages().get(i).map(|m| m.id.clone()))
+            })
+            .flatten();
+        let selected_event = self
             .timeline
             .selected
-            .and_then(|i| self.messages().get(i).map(|m| m.id.clone()));
-        let compose_id = self.compose_target_id();
+            .and_then(|i| self.messages().get(i))
+            .and_then(|m| m.event_id().map(str::to_owned));
+        let compose_id = same_timeline.then(|| self.compose_target_id()).flatten();
+        let compose_event = self.compose_target_event_id();
         if let Some(target) = self.messages_mut() {
             *target = messages;
         }
         self.request_custom_reaction_emotes();
-        let selected_at =
-            selected_id.and_then(|id| self.messages().iter().position(|m| m.id == id));
+        let find = |id: Option<&str>, event: Option<&str>| {
+            id.and_then(|id| self.messages().iter().position(|m| m.id == id))
+                .or_else(|| {
+                    event.and_then(|ev| {
+                        self.messages()
+                            .iter()
+                            .position(|m| m.event_id() == Some(ev))
+                    })
+                })
+        };
+        let selected_at = find(selected_id.as_deref(), selected_event.as_deref());
+        let compose_at =
+            same_timeline.then(|| find(compose_id.as_deref(), compose_event.as_deref()));
 
         if self.timeline.selected.is_some() {
             self.timeline.selected =
@@ -2658,7 +2679,11 @@ impl App {
                 self.set_focus(Pane::Composer);
             }
         }
-        self.remap_compose_mode(compose_id);
+        if let Some(compose_at) = compose_at {
+            self.apply_remapped_compose(compose_at);
+        } else {
+            self.remap_compose_mode_by_event(compose_event.as_deref());
+        }
     }
 
     /// The user's own latest message that can be edited, if the composer is free for
@@ -3771,7 +3796,9 @@ impl App {
                 {
                     let messages = self.place_unread_line(messages, detached.is_some());
                     let messages = self.thread_snapshot(messages, reached_start);
-                    self.apply_timeline(messages);
+                    let same_timeline = self.timeline.generation == Some(generation);
+                    self.apply_timeline(messages, same_timeline);
+                    self.timeline.generation = Some(generation);
                     self.forget_notes_of_deleted();
                     self.sync_pinned_flags(&room_id);
                     self.sync_saved_flags(&room_id);
@@ -3804,6 +3831,7 @@ impl App {
                 // was running for this view may have been aborted across a reset or
                 // restore, so the app can ask again.
                 if generation == self.generation && self.room_id().as_deref() == Some(&room_id) {
+                    self.timeline.generation = None;
                     self.timeline.reached_start = false;
                     self.timeline.empty_batches = 0;
                     self.timeline.loading_older = false;
@@ -9455,6 +9483,103 @@ mod tests {
             cmds.iter().any(|c| c == "OpenThread(!a, $root)"),
             "{cmds:?}"
         );
+    }
+
+    #[test]
+    fn return_to_live_and_timeline_reset_remap_compose_and_selection_by_event_id() {
+        let with_id = |id: &str, event: &str, sender: &str, body: &str| Message {
+            id: id.into(),
+            item: Some(ItemRef::Event(event.into())),
+            sender: sender.into(),
+            own: sender == "me",
+            time: "10:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        };
+
+        // 1. Reply and selection started in a detached slice (prefix `t2-`) survive
+        //    "back to live" when the live timeline (`t1-`) carries the same event id.
+        let (mut app, _terminal, mut commands) = connected();
+        app.rooms[0].messages = vec![with_id("t1-0", "$ev_live", "ann", "live")];
+        drain(&mut commands);
+
+        app.jump_to_event("!a".into(), "$ev_target".into(), None);
+        let jump_gen = app.next_gen;
+        drain(&mut commands);
+        app.on_matrix(detached_timeline(
+            "!a",
+            jump_gen,
+            "$ev_target",
+            None,
+            false,
+            vec![
+                with_id("t2-0", "$ev_earlier", "bob", "earlier"),
+                with_id("t2-1", "$ev_target", "bob", "target"),
+            ],
+        ));
+        assert!(app.timeline.detached);
+        assert_eq!(app.timeline.selected, Some(1));
+        app.compose_mode = ComposeMode::Reply(1);
+
+        // Return to live; the live list has different timeline ids (`t1-*`) and `$ev_target`
+        // now sits at index 0.
+        app.return_to_live();
+        drain(&mut commands);
+        app.on_matrix(timeline(
+            &app,
+            vec![
+                with_id("t1-0", "$ev_target", "bob", "target"),
+                with_id("t1-1", "$ev_newest", "ann", "newest"),
+            ],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Reply(0));
+        assert_eq!(app.timeline.selected, Some(0));
+
+        // 2. Edit started in a detached slice cancels cleanly when the event is absent
+        //    from the live timeline, even if local ids happen to collide.
+        app.jump_to_event("!a".into(), "$ev_old_mine".into(), None);
+        let jump_gen = app.next_gen;
+        drain(&mut commands);
+        app.on_matrix(detached_timeline(
+            "!a",
+            jump_gen,
+            "$ev_old_mine",
+            None,
+            false,
+            vec![with_id("0", "$ev_old_mine", "me", "old mine")],
+        ));
+        app.composer.set_text("unsent draft");
+        app.begin_edit(0, "old mine");
+        assert_eq!(app.compose_mode, ComposeMode::Edit(0));
+
+        app.return_to_live();
+        drain(&mut commands);
+        app.on_matrix(timeline(
+            &app,
+            vec![with_id("0", "$ev_other_mine", "me", "other mine")],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.composer.text(), "unsent draft");
+
+        // 3. A timeline rebuilt after `TimelineReset` (new prefix `t3-`) also keeps reply
+        //    and selection on the same event id.
+        app.compose_mode = ComposeMode::Reply(0);
+        app.set_focus(Pane::Timeline);
+        app.timeline.selected = Some(0);
+        app.on_matrix(MatrixEvent::TimelineReset {
+            room_id: "!a".into(),
+            generation: app.generation,
+        });
+        app.on_matrix(timeline(
+            &app,
+            vec![
+                with_id("t3-0", "$ev_before", "ann", "before"),
+                with_id("t3-1", "$ev_other_mine", "me", "other mine"),
+            ],
+        ));
+        assert_eq!(app.compose_mode, ComposeMode::Reply(1));
+        assert_eq!(app.timeline.selected, Some(1));
     }
 
     #[test]

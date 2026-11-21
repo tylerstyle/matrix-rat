@@ -573,6 +573,7 @@ impl App {
         self.complete.mark_namesakes(&room_id, &mut messages);
 
         let mut timeline = TimelineState {
+            generation: Some(generation),
             reached_start,
             detached: detached.is_some(),
             reached_end: detached.as_ref().is_some_and(|d| d.reached_end),
