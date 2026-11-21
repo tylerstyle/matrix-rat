@@ -1118,8 +1118,24 @@ impl Opened {
     async fn next_event(&mut self) -> Option<crate::matrix::MatrixEvent> {
         let Ok(event) = tokio::time::timeout(Duration::from_secs(60), self.events.recv()).await
         else {
+            // And what the worker and the SDK's timeline of the sample room were at.
+            let page = (self.timelines.paginator.as_ref())
+                .map(|(generation, paging)| (*generation, paging.loading()));
+            let timeline = (self.timelines.cache.iter())
+                .find(|cached| cached.key == ROOM)
+                .map(|cached| cached.timeline.clone());
+            let in_timeline = match timeline {
+                Some(timeline) => Some(
+                    (timeline.items().await.iter())
+                        .filter(|item| item.as_event().is_some())
+                        .count(),
+                ),
+                None => None,
+            };
             panic!(
-                "the worker says something within a minute, but did not: {:?}",
+                "the worker says something within a minute, but did not: {:?}, the page of \
+                 older messages running (generation, loading): {page:?}, the messages in the \
+                 sample room's timeline: {in_timeline:?}",
                 self.heard
             );
         };
@@ -1320,19 +1336,31 @@ async fn a_timeline_idle_for_long_is_dropped_and_opens_again_from_the_store() {
             break;
         }
     }
+    assert!(
+        reached_start,
+        "no page said the start was reached: {:?}",
+        opened.heard
+    );
     // The page that reached the start may be shown right after it said so.
     opened.heard.phase = "all shown after a page said the start was reached";
-    while shown < MESSAGES {
-        if let Some(MatrixEvent::Timeline {
-            generation: 3,
-            messages,
-            ..
-        }) = opened.next_event().await
-        {
-            shown = messages.iter().filter(|m| m.item.is_some()).count();
+    let all = tokio::time::timeout(Duration::from_secs(10), async {
+        while shown < MESSAGES {
+            if let Some(MatrixEvent::Timeline {
+                generation: 3,
+                messages,
+                ..
+            }) = opened.next_event().await
+            {
+                shown = messages.iter().filter(|m| m.item.is_some()).count();
+            }
         }
-    }
-    assert!(reached_start);
+    })
+    .await;
+    assert!(
+        all.is_ok(),
+        "{shown} of {MESSAGES} messages shown after a page said the start was reached: {:?}",
+        opened.heard
+    );
     assert_eq!(shown, MESSAGES);
     assert_eq!(cached(&opened), [OTHER, ROOM]);
     let asked: Vec<String> = server
