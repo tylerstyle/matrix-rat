@@ -103,6 +103,39 @@ struct DetachedForward {
     live: Option<Arc<Timeline>>,
 }
 
+/// A page (older messages, or newer ones of a detached slice) loading in the background,
+/// which answers the UI once it is loaded. A request for a page made while one is loading
+/// is answered by that one's answer, and dropped. A page counts as loading until it has
+/// answered, not until its task has ended: the UI asks for the next page as soon as it
+/// hears the answer, which can be before the task has ended, and that request would be
+/// dropped and never answered (the UI waits for an answer to every request, so the room
+/// would page no further).
+struct Paging {
+    task: JoinHandle<()>,
+    answered: Arc<AtomicBool>,
+}
+
+impl Paging {
+    /// Loads the page with `load`, and sends the UI the answer it gives.
+    fn spawn(
+        events: UnboundedSender<MatrixEvent>,
+        load: impl Future<Output = MatrixEvent> + Send + 'static,
+    ) -> Self {
+        let answered = Arc::new(AtomicBool::new(false));
+        let done = answered.clone();
+        let task = tokio::spawn(async move {
+            let answer = load.await;
+            done.store(true, Ordering::Release);
+            let _ = events.send(answer);
+        });
+        Self { task, answered }
+    }
+
+    fn loading(&self) -> bool {
+        !self.answered.load(Ordering::Acquire)
+    }
+}
+
 pub struct Timelines {
     client: Client,
     events: UnboundedSender<MatrixEvent>,
@@ -114,9 +147,9 @@ pub struct Timelines {
     /// Forwards the open room's timeline to the UI.
     forwarder: Option<JoinHandle<()>>,
     /// The running request for older messages, if any, and the generation it answers.
-    paginator: Option<(u64, JoinHandle<()>)>,
+    paginator: Option<(u64, Paging)>,
     /// The running request for newer messages on a detached timeline, if any.
-    forward_paginator: Option<JoinHandle<()>>,
+    forward_paginator: Option<Paging>,
     /// What `forwarder` is currently streaming (`None` when no room is open).
     active: Option<ActiveStream>,
     /// Saved when a jump replaces `active`, so a late `CancelOpenEvent` can restore it.
@@ -229,8 +262,8 @@ impl Timelines {
         }
         for task in [
             self.forwarder.take(),
-            self.paginator.take().map(|(_, task)| task),
-            self.forward_paginator.take(),
+            self.paginator.take().map(|(_, paging)| paging.task),
+            self.forward_paginator.take().map(|paging| paging.task),
         ]
         .into_iter()
         .flatten()
@@ -463,15 +496,14 @@ impl Timelines {
     }
 
     /// Loads one page of older messages into `self.paginator` and reports completion for
-    /// `generation`. Any matching `MatrixCmd::Paginate` while this runs is coalesced.
+    /// `generation`. Any matching `MatrixCmd::Paginate` until it answers is coalesced.
     fn spawn_paginate(
         &mut self,
         timeline: Arc<Timeline>,
         detached_start: Option<Arc<AtomicBool>>,
         generation: u64,
     ) {
-        let events = self.events.clone();
-        let task = tokio::spawn(async move {
+        let paging = Paging::spawn(self.events.clone(), async move {
             let reached_start = match timeline.paginate_backwards(PAGE).await {
                 Ok(reached_start) => reached_start,
                 Err(err) => {
@@ -483,14 +515,14 @@ impl Timelines {
             if let Some(flag) = detached_start {
                 flag.store(reached_start, Ordering::Release);
             }
-            let _ = events.send(MatrixEvent::Paginated {
+            MatrixEvent::Paginated {
                 generation,
                 reached_start,
-            });
+            }
         });
         // One of an older generation would never answer this one: nobody waits for it.
-        if let Some((_, older)) = self.paginator.replace((generation, task)) {
-            older.abort();
+        if let Some((_, older)) = self.paginator.replace((generation, paging)) {
+            older.task.abort();
         }
     }
 
@@ -1107,11 +1139,12 @@ impl Timelines {
                     return;
                 }
                 // One request at a time per open room: the one running answers this
-                // one too. (One of another generation is replaced: see `spawn_paginate`.)
+                // one too, until it has answered (see `Paging`). (One of another
+                // generation is replaced: see `spawn_paginate`.)
                 if self
                     .paginator
                     .as_ref()
-                    .is_some_and(|(running, task)| *running == generation && !task.is_finished())
+                    .is_some_and(|(running, paging)| *running == generation && paging.loading())
                 {
                     return;
                 }
@@ -1140,11 +1173,7 @@ impl Timelines {
                 {
                     self.before_jump = None;
                 }
-                if self
-                    .forward_paginator
-                    .as_ref()
-                    .is_some_and(|task| !task.is_finished())
-                {
+                if self.forward_paginator.as_ref().is_some_and(Paging::loading) {
                     return;
                 }
                 let Some(ActiveStream {
@@ -1174,8 +1203,7 @@ impl Timelines {
                 }
                 let timeline = timeline.clone();
                 let reached_end_flag = reached_end.clone();
-                let events = self.events.clone();
-                self.forward_paginator = Some(tokio::spawn(async move {
+                self.forward_paginator = Some(Paging::spawn(self.events.clone(), async move {
                     let reached_end = match timeline.paginate_forwards(PAGE).await {
                         Ok(reached_end) => reached_end,
                         Err(err) => {
@@ -1184,10 +1212,10 @@ impl Timelines {
                         }
                     };
                     reached_end_flag.store(reached_end, Ordering::Release);
-                    let _ = events.send(MatrixEvent::PaginatedForwards {
+                    MatrixEvent::PaginatedForwards {
                         generation,
                         reached_end,
-                    });
+                    }
                 }));
             }
             MatrixCmd::Send {
@@ -4734,8 +4762,11 @@ mod tests {
 
         // A page for the view shown before, still on its way when the switch came, is
         // given up for one of the view shown now: that one is answered.
-        let earlier = tokio::spawn(std::future::pending::<()>());
-        let earlier_ended = earlier.abort_handle();
+        let earlier = super::Paging::spawn(
+            timelines.events.clone(),
+            std::future::pending::<MatrixEvent>(),
+        );
+        let earlier_ended = earlier.task.abort_handle();
         timelines.paginator = Some((1, earlier));
         timelines
             .handle(MatrixCmd::Paginate {

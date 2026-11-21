@@ -360,7 +360,13 @@ async fn wait_indexed(room: &matrix_sdk::Room) {
 }
 
 /// A client of `server`, signed in as `ME`, with the event cache subscribed to (as the
-/// app has it) and synced once; and the sample room.
+/// app has it) and synced once; and the sample room. The event cache stores what a sync
+/// brings on a task of its own, after the sync has returned: this waits until it has the
+/// sample room's messages, as the tests take for granted. (A room opened before that
+/// starts empty, and its first page waits for a token while the messages come in; the
+/// timeline shows only the last 20 items of what came into it while empty, and says it
+/// reached the start when the page ends, with the rest hidden. The idle timeline test
+/// waited for them for its whole minute now and then under load.)
 pub(super) async fn client_of(
     server: &fake::Server,
     search: SearchIndexStoreKind,
@@ -386,7 +392,13 @@ pub(super) async fn client_of(
         .await
         .unwrap();
     client.event_cache().subscribe().unwrap();
+    let mut stored = client.event_cache().subscribe_to_room_generic_updates();
     client.sync_once(SyncSettings::default()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while stored.recv().await.unwrap().room_id.as_str() != ROOM {}
+    })
+    .await
+    .expect("the event cache has the sample room's messages within a minute");
     let room_id = <&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap();
     let room = client.get_room(room_id).unwrap();
     (client, room)
@@ -1371,6 +1383,90 @@ async fn a_limited_sync_after_the_start_was_loaded_says_the_timeline_was_reset()
         }
     }
     drop(opened);
+    drop(server);
+}
+
+/// Not a measurement: a request for older messages made as soon as the one before was
+/// answered is answered too. A request made while a page is loading is answered by that
+/// page's answer, and the worker took every request for one of those as long as the
+/// page's task had not ended; but the task sends its answer a little before it ends, and
+/// the interface asks again as soon as it hears it. That request was dropped and never
+/// answered, and the room paged back no further: the two tests above hung for their
+/// whole minute now and then under load. Here the task is held right as it sends the
+/// answer (by the waker of the channel it sends on) until the next request is made, so
+/// that request comes before the task has ended every time.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_for_older_messages_right_after_an_answer_is_answered() {
+    use crate::matrix::{MatrixCmd, MatrixEvent};
+    use std::sync::{Mutex, mpsc};
+    use std::task::{Context, Wake, Waker};
+
+    /// Tells the test that it was woken, and holds whoever woke it until let go.
+    struct Hold {
+        woken: mpsc::Sender<()>,
+        go: Mutex<mpsc::Receiver<()>>,
+    }
+    impl Wake for Hold {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            let go = self.go.lock().unwrap();
+            let _ = self.woken.send(());
+            let _ = go.recv_timeout(Duration::from_secs(10));
+        }
+    }
+
+    let server = fake::Server::start(json!({ "join": { ROOM: sample_room(100) } })).await;
+    let (client, _room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
+    // No room is opened: nothing but the pages says anything to the interface.
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (_ignored, ignored) = tokio::sync::watch::channel(super::IgnoredSet::default());
+    let (_own_refresh, own_refresh) = tokio::sync::watch::channel(0);
+    let mut timelines = super::Timelines::new(
+        client,
+        events,
+        ignored,
+        own_refresh,
+        super::super::people::OwnRoomNames::default(),
+        super::super::left::LeftRooms::default(),
+    );
+    let paginate = || MatrixCmd::Paginate {
+        room_id: ROOM.to_owned(),
+        generation: 1,
+    };
+    let (woken_tx, woken) = mpsc::channel();
+    let (go, go_rx) = mpsc::channel();
+    let hold = Waker::from(Arc::new(Hold {
+        woken: woken_tx,
+        go: Mutex::new(go_rx),
+    }));
+    // Waiting for the answer before the request, so that what sends it wakes `hold`.
+    assert!(
+        received
+            .poll_recv(&mut Context::from_waker(&hold))
+            .is_pending()
+    );
+    timelines.handle(paginate()).await;
+    woken
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the request is answered");
+    assert!(matches!(
+        received.try_recv(),
+        Ok(MatrixEvent::Paginated { generation: 1, .. })
+    ));
+    // Asked again while the task that answered is held, before it could end.
+    timelines.handle(paginate()).await;
+    go.send(()).unwrap();
+    let answer = tokio::time::timeout(Duration::from_secs(10), received.recv()).await;
+    assert!(
+        matches!(
+            answer,
+            Ok(Some(MatrixEvent::Paginated { generation: 1, .. }))
+        ),
+        "the request right after the answer is answered"
+    );
+    drop(timelines);
     drop(server);
 }
 
