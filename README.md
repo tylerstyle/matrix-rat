@@ -39,6 +39,16 @@ notifications and themes that follow your desktop are all there.
 | 🔔 **Notifications** | Desktop notifications with the chat's picture (click one to open its room), or plain ones through the terminal; none for what you are reading right now. Keywords of your own count like a mention. |
 | 🤖 **A channel for agents** | `matrix-rat serve` runs without the screen on a bot account; scripts send and read with `matrix-rat send`, `read` and `listen`, and a coding agent asks you a question and waits for your answer through `matrix-rat mcp`. See [For agents and scripts](#for-agents-and-scripts). |
 
+<div align="center">
+
+<img src="docs/screenshots/narrow-rooms.svg" alt="A narrow window of 56 columns showing only the room list, with unread counts" width="420">
+<img src="docs/screenshots/narrow-chat.svg" alt="The same narrow window after opening a room: the room list has stepped aside, the chat fills the window, and the rooms bar above it shows the other rooms with new messages" width="420">
+
+</div>
+
+In a narrow window (here 56 columns) one pane fills it: the room list, and once a room is
+open, the chat, with the rooms bar above it for the rooms that have something new.
+
 ## Install
 
 matrix-rat is developed and tested on Linux. The desktop features (notifications with
