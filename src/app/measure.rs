@@ -382,6 +382,72 @@ async fn measure_interface_cost_of_a_change_and_a_frame() {
         mb(grew(before, after) as f64),
         grew(before, after) as f64 / messages.len() as f64
     );
+
+    // A frame after a change of one message: a reaction comes to one in the middle, and
+    // goes again with the next change.
+    let mut one = Vec::with_capacity(RUNS);
+    for run in 0..RUNS {
+        let mut changed = messages.clone();
+        if run % 2 == 0 {
+            let middle = changed.len() / 2;
+            changed[middle].reactions.push(crate::model::Reaction {
+                key: "👍".to_owned(),
+                count: 1,
+                own: false,
+            });
+        }
+        app.on_matrix(change(&app, changed));
+        let start = std::time::Instant::now();
+        draw(&mut app, &mut terminal);
+        one.push(start.elapsed());
+    }
+    one.sort();
+    println!(
+        "[per frame] first frame after a change of one message (a reaction): {}",
+        Times(one)
+    );
+
+    // A frame after a new message at the end.
+    let mut grown = messages.clone();
+    let mut new = Vec::with_capacity(RUNS);
+    for run in 0..RUNS {
+        let day = grown.last().map(|m| m.day.clone()).unwrap_or_default();
+        grown.push(Message {
+            id: format!("$new-{run}"),
+            item: Some(crate::model::ItemRef::Event(format!("$new-{run}"))),
+            sender: "Somebody new".to_owned(),
+            sender_id: Some("@new:example.org".to_owned()),
+            time: "23:59".to_owned(),
+            day,
+            body: format!("One more message, number {run}, at the end of the room."),
+            ..Message::default()
+        });
+        app.on_matrix(change(&app, grown.clone()));
+        let start = std::time::Instant::now();
+        draw(&mut app, &mut terminal);
+        new.push(start.elapsed());
+    }
+    new.sort();
+    println!(
+        "[per frame] first frame after a new message at the end: {}",
+        Times(new)
+    );
+
+    // A frame at another width: every message is laid out again.
+    let mut resized = Vec::with_capacity(RUNS);
+    for run in 0..RUNS {
+        terminal
+            .backend_mut()
+            .resize(if run % 2 == 0 { 199 } else { 200 }, 60);
+        let start = std::time::Instant::now();
+        draw(&mut app, &mut terminal);
+        resized.push(start.elapsed());
+    }
+    resized.sort();
+    println!(
+        "[per frame] first frame at another width (layout of all rows): {}",
+        Times(resized)
+    );
 }
 
 /// The worker's news of a busy open room while the external editor has the terminal:
