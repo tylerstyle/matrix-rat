@@ -1,6 +1,7 @@
 //! Turning SDK timeline items into what the UI shows.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, BuildHasherDefault, Hasher, RandomState};
 use std::sync::Arc;
 
 use chrono::{DateTime, Local, TimeZone};
@@ -67,6 +68,162 @@ pub(super) fn utd_why(encrypted: &EncryptedMessage) -> UtdWhy {
         UtdCause::HistoricalMessageAndDeviceIsUnverified => UtdWhy::HistoryNeedsVerification,
         UtdCause::WithheldForUnverifiedOrInsecureDevice => UtdWhy::WithheldUnverified,
         UtdCause::WithheldBySender => UtdWhy::Withheld,
+    }
+}
+
+/// Pass-through hasher for digests already computed with [`RandomState`].
+#[derive(Default)]
+struct Prehashed(u64);
+
+impl Hasher for Prehashed {
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = self.0.wrapping_mul(0x1000_0000_01b3) ^ u64::from(byte);
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Reusable scratch table for [`EventDedup::dedup`].
+///
+/// Kept per open timeline task so updates with no repeated events do a single linear
+/// scan with zero heap allocations after warm-up.
+#[derive(Default)]
+pub(super) struct EventDedup {
+    seen: HashSet<u64, BuildHasherDefault<Prehashed>>,
+    hasher: RandomState,
+}
+
+impl EventDedup {
+    /// Removes duplicate event IDs from `messages` in place: each event is kept once,
+    /// at its first copy's position (preserving that copy's stable `Message.id`), with
+    /// the last copy's content (edits, reactions, redactions, decryptions, receipts).
+    ///
+    /// Works around a `matrix-sdk-ui 0.19.1` race in `TimelineBuilder::build()` where a
+    /// live sync batch can be replayed on top of `event_cache.events()`, leaving a block
+    /// of events in the timeline twice while later updates target the trailing copy.
+    pub(super) fn dedup(&mut self, messages: &mut Vec<Message>) {
+        if messages.len() < 2 {
+            return;
+        }
+        self.seen.clear();
+        self.seen.reserve(messages.len());
+        let mut repeated = false;
+        for message in messages.iter() {
+            if let Some(id) = event_id(message)
+                && !self.seen.insert(self.hasher.hash_one(id))
+            {
+                repeated = true;
+                break;
+            }
+        }
+        if !repeated {
+            return;
+        }
+        dedup_with_latest(messages);
+    }
+}
+
+fn event_id(message: &Message) -> Option<&str> {
+    match message.item.as_ref()? {
+        ItemRef::Event(id) => Some(id.as_str()),
+        ItemRef::Transaction(_) => None,
+    }
+}
+
+/// Exact deduplication pass run only when [`EventDedup::dedup`] spots a repeat (or a
+/// hash collision). Keeps the first slot and its `Message.id`, takes the last copy's
+/// content, leaves non-event items untouched, and keeps any `ReadMarker` right after
+/// its preceding event's surviving copy.
+fn dedup_with_latest(messages: &mut Vec<Message>) {
+    let n = messages.len();
+    let (dest, rm_relocate) = {
+        let mut first: HashMap<&str, usize> = HashMap::with_capacity(n);
+        let mut dest: Vec<usize> = Vec::with_capacity(n);
+        let mut any_dup = false;
+        let mut rm_pos = None;
+        for (i, message) in messages.iter().enumerate() {
+            if rm_pos.is_none() && message.kind == MsgKind::ReadMarker {
+                rm_pos = Some(i);
+            }
+            if let Some(id) = event_id(message) {
+                match first.entry(id) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(i);
+                        dest.push(i);
+                    }
+                    std::collections::hash_map::Entry::Occupied(slot) => {
+                        dest.push(*slot.get());
+                        any_dup = true;
+                    }
+                }
+            } else {
+                dest.push(i);
+            }
+        }
+        if !any_dup {
+            // Spurious hash collision in the fast-path check; leave the list untouched.
+            return;
+        }
+        // `ReadMarker` sits immediately after the last read event. If the SDK placed it
+        // after a trailing duplicate (its `update_read_marker` searches from the back),
+        // move it right after that event's surviving first copy.
+        let rm_relocate = rm_pos.and_then(|rm| {
+            let prev_event = messages[..rm]
+                .iter()
+                .rposition(|message| event_id(message).is_some())?;
+            let anchor = dest[prev_event];
+            (anchor < prev_event).then_some((rm, anchor))
+        });
+        (dest, rm_relocate)
+    };
+
+    // Move each later copy's content into its first copy's slot while keeping the first
+    // copy's `id` so UI anchors (selection, scroll, edit/reply, playback) do not jump.
+    for (i, &target) in dest.iter().enumerate() {
+        if target < i {
+            let (head, tail) = messages.split_at_mut(i);
+            let first = &mut head[target];
+            let later = &mut tail[0];
+            std::mem::swap(first, later);
+            std::mem::swap(&mut first.id, &mut later.id);
+        }
+    }
+
+    // Compact out superseded slots and track where the `ReadMarker` and its anchor land.
+    let mut new_rm = None;
+    let mut new_anchor = None;
+    let mut write = 0;
+    for (read, &target) in dest.iter().enumerate() {
+        if target == read {
+            if let Some((rm_pos, anchor)) = rm_relocate {
+                if read == rm_pos {
+                    new_rm = Some(write);
+                }
+                if read == anchor {
+                    new_anchor = Some(write);
+                }
+            }
+            if write != read {
+                messages.swap(write, read);
+            }
+            write += 1;
+        }
+    }
+    messages.truncate(write);
+
+    if let (Some(rm_at), Some(anchor_at)) = (new_rm, new_anchor) {
+        let insert_at = anchor_at + 1;
+        if insert_at < rm_at {
+            messages[insert_at..=rm_at].rotate_right(1);
+        }
     }
 }
 
@@ -1222,5 +1379,320 @@ mod tests {
         assert!(ended_p.shows_counts());
         assert!(!ended_msg.editable());
         assert_eq!(ended_p.winner_max(), 1);
+    }
+
+    fn test_event(uid: &str, event: &str, body: &str) -> Message {
+        Message {
+            id: uid.to_owned(),
+            item: Some(ItemRef::Event(event.to_owned())),
+            body: body.to_owned(),
+            day: "Today".to_owned(),
+            ..Message::default()
+        }
+    }
+
+    fn test_marker(uid: &str) -> Message {
+        Message {
+            id: uid.to_owned(),
+            kind: MsgKind::ReadMarker,
+            ..Message::default()
+        }
+    }
+
+    fn summary(messages: &[Message]) -> Vec<(&str, Option<&str>, &str)> {
+        messages
+            .iter()
+            .map(|m| {
+                let key = match m.item.as_ref() {
+                    Some(ItemRef::Event(id)) => Some(id.as_str()),
+                    Some(ItemRef::Transaction(id)) => Some(id.as_str()),
+                    None => None,
+                };
+                (m.id.as_str(), key, m.body.as_str())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dedup_collapses_repeated_block_with_latest_content() {
+        use crate::model::{ReadBy, Reader};
+
+        let stale_reader = ReadBy {
+            readers: vec![Reader {
+                name: "Bob".to_owned(),
+                time: "12:00".to_owned(),
+            }],
+            total: 1,
+        };
+        let fresh_reader = ReadBy {
+            readers: vec![Reader {
+                name: "Carol".to_owned(),
+                time: "12:05".to_owned(),
+            }],
+            total: 1,
+        };
+
+        let mut e471_first = test_event("u1", "$471", "original 471");
+        e471_first.read_by = stale_reader;
+        let mut e471_later = test_event("u6", "$471", "edited 471");
+        e471_later.edited = true;
+        e471_later.reactions = vec![Reaction {
+            key: "👍".to_owned(),
+            count: 1,
+            own: true,
+        }];
+        // SDK moved the receipt off the trailing copy; copy 1 held a stale receipt.
+        e471_later.read_by = ReadBy::default();
+
+        let e472_first = test_event("u2", "$472", "v1 472");
+        let e472_middle = test_event("u7", "$472", "v2 472");
+        let mut e472_last = test_event("u11", "$472", "v3 472");
+        e472_last.read_by = fresh_reader.clone();
+
+        let e473_first = test_event("u3", "$473", "473");
+        let mut e473_later = test_event("u8", "$473", "Message deleted");
+        e473_later.kind = MsgKind::Redacted;
+
+        let mut messages = vec![
+            test_event("u0", "$470", "470"),
+            e471_first,
+            e472_first,
+            e473_first,
+            test_event("u4", "$474", "474 v1"),
+            e471_later,
+            e472_middle,
+            e473_later,
+            test_event("u9", "$474", "474 v2"),
+            test_event("u10", "$475", "475"),
+            e472_last,
+        ];
+
+        let mut dedup = EventDedup::default();
+        dedup.dedup(&mut messages);
+
+        assert_eq!(
+            summary(&messages),
+            vec![
+                ("u0", Some("$470"), "470"),
+                ("u1", Some("$471"), "edited 471"),
+                ("u2", Some("$472"), "v3 472"),
+                ("u3", Some("$473"), "Message deleted"),
+                ("u4", Some("$474"), "474 v2"),
+                ("u10", Some("$475"), "475"),
+            ]
+        );
+        assert!(messages[1].edited);
+        assert_eq!(messages[1].reactions.len(), 1);
+        assert!(messages[1].read_by.is_empty());
+        assert_eq!(messages[2].read_by, fresh_reader);
+        assert_eq!(messages[3].kind, MsgKind::Redacted);
+    }
+
+    #[test]
+    fn dedup_keeps_non_event_items_and_clean_list_untouched() {
+        let local = |uid: &str, txn: &str, body: &str| Message {
+            id: uid.to_owned(),
+            item: Some(ItemRef::Transaction(txn.to_owned())),
+            body: body.to_owned(),
+            ..Message::default()
+        };
+        let virtual_msg = |uid: &str, body: &str| Message {
+            id: uid.to_owned(),
+            item: None,
+            body: body.to_owned(),
+            ..Message::default()
+        };
+
+        let original = vec![
+            test_event("u0", "$1", "one"),
+            test_marker("rm"),
+            test_event("u1", "$2", "two"),
+            virtual_msg("v0", "virtual"),
+            local("l0", "txn-a", "sending a"),
+            local("l1", "txn-b", "sending b"),
+        ];
+        let mut messages = original.clone();
+        let mut dedup = EventDedup::default();
+        dedup.dedup(&mut messages);
+        assert_eq!(summary(&messages), summary(&original));
+
+        // Reusing the scratch buffer on another repeat-free update does not reallocate it.
+        let cap_before = dedup.seen.capacity();
+        assert!(cap_before >= original.len());
+        dedup.dedup(&mut messages);
+        assert_eq!(dedup.seen.capacity(), cap_before);
+        assert_eq!(summary(&messages), summary(&original));
+
+        // Even if the slow path runs (as after a hash collision), a unique list stays intact.
+        dedup_with_latest(&mut messages);
+        assert_eq!(summary(&messages), summary(&original));
+
+        // Non-event items stay untouched when another event in the list repeats.
+        let mut mixed = vec![
+            test_event("u0", "$1", "one old"),
+            virtual_msg("v0", "virtual 1"),
+            test_event("u1", "$1", "one new"),
+            virtual_msg("v1", "virtual 2"),
+            local("l0", "txn-a", "echo 1"),
+            local("l1", "txn-a", "echo 2"),
+        ];
+        dedup.dedup(&mut mixed);
+        assert_eq!(
+            summary(&mixed),
+            vec![
+                ("u0", Some("$1"), "one new"),
+                ("v0", None, "virtual 1"),
+                ("v1", None, "virtual 2"),
+                ("l0", Some("txn-a"), "echo 1"),
+                ("l1", Some("txn-a"), "echo 2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn dedup_keeps_read_marker_after_its_anchor_event() {
+        let mut dedup = EventDedup::default();
+        let run = |dedup: &mut EventDedup, mut list: Vec<Message>| -> Vec<String> {
+            dedup.dedup(&mut list);
+            list.into_iter()
+                .map(|m| match m.kind {
+                    MsgKind::ReadMarker => "RM".to_owned(),
+                    _ => m.body,
+                })
+                .collect()
+        };
+
+        // ReadMarker before the repeated block stays before it.
+        assert_eq!(
+            run(
+                &mut dedup,
+                vec![
+                    test_event("u0", "$470", "470"),
+                    test_marker("rm"),
+                    test_event("u1", "$471", "471"),
+                    test_event("u2", "$472", "472"),
+                    test_event("u3", "$471", "471'"),
+                    test_event("u4", "$472", "472'"),
+                    test_event("u5", "$473", "473"),
+                ],
+            ),
+            ["470", "RM", "471'", "472'", "473"]
+        );
+
+        // ReadMarker placed by the SDK between copy 1 and copy 2 (fully_read = $472 before
+        // replay): stays right after $472', before $473 (or trailing when nothing follows).
+        assert_eq!(
+            run(
+                &mut dedup,
+                vec![
+                    test_event("u0", "$470", "470"),
+                    test_event("u1", "$471", "471"),
+                    test_event("u2", "$472", "472"),
+                    test_marker("rm"),
+                    test_event("u3", "$471", "471'"),
+                    test_event("u4", "$472", "472'"),
+                    test_event("u5", "$473", "473"),
+                ],
+            ),
+            ["470", "471'", "472'", "RM", "473"]
+        );
+        assert_eq!(
+            run(
+                &mut dedup,
+                vec![
+                    test_event("u0", "$470", "470"),
+                    test_event("u1", "$471", "471"),
+                    test_event("u2", "$472", "472"),
+                    test_marker("rm"),
+                    test_event("u3", "$471", "471'"),
+                    test_event("u4", "$472", "472'"),
+                ],
+            ),
+            ["470", "471'", "472'", "RM"]
+        );
+
+        // ReadMarker placed inside copy 2 (set_fully_read_event($472) after replay):
+        // relocates right after surviving $472', whether or not $475 follows.
+        assert_eq!(
+            run(
+                &mut dedup,
+                vec![
+                    test_event("u0", "$470", "470"),
+                    test_event("u1", "$471", "471"),
+                    test_event("u2", "$472", "472"),
+                    test_event("u3", "$473", "473"),
+                    test_event("u4", "$474", "474"),
+                    test_event("u5", "$471", "471'"),
+                    test_event("u6", "$472", "472'"),
+                    test_marker("rm"),
+                    test_event("u7", "$473", "473'"),
+                    test_event("u8", "$474", "474'"),
+                    test_event("u9", "$475", "475"),
+                ],
+            ),
+            ["470", "471'", "472'", "RM", "473'", "474'", "475"]
+        );
+        assert_eq!(
+            run(
+                &mut dedup,
+                vec![
+                    test_event("u0", "$470", "470"),
+                    test_event("u1", "$471", "471"),
+                    test_event("u2", "$472", "472"),
+                    test_event("u3", "$473", "473"),
+                    test_event("u4", "$474", "474"),
+                    test_event("u5", "$471", "471'"),
+                    test_event("u6", "$472", "472'"),
+                    test_marker("rm"),
+                    test_event("u7", "$473", "473'"),
+                    test_event("u8", "$474", "474'"),
+                ],
+            ),
+            ["470", "471'", "472'", "RM", "473'", "474'"]
+        );
+
+        // ReadMarker immediately after copy 2, after the block, or at index 0.
+        assert_eq!(
+            run(
+                &mut dedup,
+                vec![
+                    test_event("u0", "$470", "470"),
+                    test_event("u1", "$471", "471"),
+                    test_event("u2", "$472", "472"),
+                    test_event("u3", "$471", "471'"),
+                    test_event("u4", "$472", "472'"),
+                    test_marker("rm"),
+                    test_event("u5", "$473", "473"),
+                ],
+            ),
+            ["470", "471'", "472'", "RM", "473"]
+        );
+        assert_eq!(
+            run(
+                &mut dedup,
+                vec![
+                    test_event("u0", "$470", "470"),
+                    test_event("u1", "$471", "471"),
+                    test_event("u2", "$471", "471'"),
+                    test_event("u3", "$472", "472"),
+                    test_marker("rm"),
+                    test_event("u4", "$473", "473"),
+                ],
+            ),
+            ["470", "471'", "472", "RM", "473"]
+        );
+        assert_eq!(
+            run(
+                &mut dedup,
+                vec![
+                    test_marker("rm"),
+                    test_event("u1", "$471", "471"),
+                    test_event("u2", "$472", "472"),
+                    test_event("u3", "$471", "471'"),
+                    test_event("u4", "$472", "472'"),
+                ],
+            ),
+            ["RM", "471'", "472'"]
+        );
     }
 }
