@@ -923,17 +923,21 @@ async fn export_keys(
         return Err("That is not a file name".to_owned());
     };
     let parent = folder_of(path.parent().unwrap_or(Path::new(""))).to_owned();
-    std::fs::create_dir_all(&parent)
-        .map_err(|err| format!("Could not create the folder: {err}"))?;
-    // Said again, for certain, when the file is published.
-    if std::fs::symlink_metadata(&path).is_ok() {
-        return Err(
-            "A file with that name exists already. Nothing was written; choose another name."
-                .to_owned(),
-        );
-    }
-    let mut staging =
-        Staging::create(&parent).map_err(|err| format!("Could not write in that folder: {err}"))?;
+    let wanted = path.clone();
+    let mut staging = on_disk(move || {
+        std::fs::create_dir_all(&parent)
+            .map_err(|err| format!("Could not create the folder: {err}"))?;
+        // Said again, for certain, when the file is published.
+        if std::fs::symlink_metadata(&wanted).is_ok() {
+            return Err(
+                "A file with that name exists already. Nothing was written; choose another \
+                 name."
+                    .to_owned(),
+            );
+        }
+        Staging::create(&parent).map_err(|err| format!("Could not write in that folder: {err}"))
+    })
+    .await?;
     let count = Arc::new(AtomicUsize::new(0));
     let counted = count.clone();
     let result = client
@@ -944,13 +948,30 @@ async fn export_keys(
         })
         .await;
     drop(passphrase);
-    result.map_err(|err| format!("Could not export the keys: {err}"))?;
+    let result = result.map_err(|err| format!("Could not export the keys: {err}"));
     let count = count.load(Ordering::Relaxed);
-    if count == 0 {
-        return Err("This device has no message keys to export yet".to_owned());
-    }
-    staging.publish(&path)?;
+    let target = path.clone();
+    // Whatever came of it, the staging folder is cleared away there too (on drop).
+    on_disk(move || {
+        result?;
+        if count == 0 {
+            return Err("This device has no message keys to export yet".to_owned());
+        }
+        staging.publish(&target)
+    })
+    .await?;
     Ok((count, path))
+}
+
+/// Runs file work on the blocking threads. Making folders, publishing a file and
+/// syncing it to the drive can take a while on a slow or network drive, and the
+/// worker's loop must not wait for it meanwhile.
+async fn on_disk<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|_| Err("The file could not be handled".to_owned()))
 }
 
 fn import_error(err: &RoomKeyImportError) -> String {
@@ -981,11 +1002,13 @@ async fn import_keys(
     path: PathBuf,
     passphrase: Zeroizing<String>,
 ) -> Result<(usize, usize), String> {
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => return Err("That is not a file".to_owned()),
-        Err(err) => return Err(format!("Could not read the file: {err}")),
-    }
+    let file = path.clone();
+    on_disk(move || match std::fs::metadata(&file) {
+        Ok(meta) if meta.is_file() => Ok(()),
+        Ok(_) => Err("That is not a file".to_owned()),
+        Err(err) => Err(format!("Could not read the file: {err}")),
+    })
+    .await?;
     let result = client
         .encryption()
         .import_room_keys(path, &passphrase)

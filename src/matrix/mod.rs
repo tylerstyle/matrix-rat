@@ -1535,7 +1535,7 @@ impl Worker {
             Ok(SessionEnd::Shutdown) => {
                 let joined = search::joined_room_ids(&active.client, &left);
                 drop(active);
-                search::prune_search_dir(&self.paths.search_dir(), &joined);
+                search::prune_search_dir_off_loop(&self.paths.search_dir(), joined).await;
                 return false;
             }
             Ok(SessionEnd::SoftLogout) => {
@@ -1547,7 +1547,7 @@ impl Worker {
                 }
                 let joined = search::joined_room_ids(&active.client, &left);
                 drop(active);
-                search::prune_search_dir(&self.paths.search_dir(), &joined);
+                search::prune_search_dir_off_loop(&self.paths.search_dir(), joined).await;
                 *pending = Some(PendingAuth::Reauth {
                     target,
                     passphrase,

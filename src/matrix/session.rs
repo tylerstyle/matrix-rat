@@ -318,11 +318,24 @@ pub async fn forget_with<K: KeyringBackend>(
     target: Option<&ReauthTarget>,
     keyring: &K,
 ) {
-    let key = target
-        .map(|t| t.keyring_key(&paths.profile))
-        .or_else(|| read_saved_key(paths));
-    let _ = std::fs::remove_file(paths.session_file());
-    let _ = std::fs::remove_dir_all(paths.search_dir());
+    // On the blocking threads: the search index is a folder of many files, and this
+    // runs in the worker's loop, which must not stop for them.
+    let files = paths.clone();
+    let read_key = target.is_none();
+    let saved_key = tokio::task::spawn_blocking(move || {
+        let key = if read_key {
+            read_saved_key(&files)
+        } else {
+            None
+        };
+        let _ = std::fs::remove_file(files.session_file());
+        let _ = std::fs::remove_dir_all(files.search_dir());
+        key
+    })
+    .await
+    .ok()
+    .flatten();
+    let key = target.map(|t| t.keyring_key(&paths.profile)).or(saved_key);
     if let Some(key) = key
         && let Err(err) = keyring.delete(&key).await
     {
@@ -344,15 +357,20 @@ pub async fn clear_with<K: KeyringBackend>(
     keyring: &K,
 ) {
     forget_with(paths, target, keyring).await;
-    // What the account saved for later names its rooms and messages: it goes with
-    // the account. (A session the server merely ended keeps it: see `forget`.)
-    crate::saved::remove_files(&paths.saved_file());
-    let _ = std::fs::remove_dir_all(paths.store_dir());
-    let _ = std::fs::remove_dir_all(paths.data_dir.join("store.previous"));
-    let _ = std::fs::remove_dir_all(paths.search_dir());
-    // Transcripts and translations kept by `keep_notes`: message text in plain form.
-    let _ = std::fs::remove_file(paths.notes_file());
-    let _ = std::fs::remove_file(paths.notes_file().with_extension("json.new"));
+    // On the blocking threads, as in `forget_with`: the stores are many files.
+    let paths = paths.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        // What the account saved for later names its rooms and messages: it goes with
+        // the account. (A session the server merely ended keeps it: see `forget`.)
+        crate::saved::remove_files(&paths.saved_file());
+        let _ = std::fs::remove_dir_all(paths.store_dir());
+        let _ = std::fs::remove_dir_all(paths.data_dir.join("store.previous"));
+        let _ = std::fs::remove_dir_all(paths.search_dir());
+        // Transcripts and translations kept by `keep_notes`: message text in plain form.
+        let _ = std::fs::remove_file(paths.notes_file());
+        let _ = std::fs::remove_file(paths.notes_file().with_extension("json.new"));
+    })
+    .await;
 }
 
 fn write_saved(path: &Path, saved: &Saved) -> Result<()> {
@@ -509,7 +527,7 @@ pub async fn restore_with<K: KeyringBackend>(
             "Could not restore your session: {err:#}. Your local store was kept intact."
         ));
     }
-    super::search::prune_stale_search_indexes(&client, &paths.search_dir());
+    super::search::prune_stale_search_indexes(&client, &paths.search_dir()).await;
 
     RestoreOutcome::Restored(ActiveSession {
         client,
@@ -598,7 +616,7 @@ async fn commit_preserved_reauth<K: KeyringBackend>(
 
     let client = offline_client(paths, &homeserver, existing_passphrase).await?;
     client.restore_session(auth_session).await?;
-    super::search::prune_stale_search_indexes(&client, &paths.search_dir());
+    super::search::prune_stale_search_indexes(&client, &paths.search_dir()).await;
     let saved = Saved {
         homeserver,
         passphrase: file_passphrase,

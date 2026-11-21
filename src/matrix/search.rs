@@ -54,7 +54,7 @@ impl fmt::Debug for SearchHit {
 /// joined. Called when no `RoomIndex` handles are open (startup before sync/search, and
 /// session shutdown after dropping the `Client`) because `matrix-sdk 0.19.1` keeps an
 /// in-memory `HashMap<OwnedRoomId, RoomIndex>` without a public room-removal API.
-pub(crate) fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<String>) {
+fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<String>) {
     let Ok(entries) = std::fs::read_dir(search_dir) else {
         return;
     };
@@ -89,10 +89,17 @@ pub(super) fn joined_room_ids(client: &Client, left: &LeftRooms) -> HashSet<Stri
 }
 
 /// Prunes non-joined room search index directories using the client's restored room list.
-pub(crate) fn prune_stale_search_indexes(client: &Client, search_dir: &Path) {
+pub(crate) async fn prune_stale_search_indexes(client: &Client, search_dir: &Path) {
     // Before the session: nothing was left in it yet.
     let joined = joined_room_ids(client, &LeftRooms::default());
-    prune_search_dir(search_dir, &joined);
+    prune_search_dir_off_loop(search_dir, joined).await;
+}
+
+/// [`prune_search_dir`] on the blocking threads: an index is a folder of many files,
+/// and the worker's loop must not stop for them.
+pub(crate) async fn prune_search_dir_off_loop(search_dir: &Path, joined: HashSet<String>) {
+    let search_dir = search_dir.to_owned();
+    let _ = tokio::task::spawn_blocking(move || prune_search_dir(&search_dir, &joined)).await;
 }
 
 pub(super) struct Searcher {
