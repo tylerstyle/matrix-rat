@@ -177,6 +177,20 @@ yet; each piece is written and reviewed as in §4.
   nearest-colour mapping that uses the grey ramp too and keeps the roles apart, a cue for the
   cursor that does not rest on colour alone (as `high-contrast` underlines it), and a test
   that every built-in theme keeps cursor, open room and background apart in 256 colours.
+- **Planning first: using it over ssh from a phone** (the user, 2026-11-21): "think about ssh
+  problems rising from using onscreen keyboards without proper keys and the shortcuts, that
+  fall because of it. ESC isn't always there. Alt and Ctrl also. Brainstorm, how this could be
+  done when connecting from mobile. Maybe an option to pass for mobile friendly keybinds and
+  even ui elements (although that might be unnecessary, because it is very good already).
+  Like `matrix-rat --mobile`." A brainstorm and a proposal for the user come before any code.
+  What there is to build on: key presets (`default`, `vim` in `src/keymap.rs`) and `[keys]`
+  overrides; clicks on nearly everything; right-click menus; the command palette (`Ctrl-P`),
+  which reaches every action. Esc closes popups and leaves modes (16 places in the README's
+  key tables); most other shortcuts are `Ctrl-` or `Alt-`. To find out first: which ssh app
+  the user uses on the phone and what its extra-keys row sends; whether a tap and a long press
+  reach the app as a click and a right-click; which actions have no way in without Esc, Ctrl
+  or Alt. Since the same profile is used from the desktop too, a per-start switch
+  (`--mobile`) may suit better than a setting in `config.toml`.
 
 ### 6.2 Later, after 1.0.0 or by demand
 
