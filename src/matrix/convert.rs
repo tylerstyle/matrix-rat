@@ -376,6 +376,12 @@ fn dedup_with_latest(messages: &mut Vec<Message>) {
             let (head, tail) = messages.split_at_mut(i);
             let first = &mut head[target];
             let later = &mut tail[0];
+            // Decryption goes one way only, and the SDK decrypts whichever copy it finds
+            // by position (keys imported from a file, say), often the first: a copy still
+            // locked never stands in for one that was decrypted.
+            if later.kind == MsgKind::Undecryptable && first.kind != MsgKind::Undecryptable {
+                continue;
+            }
             std::mem::swap(first, later);
             std::mem::swap(&mut first.id, &mut later.id);
         }
@@ -1681,6 +1687,37 @@ mod tests {
         assert!(messages[1].read_by.is_empty());
         assert_eq!(messages[2].read_by, fresh_reader);
         assert_eq!(messages[3].kind, MsgKind::Redacted);
+    }
+
+    /// Of an event held twice, the SDK decrypts the copy it finds by position when keys
+    /// come in from a key file, which can be the first: the second, still locked, does
+    /// not hide it. Decrypted last, the last copy wins as before.
+    #[test]
+    fn dedup_keeps_the_decrypted_copy_of_an_event() {
+        let locked = |id: &str, event: &str| {
+            let mut message = test_event(id, event, "Unable to decrypt");
+            message.kind = MsgKind::Undecryptable;
+            message
+        };
+        let mut messages = vec![
+            test_event("u1", "$1", "readable now"),
+            locked("u2", "$2"),
+            locked("u3", "$1"),
+            test_event("u4", "$2", "readable too"),
+        ];
+        EventDedup::default().dedup(&mut messages);
+        assert_eq!(
+            summary(&messages),
+            vec![
+                ("u1", Some("$1"), "readable now"),
+                ("u2", Some("$2"), "readable too"),
+            ]
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.kind != MsgKind::Undecryptable)
+        );
     }
 
     #[test]
