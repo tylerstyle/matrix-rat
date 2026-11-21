@@ -1823,11 +1823,14 @@ impl Worker {
         let _notices =
             notify::watch(client, self.events.clone(), ignored.clone(), left.clone()).await;
         let mut session_changes = client.subscribe_to_session_changes();
-        let token_saver = {
+        // In a set, which aborts it when dropped: it holds the client, and a session
+        // that fails to start (an early return below) must not leave it running.
+        let mut token_saver = tokio::task::JoinSet::new();
+        {
             let mut changes = client.subscribe_to_session_changes();
             let (paths, client, passphrase) =
                 (self.paths.clone(), client.clone(), passphrase.to_owned());
-            tokio::spawn(async move {
+            token_saver.spawn(async move {
                 use tokio::sync::broadcast::error::RecvError;
                 loop {
                     match changes.recv().await {
@@ -1846,8 +1849,8 @@ impl Worker {
                         Err(RecvError::Closed) => break,
                     }
                 }
-            })
-        };
+            });
+        }
 
         // Offline mode: the service notices a lost connection, reports `Offline` and
         // resumes by itself when the server is reachable again.
@@ -2296,10 +2299,10 @@ impl Worker {
         timelines.stop();
         // Do not hang on exit if the server is unreachable.
         let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
-        token_saver.abort();
+        token_saver.abort_all();
         // Waited for: a save that is running must not write the session file again
         // after the session was forgotten.
-        let _ = token_saver.await;
+        while token_saver.join_next().await.is_some() {}
         // Once more on the way out, in case a refresh happened during the shutdown.
         if matches!(end, SessionEnd::Shutdown)
             && let Err(err) = session::save_tokens(&self.paths, client, passphrase, in_keyring)
