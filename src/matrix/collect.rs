@@ -660,10 +660,12 @@ where
     }
 }
 
-/// `items` with each event once, at its first place. A batch of events can reach a
+/// `items` with each event once, at its last place. A batch of events can reach a
 /// timeline twice (seen in the server test while sync still brought the newest
-/// messages of a flood): a message must not count, or be archived, twice. Items
-/// without a key (virtual ones, a local echo) all stay.
+/// messages of a flood): a message must not count, or be archived, twice. The later
+/// copy is the one kept: it is the one the SDK's later updates (an edit, a decryption)
+/// reach, and the read marker is placed after it (the SDK looks for the marker's event
+/// from the back). Items without a key (virtual ones, a local echo) all stay.
 fn without_repeats<T, K: std::hash::Hash + Eq>(
     items: Vector<T>,
     key: impl Fn(&T) -> Option<K>,
@@ -672,10 +674,13 @@ where
     T: Clone,
 {
     let mut seen = std::collections::HashSet::new();
-    items
+    let mut kept: Vec<T> = items
         .into_iter()
+        .rev()
         .filter(|item| key(item).is_none_or(|key| seen.insert(key)))
-        .collect()
+        .collect();
+    kept.reverse();
+    kept.into_iter().collect()
 }
 
 /// The event id of a timeline item, for [`without_repeats`].
@@ -1025,7 +1030,33 @@ mod tests {
             .into_iter()
             .map(|item| item.1)
             .collect();
-        assert_eq!(kept, ["date", "a", "b", "c", "marker", "echo", "d"]);
+        assert_eq!(
+            kept,
+            ["date", "a", "b again", "c again", "marker", "echo", "d"]
+        );
+    }
+
+    #[test]
+    fn of_an_event_twice_the_later_copy_stays_where_it_is() {
+        // The SDK puts the read marker after the copy that its later updates reach
+        // (its search for the marker's place starts at the back): read up to b, and
+        // c is not read. The later copies also carry edits and decryptions.
+        let items: Vector<(Option<u32>, &str)> = [
+            (Some(1), "a"),
+            (Some(2), "b"),
+            (Some(3), "c"),
+            (Some(2), "b'"),
+            (None, "read marker"),
+            (Some(3), "c'"),
+            (Some(4), "d"),
+        ]
+        .into_iter()
+        .collect();
+        let kept: Vec<&str> = without_repeats(items, |item| item.0)
+            .into_iter()
+            .map(|item| item.1)
+            .collect();
+        assert_eq!(kept, ["a", "b'", "read marker", "c'", "d"]);
     }
     use crate::collect::tests::{AT, said};
     use crate::files::NewFile;
