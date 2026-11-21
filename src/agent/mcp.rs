@@ -1189,18 +1189,23 @@ impl Server {
             }
             let until = settle.map_or(part, |settle| settle.min(deadline));
             tokio::select! {
-                next = listener.next() => {
-                    let message = next.map_err(|err| self.told(err))?;
+                next = listener.next_told() => {
+                    let (message, changed) = next.map_err(|err| self.told(err))?;
                     let at = place(&message.event_id, &heard);
-                    // Without a place, and owed or handed over before: not at the
-                    // room's end, but from further back than what was read. It is
-                    // told because it changed, and it must not take the room back.
-                    // (Not: known. Another call may have looked a moment ago.)
-                    let old = at.is_none() && self.reopened(&message);
+                    // Without a place, and told because it changed (`serve` had it
+                    // before), or owed or handed over before: not at the room's end,
+                    // but from further back than what was read. It is history, and
+                    // it must not take the room back. (Not: known. Another call may
+                    // have looked a moment ago.)
+                    let old = at.is_none() && (changed || self.reopened(&message));
                     if at.is_none() && !old {
                         heard.push(message.event_id.clone());
                     }
-                    self.look(std::slice::from_ref(&message));
+                    // (Not what is from further back: what is known has no holes,
+                    // and what stands between it and what was read is not known.)
+                    if !old {
+                        self.look(std::slice::from_ref(&message));
+                    }
                     // What stands before where the room has been seen is told
                     // again by `serve` when it changes, and for less (a sender
                     // trusted differently, history that could not be read at
@@ -1208,7 +1213,8 @@ impl Server {
                     // owed, or was handed over saying something else.
                     let weighed = found.iter().any(|known| known.event_id == message.event_id)
                         || doubted.iter().any(|(known, _)| *known == message.event_id);
-                    if at.is_some_and(|at| at < start) && !weighed && !self.reopened(&message) {
+                    let before = old || at.is_some_and(|at| at < start);
+                    if before && !weighed && !self.reopened(&message) {
                         continue;
                     }
                     sort_in(message, &mut found, &mut doubted);

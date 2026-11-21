@@ -1897,3 +1897,47 @@ async fn a_wait_in_a_room_that_showed_nothing_is_one_piece() {
     assert_eq!(ids(&woken), ["$answer"]);
     session.end().await;
 }
+
+/// A message from further back than a read reaches is told again by `serve` when it
+/// changes: edited, decrypted at last, its sender verified. That is history, not the
+/// user's new word: it ends no wait, and the room is not taken to be seen up to it.
+#[tokio::test]
+async fn an_old_message_that_changes_beyond_a_read_is_not_news() {
+    let mut history = vec![
+        message("$edited", ANN, "an old answer"),
+        locked("$sealed", ANN),
+        doubted("$doubted", ANN, "an old yes", None, "unverified_identity"),
+    ];
+    history.extend((0..proto::READ_MAX).map(|n| message(&format!("$m{n}"), EVE, "chatter")));
+    let world = World::start("mcp-beyond", history).await;
+    let mut session = Session::start(world.socket(), Some(ANN));
+    let id = begin_wait(&mut session, &world, json!({ "timeout_seconds": 600 })).await;
+    world.change("$edited", |changed| {
+        changed.body = "an old answer, corrected".into();
+        changed.edited = true;
+    });
+    world.change("$sealed", |changed| {
+        *changed = message("$sealed", ANN, "an old secret");
+    });
+    world.change("$doubted", |changed| {
+        *changed = message("$doubted", ANN, "an old yes");
+    });
+    assert!(
+        session
+            .hear_within(Duration::from_millis(600))
+            .await
+            .is_none(),
+        "woken by history"
+    );
+    // What she says now still is news, once.
+    world.post(message("$new", ANN, "the answer"));
+    let (failed, woken) = session.result(id).await;
+    assert!(!failed);
+    assert_eq!(ids(&woken), ["$new"]);
+    let nothing = session
+        .ok("wait_for_message", json!({ "timeout_seconds": 1 }))
+        .await;
+    assert_eq!(nothing, json!({ "status": "nothing new", "messages": [] }));
+    session.end().await;
+    world.stop().await;
+}
