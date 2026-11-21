@@ -888,6 +888,9 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         Action::Doctor,
         Action::ArchiveRoom,
         Action::CatchUp,
+        Action::LeaveRoom,
+        Action::InviteUser,
+        Action::CancelCompose,
     ];
     for binding in active_bindings {
         if include_keymap_action(binding.action) == ActionInclusion::Skip {
@@ -1338,7 +1341,7 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::SaveForLater | Action::RemindMe => sel.can_keep,
         Action::OpenPinned => ctx.has_room && !in_pending,
         // About the room that room info would show, as in the room's menu.
-        Action::OpenThreads => ctx
+        Action::OpenThreads | Action::InviteUser => ctx
             .target
             .as_ref()
             .is_some_and(|(_, kind)| !kind.is_pending()),
@@ -1381,9 +1384,10 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::JumpToNewest | Action::JumpToOldest | Action::JumpToUnread => {
             ctx.has_room && ctx.has_messages
         }
+        Action::CancelCompose => !matches!(ctx.compose_mode, ComposeMode::Normal),
         Action::AcceptInvite | Action::DeclineInvite => ctx.in_invite,
         Action::WithdrawKnock => ctx.in_knock,
-        Action::RoomInfo => ctx.target.is_some(),
+        Action::RoomInfo | Action::LeaveRoom => ctx.target.is_some(),
         Action::Search => ctx.has_room && !in_pending,
         Action::SpaceNext | Action::SpacePrev => !ctx.spaces.is_empty(),
         Action::Quit
@@ -1407,7 +1411,6 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         | Action::SelectNewer
         | Action::Send
         | Action::Newline
-        | Action::CancelCompose
         | Action::OpenEmoji
         | Action::LoginSubmit
         | Action::LoginBrowser
@@ -1428,8 +1431,6 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         | Action::SelectTheme(_)
         | Action::Setting(_)
         | Action::NewRoom
-        | Action::LeaveRoom
-        | Action::InviteUser
         | Action::Manage(_)
         | Action::ContextMenu
         | Action::SidebarTop
@@ -1918,7 +1919,7 @@ fn collect_room_management(ctx: &PaletteContext, out: &mut Vec<Entry>) {
             Target::Action(action),
             Category::Action,
             title,
-            None,
+            ctx.keymap.label_for(action).map(str::to_owned),
             title,
             aliases,
             enabled,
@@ -2939,5 +2940,119 @@ mod tests {
             count_withdraw(&Palette::open(ctx)),
             vec![(Some("F10".to_owned()), false, 5)]
         );
+    }
+
+    #[test]
+    fn bound_leave_invite_and_cancel_compose_stay_single_and_follow_state() {
+        let entries_of = |p: &Palette, action: Action| -> Vec<(String, Option<String>, bool)> {
+            p.entries
+                .iter()
+                .filter(|e| e.target == Target::Action(action))
+                .map(|e| (e.title.clone(), e.hint.clone(), e.enabled))
+                .collect()
+        };
+
+        let mut ctx = sample_context();
+        let (f8, m8) = keymap::parse_key(keymap::Context::Global, "F8").unwrap();
+        let (f9, m9) = keymap::parse_key(keymap::Context::Global, "F9").unwrap();
+        let (f10, m10) = keymap::parse_key(keymap::Context::Composer, "F10").unwrap();
+        ctx.keymap
+            .apply_rebind(keymap::Context::Global, Action::LeaveRoom, f8, m8);
+        ctx.keymap
+            .apply_rebind(keymap::Context::Global, Action::InviteUser, f9, m9);
+        ctx.keymap
+            .apply_rebind(keymap::Context::Composer, Action::CancelCompose, f10, m10);
+
+        // Joined room, normal compose: Leave and Invite appear once with their key;
+        // CancelCompose is absent and disabled.
+        let p = Palette::open(ctx.clone());
+        assert_eq!(
+            entries_of(&p, Action::LeaveRoom),
+            vec![("Leave rust…".to_owned(), Some("F8".to_owned()), true)]
+        );
+        assert_eq!(
+            entries_of(&p, Action::InviteUser),
+            vec![(
+                "Invite someone to rust…".to_owned(),
+                Some("F9".to_owned()),
+                true
+            )]
+        );
+        assert!(entries_of(&p, Action::CancelCompose).is_empty());
+        assert!(action_enabled(Action::LeaveRoom, &ctx));
+        assert!(action_enabled(Action::InviteUser, &ctx));
+        assert!(!action_enabled(Action::CancelCompose, &ctx));
+
+        // Pending invite + replying: Invite is disabled, Leave stays enabled (decline),
+        // CancelCompose appears once as "Cancel reply".
+        let mut invite = ctx.clone();
+        invite.target = Some(("Party".to_owned(), crate::model::RoomKind::Invite));
+        invite.compose_mode = ComposeMode::Reply(0);
+        let p = Palette::open(invite.clone());
+        assert_eq!(
+            entries_of(&p, Action::LeaveRoom),
+            vec![(
+                "Decline the invitation to Party…".to_owned(),
+                Some("F8".to_owned()),
+                true
+            )]
+        );
+        assert_eq!(
+            entries_of(&p, Action::InviteUser),
+            vec![(
+                "Invite someone to Party…".to_owned(),
+                Some("F9".to_owned()),
+                false
+            )]
+        );
+        assert_eq!(
+            entries_of(&p, Action::CancelCompose),
+            vec![("Cancel reply".to_owned(), Some("F10".to_owned()), true)]
+        );
+        assert!(action_enabled(Action::LeaveRoom, &invite));
+        assert!(!action_enabled(Action::InviteUser, &invite));
+        assert!(action_enabled(Action::CancelCompose, &invite));
+
+        // Pending knock + editing: Invite stays disabled; CancelCompose appears once as
+        // "Cancel edit".
+        let mut knock = ctx.clone();
+        knock.target = Some(("Club".to_owned(), crate::model::RoomKind::Knock));
+        knock.compose_mode = ComposeMode::Edit(0);
+        let p = Palette::open(knock.clone());
+        assert_eq!(
+            entries_of(&p, Action::InviteUser),
+            vec![(
+                "Invite someone to Club…".to_owned(),
+                Some("F9".to_owned()),
+                false
+            )]
+        );
+        assert_eq!(
+            entries_of(&p, Action::CancelCompose),
+            vec![("Cancel edit".to_owned(), Some("F10".to_owned()), true)]
+        );
+        assert!(!action_enabled(Action::InviteUser, &knock));
+        assert!(action_enabled(Action::CancelCompose, &knock));
+
+        // No target room: Leave and Invite both appear once and are disabled.
+        let mut none = ctx;
+        none.target = None;
+        let p = Palette::open(none.clone());
+        assert_eq!(
+            entries_of(&p, Action::LeaveRoom),
+            vec![("Leave this room…".to_owned(), Some("F8".to_owned()), false)]
+        );
+        assert_eq!(
+            entries_of(&p, Action::InviteUser),
+            vec![(
+                "Invite someone to this room…".to_owned(),
+                Some("F9".to_owned()),
+                false
+            )]
+        );
+        assert!(entries_of(&p, Action::CancelCompose).is_empty());
+        assert!(!action_enabled(Action::LeaveRoom, &none));
+        assert!(!action_enabled(Action::InviteUser, &none));
+        assert!(!action_enabled(Action::CancelCompose, &none));
     }
 }
