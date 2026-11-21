@@ -204,8 +204,10 @@ two prongs: the measured look at memory and CPU first, so that the review that f
 numbers to hold its findings against.
 
 - **A deep look at memory and CPU use.** First part done 2026-11-21 (thread pools, SQLite
-  connections, the store lock; see the review log); a comparison day with the user's account
-  follows. Measured, not guessed: memory at rest and over a
+  connections, the store lock; see the review log); second part the same day (what memory
+  holds per message and room, what a change costs, two lists that held too much); a
+  comparison day with the user's account follows, and the fixes for what has no bound
+  (idle timelines, the queue while the editor runs, rebuilds per burst). Measured, not guessed: memory at rest and over a
   day with a real account (many rooms, large timelines, pictures), CPU at rest, while
   syncing and while scrolling, for the app and for `serve`; what grows without bound; where
   the time of a frame goes. Then the fixes the numbers call for.
