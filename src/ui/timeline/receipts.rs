@@ -10,7 +10,7 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use super::{INDENT, Row};
+use super::{Free, INDENT, Row};
 use crate::images::EMOTE_CELLS;
 use crate::model::ReadBy;
 use crate::text::{truncate, width};
@@ -65,7 +65,7 @@ pub(super) fn mark(row: &mut Row, read_by: &ReadBy, direct: bool, max_width: usi
         None => text,
     };
     let free = max_width.saturating_sub(taken + GAP);
-    if let Some(spans) = marker(read_by, direct, theme, free) {
+    let (said, at) = if let Some(spans) = marker(read_by, direct, theme, free) {
         let marker_width: usize = spans.iter().map(|span| width(&span.content)).sum();
         let pad = max_width - text - marker_width;
         row.line.spans.push(Span::raw(" ".repeat(pad)));
@@ -74,6 +74,7 @@ pub(super) fn mark(row: &mut Row, read_by: &ReadBy, direct: bool, max_width: usi
         if let Some(part) = &mut row.audio {
             part.marker = marker_width as u16;
         }
+        (text, text + pad)
     } else if row.image.is_none() && max_width >= CUT_MIN {
         // "… ✓" over the end of the text. (Nothing can be written over a
         // picture; who read that is in the menu.)
@@ -85,7 +86,8 @@ pub(super) fn mark(row: &mut Row, read_by: &ReadBy, direct: bool, max_width: usi
             fg: theme.style(Role::Muted).fg,
             ..Style::new()
         };
-        let pad = max_width - 3 - row.line.width();
+        let said = row.line.width();
+        let pad = max_width - 3 - said;
         row.line
             .spans
             .push(Span::styled(format!("…{} ✓", " ".repeat(pad)), muted));
@@ -94,6 +96,17 @@ pub(super) fn mark(row: &mut Row, read_by: &ReadBy, direct: bool, max_width: usi
         if let Some(part) = &mut row.audio {
             part.marker = 2;
         }
+        // The marker begins at the "…".
+        (said, said)
+    } else {
+        return;
+    };
+    // The buttons of the message stay clear of the marker (see `notes`).
+    if row.free != Free::Nowhere {
+        row.free = Free::Before {
+            text: said as u16,
+            at: at as u16,
+        };
     }
 }
 

@@ -12,7 +12,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::{INDENT, Row};
+use super::{Free, INDENT, Row};
 use crate::app::App;
 use crate::model::Message;
 use crate::notes::{Note, NoteKind, NoteState, Notes};
@@ -108,6 +108,7 @@ fn note_rows(
             image: None,
             emotes: Vec::new(),
             audio: None,
+            free: super::Free::End,
         }
     };
     let label = format!("{}: ", kind.label());
@@ -180,27 +181,18 @@ pub(super) fn buttons(app: &App, message: &Message, lit: bool) -> Buttons {
     buttons
 }
 
-/// Where on a row its buttons go: after what the row says, and before the read marker
-/// at its right end if it has one (see `receipts`: blanks, then the marker). The
-/// columns the text takes, and the column the buttons must end before.
-pub(super) fn free_part(line: &Line<'_>, row_width: usize) -> (usize, usize) {
-    let blank = |span: &Span<'_>| {
-        !span.content.is_empty()
-            && span.style == Style::default()
-            && span.content.chars().all(|c| c == ' ')
-    };
-    // The blanks before a marker: the last blank span, with something after it and
-    // text before it (the indent in front of a row is blank too).
-    let pad = line.spans.iter().rposition(blank).filter(|at| {
-        *at + 1 < line.spans.len() && line.spans[..*at].iter().any(|span| !blank(span))
-    });
-    match pad {
-        Some(at) => {
-            let before: usize = line.spans[..at].iter().map(|s| width(&s.content)).sum();
-            let end = before + width(&line.spans[at].content);
-            (before, end.saturating_sub(GAP).min(row_width))
-        }
-        None => (line.width(), row_width),
+/// Where on a row its buttons go, as the row says (see [`Free`]): after what the row
+/// says, and before what is aligned to its right end if anything is (a code block's
+/// "copy", a read marker). The columns the text takes, and the column the buttons must
+/// end before; none fit on the row that names the sender.
+pub(super) fn free_part(row: &Row, row_width: usize) -> (usize, usize) {
+    match row.free {
+        Free::End => (row.line.width(), row_width),
+        Free::Before { text, at } => (
+            usize::from(text),
+            usize::from(at).saturating_sub(GAP).min(row_width),
+        ),
+        Free::Nowhere => (row_width, row_width),
     }
 }
 
@@ -441,19 +433,30 @@ mod tests {
 
     #[test]
     fn the_free_part_of_a_row_ends_before_its_read_marker() {
-        // No marker: all of the row after its text.
-        let line = Line::from(vec![Span::raw("  "), Span::raw("hello")]);
-        assert_eq!(free_part(&line, 40), (7, 40));
+        // No marker: all of the row after its text, blanks in it or not.
+        let mut row = Row::plain(
+            Line::from(vec![
+                Span::raw("  "),
+                Span::raw("hello"),
+                Span::raw(" "),
+                Span::raw("(edited)"),
+            ]),
+            Some(0),
+        );
+        assert_eq!(free_part(&row, 40), (16, 40));
         // Text, blanks, marker: the buttons end two columns before the marker.
-        let line = Line::from(vec![
-            Span::raw("  "),
-            Span::raw("hello"),
-            Span::raw(" ".repeat(29)),
-            Span::raw("B ✓"),
-        ]);
-        assert_eq!(free_part(&line, 40), (7, 34));
-        // Only an indent and a word: the indent is not taken for the blanks.
-        let line = Line::from(vec![Span::raw("  "), Span::raw("✓")]);
-        assert_eq!(free_part(&line, 40), (3, 40));
+        row.free = Free::Before { text: 16, at: 37 };
+        assert_eq!(free_part(&row, 40), (16, 35));
+        // The row that names the sender has no room for them.
+        row.free = Free::Nowhere;
+        let (taken, end) = free_part(&row, 40);
+        assert_eq!(place(&lit_one(), taken, end), None);
+    }
+
+    fn lit_one() -> Buttons {
+        Buttons {
+            fixed: Vec::new(),
+            lit: vec![button(NoteKind::Translation, "translate")],
+        }
     }
 }

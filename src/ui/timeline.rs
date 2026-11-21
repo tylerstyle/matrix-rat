@@ -46,6 +46,22 @@ pub struct Row {
     /// What of a voice or audio message the row shows, which looks different while
     /// the message loads or plays (see `ui::audio`).
     audio: Option<AudioPart>,
+    /// Where the buttons of its message may be painted on the row (see `notes`).
+    free: Free,
+}
+
+/// Where on a row the buttons of its message may be painted. Said by what lays the
+/// row out, not guessed from what it shows: blanks in a row are no sign of anything.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Free {
+    /// After what the row says, to its end.
+    #[default]
+    End,
+    /// Between what the row says (`text` columns) and what is aligned to its right
+    /// end from column `at` on: a code block's "copy", a read marker (see `receipts`).
+    Before { text: u16, at: u16 },
+    /// Nowhere: the row that names the sender.
+    Nowhere,
 }
 
 /// A row of a voice or audio message that changes while it loads or plays.
@@ -73,6 +89,7 @@ impl std::fmt::Debug for Row {
             .field("image", &self.image)
             .field("emotes", &self.emotes.len())
             .field("audio", &self.audio)
+            .field("free", &self.free)
             .finish_non_exhaustive()
     }
 }
@@ -117,6 +134,7 @@ impl Row {
             image: None,
             emotes: Vec::new(),
             audio: None,
+            free: Free::End,
         }
     }
 
@@ -325,6 +343,7 @@ fn preview_rows(preview: &Preview, msg: usize, body_width: usize, theme: &Theme)
         image: None,
         emotes: Vec::new(),
         audio: None,
+        free: Free::End,
     };
     let title = Style {
         fg: theme.style(Role::Text).fg,
@@ -581,6 +600,8 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
             if message.sender_id.is_some() && hit_w > 0 {
                 row.hits.push((0, hit_w, HitId::Sender(i)));
             }
+            // The buttons go with what the message says, not with who said it.
+            row.free = Free::Nowhere;
             rows.push(row);
         }
 
@@ -609,6 +630,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                 image: None,
                 emotes: Vec::new(),
                 audio: None,
+                free: Free::End,
             });
         }
 
@@ -649,6 +671,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                                 }),
                                 emotes: Vec::new(),
                                 audio: None,
+                                free: Free::End,
                             });
                         }
                     }
@@ -667,6 +690,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                             image: None,
                             emotes: Vec::new(),
                             audio: None,
+                            free: Free::End,
                         });
                     }
                     Slot::Failed(_) | Slot::Off => {}
@@ -845,6 +869,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                     }
                 }
                 // "copy" at the right end of a code block's first line, where it fits.
+                let mut free = Free::End;
                 if let Some(block) = first_of {
                     let label_width = width(COPY_LABEL);
                     if col + 1 + label_width <= max_width {
@@ -856,6 +881,10 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                             (start + label_width) as u16,
                             HitId::CopyCode(i, block),
                         ));
+                        free = Free::Before {
+                            text: col as u16,
+                            at: start as u16,
+                        };
                     }
                 }
                 rows.push(Row {
@@ -866,6 +895,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                     image: None,
                     emotes: spots,
                     audio,
+                    free,
                 });
                 rows.extend(own_row);
             }
@@ -925,6 +955,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                     image: None,
                     emotes: std::mem::take(&mut spots),
                     audio: None,
+                    free: Free::End,
                 });
                 col = INDENT.len();
             }
@@ -956,6 +987,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                 image: None,
                 emotes: spots,
                 audio: None,
+                free: Free::End,
             });
         }
         if let Some(thread) = &message.thread {
@@ -1013,6 +1045,7 @@ fn thread_row(thread: &ThreadSummary, msg: usize, body_width: usize, theme: &The
         image: None,
         emotes: Vec::new(),
         audio: None,
+        free: Free::End,
     }
 }
 
@@ -1194,6 +1227,7 @@ fn push_poll_rows(
             image: None,
             emotes: Vec::new(),
             audio: None,
+            free: Free::End,
         });
     }
 
@@ -1773,8 +1807,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup: Option<Rect>) {
                 waiting = Some((msg, buttons));
             }
             let free = row.image.is_none() && sounding.is_none();
-            // What the row says, and where its read marker begins if it has one.
-            let (taken, end) = notes::free_part(&row.line, usize::from(rect.width));
+            // What the row says, and where what is aligned to its end begins.
+            let (taken, end) = notes::free_part(row, usize::from(rect.width));
             if let Some((_, buttons)) = &mut waiting
                 && free
                 && let Some(placed) = notes::place(buttons, taken, end)
