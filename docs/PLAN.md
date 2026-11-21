@@ -186,11 +186,15 @@ yet; each piece is written and reviewed as in §4.
   What there is to build on: key presets (`default`, `vim` in `src/keymap.rs`) and `[keys]`
   overrides; clicks on nearly everything; right-click menus; the command palette (`Ctrl-P`),
   which reaches every action. Esc closes popups and leaves modes (16 places in the README's
-  key tables); most other shortcuts are `Ctrl-` or `Alt-`. To find out first: which ssh app
-  the user uses on the phone and what its extra-keys row sends; whether a tap and a long press
-  reach the app as a click and a right-click; which actions have no way in without Esc, Ctrl
-  or Alt. Since the same profile is used from the desktop too, a per-start switch
-  (`--mobile`) may suit better than a setting in `config.toml`.
+  key tables); most other shortcuts are `Ctrl-` or `Alt-`. The user's client today is iSH on
+  iOS (a Linux emulator with `ssh` inside; a row of extra keys); they would like a better one,
+  perhaps on libghostty. Candidates found on 2026-11-22: gterm (free on the App Store, its key
+  bar has Esc, Ctrl, Alt, Tab and arrows, Ed25519 keys) and VVTerm (App Store, Ghostty-based,
+  the most active of them), with Echo, Spectty and Geistty in the awesome-libghostty list. To
+  find out first: what each client's keys send; whether a tap and a long press reach the app
+  as a click and a right-click; whether it shows full colour; which actions have no way in
+  without Esc, Ctrl or Alt. Since the same profile is used from the desktop too, a per-start
+  switch (`--mobile`) may suit better than a setting in `config.toml`.
 
 ### 6.2 Later, after 1.0.0 or by demand
 
