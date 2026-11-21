@@ -1126,10 +1126,13 @@ mod tests {
             .build()
             .await
             .unwrap();
+        // Listening starts before the name is owned: a stream hears only what comes
+        // after it is made, and a client may call as soon as the name is there, before
+        // the task below has run (on a busy machine). That call would go unanswered.
+        let mut stream = zbus::MessageStream::from(&conn);
         conn.request_name("org.freedesktop.secrets").await.unwrap();
 
         tokio::spawn(async move {
-            let mut stream = zbus::MessageStream::from(&conn);
             while let Some(Ok(msg)) = stream.next().await {
                 if msg.header().message_type() != zbus::message::Type::MethodCall {
                     continue;
