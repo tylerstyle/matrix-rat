@@ -2502,12 +2502,15 @@ async fn forward(
             }),
         }
     };
-    // Which threads have unread replies; nothing to look up inside a thread.
-    let unread = async |items: &Vector<Arc<TimelineItem>>| {
+    // Which threads have unread replies; nothing to look up inside a thread. (The
+    // ignored set is taken out of the channel first, as in `prepare_messages`.)
+    let unread = async |items: &Vector<Arc<TimelineItem>>,
+                        ignored: &watch::Receiver<IgnoredSet>| {
         if in_thread {
             HashSet::new()
         } else {
-            threads::unread(&room, items, &read_marks).await
+            let ignored = IgnoredSet::clone(&ignored.borrow());
+            threads::unread(&room, items, &read_marks, &ignored).await
         }
     };
     // Replies to messages that are not loaded only say "an earlier message" until the
@@ -2534,7 +2537,7 @@ async fn forward(
         }
     };
     fetch_replies(&items);
-    let marks = unread(&items).await;
+    let marks = unread(&items, &ignored).await;
     let messages = prepare_messages(
         &room,
         &items,
@@ -2639,7 +2642,7 @@ async fn forward(
                     reuse.forget();
                 }
                 fetch_replies(&items);
-                let marks = unread(&items).await;
+                let marks = unread(&items, &ignored).await;
                 let messages = prepare_messages(
                     &room,
                     &items,
@@ -2659,7 +2662,7 @@ async fn forward(
                 if changed.is_err() {
                     return;
                 }
-                let marks = unread(&items).await;
+                let marks = unread(&items, &ignored).await;
                 let messages = prepare_messages(
                     &room,
                     &items,
@@ -2690,7 +2693,7 @@ async fn forward(
                 if changed.is_err() {
                     return;
                 }
-                let marks = unread(&items).await;
+                let marks = unread(&items, &ignored).await;
                 let messages = prepare_messages(
                     &room,
                     &items,
@@ -4473,6 +4476,45 @@ mod tests {
         (server, client, timelines, events, watches)
     }
 
+    /// The first timeline of `room` under `generation` that `ready` accepts.
+    async fn timeline_where(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<crate::matrix::MatrixEvent>,
+        room: &str,
+        generation: u64,
+        ready: impl Fn(&[crate::model::Message]) -> bool,
+    ) -> Vec<crate::model::Message> {
+        use crate::matrix::MatrixEvent;
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match events.recv().await {
+                    Some(MatrixEvent::Timeline {
+                        room_id,
+                        generation: shown,
+                        messages,
+                        ..
+                    }) if room_id == room && shown == generation && ready(&messages) => {
+                        return messages;
+                    }
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for the timeline")
+    }
+
+    fn message_of<'a>(
+        messages: &'a [crate::model::Message],
+        event: &str,
+    ) -> Option<&'a crate::model::Message> {
+        use crate::model::ItemRef;
+        messages
+            .iter()
+            .find(|message| message.item == Some(ItemRef::Event(event.to_owned())))
+    }
+
     /// Ignoring or unignoring someone has the SDK clear every room's event cache in place
     /// (`EventCache::clear_all_rooms`, from its task that watches the ignore list). The
     /// timelines on it, shown or kept, start over from the same empty cache a new one
@@ -4607,6 +4649,123 @@ mod tests {
         })
         .await
         .expect("the earlier page was given up, and this one answered");
+        drop(server);
+    }
+
+    /// The newest reply of a thread that an ignored user wrote is not previewed under
+    /// the thread's first message, and does not make the thread unread (the number of
+    /// replies still counts it: the summary is the server's).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ignored_users_reply_neither_shows_nor_marks_a_thread_unread() {
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::spaces::fake;
+
+        let room = "!threads:localhost";
+        let (bob, mallory) = ("@bob:localhost", "@mallory:localhost");
+        let mut joined = fake::joined(false, vec![]);
+        joined["timeline"]["events"] = serde_json::json!([
+            said(room, "$root1:localhost", bob, "first thread", None),
+            said(room, "$root2:localhost", bob, "second thread", None),
+            said(
+                room,
+                "$r1:localhost",
+                bob,
+                "bob answers",
+                Some("$root1:localhost")
+            ),
+            said(
+                room,
+                "$r2:localhost",
+                mallory,
+                "mallory answers",
+                Some("$root2:localhost")
+            ),
+        ]);
+        let (server, _client, mut timelines, mut events, (ignored_tx, _own)) =
+            opened_with(serde_json::json!({ room: joined })).await;
+        ignored_tx.send_replace(std::sync::Arc::new(
+            [matrix_sdk::ruma::OwnedUserId::try_from(mallory).unwrap()].into(),
+        ));
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room.to_owned(),
+                generation: 1,
+            })
+            .await;
+        // Once the other thread's newest reply is known, this one's is too.
+        let messages = timeline_where(&mut events, room, 1, |messages| {
+            let thread = |id| message_of(messages, id).and_then(|m| m.thread.as_ref());
+            thread("$root1:localhost").is_some_and(|t| t.latest.is_some())
+                && thread("$root2:localhost").is_some()
+        })
+        .await;
+        let first = message_of(&messages, "$root1:localhost").unwrap();
+        let first = first.thread.as_ref().unwrap();
+        assert!(first.unread, "nothing of the first thread was read");
+        let second = message_of(&messages, "$root2:localhost").unwrap();
+        let second = second.thread.as_ref().unwrap();
+        assert_eq!(second.replies, 1);
+        assert_eq!(second.latest, None, "no preview of what mallory wrote");
+        assert!(!second.unread, "mallory's reply does not make it unread");
+        drop(server);
+    }
+
+    /// Which threads have unread replies is looked at on every change of the room's
+    /// timeline. The user's receipts for the whole room (as clients without threads send
+    /// them) are the same for every thread: loaded once per look, besides each thread's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_room_wide_receipts_are_loaded_once_for_all_threads() {
+        use crate::matrix::spaces::fake;
+        use matrix_sdk_ui::timeline::TimelineDetails;
+
+        let room_id = "!counted:localhost";
+        let bob = "@bob:localhost";
+        let roots = ["$t1:localhost", "$t2:localhost", "$t3:localhost"];
+        let mut events = Vec::new();
+        for (n, root) in roots.into_iter().enumerate() {
+            events.push(said(room_id, root, bob, "a thread", None));
+            let reply = format!("$reply{n}:localhost");
+            events.push(said(room_id, &reply, bob, "an answer", Some(root)));
+        }
+        let mut joined = fake::joined(false, vec![]);
+        joined["timeline"]["events"] = serde_json::Value::Array(events);
+        let (server, client, _timelines, _events, _watches) =
+            opened_with(serde_json::json!({ room_id: joined })).await;
+        let room = client
+            .get_room(<&matrix_sdk::ruma::RoomId>::try_from(room_id).unwrap())
+            .unwrap();
+        let timeline = super::room_timeline(&room).await.unwrap();
+        // Each thread's newest reply known.
+        let items = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let items = timeline.items().await;
+                let known = items
+                    .iter()
+                    .filter_map(|item| item.as_event()?.content().thread_summary())
+                    .filter(|summary| matches!(summary.latest_event, TimelineDetails::Ready(_)))
+                    .count();
+                if known == roots.len() {
+                    return items;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the threads' newest replies are known");
+        let loads = || {
+            super::threads::RECEIPT_LOADS
+                .lock()
+                .unwrap()
+                .get(room_id)
+                .copied()
+                .unwrap_or(0)
+        };
+        let before = loads();
+        let unread =
+            super::threads::unread(&room, &items, &Default::default(), &Default::default()).await;
+        assert_eq!(unread.len(), roots.len(), "no thread was read");
+        // Read and private receipts: of each thread, and once of the whole room.
+        assert_eq!(loads() - before, 2 * roots.len() + 2);
         drop(server);
     }
 

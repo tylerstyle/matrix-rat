@@ -557,7 +557,7 @@ pub(super) fn event_message(
     )]
     match event.content() {
         TimelineItemContent::MsgLike(content) => {
-            message.thread = super::threads::summary(content);
+            message.thread = super::threads::summary(content, ignored);
             message.reactions = content
                 .reactions
                 .iter()
