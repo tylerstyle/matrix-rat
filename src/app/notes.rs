@@ -707,15 +707,18 @@ impl App {
         }
     }
 
-    /// A typed setting as it is edited: the audio player's and the four of this file.
-    pub(super) fn setting_text(&self, setting: crate::modal::Setting) -> String {
+    /// A typed setting as it is edited; `None` for settings not edited as text.
+    pub(super) fn setting_text(&self, setting: crate::modal::Setting) -> Option<String> {
         use crate::modal::Setting;
         match setting {
-            Setting::AudioPlayer => self.audio.setting.clone(),
-            Setting::TranscribeCommand => self.notes.transcribe_command.clone(),
-            Setting::TranscribeModel => self.notes.transcribe_model.clone(),
-            Setting::TranslateCommand => self.notes.translate_command.clone(),
-            Setting::TranslateLanguage => notes::language(&self.notes.translate_language),
+            Setting::DownloadDir => Some(self.download_dir.clone()),
+            Setting::AudioPlayer => Some(self.audio.setting.clone()),
+            Setting::AudioRecorder => Some(self.audio.recorder_setting.clone()),
+            Setting::TranscribeCommand => Some(self.notes.transcribe_command.clone()),
+            Setting::TranscribeModel => Some(self.notes.transcribe_model.clone()),
+            Setting::TranslateCommand => Some(self.notes.translate_command.clone()),
+            Setting::TranslateLanguage => Some(notes::language(&self.notes.translate_language)),
+            Setting::SummaryCommand => Some(self.collect.summary_setting().to_owned()),
             Setting::Theme
             | Setting::SidebarWidth
             | Setting::RoomPreviews
@@ -728,10 +731,7 @@ impl App {
             | Setting::DoNotDisturb
             | Setting::Notifications
             | Setting::Keywords
-            | Setting::DownloadDir
-            | Setting::AudioRecorder
             | Setting::KeepNotes
-            | Setting::SummaryCommand
             | Setting::Keys
             | Setting::Encryption
             | Setting::Profile
@@ -744,7 +744,7 @@ impl App {
             | Setting::Sessions
             | Setting::KeyBackup
             | Setting::WindowTitle
-            | Setting::Doctor => String::new(),
+            | Setting::Doctor => None,
         }
     }
 

@@ -1243,40 +1243,22 @@ impl App {
                 };
                 self.save_setting("notifications", self.notify_mode.name());
             }
-            Setting::DownloadDir => {
-                if delta == 0
-                    && let Some(Modal::Settings(menu)) = &mut self.modal
-                {
-                    menu.editing = Some(LineEdit::from(self.download_dir.as_str()));
-                }
-            }
-            Setting::AudioPlayer
+            Setting::DownloadDir
+            | Setting::AudioPlayer
+            | Setting::AudioRecorder
             | Setting::TranscribeCommand
             | Setting::TranscribeModel
             | Setting::TranslateCommand
-            | Setting::TranslateLanguage => {
-                let text = self.setting_text(setting);
+            | Setting::TranslateLanguage
+            | Setting::SummaryCommand => {
                 if delta == 0
+                    && let Some(text) = self.setting_text(setting)
                     && let Some(Modal::Settings(menu)) = &mut self.modal
                 {
                     menu.editing = Some(LineEdit::from(text.as_str()));
                 }
             }
-            Setting::AudioRecorder => {
-                if delta == 0
-                    && let Some(Modal::Settings(menu)) = &mut self.modal
-                {
-                    menu.editing = Some(LineEdit::from(self.audio.recorder_setting.as_str()));
-                }
-            }
             Setting::KeepNotes => self.toggle_keep_notes(),
-            Setting::SummaryCommand => {
-                if delta == 0
-                    && let Some(Modal::Settings(menu)) = &mut self.modal
-                {
-                    menu.editing = Some(LineEdit::from(self.collect.summary_setting()));
-                }
-            }
             Setting::Keys => {
                 if delta == 0 {
                     self.open_keybinds_editor();
@@ -3528,6 +3510,7 @@ impl App {
                         let text = menu.editing.take().unwrap_or_default();
                         #[warn(clippy::wildcard_enum_match_arm)]
                         match menu.current() {
+                            Setting::DownloadDir => self.set_download_dir(&text),
                             Setting::AudioPlayer => self.set_audio_player(&text),
                             Setting::AudioRecorder => self.set_audio_recorder(&text),
                             Setting::TranscribeCommand => self.set_transcribe_command(&text),
@@ -3535,8 +3518,7 @@ impl App {
                             Setting::TranslateCommand => self.set_translate_command(&text),
                             Setting::TranslateLanguage => self.set_translate_language(&text),
                             Setting::SummaryCommand => self.set_summary_command(&text),
-                            Setting::DownloadDir
-                            | Setting::Theme
+                            Setting::Theme
                             | Setting::SidebarWidth
                             | Setting::RoomPreviews
                             | Setting::LinkPreviews
@@ -3561,7 +3543,7 @@ impl App {
                             | Setting::Sessions
                             | Setting::KeyBackup
                             | Setting::WindowTitle
-                            | Setting::Doctor => self.set_download_dir(&text),
+                            | Setting::Doctor => {}
                         }
                     }
                     _ => {
@@ -10376,5 +10358,55 @@ mod tests {
         assert!(!drain_or_abort(&mut hung, Duration::from_millis(30)).await);
         assert!(dropped.load(Ordering::SeqCst));
         assert!(hung.is_empty());
+    }
+
+    #[test]
+    fn setting_text_edit_only_writes_download_dir_for_download_dir() {
+        let mut app = App::demo();
+        app.download_dir = "/tmp/original-downloads".to_owned();
+
+        // Editing DownloadDir writes download_dir as before.
+        app.perform_setting(Setting::DownloadDir);
+        let Some(Modal::Settings(menu)) = &mut app.modal else {
+            panic!("expected settings modal");
+        };
+        assert_eq!(
+            menu.editing.as_ref().map(LineEdit::as_str),
+            Some("/tmp/original-downloads")
+        );
+        menu.editing = Some(LineEdit::from("/tmp/new-downloads"));
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.download_dir, "/tmp/new-downloads");
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Settings(menu)) if menu.editing.is_none()
+        ));
+
+        // Submitting text on a non-text setting must not fall through into download_dir.
+        let mut menu = SettingsMenu::select(Setting::Theme, app.has_theme_pair());
+        menu.editing = Some(LineEdit::from("/tmp/wrong-setting"));
+        app.modal = Some(Modal::Settings(menu));
+        app.on_event(key(KeyCode::Enter));
+        assert_eq!(app.download_dir, "/tmp/new-downloads");
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Settings(menu)) if menu.editing.is_none()
+        ));
+
+        // Every text-editable setting exposes its text; non-text settings return None.
+        for setting in [
+            Setting::DownloadDir,
+            Setting::AudioPlayer,
+            Setting::AudioRecorder,
+            Setting::TranscribeCommand,
+            Setting::TranscribeModel,
+            Setting::TranslateCommand,
+            Setting::TranslateLanguage,
+            Setting::SummaryCommand,
+        ] {
+            assert!(app.setting_text(setting).is_some(), "{setting:?}");
+        }
+        assert!(app.setting_text(Setting::Theme).is_none());
+        assert!(app.setting_text(Setting::Doctor).is_none());
     }
 }
