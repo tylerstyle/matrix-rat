@@ -1836,12 +1836,16 @@ where
 /// Whether the room is encrypted (the account's defaults can differ for such rooms) is
 /// what the store has: the room list asks this of every room, every time it is made,
 /// and must not wait for the server. The sync brings every room's encryption along; a
-/// room it has not told of yet counts as not encrypted until it does.
+/// room it has not told of yet counts as encrypted until it does, as the room list
+/// shows it.
 pub(super) async fn notification_mode(
     settings: &NotificationSettings,
     room: &Room,
 ) -> Option<RoomNotificationMode> {
-    let encrypted = room.encryption_state().is_encrypted();
+    let encrypted = !matches!(
+        room.encryption_state(),
+        matrix_sdk::EncryptionState::NotEncrypted
+    );
     notification_mode_as(settings, room, Some(encrypted)).await
 }
 
