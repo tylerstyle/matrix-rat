@@ -650,6 +650,32 @@ mod tests {
         );
     }
 
+    /// A jump switches the worker to another room (`!b`, gen 2), then a late cancel
+    /// restores the open room (`!a`, gen 1) with a reset and fresh timeline while the
+    /// external editor holds events: `!b`'s snapshot does not disturb `!a`, and `!a`'s
+    /// restored timeline stays behind its reset.
+    #[test]
+    fn a_late_cancel_restore_held_during_external_editor_replays_in_order() {
+        let mut held = HeldEvents::default();
+        held.push(timeline("!a", 1, 20));
+        held.push(timeline("!b", 2, 5));
+        held.push(MatrixEvent::TimelineReset {
+            room_id: "!a".to_owned(),
+            generation: 1,
+        });
+        held.push(timeline("!a", 1, 21));
+        held.push(timeline("!a", 1, 22));
+        assert_eq!(
+            drain(&mut held),
+            [
+                "Timeline(!a, generation 1, 20 messages, start: false, detached: false)",
+                "Timeline(!b, generation 2, 5 messages, start: false, detached: false)",
+                "TimelineReset(!a, generation 1)",
+                "Timeline(!a, generation 1, 22 messages, start: false, detached: false)",
+            ]
+        );
+    }
+
     /// Back from the editor, the app gets what was held first, in order, then what the
     /// channel has.
     #[tokio::test]
