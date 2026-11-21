@@ -563,11 +563,14 @@ impl App {
         // somewhere in its history. The message jumped to is what the view shows,
         // not the line (the view's state is made anew below).
         let messages = self.place_unread_line(messages, detached.is_some());
-        let messages = if self.thread_open() {
+        let mut messages = if self.thread_open() {
             self.thread_snapshot(messages, reached_start)
         } else {
             messages
         };
+        // Told apart with the room's members too, as any other list from the worker
+        // (see `apply_timeline`).
+        self.complete.mark_namesakes(&room_id, &mut messages);
 
         let mut timeline = TimelineState {
             reached_start,
@@ -1519,6 +1522,54 @@ mod tests {
         assert_eq!(demo.active, thread_room);
         assert!(demo.thread_open());
         assert_eq!(demo.timeline.selected, Some(1));
+    }
+
+    /// A slice jumped to is told apart as the worker's other lists are: with the
+    /// room's members held, a line about someone who wrote nothing there but goes by
+    /// a member's name names them with the ID.
+    #[test]
+    fn a_jump_tells_apart_whom_a_line_is_about_from_a_member_of_the_same_name() {
+        let (mut app, _rx, _h) = test_app_with_matrix();
+        app.on_matrix(crate::matrix::MatrixEvent::RoomMembers {
+            room_id: "!a:example.org".into(),
+            members: vec![crate::complete::Member {
+                user_id: "@bob:example.org".into(),
+                display_name: "bob".into(),
+            }],
+            can_mention_room: false,
+        });
+        app.pending_jump = Some(PendingJump {
+            generation: 9,
+            room_id: "!a:example.org".into(),
+            event_id: "$ban".into(),
+            thread_root: None,
+        });
+        app.generation = 9;
+        app.on_jump_arrived(
+            9,
+            "!a:example.org".into(),
+            vec![Message {
+                id: "$ban".into(),
+                item: Some(ItemRef::Event("$ban".into())),
+                kind: MsgKind::System,
+                sender: "carol".into(),
+                sender_id: Some("@carol:example.org".into()),
+                body: "bob was banned by carol".into(),
+                subject: Some(("bob".into(), "@bob:elsewhere.org".into())),
+                ..Message::default()
+            }],
+            false,
+            Some(DetachedTimeline {
+                target_event: "$ban".into(),
+                reached_end: false,
+                thread_root: None,
+            }),
+        );
+        assert_eq!(app.rooms[0].id, "!a:example.org");
+        assert_eq!(
+            app.rooms[0].messages[0].body,
+            "bob (@bob:elsewhere.org) was banned by carol"
+        );
     }
 
     #[test]
