@@ -206,6 +206,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             SideRow::Room(index) => {
                 let room = &app.rooms[*index];
                 let active = Some(*index) == open_room;
+                let cursor = focused && Some(*index) == cursor_room;
                 let base = if active {
                     Role::RoomActive
                 } else if room.bold || room.marked_unread {
@@ -213,13 +214,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Role::Room
                 };
-                highlight(
-                    frame,
-                    app,
-                    rect,
-                    *index,
-                    focused && Some(*index) == cursor_room,
-                );
+                highlight(frame, app, rect, *index, cursor);
 
                 let badge = match count_label(room.unread) {
                     count if count.is_empty() => count,
@@ -231,13 +226,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 let name_width = (rect.width.saturating_sub(3 + tile_cols + badge_width)) as usize;
                 let name_style = theme.style(base);
                 let tile = tile_style(theme, &room.name);
-                // The open room keeps a bright bar at the edge, so it is easy to find
-                // wherever the focus is.
-                let marker = if active {
-                    Span::styled("▌", theme.style(Role::BorderFocused))
-                } else {
-                    Span::raw(" ")
-                };
+                let marker = row_marker(theme, active, cursor, true);
                 let line = Line::from(vec![
                     marker,
                     Span::styled(
@@ -286,18 +275,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             SideRow::Preview(index) => {
                 let room = &app.rooms[*index];
-                highlight(
-                    frame,
-                    app,
-                    rect,
-                    *index,
-                    focused && Some(*index) == cursor_room,
-                );
-                let marker = if Some(*index) == open_room {
-                    Span::styled("▌", theme.style(Role::BorderFocused))
-                } else {
-                    Span::raw(" ")
-                };
+                let active = Some(*index) == open_room;
+                let cursor = focused && Some(*index) == cursor_room;
+                highlight(frame, app, rect, *index, cursor);
+                let marker = row_marker(theme, active, cursor, n == 0);
                 let tile = ratatui::style::Style::new().bg(theme.user_color(&room.name));
                 let text_width = rect.width.saturating_sub(3 + tile_cols) as usize;
                 // Until the worker has said what the latest message is (and in the
@@ -374,13 +355,52 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// The background that marks the open room, the keyboard cursor or the pointer.
+/// The one-column edge mark for a room row: `›` where the keyboard cursor sits (so
+/// it never rests on background colour alone, also on the open room), `▌` on the
+/// open room otherwise, and blank elsewhere.
+fn row_marker(
+    theme: &crate::theme::Theme,
+    active: bool,
+    cursor: bool,
+    primary_line: bool,
+) -> Span<'static> {
+    if cursor && primary_line {
+        // On the open room, use its own foreground so high-contrast themes (dark
+        // text on a bright active bar) stay legible; elsewhere match the `›` used
+        // in the other lists.
+        let fg = if active {
+            theme.style(Role::RoomActive).fg
+        } else {
+            theme.style(Role::TitleFocused).fg
+        };
+        Span::styled(
+            "›",
+            ratatui::style::Style {
+                fg,
+                ..ratatui::style::Style::new()
+            }
+            .add_modifier(ratatui::style::Modifier::BOLD),
+        )
+    } else if active && !cursor {
+        // The open room keeps a bright bar at the edge, so it is easy to find
+        // wherever the focus is.
+        Span::styled("▌", theme.style(Role::BorderFocused))
+    } else {
+        Span::raw(" ")
+    }
+}
+
+/// The background that marks the open room or the keyboard cursor.
 fn highlight(frame: &mut Frame, app: &App, rect: Rect, index: usize, cursor: bool) {
     let theme = &app.theme;
     if Some(index) == app.open_index() {
-        frame
-            .buffer_mut()
-            .set_style(rect, theme.style(Role::RoomActive));
+        let mut style = theme.style(Role::RoomActive);
+        if cursor {
+            // Keep cursor modifiers (such as the underline in high-contrast,
+            // terminal and NO_COLOR) when the cursor rests on the open room.
+            style = style.add_modifier(theme.style(Role::RoomCursor).add_modifier);
+        }
+        frame.buffer_mut().set_style(rect, style);
     } else if cursor {
         frame
             .buffer_mut()
@@ -503,7 +523,33 @@ fn draw_space_header(frame: &mut Frame, app: &mut App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier};
+
     use super::*;
+    use crate::action::Action;
+    use crate::theme::Theme;
+
+    fn draw_buffer(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| super::super::draw(frame, app))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Finds the row `y` inside the sidebar whose text contains `needle`.
+    fn row_y(buf: &ratatui::buffer::Buffer, needle: &str) -> u16 {
+        let w = buf.area.width.min(24);
+        for y in 0..buf.area.height {
+            let line: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
+            if line.contains(needle) {
+                return y;
+            }
+        }
+        panic!("{needle:?} not found in sidebar");
+    }
 
     #[test]
     fn initials_are_always_two_columns() {
@@ -518,5 +564,120 @@ mod tests {
             assert_eq!(initial(name), tile, "{name}");
             assert_eq!(width(&initial(name)), 2, "{name}");
         }
+    }
+
+    #[test]
+    fn cursor_cue_shows_on_open_and_other_rooms_in_all_colour_modes() {
+        // Truecolor, 256-colour (rat-dark and rose-pine), high-contrast, terminal, NO_COLOR.
+        let mut rat_256 = Theme::builtin("rat-dark").unwrap();
+        rat_256.downgrade_to_256();
+        let mut rose_256 = Theme::builtin("rose-pine").unwrap();
+        rose_256.downgrade_to_256();
+        let mut no_color = Theme::builtin("rat-dark").unwrap();
+        no_color.strip_colors();
+        let cases = [
+            ("truecolor", Theme::builtin("rat-dark").unwrap(), false),
+            ("rat-dark-256", rat_256, true),
+            ("rose-pine-256", rose_256, true),
+            (
+                "high-contrast",
+                Theme::builtin("high-contrast").unwrap(),
+                false,
+            ),
+            ("terminal", Theme::builtin("terminal").unwrap(), false),
+            ("no-color", no_color, false),
+        ];
+
+        for (label, theme, check_256_bgs) in cases {
+            let mut app = App::demo();
+            app.theme = theme;
+
+            // Focus on composer: open room has `▌`, no room has `›`.
+            let buf = draw_buffer(&mut app, 100, 20);
+            let rust_y = row_y(&buf, "rust");
+            let rat_y = row_y(&buf, "matrix-rat");
+            assert_eq!(buf[(1, rust_y)].symbol(), "▌", "{label} unfocused open");
+            assert_eq!(buf[(1, rat_y)].symbol(), " ", "{label} unfocused other");
+
+            // Focus sidebar with cursor on the open room (`rust`): `›` replaces `▌`.
+            app.perform(Action::Focus(Pane::Sidebar));
+            let buf = draw_buffer(&mut app, 100, 20);
+            assert_eq!(buf[(1, rust_y)].symbol(), "›", "{label} cursor on open");
+            assert_eq!(buf[(1, rat_y)].symbol(), " ", "{label} other unmarked");
+            if label == "high-contrast" {
+                assert_eq!(
+                    buf[(1, rust_y)].fg,
+                    app.theme.style(Role::RoomActive).fg.unwrap(),
+                    "high-contrast cursor on open room stays legible"
+                );
+            }
+            if matches!(label, "high-contrast" | "terminal" | "no-color") {
+                assert!(
+                    buf[(5, rust_y)].modifier.contains(Modifier::UNDERLINED),
+                    "{label}: open room keeps cursor underline"
+                );
+            }
+            if label == "no-color" {
+                assert!(buf[(5, rust_y)].modifier.contains(Modifier::REVERSED));
+            }
+
+            // Move cursor down to `matrix-rat`: open room gets `▌` back, cursor row gets `›`.
+            app.perform(Action::SidebarDown);
+            let buf = draw_buffer(&mut app, 100, 20);
+            assert_eq!(buf[(1, rust_y)].symbol(), "▌", "{label} open keeps bar");
+            assert_eq!(buf[(1, rat_y)].symbol(), "›", "{label} cursor on other");
+            if matches!(label, "high-contrast" | "terminal" | "no-color") {
+                assert!(
+                    buf[(5, rat_y)].modifier.contains(Modifier::UNDERLINED),
+                    "{label}: cursor row underlined"
+                );
+                assert!(
+                    !buf[(5, rust_y)].modifier.contains(Modifier::UNDERLINED),
+                    "{label}: open room loses underline once cursor leaves"
+                );
+            }
+            if check_256_bgs {
+                let open_bg = buf[(8, rust_y)].bg;
+                let cursor_bg = buf[(8, rat_y)].bg;
+                let plain_y = row_y(&buf, "carol");
+                let plain_bg = buf[(8, plain_y)].bg;
+                assert!(matches!(open_bg, Color::Indexed(_)), "{label}");
+                assert!(matches!(cursor_bg, Color::Indexed(_)), "{label}");
+                assert!(matches!(plain_bg, Color::Indexed(_)), "{label}");
+                assert_ne!(cursor_bg, plain_bg, "{label}: cursor vs bg");
+                assert_ne!(open_bg, plain_bg, "{label}: open vs bg");
+                assert_ne!(cursor_bg, open_bg, "{label}: cursor vs open");
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_cue_in_two_line_preview_mode() {
+        let mut app = App::demo();
+        app.room_previews = true;
+        app.perform(Action::Focus(Pane::Sidebar));
+
+        // Cursor on the open room: `›` on line 1, clean blank on line 2 (no dangling `▌`).
+        let buf = draw_buffer(&mut app, 100, 24);
+        let rust_y = row_y(&buf, "rust");
+        assert_eq!(buf[(1, rust_y)].symbol(), "›");
+        assert_eq!(buf[(1, rust_y + 1)].symbol(), " ");
+
+        // Move cursor down: open room regains `▌` on both lines; cursor room shows `›` on line 1.
+        app.perform(Action::SidebarDown);
+        let buf = draw_buffer(&mut app, 100, 24);
+        let rat_y = row_y(&buf, "matrix-rat");
+        assert_eq!(buf[(1, rust_y)].symbol(), "▌");
+        assert_eq!(buf[(1, rust_y + 1)].symbol(), "▌");
+        assert_eq!(buf[(1, rat_y)].symbol(), "›");
+        assert_eq!(buf[(1, rat_y + 1)].symbol(), " ");
+
+        // When line 1 of the cursor room scrolls above the viewport, line 2 carries `›`.
+        // Use a shorter window so `scroll = 4` (past Favourites, rust(2), matrix-rat line 1)
+        // is not clamped back to 0.
+        app.sidebar.scroll = 4;
+        let buf = draw_buffer(&mut app, 100, 12);
+        assert_eq!(app.sidebar.scroll, 4);
+        assert_eq!(buf[(1, 3)].symbol(), "›");
     }
 }

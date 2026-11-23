@@ -590,6 +590,15 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_cursor_on_open_and_other_room() {
+        let mut app = App::demo();
+        app.perform(Action::Focus(Pane::Sidebar));
+        insta::assert_snapshot!("sidebar_cursor_on_open_room", render(&mut app, 100, 16));
+        app.perform(Action::SidebarDown);
+        insta::assert_snapshot!("sidebar_cursor_on_other_room", render(&mut app, 100, 16));
+    }
+
+    #[test]
     fn settings_menu() {
         let mut app = App::demo();
         render(&mut app, 100, 30);
