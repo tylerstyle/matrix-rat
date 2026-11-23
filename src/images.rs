@@ -71,6 +71,10 @@ pub const EMOTE_IN_FLIGHT: usize = 6;
 const LEARNED_ENTRIES: usize = 4096;
 /// A request the worker never answered (it restarted) may be made again after this.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+/// A custom emoji picture that failed is fetched again, when it is drawn again, after
+/// this long; each failure in a row doubles it, up to [`RETRY_MAX`].
+const RETRY_FIRST: Duration = Duration::from_secs(60);
+const RETRY_MAX: Duration = Duration::from_secs(30 * 60);
 /// How long the terminal gets to answer the question about what it can draw.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Above this many pixels a kitty transmission is compressed, if the terminal can.
@@ -606,13 +610,30 @@ struct Small {
     state: SmallState,
     /// The frame it was last drawn in.
     used: u64,
+    /// How many fetches failed in a row.
+    failures: u32,
 }
 
 impl Small {
+    /// The fetch failed: the picture is not asked for again before [`retry_wait`].
+    fn fail(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+        self.state = SmallState::Failed {
+            retry_at: Instant::now() + retry_wait(self.failures),
+        };
+    }
+
     /// Asked for, and not given up on: the worker may still answer.
     fn on_its_way(&self) -> bool {
         matches!(self.state, SmallState::Loading { since } if since.elapsed() < REQUEST_TIMEOUT)
     }
+}
+
+/// The pause after the `failures`th failure in a row: [`RETRY_FIRST`], doubling.
+fn retry_wait(failures: u32) -> Duration {
+    RETRY_FIRST
+        .saturating_mul(1 << failures.saturating_sub(1).min(16))
+        .min(RETRY_MAX)
 }
 
 enum SmallState {
@@ -620,8 +641,10 @@ enum SmallState {
         since: Instant,
     },
     /// The list shows the coloured tile instead (a custom emoji its name), without a
-    /// word.
-    Failed,
+    /// word. May be fetched again from `retry_at` on (custom emoji only).
+    Failed {
+        retry_at: Instant,
+    },
     Ready {
         pixels: Pixels,
         /// One for each size it is drawn at, the one drawn last at the end. A custom
@@ -924,6 +947,7 @@ impl ImageStore {
                 Small {
                     state,
                     used: self.frame,
+                    failures: 0,
                 },
             );
             self.avatar_requests.push(url.to_owned());
@@ -942,7 +966,7 @@ impl ImageStore {
         avatar.used = self.frame;
         match &avatar.state {
             SmallState::Ready { pixels, .. } => Some(Arc::clone(pixels)),
-            SmallState::Loading { .. } | SmallState::Failed => None,
+            SmallState::Loading { .. } | SmallState::Failed { .. } => None,
         }
     }
 
@@ -1016,13 +1040,15 @@ impl ImageStore {
         if !matches!(avatar.state, SmallState::Loading { .. }) {
             return;
         }
-        avatar.state = match result {
-            Ok(decoded) => SmallState::Ready {
-                pixels: decoded.pixels,
-                encoded: Vec::new(),
-            },
-            Err(_) => SmallState::Failed,
-        };
+        match result {
+            Ok(decoded) => {
+                avatar.state = SmallState::Ready {
+                    pixels: decoded.pixels,
+                    encoded: Vec::new(),
+                };
+            }
+            Err(_) => avatar.fail(),
+        }
     }
 
     /// Remembers that the untransmitted picture for `cells` was put into the frame at
@@ -1100,6 +1126,18 @@ impl ImageStore {
                     loading += 1;
                     self.emote_requests.push(url.to_owned());
                 }
+                // One that failed is tried again once its pause is over, and only as
+                // it is drawn again.
+                if let SmallState::Failed { retry_at } = small.state
+                    && Instant::now() >= retry_at
+                    && loading < EMOTE_IN_FLIGHT
+                {
+                    small.state = SmallState::Loading {
+                        since: Instant::now(),
+                    };
+                    loading += 1;
+                    self.emote_requests.push(url.to_owned());
+                }
                 continue;
             }
             if loading >= EMOTE_IN_FLIGHT || !crate::matrix::is_valid_mxc(url) {
@@ -1113,6 +1151,7 @@ impl ImageStore {
                         since: Instant::now(),
                     },
                     used: frame,
+                    failures: 0,
                 },
             );
             self.emote_requests.push(url.to_owned());
@@ -1140,18 +1179,18 @@ impl ImageStore {
         if !matches!(small.state, SmallState::Loading { .. }) {
             return;
         }
-        small.state = match result {
+        match result {
             Ok(decoded) => {
                 // Two cells instead of the name: the lines are laid out again.
                 self.emote_rev += 1;
-                SmallState::Ready {
+                small.state = SmallState::Ready {
                     pixels: decoded.pixels,
                     encoded: Vec::new(),
-                }
+                };
             }
-            // The name stays where it is.
-            Err(_) => SmallState::Failed,
-        };
+            // The name stays where it is, and the picture is tried again later.
+            Err(_) => small.fail(),
+        }
     }
 
     /// A custom emoji's picture ready to draw into its two cells, if it is there.
@@ -2585,6 +2624,67 @@ mod tests {
     }
 
     #[test]
+    fn the_pause_before_a_failed_picture_is_asked_for_again_doubles_up_to_a_limit() {
+        let minutes = |failures| retry_wait(failures).as_secs() / 60;
+        assert_eq!(
+            (1..=7).map(minutes).collect::<Vec<_>>(),
+            [1, 2, 4, 8, 16, 30, 30]
+        );
+        assert_eq!(minutes(u32::MAX), 30);
+    }
+
+    /// A failed picture is fetched again only once its pause is over and only as it is
+    /// drawn again; the pause then doubles. (The clock is the pause's end, set by hand.)
+    #[test]
+    fn a_failed_custom_emoji_picture_is_tried_again_after_a_growing_pause() {
+        let mut store = ImageStore::new(kitty());
+        let url = "mxc://example.org/flaky";
+        let due = |store: &mut ImageStore| {
+            store.emotes.get_mut(url).unwrap().state = SmallState::Failed {
+                retry_at: Instant::now(),
+            };
+        };
+        store.begin_frame();
+        store.request_emote(url);
+        assert_eq!(store.take_emote_requests().len(), 1);
+        store.on_emote(url, Err("could not be loaded".into()));
+        assert_eq!(store.emotes[url].failures, 1);
+
+        // Within the pause, drawn again and again: nothing is asked for.
+        store.begin_frame();
+        store.request_emote(url);
+        assert!(store.take_emote_requests().is_empty());
+
+        // Over, but not drawn: nothing happens.
+        due(&mut store);
+        store.begin_frame();
+        assert!(store.take_emote_requests().is_empty());
+        assert!(matches!(store.emotes[url].state, SmallState::Failed { .. }));
+
+        // Over, and drawn: asked for once, and the name stays while it loads.
+        store.request_emote(url);
+        assert_eq!(store.take_emote_requests(), [url]);
+        assert!(!store.emote_ready(url));
+        store.request_emote(url);
+        assert!(store.take_emote_requests().is_empty());
+
+        // Failing again waits twice as long.
+        store.on_emote(url, Err("could not be loaded".into()));
+        assert_eq!(store.emotes[url].failures, 2);
+        let SmallState::Failed { retry_at } = store.emotes[url].state else {
+            panic!("failed");
+        };
+        assert!(retry_at > Instant::now() + Duration::from_secs(100));
+
+        // And a later try that works is drawn.
+        due(&mut store);
+        store.request_emote(url);
+        assert_eq!(store.take_emote_requests(), [url]);
+        store.on_emote(url, Ok(decoded(64, 64)));
+        assert!(store.emote_ready(url));
+    }
+
+    #[test]
     fn a_custom_emoji_picture_that_arrives_changes_the_layout_and_one_that_fails_does_not() {
         let mut store = ImageStore::new(kitty());
         let (good, bad) = ("mxc://example.org/good", "mxc://example.org/bad");
@@ -2599,7 +2699,7 @@ mod tests {
         store.on_emote(bad, Err("could not be loaded".into()));
         assert_eq!(store.emote_rev, before);
         assert!(!store.emote_ready(bad));
-        // A failure is not asked for again.
+        // A failure is not asked for again at once.
         store.request_emote(bad);
         assert!(store.take_emote_requests().is_empty());
 
