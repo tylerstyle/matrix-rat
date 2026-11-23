@@ -2544,4 +2544,270 @@ mod tests {
         let _ = other.matrix_auth().logout().await;
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// Against a real homeserver, through the worker, as `/catchup N` asks: in a fresh
+    /// room of a second account,
+    ///
+    /// 1. more messages than asked for, all of them read: the last N are exactly the
+    ///    newest N, oldest first;
+    /// 2. three more, unread: the last N are the newest N, read or not, and collecting
+    ///    them moved no read marker (what is unread is still exactly those three);
+    /// 3. more asked for than the room has: all of it, and that the room has no more.
+    ///
+    /// Run as the test above; it sends some 70 messages.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn the_last_messages_are_the_newest_ones_read_or_not_and_move_no_read_marker() {
+        use matrix_sdk::Client;
+        use matrix_sdk::config::SyncSettings;
+        use matrix_sdk::ruma::api::client::room::create_room::v3::Request as CreateRoom;
+        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+        use tokio::sync::mpsc::UnboundedReceiver;
+
+        use crate::matrix::{MatrixCmd, MatrixHandle, RoomCategory, spawn};
+
+        const ASKED: usize = 40;
+        let var = |name: &str| std::env::var(name).ok();
+        let homeserver =
+            var("MATRIX_RAT_TEST_HOMESERVER").unwrap_or_else(|| "http://127.0.0.1:6167".into());
+        let username = var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let password = var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let other_name = var("MATRIX_RAT_TEST_USER2").unwrap_or_else(|| "bob".into());
+        let other_password = var("MATRIX_RAT_TEST_PASSWORD2").unwrap_or_else(|| "bobpass".into());
+        let run = std::process::id();
+        let within = Duration::from_secs;
+
+        let other = Client::builder()
+            .homeserver_url(&homeserver)
+            .build()
+            .await
+            .expect("client");
+        other
+            .matrix_auth()
+            .login_username(&other_name, &other_password)
+            .initial_device_display_name("matrix-rat collect test")
+            .send()
+            .await
+            .expect("login of the second user");
+        other
+            .sync_once(SyncSettings::default())
+            .await
+            .expect("sync");
+
+        let root = std::env::temp_dir().join(format!("matrix-rat-collect-last-{run}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::paths::Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            log_dir: root.join("log"),
+            runtime_dir: root.join("run"),
+            profile: "it".into(),
+        };
+        paths.create_dirs().unwrap();
+        let (handle, mut events) = spawn(paths);
+        handle.send(MatrixCmd::LoginPassword {
+            homeserver,
+            username,
+            password: password.into(),
+        });
+        let logged_in = async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::LoginFailed(err) | MatrixEvent::Error(err) => panic!("{err}"),
+                    MatrixEvent::LoggedIn { user_id } => return user_id,
+                    _ => {}
+                }
+            }
+        };
+        let own_id = tokio::time::timeout(within(30), logged_in)
+            .await
+            .expect("login in time");
+
+        // A room of the other's, without encryption, that we are invited to and join.
+        let mut create = CreateRoom::new();
+        create.invite = vec![UserId::parse(&own_id).expect("a user id")];
+        create.name = Some(format!("collect last test {run}"));
+        let other_room = other.create_room(create).await.expect("room");
+        let room_id = other_room.room_id().to_string();
+        let joined = async {
+            let mut asked = false;
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::Error(err) | MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                    MatrixEvent::Rooms(rooms) => {
+                        match rooms.iter().find(|room| room.id == room_id) {
+                            Some(room) if room.category == RoomCategory::Invite => {
+                                if !asked {
+                                    asked = true;
+                                    handle.send(MatrixCmd::Join {
+                                        room_id: room_id.clone(),
+                                    });
+                                }
+                            }
+                            Some(_) => return,
+                            None => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(within(60), joined)
+            .await
+            .expect("the invitation arrives and is accepted");
+
+        let say = |body: String| {
+            let other_room = other_room.clone();
+            async move {
+                other_room
+                    .send(RoomMessageEventContent::text_plain(body))
+                    .await
+                    .expect("message of the second user");
+            }
+        };
+        // The answer to a collection, whatever else the worker says meanwhile.
+        async fn answer(
+            events: &mut UnboundedReceiver<MatrixEvent>,
+            request: u64,
+        ) -> Result<UnreadText, String> {
+            let wait = async {
+                loop {
+                    let MatrixEvent::Collect(event) = events.recv().await.expect("worker stopped")
+                    else {
+                        continue;
+                    };
+                    match event {
+                        CollectEvent::Unread {
+                            request: of,
+                            result,
+                        } if of == request => return result,
+                        CollectEvent::Unread { .. }
+                        | CollectEvent::Archived { .. }
+                        | CollectEvent::Progress { .. } => {}
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(120), wait)
+                .await
+                .expect("the collection is answered")
+        }
+        // The texts of our test's lines, oldest first (not the lines of the room's
+        // creation, which come with the start of the room).
+        fn bodies(text: &UnreadText, run: u32) -> Vec<String> {
+            text.text
+                .lines()
+                .filter_map(|line| line.rsplit(": ").next())
+                .filter(|body| body.contains(&format!("-{run}-")))
+                .map(str::to_owned)
+                .collect()
+        }
+        // `command` asked again until `done` accepts the answer: our sync may be
+        // behind what the other one just sent.
+        async fn until(
+            handle: &MatrixHandle,
+            events: &mut UnboundedReceiver<MatrixEvent>,
+            first_request: u64,
+            command: impl Fn(u64) -> CollectCmd,
+            done: impl Fn(&UnreadText) -> bool,
+        ) -> UnreadText {
+            let mut last = None;
+            for attempt in 0..30 {
+                let request = first_request + attempt;
+                handle.send(MatrixCmd::Collect(command(request)));
+                let text = answer(events, request).await.expect("the text");
+                if done(&text) {
+                    return text;
+                }
+                last = Some(format!("{text:?}"));
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            panic!("the answer never came to what was expected; last: {last:?}");
+        }
+        let last = |count: usize| {
+            let room_id = room_id.clone();
+            move |request| CollectCmd::Last {
+                request,
+                room_id: room_id.clone(),
+                count,
+            }
+        };
+
+        // 1. More than asked for (and than a fresh timeline holds); all of them read.
+        let said: Vec<String> = (0..ASKED + 25)
+            .map(|n| format!("said-{run}-{n:02}"))
+            .collect();
+        for body in &said {
+            say(body.clone()).await;
+        }
+        let newest = said.last().cloned().unwrap();
+        until(&handle, &mut events, 1, last(ASKED), |text| {
+            bodies(text, run).last() == Some(&newest)
+        })
+        .await;
+        handle.send(MatrixCmd::MarkRead {
+            room_id: room_id.clone(),
+            public: false,
+        });
+        // Reading is not answered: give it the time to reach the server.
+        tokio::time::sleep(within(2)).await;
+        let text = until(&handle, &mut events, 100, last(ASKED), |_| true).await;
+        assert_eq!(bodies(&text, run), said[said.len() - ASKED..], "{text:?}");
+        assert_eq!(text.messages, ASKED, "{text:?}");
+        assert!(
+            !text.cut && !text.known && text.stopped.is_none(),
+            "{text:?}"
+        );
+
+        // 2. Three more, unread: the last N, read or not; and then what is unread is
+        // still exactly the three.
+        let news: Vec<String> = (0..3).map(|n| format!("news-{run}-{n}")).collect();
+        for body in &news {
+            say(body.clone()).await;
+        }
+        let text = until(&handle, &mut events, 200, last(ASKED), |text| {
+            bodies(text, run).last() == news.last()
+        })
+        .await;
+        let mut expected = said[said.len() - (ASKED - news.len())..].to_vec();
+        expected.extend(news.iter().cloned());
+        assert_eq!(bodies(&text, run), expected, "{text:?}");
+        assert_eq!(text.messages, ASKED, "{text:?}");
+        let room = room_id.clone();
+        let unread = until(
+            &handle,
+            &mut events,
+            300,
+            move |request| CollectCmd::Unread {
+                request,
+                room_id: room.clone(),
+                from: None,
+                newest: 50,
+            },
+            |unread| unread.known && unread.messages >= news.len(),
+        )
+        .await;
+        assert_eq!(bodies(&unread, run), news, "{unread:?}");
+        assert_eq!(unread.messages, news.len(), "{unread:?}");
+
+        // 3. More asked for than the room has: all of it, back to its start.
+        let text = until(
+            &handle,
+            &mut events,
+            400,
+            last(collect::SUMMARY_MESSAGES),
+            |_| true,
+        )
+        .await;
+        let mut all = said.clone();
+        all.extend(news.iter().cloned());
+        assert_eq!(bodies(&text, run), all, "{text:?}");
+        assert!(text.messages < collect::SUMMARY_MESSAGES, "{text:?}");
+        assert!(text.messages >= all.len(), "{text:?}");
+        assert!(!text.cut && text.stopped.is_none(), "{text:?}");
+
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = other.matrix_auth().logout().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
