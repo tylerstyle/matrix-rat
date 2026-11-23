@@ -1334,6 +1334,48 @@ mod tests {
         .collect();
         assert_eq!(kept, ["a readable", "b", "read marker", "c"]);
     }
+
+    /// An event three times: the first place, the newest readable content, and the read
+    /// marker that follows the third copy goes after the first.
+    #[test]
+    fn of_an_event_three_times_the_first_place_and_the_newest_readable_copy_are_kept() {
+        let items: Vector<(Option<u32>, &str, bool)> = [
+            (Some(1), "a", false),
+            (Some(2), "b", false),
+            (Some(1), "a locked", true),
+            (Some(3), "c", false),
+            (Some(1), "a edited", false),
+            (None, "read marker", false),
+            (Some(4), "d", false),
+        ]
+        .into_iter()
+        .collect();
+        let kept: Vec<&str> = without_repeats(
+            items,
+            |item| item.0,
+            |item| item.2,
+            |item| item.1 == "read marker",
+        )
+        .into_iter()
+        .map(|item| item.1)
+        .collect();
+        assert_eq!(kept, ["a edited", "read marker", "b", "c", "d"]);
+        // Locked, then readable, then locked again: the readable copy stays.
+        let items: Vector<(Option<u32>, &str, bool)> = [
+            (Some(1), "a locked", true),
+            (Some(2), "b", false),
+            (Some(1), "a readable", false),
+            (Some(1), "a locked again", true),
+            (Some(3), "c", false),
+        ]
+        .into_iter()
+        .collect();
+        let kept: Vec<&str> = without_repeats(items, |item| item.0, |item| item.2, |_| false)
+            .into_iter()
+            .map(|item| item.1)
+            .collect();
+        assert_eq!(kept, ["a readable", "b", "c"]);
+    }
     use crate::collect::tests::{AT, said};
     use crate::files::NewFile;
     use chrono::Utc;
@@ -2168,19 +2210,6 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
-    /// Against a real homeserver, through the worker, with two accounts: the test
-    /// account (ours) and a second one that writes. In a fresh room of theirs:
-    ///
-    /// 1. "What is loaded now" of an open room that shows more than a timeline of
-    ///    its own starts with: the archive holds every message the app holds.
-    /// 2. With a known read position, what is unread is exactly what came after it.
-    /// 3. With more unread than a summary holds: the newest unread, cut, where the
-    ///    read position is still among what the SDK holds; otherwise the answer says
-    ///    that it is not known what is unread, and holds only the newest asked for.
-    ///
-    /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test -- --ignored`
-    /// (the second account: `MATRIX_RAT_TEST_USER2` and `MATRIX_RAT_TEST_PASSWORD2`,
-    /// by default bob and bobpass). The third part sends several hundred messages.
     /// What the server tests here share: a room of a second user's, without encryption
     /// (theirs is a plain client), that our worker, logged in, has joined.
     struct Joined {
@@ -2399,6 +2428,19 @@ mod tests {
         )
     }
 
+    /// Against a real homeserver, through the worker, with two accounts: the test
+    /// account (ours) and a second one that writes. In a fresh room of theirs:
+    ///
+    /// 1. "What is loaded now" of an open room that shows more than a timeline of
+    ///    its own starts with: the archive holds every message the app holds.
+    /// 2. With a known read position, what is unread is exactly what came after it.
+    /// 3. With more unread than a summary holds: the newest unread, cut, where the
+    ///    read position is still among what the SDK holds; otherwise the answer says
+    ///    that it is not known what is unread, and holds only the newest asked for.
+    ///
+    /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test -- --ignored`
+    /// (the second account: `MATRIX_RAT_TEST_USER2` and `MATRIX_RAT_TEST_PASSWORD2`,
+    /// by default bob and bobpass). The third part sends several hundred messages.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs a local homeserver"]
     async fn an_open_room_is_archived_whole_and_unread_is_what_came_after_reading_or_not_known() {
@@ -2702,6 +2744,9 @@ mod tests {
             }
         }
         flood.await.expect("the flood was sent");
+        // The worker's sync and store stop before their folder goes.
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
         let _ = other.matrix_auth().logout().await;
         let _ = std::fs::remove_dir_all(root);
     }
