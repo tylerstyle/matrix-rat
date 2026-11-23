@@ -1,0 +1,20 @@
+---
+source: src/ui/mod.rs
+expression: "render(&mut app, 100, 16)"
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
+"│ type to filter…      ││                                                                         ││"
+"│ ○ Unread  ○ People   ││● alice  09:15                                                           ││"
+"│ Favourites           ││  ┃ carol: Morning! Is the sliding sync proxy still needed?              ││"
+"│▌R  rust              ││  No, it is native in the homeserver now.                                ││"
+"│›M  matrix-rat        ││                                                                         ││"
+"│ People               ││● you  09:20                                                             ││"
+"│ B  bob            2  ││  Good to know, thanks. (edited)                                         ┃│"
+"│ C  carol             ││                                                                         ┃│"
+"│ Rooms                ││● dave  10:02                                                            ┃│"
+"│ D  design         5  ││  Shipping a TUI client on top of it this week 🐀                        ┃│" Hidden by multi-width symbols: [(73, " ")]
+"│ N  nixos             │╰ carol is typing… ────────────────────────────────────────────────────────╯"
+"│ O  off-topic     12  │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
+"│                      ││ Click here or press Alt-3 to write                                 📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
+"╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
+" ● demo data  ↑↓ move  Enter open  type to filter Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

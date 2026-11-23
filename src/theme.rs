@@ -481,10 +481,12 @@ impl Theme {
 
     pub fn downgrade_to_256(&mut self) {
         self.low_color = true;
+        let original = self.styles.clone();
         for style in &mut self.styles {
             style.fg = style.fg.map(to_256);
             style.bg = style.bg.map(to_256);
         }
+        separate_256_backgrounds(&original, &mut self.styles);
         for color in &mut self.users {
             *color = to_256(*color);
         }
@@ -543,26 +545,191 @@ fn parse_color(value: &str) -> Option<Color> {
     Color::from_str(value).ok()
 }
 
+const CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+/// Background roles that must stay visually distinguishable after 256-colour
+/// mapping, in hierarchy order: earlier roles settle before later ones avoid them.
+const SEPARATE_BG: &[(Role, &[Role])] = &[
+    (Role::RoomCursor, &[Role::Text]),
+    (Role::Reaction, &[Role::Text]),
+    (Role::Spoiler, &[Role::Text]),
+    (Role::RoomActive, &[Role::Text, Role::RoomCursor]),
+    (
+        Role::MessageSelected,
+        &[Role::Text, Role::RoomCursor, Role::Reaction, Role::Spoiler],
+    ),
+    (Role::ReactionOwn, &[Role::Text, Role::Reaction]),
+];
+
+/// The sRGB colour of an xterm 256-colour index in `16..=255`
+/// (the 6x6x6 colour cube and the 24-step grey ramp).
+fn palette_256_rgb(index: u8) -> (u8, u8, u8) {
+    if index >= 232 {
+        let v = 8 + 10 * (index - 232);
+        (v, v, v)
+    } else {
+        let n = usize::from(index.saturating_sub(16));
+        (
+            CUBE_LEVELS[n / 36],
+            CUBE_LEVELS[(n / 6) % 6],
+            CUBE_LEVELS[n % 6],
+        )
+    }
+}
+
+/// Squared weighted RGB ("redmean") distance between two sRGB colours.
+fn redmean_distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
+    let r_mean = (u32::from(a.0) + u32::from(b.0)) / 2;
+    let dr = u32::from(a.0.abs_diff(b.0));
+    let dg = u32::from(a.1.abs_diff(b.1));
+    let db = u32::from(a.2.abs_diff(b.2));
+    (512 + r_mean) * dr * dr + 1024 * dg * dg + (767 - r_mean) * db * db
+}
+
+/// Relative Rec. 709 brightness, scaled to integers (`0..=2_550_000`).
+fn luma((r, g, b): (u8, u8, u8)) -> u32 {
+    2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b)
+}
+
+/// The nearest of the 240 fixed colours by [`redmean_distance`] (the lower index on a
+/// tie). Only the cube corners around the colour and the greys near its weighted mean
+/// can be nearest: a search over these few gives the same index as one over all 240
+/// for every one of the 16.7 million colours (checked once; a test checks a grid). It
+/// matters: a picture drawn in half blocks asks for two colours a cell on every frame.
+fn nearest_256(rgb: (u8, u8, u8)) -> u8 {
+    // The one or two cube levels around a channel's value.
+    let around = |v: u8| {
+        let above = CUBE_LEVELS
+            .iter()
+            .position(|&level| level >= v)
+            .unwrap_or(CUBE_LEVELS.len() - 1);
+        above.saturating_sub(1)..=above
+    };
+    let mut best = (u32::MAX, 16u8);
+    let mut consider = |idx: u8| {
+        best = best.min((redmean_distance(rgb, palette_256_rgb(idx)), idx));
+    };
+    for r in around(rgb.0) {
+        for g in around(rgb.1) {
+            for b in around(rgb.2) {
+                consider((16 + 36 * r + 6 * g + b) as u8);
+            }
+        }
+    }
+    // The grey steps around the channels' mean, weighted 2:4:3 (redmean's weights at low
+    // red; they shift to 3:4:2 at full red, which the four steps searched absorb).
+    let mean = (2 * u32::from(rgb.0) + 4 * u32::from(rgb.1) + 3 * u32::from(rgb.2)) / 9;
+    let step = (mean.saturating_sub(8) / 10).min(23) as u8;
+    for k in step.saturating_sub(1)..=(step + 2).min(23) {
+        consider(232 + k);
+    }
+    best.1
+}
+
+/// [`nearest_256`] the slow way, over all 240 colours: what it must agree with.
+#[cfg(test)]
+fn nearest_256_of_all(rgb: (u8, u8, u8)) -> u8 {
+    (16u8..=255)
+        .min_by_key(|&idx| (redmean_distance(rgb, palette_256_rgb(idx)), idx))
+        .unwrap_or(16)
+}
+
+/// Nearest colour over both the 6x6x6 cube (`16..=231`) and the grey ramp (`232..=255`).
 fn to_256(color: Color) -> Color {
     let Color::Rgb(r, g, b) = color else {
         return color;
     };
-    // Greys map onto the 24-step grey ramp, everything else onto the 6x6x6 cube.
-    if r == g && g == b {
-        return match r {
-            0..=7 => Color::Indexed(16),
-            248..=255 => Color::Indexed(231),
-            _ => Color::Indexed(232 + ((r as u16 - 8) * 24 / 240) as u8),
+    Color::Indexed(nearest_256((r, g, b)))
+}
+
+/// Keeps background pairs that differed in 24-bit colour from collapsing onto the
+/// same 256-colour index, nudging a collapsed role to the nearest distinct index
+/// while preserving its relative lightness direction where possible.
+fn separate_256_backgrounds(original: &[Style], styles: &mut [Style]) {
+    for &(role, against) in SEPARATE_BG {
+        let Some(Color::Rgb(r, g, b)) = original[role as usize].bg else {
+            continue;
         };
-    }
-    let step = |v: u8| -> u8 {
-        match v {
-            0..=47 => 0,
-            48..=114 => 1,
-            _ => (v - 35) / 40,
+        let Some(Color::Indexed(cur_idx)) = styles[role as usize].bg else {
+            continue;
+        };
+        let orig_rgb = (r, g, b);
+        let orig_luma = luma(orig_rgb);
+
+        let mut avoid: Vec<u8> = Vec::new();
+        let mut directions: Vec<(u32, bool)> = Vec::new();
+        let mut collided = false;
+        let mut collided_dir: Option<(u32, bool)> = None;
+
+        for &other in against {
+            let orig_other = original[other as usize].bg;
+            if orig_other == Some(Color::Rgb(r, g, b)) {
+                continue;
+            }
+            let Some(Color::Indexed(other_idx)) = styles[other as usize].bg else {
+                continue;
+            };
+            avoid.push(other_idx);
+            let dir = if other_idx >= 16 {
+                let other_rgb = if let Some(Color::Rgb(or, og, ob)) = orig_other {
+                    Some((or, og, ob))
+                } else if let Some(Color::Indexed(i)) = orig_other
+                    && i >= 16
+                {
+                    Some(palette_256_rgb(i))
+                } else {
+                    None
+                };
+                other_rgb.and_then(|rgb| {
+                    let other_luma = luma(rgb);
+                    (orig_luma != other_luma)
+                        .then_some((luma(palette_256_rgb(other_idx)), orig_luma > other_luma))
+                })
+            } else {
+                None
+            };
+            if let Some(d) = dir {
+                directions.push(d);
+            }
+            if cur_idx == other_idx {
+                collided = true;
+                collided_dir = dir;
+            }
         }
-    };
-    Color::Indexed(16 + 36 * step(r) + 6 * step(g) + step(b))
+        if !collided {
+            continue;
+        }
+
+        // Never nudge a background onto the text drawn over it.
+        for fg_role in [role, Role::Text] {
+            if original[fg_role as usize].fg != Some(Color::Rgb(r, g, b))
+                && let Some(Color::Indexed(fg_idx)) = styles[fg_role as usize].fg
+            {
+                avoid.push(fg_idx);
+            }
+        }
+
+        let pick = |predicate: &dyn Fn(u8) -> bool| -> Option<u8> {
+            (16u8..=255)
+                .filter(|idx| !avoid.contains(idx) && predicate(*idx))
+                .min_by_key(|&idx| (redmean_distance(orig_rgb, palette_256_rgb(idx)), idx))
+        };
+        let fits = |idx: u8, (ref_luma, want_lighter): (u32, bool)| {
+            let cand = luma(palette_256_rgb(idx));
+            if want_lighter {
+                cand > ref_luma
+            } else {
+                cand < ref_luma
+            }
+        };
+
+        let chosen = pick(&|idx| directions.iter().all(|&d| fits(idx, d)))
+            .or_else(|| collided_dir.and_then(|d| pick(&|idx| fits(idx, d))))
+            .or_else(|| pick(&|_| true));
+        if let Some(idx) = chosen {
+            styles[role as usize].bg = Some(Color::Indexed(idx));
+        }
+    }
 }
 
 /// Whether the terminal currently uses a dark or light colour scheme.
@@ -752,6 +919,64 @@ hover = "primary"
         assert!(short.warnings.is_empty(), "{:?}", short.warnings);
     }
 
+    /// The quick search agrees with the one over all 240 colours (checked once for
+    /// every colour; here on a grid with the values where the nearest level changes).
+    #[test]
+    fn the_quick_nearest_colour_is_the_nearest_of_all() {
+        let mut values: Vec<u8> = (0..=255).step_by(9).collect();
+        values.extend([
+            47, 48, 114, 115, 116, 154, 155, 156, 194, 195, 196, 234, 235, 255,
+        ]);
+        for &r in &values {
+            for &g in &values {
+                for &b in &values {
+                    assert_eq!(
+                        nearest_256((r, g, b)),
+                        nearest_256_of_all((r, g, b)),
+                        "{r} {g} {b}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn to_256_maps_cube_grey_ramp_and_near_greys() {
+        // Exact cube corners and interior points.
+        assert_eq!(to_256(Color::Rgb(0, 0, 0)), Color::Indexed(16));
+        assert_eq!(to_256(Color::Rgb(255, 255, 255)), Color::Indexed(231));
+        assert_eq!(to_256(Color::Rgb(255, 0, 0)), Color::Indexed(196));
+        assert_eq!(to_256(Color::Rgb(0, 255, 0)), Color::Indexed(46));
+        assert_eq!(to_256(Color::Rgb(0, 0, 255)), Color::Indexed(21));
+        assert_eq!(to_256(Color::Rgb(95, 95, 95)), Color::Indexed(59));
+        assert_eq!(to_256(Color::Rgb(135, 175, 215)), Color::Indexed(110));
+
+        // Exact grey ramp endpoints and steps (8 + 10*k).
+        for k in 0..24u8 {
+            let v = 8 + 10 * k;
+            assert_eq!(to_256(Color::Rgb(v, v, v)), Color::Indexed(232 + k));
+        }
+
+        // Dark near-greys (rat-dark bg/surface/surface_high) land on the grey ramp
+        // instead of collapsing onto cube black (16).
+        for (rgb, expected) in [
+            ((0x16, 0x16, 0x1d), 234),
+            ((0x1f, 0x1f, 0x28), 235),
+            ((0x2a, 0x2a, 0x37), 236),
+        ] {
+            let Color::Indexed(idx) = to_256(Color::Rgb(rgb.0, rgb.1, rgb.2)) else {
+                panic!("expected indexed colour");
+            };
+            assert!((232..=255).contains(&idx), "{rgb:?} -> {idx}");
+            assert_eq!(idx, expected, "{rgb:?}");
+        }
+
+        // Non-RGB colours pass through unchanged.
+        assert_eq!(to_256(Color::Reset), Color::Reset);
+        assert_eq!(to_256(Color::Blue), Color::Blue);
+        assert_eq!(to_256(Color::Indexed(42)), Color::Indexed(42));
+    }
+
     #[test]
     fn downgrade_removes_rgb() {
         let mut theme = Theme::builtin(DEFAULT_THEME).unwrap();
@@ -763,5 +988,126 @@ hover = "primary"
         }
         assert_eq!(to_256(Color::Rgb(255, 255, 255)), Color::Indexed(231));
         assert_eq!(to_256(Color::Rgb(255, 0, 0)), Color::Indexed(196));
+    }
+
+    #[test]
+    fn every_builtin_keeps_distinct_roles_apart_in_256_colours() {
+        for name in Theme::builtin_names() {
+            let original = Theme::builtin(&name).unwrap();
+            let mut downgraded = original.clone();
+            downgraded.downgrade_to_256();
+
+            for role in Role::ALL {
+                let style = downgraded.style(*role);
+                assert!(
+                    !matches!(style.fg, Some(Color::Rgb(..))),
+                    "{name} {role:?} fg"
+                );
+                assert!(
+                    !matches!(style.bg, Some(Color::Rgb(..))),
+                    "{name} {role:?} bg"
+                );
+            }
+            for &color in &downgraded.users {
+                assert!(!matches!(color, Color::Rgb(..)), "{name} user colour");
+            }
+
+            // Calling downgrade_to_256 twice is a no-op.
+            let mut twice = downgraded.clone();
+            twice.downgrade_to_256();
+            assert_eq!(downgraded.styles, twice.styles, "{name} idempotent");
+
+            if name == "terminal" {
+                assert!(
+                    downgraded
+                        .style(Role::RoomCursor)
+                        .add_modifier
+                        .contains(Modifier::UNDERLINED)
+                );
+                assert!(
+                    downgraded
+                        .style(Role::RoomActive)
+                        .add_modifier
+                        .contains(Modifier::REVERSED)
+                );
+                continue;
+            }
+
+            let bg = |role: Role| downgraded.style(role).bg;
+            let orig_bg = |role: Role| original.style(role).bg;
+            for (a, b) in [
+                (Role::RoomCursor, Role::Text),
+                (Role::RoomActive, Role::Text),
+                (Role::RoomCursor, Role::RoomActive),
+                (Role::MessageSelected, Role::Text),
+                (Role::Reaction, Role::Text),
+                (Role::ReactionOwn, Role::Text),
+                (Role::ReactionOwn, Role::Reaction),
+                (Role::Spoiler, Role::Text),
+                (Role::MessageSelected, Role::RoomCursor),
+                (Role::MessageSelected, Role::Reaction),
+                (Role::MessageSelected, Role::Spoiler),
+            ] {
+                if orig_bg(a) != orig_bg(b) {
+                    assert_ne!(
+                        bg(a),
+                        bg(b),
+                        "{name}: {a:?} ({:?}) collapsed onto {b:?} ({:?})",
+                        bg(a),
+                        bg(b)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closely_spaced_shades_stay_apart_and_ordered_in_256() {
+        for (label, bg_hex, surf_hex, hi_hex, fg_hex, lighter_steps) in [
+            ("dark", "#010101", "#040404", "#070707", "#ffffff", true),
+            ("light", "#ffffff", "#fcfcfc", "#f9f9f9", "#000000", false),
+        ] {
+            let src = format!(
+                "[palette]\nbg = \"{bg_hex}\"\nsurface = \"{surf_hex}\"\nsurface_high = \"{hi_hex}\"\nfg = \"{fg_hex}\"\n"
+            );
+            let mut theme = Theme::parse(&src, label).unwrap();
+            theme.downgrade_to_256();
+            let idx = |role: Role| {
+                let Some(Color::Indexed(i)) = theme.style(role).bg else {
+                    panic!("{label} {role:?}: {:?}", theme.style(role).bg);
+                };
+                i
+            };
+            let (t, c, a, m) = (
+                idx(Role::Text),
+                idx(Role::RoomCursor),
+                idx(Role::RoomActive),
+                idx(Role::MessageSelected),
+            );
+            assert_ne!(t, c, "{label}");
+            assert_ne!(t, a, "{label}");
+            assert_ne!(c, a, "{label}");
+            assert_ne!(t, m, "{label}");
+            assert_ne!(c, m, "{label}");
+            let (lt, lc, la) = (
+                luma(palette_256_rgb(t)),
+                luma(palette_256_rgb(c)),
+                luma(palette_256_rgb(a)),
+            );
+            if lighter_steps {
+                assert!(lt < lc && lc < la, "{label}: {t}({lt}) {c}({lc}) {a}({la})");
+            } else {
+                assert!(lt > lc && lc > la, "{label}: {t}({lt}) {c}({lc}) {a}({la})");
+            }
+        }
+
+        // Intentionally identical backgrounds are left equal.
+        let mut same = Theme::parse(
+            "[palette]\nbg = \"#101010\"\nsurface = \"#101010\"\nfg = \"#ffffff\"\n",
+            "same",
+        )
+        .unwrap();
+        same.downgrade_to_256();
+        assert_eq!(same.style(Role::Text).bg, same.style(Role::RoomCursor).bg);
     }
 }
