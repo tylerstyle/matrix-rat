@@ -616,7 +616,8 @@ fn nearest_256(rgb: (u8, u8, u8)) -> u8 {
             }
         }
     }
-    // The grey steps around the channels' mean, weighted 2:4:3 as redmean weighs them.
+    // The grey steps around the channels' mean, weighted 2:4:3 (redmean's weights at low
+    // red; they shift to 3:4:2 at full red, which the four steps searched absorb).
     let mean = (2 * u32::from(rgb.0) + 4 * u32::from(rgb.1) + 3 * u32::from(rgb.2)) / 9;
     let step = (mean.saturating_sub(8) / 10).min(23) as u8;
     for k in step.saturating_sub(1)..=(step + 2).min(23) {
