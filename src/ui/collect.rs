@@ -361,9 +361,11 @@ fn summarised(messages: usize, cut: bool, of: Of, program: &str) -> String {
                 match stopped {
                     None => " (the room has no more)".to_owned(),
                     Some(Cut::LoadFailed) => " (older ones could not be loaded)".to_owned(),
+                    // The bound, not a claim that the room has more: its first message
+                    // may lie just past it.
                     Some(Cut::Limit) => format!(
-                        " (the room has more, but catching up looks at its newest {} events \
-                         only)",
+                        " (catching up looks no further back than the room's newest {} \
+                         events)",
                         thousands(LAST_EVENTS)
                     ),
                 }

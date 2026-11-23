@@ -183,8 +183,8 @@ pub enum CatchUpStage {
     /// room's first message).
     Nothing,
     /// Of the last messages, none was found in the newest
-    /// [`LAST_EVENTS`](crate::matrix::LAST_EVENTS) events, and the room has more:
-    /// loading ended there.
+    /// [`LAST_EVENTS`](crate::matrix::LAST_EVENTS) events: loading ended there,
+    /// before it saw the room's first message.
     NothingInNewest,
     Failed(String),
 }
@@ -1352,17 +1352,19 @@ mod tests {
             shown.contains("Summary of the last 12 messages (older ones could not be loaded)"),
             "{shown}"
         );
-        // Loading stopped at its bound: nothing failed, and the room has more.
+        // Loading stopped at its bound: nothing failed, and whether the room has more
+        // is not known.
         let shown = done(12, false, Some(Cut::Limit));
         assert!(
             shown.contains(&format!(
-                "Summary of the last 12 messages (the room has more, but catching up looks \
-                 at its newest {} events only), by sh.",
+                "Summary of the last 12 messages (catching up looks no further back than \
+                 the room's newest {} events), by sh.",
                 thousands(LAST_EVENTS)
             )),
             "{shown}"
         );
         assert!(!shown.contains("could not be loaded"), "{shown}");
+        assert!(!shown.contains("has more"), "{shown}");
         // More text than a summary takes: the newest of them, and it says so.
         let shown = done(40, true, None);
         assert!(
