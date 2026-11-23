@@ -9,7 +9,7 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-21, with 1.1.0 begun (§6.1); releases up to 1.0.1. The
+Last brought up to date: 2026-11-23, with 1.1.0 begun (§6.1); releases up to 1.0.2. The
 plans of 0.8 and 0.9 moved to [`docs/history/`](history/) on 2026-11-20, the road to 1.0 on
 2026-11-21.
 
@@ -45,6 +45,7 @@ Not goals: calls, widgets, creating or deactivating accounts, a Windows build.
 | 0.9.1 | 2026-11-17 | `serve` ends with exit code 78 when the profile needs a login, so a service can restart after a real failure; a `wait_for_message` that is already waiting finds an answer loaded late; a first read no longer keeps unverified history for later. |
 | 1.0.0 | 2026-11-21 | Voice messages recorded in the composer (listened to before sending), a rooms bar above the chat while the room list is out of sight, local transcripts (`W`) and translations (`L`) under messages, saved messages and reminders (`b`, `B`), `/archive` to Markdown, `/catchup` through a summary command of your own, `--from` once for each account of the user, `MATRIX_RAT_AGENT_NAME` for `mcp`. The passes of 6.2: fewer threads, open files and wakeups, memory that levels off over a day, timeline changes and drawing many times faster; a swarm review of the whole code with every verified finding fixed; people who share a name told apart (colours follow the account); paging that never stalls and no hidden history; no wildcard matches on our own enums. |
 | 1.0.1 | 2026-11-21 | No more quitting two seconds after opening a room (a repaint asked the terminal for its cursor while the event stream held its reader); an error exit shuts the worker down first. Nothing lights up under the mouse pointer any more, and the terminal reports only clicks, the wheel and drags. comrak 1.0, clap 4.6.8, zeroize 1.9.2; the release workflow on checkout v7, upload-artifact v7, download-artifact v8. |
+| 1.0.2 | 2026-11-23 | Dependencies brought up to date: url 2.5.9 (RUSTSEC-2026-0592), comrak 1.2.0 (slow parsing of some tables, autolinks and strikethrough runs fixed), zbus 6.5, clap 4.6.9 and 37 more compatible updates (one crate fewer); `cargo deny` looks for unmaintained crates in the whole tree again (cargo-deny 0.22 in CI). |
 
 Each release is a tag, a GitHub release with notes, the Nix package in the NUR with a binary
 cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
@@ -54,7 +55,7 @@ cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
 
 One binary crate, about 190,000 lines of Rust with its tests (945 unit tests and 43 tests against
 a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0; 1113 and 45 at 0.9.1;
-1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1, besides 12 measurements that are run by hand).
+1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1 and 1.0.2, besides 12 measurements that are run by hand).
 
 **Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.19.1, pinned exactly (every minor
 release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`; `ratatui-image` and `image` for
@@ -177,6 +178,15 @@ yet; each piece is written and reviewed as in §4.
   nearest-colour mapping that uses the grey ramp too and keeps the roles apart, a cue for the
   cursor that does not rest on colour alone (as `high-contrast` underlines it), and a test
   that every built-in theme keeps cursor, open room and background apart in 256 colours.
+- **An event twice in what is unread, after newer ones** (seen once on 2026-11-23, §7): make
+  the server test name every message it got, catch the shape, and decide where a copy that the
+  SDK put after newer events belongs (the later copy is kept in place today, because the SDK
+  puts the read marker by it).
+- **notify 9** (published 2026-11-21; the file watcher behind theme reloading): kept out of
+  1.0.2, which took only compatible updates. Its breaking changes reach how watch errors are
+  matched (`src/logsafe.rs`) and how events and watching the same path again behave
+  (`src/watch.rs`); its guide is `docs/UPGRADING_V8_TO_V9.md` in notify-rs/notify. With its own
+  review and the theme watcher tried by hand.
 - **Planning first: using it over ssh from a phone** (the user, 2026-11-21): "think about ssh
   problems rising from using onscreen keyboards without proper keys and the shortcuts, that
   fall because of it. ESC isn't always there. Alt and Ctrl also. Brainstorm, how this could be
@@ -267,6 +277,11 @@ yet; each piece is written and reviewed as in §4.
   stays as a safety net when the SDK is updated: upstream `main` can still apply updates twice when
   a timeline falls more than 32 updates behind (`RecvError::Lagged` reloads the events but keeps
   the old receiver; checked 2026-11-21, reported as matrix-rust-sdk issue #7533).
+  Seen once more on 2026-11-23, in the same test on the 1.0.2 release commit (no SDK change):
+  after a flood of 518 messages, what is unread ended with an older message (`flood-478`) for
+  30 seconds, so a copy seems to have landed after newer ones, where keeping the later copy
+  in place shows it as the newest. Three reruns passed. The test names only the first and last
+  message, so the shape is inferred, not seen; for 1.1.0 (§6.1).
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.

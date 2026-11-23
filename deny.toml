@@ -7,6 +7,9 @@
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 
 [advisories]
+# Unmaintained crates anywhere in the tree, not only our direct dependencies (cargo-deny
+# 0.22 narrowed its default to those): a deep one still ships in the binary.
+unmaintained = "all"
 # Each one here is known, cannot be fixed from this side, and says why. An entry goes
 # when its reason does: `cargo deny` warns about one that no longer matches anything.
 ignore = [
