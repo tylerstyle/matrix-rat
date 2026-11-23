@@ -591,7 +591,43 @@ fn luma((r, g, b): (u8, u8, u8)) -> u32 {
     2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b)
 }
 
+/// The nearest of the 240 fixed colours by [`redmean_distance`] (the lower index on a
+/// tie). Only the cube corners around the colour and the greys near its weighted mean
+/// can be nearest: a search over these few gives the same index as one over all 240
+/// for every one of the 16.7 million colours (checked once; a test checks a grid). It
+/// matters: a picture drawn in half blocks asks for two colours a cell on every frame.
 fn nearest_256(rgb: (u8, u8, u8)) -> u8 {
+    // The one or two cube levels around a channel's value.
+    let around = |v: u8| {
+        let above = CUBE_LEVELS
+            .iter()
+            .position(|&level| level >= v)
+            .unwrap_or(CUBE_LEVELS.len() - 1);
+        above.saturating_sub(1)..=above
+    };
+    let mut best = (u32::MAX, 16u8);
+    let mut consider = |idx: u8| {
+        best = best.min((redmean_distance(rgb, palette_256_rgb(idx)), idx));
+    };
+    for r in around(rgb.0) {
+        for g in around(rgb.1) {
+            for b in around(rgb.2) {
+                consider((16 + 36 * r + 6 * g + b) as u8);
+            }
+        }
+    }
+    // The grey steps around the channels' mean, weighted 2:4:3 as redmean weighs them.
+    let mean = (2 * u32::from(rgb.0) + 4 * u32::from(rgb.1) + 3 * u32::from(rgb.2)) / 9;
+    let step = (mean.saturating_sub(8) / 10).min(23) as u8;
+    for k in step.saturating_sub(1)..=(step + 2).min(23) {
+        consider(232 + k);
+    }
+    best.1
+}
+
+/// [`nearest_256`] the slow way, over all 240 colours: what it must agree with.
+#[cfg(test)]
+fn nearest_256_of_all(rgb: (u8, u8, u8)) -> u8 {
     (16u8..=255)
         .min_by_key(|&idx| (redmean_distance(rgb, palette_256_rgb(idx)), idx))
         .unwrap_or(16)
@@ -880,6 +916,27 @@ hover = "primary"
         )
         .unwrap();
         assert!(short.warnings.is_empty(), "{:?}", short.warnings);
+    }
+
+    /// The quick search agrees with the one over all 240 colours (checked once for
+    /// every colour; here on a grid with the values where the nearest level changes).
+    #[test]
+    fn the_quick_nearest_colour_is_the_nearest_of_all() {
+        let mut values: Vec<u8> = (0..=255).step_by(9).collect();
+        values.extend([
+            47, 48, 114, 115, 116, 154, 155, 156, 194, 195, 196, 234, 235, 255,
+        ]);
+        for &r in &values {
+            for &g in &values {
+                for &b in &values {
+                    assert_eq!(
+                        nearest_256((r, g, b)),
+                        nearest_256_of_all((r, g, b)),
+                        "{r} {g} {b}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
