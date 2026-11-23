@@ -189,6 +189,23 @@ yet; each piece is written and reviewed as in §4.
   as a click and a right-click; whether it shows full colour; which actions have no way in
   without Esc, Ctrl or Alt. Since the same profile is used from the desktop too, a per-start
   switch (`--mobile`) may suit better than a setting in `config.toml`.
+- **Several messages of one person in a row, told apart** (the user, 2026-11-23): "a separator
+  in the chat view, when someone posts multiple messages. As it is now, they look as if written
+  as one and are hard to visually separate. … A line break, a line. Make suggestions." Today a
+  run of one sender's messages has one header (`● name  time`), every message's text sits
+  behind the same two-space indent (`INDENT`), and the empty row comes only before the next
+  sender (`Flow::next` and `Before` in `src/ui/timeline.rs`); only a reaction row parts two
+  messages of a run. Suggestions, for the user to choose (one, or one as a setting):
+  1. a mark in the indent on the first line of each further message of the run, muted, such as
+     `·` under the header's `●`: no row more, readable without colour (`NO_COLOR`, 256
+     colours over ssh);
+  2. its time, muted, on that first line too (or only there);
+  3. an empty row between them, as between senders: the simplest, but a row per message,
+     felt most on a phone;
+  4. a faint line (`┄`) between them: the clearest, also a row each, and busier.
+  Not proposed: alternating background shades, which vanish without colour (as the room
+  cursor did over ssh). Whatever is chosen also has to fit selection (`↑` from the composer),
+  replies and threads, the read marker and the receipts row, and the room view's snapshots.
 
 ### 6.2 Later, after 1.0.0 or by demand
 
