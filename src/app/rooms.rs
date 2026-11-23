@@ -12,7 +12,7 @@ use super::{
 use crate::action::{Action, Pane};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::manage::{
-    Address, BanPrompt, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NewPopup, Pending,
+    Address, BanPrompt, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NAME_MAX, NewPopup, Pending,
     PermAction, PreviewButton, RoleChooser, RoomSetting, SettingSubview, Stage, address_entries,
     clean_input, normalize_alias_input, parse_address, parse_alias_local, parse_user,
     validate_permissions_draft,
@@ -29,8 +29,6 @@ use crate::text::sanitize_line;
 /// than this and opening it by itself would come as a surprise.
 pub(super) const OPEN_WITHIN: Duration = Duration::from_secs(60);
 pub(super) const NO_ACCOUNT: &str = "The demo has no account to do this with.";
-/// What servers accept for a room name.
-const NAME_MAX: usize = 255;
 
 #[derive(Default)]
 pub struct ManageState {

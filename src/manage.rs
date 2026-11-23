@@ -57,6 +57,8 @@ const ID_MAX: usize = 255;
 pub const VIA_MAX: usize = 5;
 /// The longest text any of the one-line inputs of the room popups takes.
 pub const FIELD_MAX: usize = 1024;
+/// What servers accept for a room name: its input stops there.
+pub const NAME_MAX: usize = 255;
 
 /// Characters with no place in an identifier: whitespace, everything `text::sanitize`
 /// would take out, and the invisible ones that make two different ids look the same.
@@ -586,7 +588,7 @@ impl NewPopup {
             single: stage != Stage::Choose,
             address: LineEdit::new().with_max_bytes(FIELD_MAX),
             user: LineEdit::new().with_max_bytes(FIELD_MAX),
-            name: LineEdit::new().with_max_bytes(FIELD_MAX),
+            name: LineEdit::new().with_max_bytes(NAME_MAX),
             topic: LineEdit::new().with_max_bytes(FIELD_MAX),
             public: false,
             alias: LineEdit::new().with_max_bytes(FIELD_MAX),
@@ -2348,6 +2350,20 @@ mod tests {
         let popup = InfoPopup::new("!r:example.org", "Rats", RoomKind::Invite);
         assert_eq!(popup.rows(), [InfoRow::Leave]);
         assert_eq!(popup.leave_label(), "Decline invitation");
+    }
+
+    #[test]
+    fn the_name_input_stops_at_what_a_server_takes_and_the_topic_does_not() {
+        let mut form = NewPopup::new(Stage::Create);
+        form.name.insert(&"x".repeat(NAME_MAX + 10));
+        assert_eq!(form.name.len(), NAME_MAX);
+        // A character is never split: 2-byte "é" cannot take the last byte.
+        let mut form = NewPopup::new(Stage::CreateSpace);
+        form.name.insert(&"x".repeat(NAME_MAX - 1));
+        form.name.insert("é");
+        assert_eq!(form.name.len(), NAME_MAX - 1);
+        form.topic.insert(&"y".repeat(FIELD_MAX + 10));
+        assert_eq!(form.topic.len(), FIELD_MAX);
     }
 
     #[test]
