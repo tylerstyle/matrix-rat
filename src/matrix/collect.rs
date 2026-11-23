@@ -661,52 +661,87 @@ where
     }
 }
 
-/// `items` with each event once, at its last place. A batch of events can reach a
-/// timeline twice (seen in the server test while sync still brought the newest
-/// messages of a flood): a message must not count, or be archived, twice. The later
-/// copy is the one kept: it is the one the SDK's later updates (an edit, a decryption)
-/// mostly reach, and the read marker is placed after it (the SDK looks for the
-/// marker's event from the back). But keys that come in later (from a key file, say)
-/// can decrypt the earlier copy: one that is `locked` gives way to one that is not
-/// (see [`super::convert::takes_over`]), in its place. Items without a key (virtual
-/// ones, a local echo) all stay.
+/// `items` with each event once: matrix-sdk-ui 0.19.1 can hold an event in a live
+/// timeline twice (its builder reads the event cache a second time after subscribing to
+/// it, and what came in between is applied again; fixed upstream after 0.19.1, PR
+/// #7248). The repeated copy lands wherever the replayed update points, which can be
+/// after newer events (seen in the server test while a flood came in: three messages
+/// again after forty newer ones). So each event keeps its first copy's place, as the
+/// room view does (`super::convert::EventDedup`), with the content of its last copy,
+/// which the SDK's later updates (an edit, a decryption) reach; but a copy still
+/// `locked` never stands in for one that was decrypted (see
+/// [`super::convert::takes_over`]). The SDK places the read marker after the marker's
+/// event searching from the back: a `marker` that follows a later copy moves to just
+/// after the copy kept. Items without a key (virtual ones, a local echo) all stay.
 fn without_repeats<T, K: std::hash::Hash + Eq>(
     items: Vector<T>,
     key: impl Fn(&T) -> Option<K>,
     locked: impl Fn(&T) -> bool,
+    marker: impl Fn(&T) -> bool,
 ) -> Vector<T>
 where
     T: Clone,
 {
     use std::collections::hash_map::Entry;
-    // From the back: the first copy met is the later one, and where it is kept.
-    let mut place = std::collections::HashMap::new();
-    let mut kept: Vec<T> = Vec::with_capacity(items.len());
-    for item in items.into_iter().rev() {
-        let Some(key) = key(&item) else {
-            kept.push(item);
+    let mut items: Vec<T> = items.into_iter().collect();
+    // The place of each event's first copy; whether each place stays.
+    let mut first = std::collections::HashMap::new();
+    let mut stays = vec![true; items.len()];
+    // The last event met (its place, and where its first copy is), and the read marker
+    // to move (its place, and the place it goes after).
+    let mut last_event = None;
+    let mut moved_marker = None;
+    for at in 0..items.len() {
+        if moved_marker.is_none()
+            && marker(&items[at])
+            && let Some((event, kept)) = last_event
+            && kept < event
+        {
+            moved_marker = Some((at, kept));
+        }
+        let Some(key) = key(&items[at]) else {
             continue;
         };
-        match place.entry(key) {
+        match first.entry(key) {
             Entry::Vacant(slot) => {
-                slot.insert(kept.len());
-                kept.push(item);
+                slot.insert(at);
+                last_event = Some((at, at));
             }
             Entry::Occupied(slot) => {
-                let shown = &mut kept[*slot.get()];
-                if super::convert::takes_over(locked(shown), locked(&item), false) {
-                    *shown = item;
+                let kept = *slot.get();
+                stays[at] = false;
+                last_event = Some((at, kept));
+                if super::convert::takes_over(locked(&items[kept]), locked(&items[at]), true) {
+                    items.swap(kept, at);
                 }
             }
         }
     }
-    kept.reverse();
-    kept.into_iter().collect()
+    if let Some((at, _)) = moved_marker {
+        stays[at] = false;
+    }
+    let mut out = Vector::new();
+    for (at, item) in items.iter().enumerate() {
+        if stays[at] {
+            out.push_back(item.clone());
+        }
+        if let Some((from, after)) = moved_marker
+            && after == at
+        {
+            out.push_back(items[from].clone());
+        }
+    }
+    out
 }
 
 /// The event id of a timeline item, for [`without_repeats`].
 fn event_key(item: &Arc<TimelineItem>) -> Option<String> {
     Some(item.as_event()?.event_id()?.to_string())
+}
+
+/// Whether a timeline item is the account's read marker, for [`without_repeats`].
+fn read_marker_item(item: &Arc<TimelineItem>) -> bool {
+    matches!(item.as_virtual(), Some(VirtualTimelineItem::ReadMarker))
 }
 
 /// Whether a timeline item is an event that could not be decrypted, for
@@ -851,7 +886,9 @@ async fn unread(
             || (from.is_none() && last_own(items).is_some())
     })
     .await;
-    let items = without_repeats(items, event_key, undecryptable);
+    #[cfg(test)]
+    probe::record(&items, room).await;
+    let items = without_repeats(items, event_key, undecryptable, read_marker_item);
     read.extend(
         timeline
             .latest_user_read_receipt_timeline_event_id(&own)
@@ -871,6 +908,53 @@ async fn unread(
         newest,
         &chrono::Local,
     ))
+}
+
+/// What the last collection of what is unread saw, in test builds only, for the server
+/// tests to show when they fail: the timeline's texts in order before
+/// [`without_repeats`], and the SDK's event cache's. The SDK's races that put a
+/// message twice into a timeline are rare and depend on timing; when one shows, this
+/// tells a copy the timeline repeated from an order the event cache itself holds.
+#[cfg(test)]
+pub(super) mod probe {
+    use std::sync::Mutex;
+
+    pub static SEEN: Mutex<Option<(Vec<String>, Vec<String>)>> = Mutex::new(None);
+
+    pub async fn record(items: &super::Items, room: &matrix_sdk::Room) {
+        use matrix_sdk_ui::timeline::VirtualTimelineItem;
+        let timeline = items
+            .iter()
+            .filter_map(|item| match item.as_event() {
+                Some(event) => Some(
+                    event
+                        .content()
+                        .as_message()
+                        .map_or_else(|| "(not a message)".to_owned(), |m| m.body().to_owned()),
+                ),
+                None => matches!(item.as_virtual(), Some(VirtualTimelineItem::ReadMarker))
+                    .then(|| "|read marker|".to_owned()),
+            })
+            .collect();
+        let mut cache = Vec::new();
+        if let Ok((events, _drops)) = room.event_cache().await
+            && let Ok(events) = events.events().await
+        {
+            use matrix_sdk::ruma::events::{
+                AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
+            };
+            cache = events
+                .iter()
+                .map(|event| match event.raw().deserialize() {
+                    Ok(AnySyncTimelineEvent::MessageLike(
+                        AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(m)),
+                    )) => m.content.body().to_owned(),
+                    _ => "(not a message)".to_owned(),
+                })
+                .collect();
+        }
+        *SEEN.lock().unwrap() = Some((timeline, cache));
+    }
 }
 
 /// The text of what is unread in `slots` (a room's timeline, oldest first).
@@ -970,7 +1054,7 @@ async fn archive(
         Span::Everything => false,
     })
     .await;
-    let items = without_repeats(items, event_key, undecryptable);
+    let items = without_repeats(items, event_key, undecryptable, read_marker_item);
     progress.tell(event_count(&items));
     let own = room.own_user_id().to_owned();
     let ignored = ignored.borrow().clone();
@@ -1105,7 +1189,7 @@ mod tests {
 
     #[test]
     fn an_event_that_reached_the_timeline_twice_counts_once() {
-        // The shape the server test met: a block of four, again right after itself.
+        // A block of two, again right after itself.
         let items: Vector<(Option<u32>, &str)> = [
             (None, "date"),
             (Some(470), "a"),
@@ -1119,18 +1203,44 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let kept: Vec<&str> = without_repeats(items, |item| item.0, |_| false)
-            .into_iter()
-            .map(|item| item.1)
-            .collect();
+        let kept: Vec<&str> =
+            without_repeats(items, |item| item.0, |_| false, |item| item.1 == "marker")
+                .into_iter()
+                .map(|item| item.1)
+                .collect();
         assert_eq!(
             kept,
             ["date", "a", "b again", "c again", "marker", "echo", "d"]
         );
     }
 
+    /// The shape the server test met while a flood came in: three messages again
+    /// after forty newer ones. They belong where they came first; the summary of the
+    /// newest seven must not hold them.
     #[test]
-    fn of_an_event_twice_the_later_copy_stays_where_it_is() {
+    fn a_block_replayed_after_newer_events_stays_where_it_came_first() {
+        let first = (470..=517).map(|n| (Some(n), "first"));
+        let again = (473..=475).map(|n| (Some(n), "again"));
+        let items: Vector<(Option<u32>, &str)> = first
+            .clone()
+            .take(514 - 470)
+            .chain(again)
+            .chain(first.skip(514 - 470))
+            .collect();
+        let kept = without_repeats(items, |item| item.0, |_| false, |_| false);
+        let order: Vec<u32> = kept.iter().filter_map(|item| item.0).collect();
+        assert_eq!(order, (470..=517).collect::<Vec<_>>());
+        // The content is the later copy's, which the SDK's later updates reach.
+        let again: Vec<u32> = kept
+            .iter()
+            .filter(|item| item.1 == "again")
+            .filter_map(|item| item.0)
+            .collect();
+        assert_eq!(again, [473, 474, 475]);
+    }
+
+    #[test]
+    fn of_an_event_twice_the_first_place_is_kept_and_the_read_marker_goes_with_it() {
         // The SDK puts the read marker after the copy that its later updates reach
         // (its search for the marker's place starts at the back): read up to b, and
         // c is not read. The later copies also carry edits and decryptions.
@@ -1145,15 +1255,42 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let kept: Vec<&str> = without_repeats(items, |item| item.0, |_| false)
-            .into_iter()
-            .map(|item| item.1)
-            .collect();
+        let kept: Vec<&str> = without_repeats(
+            items,
+            |item| item.0,
+            |_| false,
+            |item| item.1 == "read marker",
+        )
+        .into_iter()
+        .map(|item| item.1)
+        .collect();
         assert_eq!(kept, ["a", "b'", "read marker", "c'", "d"]);
+        // Read up to b, which came again after newer ones: c and d stay unread.
+        let items: Vector<(Option<u32>, &str)> = [
+            (Some(1), "a"),
+            (Some(2), "b"),
+            (Some(3), "c"),
+            (Some(4), "d"),
+            (Some(2), "b'"),
+            (None, "read marker"),
+            (Some(5), "e"),
+        ]
+        .into_iter()
+        .collect();
+        let kept: Vec<&str> = without_repeats(
+            items,
+            |item| item.0,
+            |_| false,
+            |item| item.1 == "read marker",
+        )
+        .into_iter()
+        .map(|item| item.1)
+        .collect();
+        assert_eq!(kept, ["a", "b'", "read marker", "c", "d", "e"]);
     }
 
     /// Keys that came in later (from a key file) decrypted the earlier copy of an event
-    /// held twice: the later copy, still locked, keeps its place but not its content.
+    /// held twice: the first place is kept, with the decrypted content.
     #[test]
     fn of_an_event_twice_a_decrypted_copy_is_not_given_up_for_a_locked_one() {
         let items: Vector<(Option<u32>, &str, bool)> = [
@@ -1166,13 +1303,17 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let kept: Vec<&str> = without_repeats(items, |item| item.0, |item| item.2)
-            .into_iter()
-            .map(|item| item.1)
-            .collect();
-        assert_eq!(kept, ["c", "a readable", "read marker", "b readable"]);
-        // The read marker between the copies: the decrypted one takes the later place,
-        // after the marker, where the SDK put it; it is not moved back before it.
+        let kept: Vec<&str> = without_repeats(
+            items,
+            |item| item.0,
+            |item| item.2,
+            |item| item.1 == "read marker",
+        )
+        .into_iter()
+        .map(|item| item.1)
+        .collect();
+        assert_eq!(kept, ["a readable", "read marker", "b readable", "c"]);
+        // The read marker after a first copy stays where it is.
         let items: Vector<(Option<u32>, &str, bool)> = [
             (Some(1), "a readable", false),
             (Some(2), "b", false),
@@ -1182,11 +1323,58 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let kept: Vec<&str> = without_repeats(items, |item| item.0, |item| item.2)
+        let kept: Vec<&str> = without_repeats(
+            items,
+            |item| item.0,
+            |item| item.2,
+            |item| item.1 == "read marker",
+        )
+        .into_iter()
+        .map(|item| item.1)
+        .collect();
+        assert_eq!(kept, ["a readable", "b", "read marker", "c"]);
+    }
+
+    /// An event three times: the first place, the newest readable content, and the read
+    /// marker that follows the third copy goes after the first.
+    #[test]
+    fn of_an_event_three_times_the_first_place_and_the_newest_readable_copy_are_kept() {
+        let items: Vector<(Option<u32>, &str, bool)> = [
+            (Some(1), "a", false),
+            (Some(2), "b", false),
+            (Some(1), "a locked", true),
+            (Some(3), "c", false),
+            (Some(1), "a edited", false),
+            (None, "read marker", false),
+            (Some(4), "d", false),
+        ]
+        .into_iter()
+        .collect();
+        let kept: Vec<&str> = without_repeats(
+            items,
+            |item| item.0,
+            |item| item.2,
+            |item| item.1 == "read marker",
+        )
+        .into_iter()
+        .map(|item| item.1)
+        .collect();
+        assert_eq!(kept, ["a edited", "read marker", "b", "c", "d"]);
+        // Locked, then readable, then locked again: the readable copy stays.
+        let items: Vector<(Option<u32>, &str, bool)> = [
+            (Some(1), "a locked", true),
+            (Some(2), "b", false),
+            (Some(1), "a readable", false),
+            (Some(1), "a locked again", true),
+            (Some(3), "c", false),
+        ]
+        .into_iter()
+        .collect();
+        let kept: Vec<&str> = without_repeats(items, |item| item.0, |item| item.2, |_| false)
             .into_iter()
             .map(|item| item.1)
             .collect();
-        assert_eq!(kept, ["b", "read marker", "a readable", "c"]);
+        assert_eq!(kept, ["a readable", "b", "c"]);
     }
     use crate::collect::tests::{AT, said};
     use crate::files::NewFile;
@@ -2022,30 +2210,25 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
-    /// Against a real homeserver, through the worker, with two accounts: the test
-    /// account (ours) and a second one that writes. In a fresh room of theirs:
-    ///
-    /// 1. "What is loaded now" of an open room that shows more than a timeline of
-    ///    its own starts with: the archive holds every message the app holds.
-    /// 2. With a known read position, what is unread is exactly what came after it.
-    /// 3. With more unread than a summary holds: the newest unread, cut, where the
-    ///    read position is still among what the SDK holds; otherwise the answer says
-    ///    that it is not known what is unread, and holds only the newest asked for.
-    ///
-    /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test -- --ignored`
-    /// (the second account: `MATRIX_RAT_TEST_USER2` and `MATRIX_RAT_TEST_PASSWORD2`,
-    /// by default bob and bobpass). The third part sends several hundred messages.
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "needs a local homeserver"]
-    async fn an_open_room_is_archived_whole_and_unread_is_what_came_after_reading_or_not_known() {
+    /// What the server tests here share: a room of a second user's, without encryption
+    /// (theirs is a plain client), that our worker, logged in, has joined.
+    struct Joined {
+        handle: crate::matrix::MatrixHandle,
+        events: tokio::sync::mpsc::UnboundedReceiver<MatrixEvent>,
+        other: matrix_sdk::Client,
+        other_room: matrix_sdk::Room,
+        room_id: String,
+        room_name: String,
+        root: std::path::PathBuf,
+        run: u32,
+    }
+
+    async fn joined_room(tag: &str) -> Joined {
         use matrix_sdk::Client;
         use matrix_sdk::config::SyncSettings;
         use matrix_sdk::ruma::api::client::room::create_room::v3::Request as CreateRoom;
-        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
-        use tokio::sync::mpsc::UnboundedReceiver;
 
         use crate::matrix::{MatrixCmd, RoomCategory, spawn};
-        use crate::model::MsgKind;
 
         let var = |name: &str| std::env::var(name).ok();
         let homeserver =
@@ -2074,7 +2257,7 @@ mod tests {
             .await
             .expect("sync");
 
-        let root = std::env::temp_dir().join(format!("matrix-rat-collect-{run}"));
+        let root = std::env::temp_dir().join(format!("matrix-rat-collect-{tag}-{run}"));
         let _ = std::fs::remove_dir_all(&root);
         let paths = crate::paths::Paths {
             config_dir: root.join("config"),
@@ -2105,7 +2288,7 @@ mod tests {
 
         // A room of the other's, without encryption (theirs is a plain client), that
         // we are invited to and join.
-        let room_name = format!("collect test {run}");
+        let room_name = format!("collect {tag} {run}");
         let mut create = CreateRoom::new();
         create.invite = vec![UserId::parse(&own_id).expect("a user id")];
         create.name = Some(room_name.clone());
@@ -2137,6 +2320,147 @@ mod tests {
         tokio::time::timeout(within(60), joined)
             .await
             .expect("the invitation arrives and is accepted");
+        Joined {
+            handle,
+            events,
+            other,
+            other_room,
+            room_id,
+            room_name,
+            root,
+            run,
+        }
+    }
+
+    // The answer to a collection, whatever else the worker says meanwhile.
+    async fn answer(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixEvent>,
+        request: u64,
+    ) -> CollectEvent {
+        let wait = async {
+            loop {
+                let MatrixEvent::Collect(event) = events.recv().await.expect("worker stopped")
+                else {
+                    continue;
+                };
+                let of = match &event {
+                    CollectEvent::Unread { request, .. }
+                    | CollectEvent::Archived { request, .. } => Some(*request),
+                    CollectEvent::Progress { .. } => None,
+                };
+                if of == Some(request) {
+                    return event;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(120), wait)
+            .await
+            .expect("the collection is answered")
+    }
+    // The texts of the lines handed to a summary command.
+    fn bodies(unread: &UnreadText) -> Vec<String> {
+        unread
+            .text
+            .lines()
+            .map(|line| line.rsplit(": ").next().unwrap_or_default().to_owned())
+            .collect()
+    }
+    // The texts in order, a run of consecutive numbers of one kind written as a range
+    // ("flood-7-012..=015, flood-7-003"), so a failure shows the whole shape.
+    fn runs(got: &[String]) -> String {
+        let split = |text: &str| {
+            let (kind, number) = text.rsplit_once('-')?;
+            Some((kind.to_owned(), number.parse::<usize>().ok()?, number.len()))
+        };
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < got.len() {
+            let Some((kind, first, width)) = split(&got[i]) else {
+                out.push(got[i].clone());
+                i += 1;
+                continue;
+            };
+            let mut j = i + 1;
+            while j < got.len()
+                && split(&got[j]).is_some_and(|(k, n, _)| k == kind && n == first + (j - i))
+            {
+                j += 1;
+            }
+            out.push(if j - i > 1 {
+                format!("{kind}-{first:0width$}..={}", first + (j - i - 1))
+            } else {
+                got[i].clone()
+            });
+            i = j;
+        }
+        out.join(", ")
+    }
+    // What the probe saw in the last collection: the timeline before
+    // `without_repeats`, and the SDK's event cache.
+    fn seen() -> String {
+        let seen = super::probe::SEEN.lock().unwrap().clone();
+        let Some((timeline, cache)) = seen else {
+            return "the probe saw nothing".to_owned();
+        };
+        let repeated = {
+            let mut met = std::collections::HashSet::new();
+            timeline
+                .iter()
+                .filter(|text| !text.starts_with(['(', '|']) && !met.insert(*text))
+                .count()
+        };
+        format!(
+            "timeline ({} items, {repeated} repeated): [{}]; event cache ({} events): [{}]",
+            timeline.len(),
+            runs(&timeline),
+            cache.len(),
+            runs(&cache),
+        )
+    }
+    fn shape(unread: &UnreadText) -> String {
+        let got = bodies(unread);
+        format!(
+            "known={}, messages={}, cut={}, all=[{}]",
+            unread.known,
+            unread.messages,
+            unread.cut,
+            runs(&got),
+        )
+    }
+
+    /// Against a real homeserver, through the worker, with two accounts: the test
+    /// account (ours) and a second one that writes. In a fresh room of theirs:
+    ///
+    /// 1. "What is loaded now" of an open room that shows more than a timeline of
+    ///    its own starts with: the archive holds every message the app holds.
+    /// 2. With a known read position, what is unread is exactly what came after it.
+    /// 3. With more unread than a summary holds: the newest unread, cut, where the
+    ///    read position is still among what the SDK holds; otherwise the answer says
+    ///    that it is not known what is unread, and holds only the newest asked for.
+    ///
+    /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=alicepass cargo test -- --ignored`
+    /// (the second account: `MATRIX_RAT_TEST_USER2` and `MATRIX_RAT_TEST_PASSWORD2`,
+    /// by default bob and bobpass). The third part sends several hundred messages.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn an_open_room_is_archived_whole_and_unread_is_what_came_after_reading_or_not_known() {
+        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+        use tokio::sync::mpsc::UnboundedReceiver;
+
+        use crate::matrix::MatrixCmd;
+        use crate::model::MsgKind;
+
+        let Joined {
+            handle,
+            mut events,
+            other,
+            other_room,
+            room_id,
+            room_name,
+            root,
+            run,
+        } = joined_room("archive").await;
+        let within = Duration::from_secs;
 
         let say = |body: String| {
             let other_room = other_room.clone();
@@ -2147,47 +2471,6 @@ mod tests {
                     .expect("message of the second user");
             }
         };
-        // The answer to a collection, whatever else the worker says meanwhile.
-        async fn answer(events: &mut UnboundedReceiver<MatrixEvent>, request: u64) -> CollectEvent {
-            let wait = async {
-                loop {
-                    let MatrixEvent::Collect(event) = events.recv().await.expect("worker stopped")
-                    else {
-                        continue;
-                    };
-                    let of = match &event {
-                        CollectEvent::Unread { request, .. }
-                        | CollectEvent::Archived { request, .. } => Some(*request),
-                        CollectEvent::Progress { .. } => None,
-                    };
-                    if of == Some(request) {
-                        return event;
-                    }
-                }
-            };
-            tokio::time::timeout(Duration::from_secs(120), wait)
-                .await
-                .expect("the collection is answered")
-        }
-        // The texts of the lines handed to a summary command.
-        fn bodies(unread: &UnreadText) -> Vec<String> {
-            unread
-                .text
-                .lines()
-                .map(|line| line.rsplit(": ").next().unwrap_or_default().to_owned())
-                .collect()
-        }
-        fn shape(unread: &UnreadText) -> String {
-            let got = bodies(unread);
-            format!(
-                "known={}, messages={}, cut={}, first={:?}, last={:?}",
-                unread.known,
-                unread.messages,
-                unread.cut,
-                got.first(),
-                got.last(),
-            )
-        }
         // What is unread, asked again until `done` accepts it (our sync may be behind
         // what the other one just sent).
         async fn unread_until(
@@ -2197,8 +2480,8 @@ mod tests {
             first_request: u64,
             newest: usize,
             done: impl Fn(&UnreadText) -> bool,
-        ) -> UnreadText {
-            let mut last = None;
+        ) -> Result<UnreadText, String> {
+            let mut last = String::new();
             for attempt in 0..30 {
                 let request = first_request + attempt;
                 handle.send(MatrixCmd::Collect(CollectCmd::Unread {
@@ -2212,12 +2495,38 @@ mod tests {
                 };
                 let unread = result.expect("what is unread");
                 if done(&unread) {
-                    return unread;
+                    return Ok(unread);
                 }
-                last = Some(shape(&unread));
+                last = shape(&unread);
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            panic!("what is unread never came to what was expected; last: {last:?}");
+            Err(last)
+        }
+        // The newest texts of `room` in the server's order (`/messages`, oldest first), to
+        // set beside ours when they disagree.
+        async fn server_order(room: &matrix_sdk::Room, newest: u32) -> String {
+            let mut options = matrix_sdk::room::MessagesOptions::backward();
+            options.limit = newest.into();
+            let Ok(page) = room.messages(options).await else {
+                return "the server's order could not be read".to_owned();
+            };
+            let mut got: Vec<String> = page
+                .chunk
+                .iter()
+                .filter_map(|event| {
+                    let matrix_sdk::ruma::events::AnySyncTimelineEvent::MessageLike(
+                        matrix_sdk::ruma::events::AnySyncMessageLikeEvent::RoomMessage(
+                            matrix_sdk::ruma::events::SyncMessageLikeEvent::Original(message),
+                        ),
+                    ) = event.raw().deserialize().ok()?
+                    else {
+                        return None;
+                    };
+                    Some(message.content.body().to_owned())
+                })
+                .collect();
+            got.reverse();
+            runs(&got)
         }
 
         // 1. More messages than a fresh timeline shows, all of them on our screen.
@@ -2296,7 +2605,8 @@ mod tests {
         let unread = unread_until(&handle, &mut events, &room_id, 100, 50, |unread| {
             unread.known && unread.messages >= 3
         })
-        .await;
+        .await
+        .unwrap_or_else(|last| panic!("what is unread never came to the news; last: {last}"));
         let info = shape(&unread);
         assert_eq!(bodies(&unread), news, "exactly what was not read ({info})");
         assert_eq!(unread.messages, news.len(), "unread count ({info})");
@@ -2317,11 +2627,19 @@ mod tests {
         for body in &flood {
             say(body.clone()).await;
         }
-        let unread = unread_until(&handle, &mut events, &room_id, 200, 7, |unread| {
+        let unread = match unread_until(&handle, &mut events, &room_id, 200, 7, |unread| {
             unread.text.trim_end().ends_with(flood[many - 1].as_str())
         })
-        .await;
-        let info = shape(&unread);
+        .await
+        {
+            Ok(unread) => unread,
+            Err(last) => panic!(
+                "what is unread never ended with the newest of the flood; last: {last}; \
+                 the server's newest 40: {}",
+                server_order(&other_room, 40).await
+            ),
+        };
+        let info = format!("{}; {}", shape(&unread), seen());
         if unread.known {
             let newest = &flood[many - collect::SUMMARY_MESSAGES..];
             assert!(unread.cut, "more is unread than a summary holds ({info})");
@@ -2338,6 +2656,95 @@ mod tests {
             assert_eq!(bodies(&unread), newest, "newest bodies ({info})");
         }
 
+        handle.send(MatrixCmd::Shutdown);
+        while events.recv().await.is_some() {}
+        let _ = other.matrix_auth().logout().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// While a flood comes in, each collection opens a timeline as sync brings more:
+    /// matrix-sdk-ui 0.19.1 can then hold messages twice, a copy even after newer ones
+    /// (see [`without_repeats`]). What is collected must still be each message once,
+    /// in the order sent.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn while_a_flood_comes_in_what_is_collected_is_in_order_and_once() {
+        use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
+
+        use crate::matrix::MatrixCmd;
+
+        let Joined {
+            handle,
+            mut events,
+            other,
+            other_room,
+            room_id,
+            root,
+            run,
+            ..
+        } = joined_room("flood").await;
+        // The ids of what was sent, in order: each collection starts a little before the
+        // newest, so it loads little and many fit into the flood.
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let say = |room: matrix_sdk::Room, body: String| async move {
+            room.send(RoomMessageEventContent::text_plain(body))
+                .await
+                .expect("message of the second user")
+                .response
+                .event_id
+                .to_string()
+        };
+        let first = say(other_room.clone(), format!("storm-{run}-start")).await;
+        const STORM: usize = 1500;
+        let flood = tokio::spawn({
+            let (room, sent) = (other_room.clone(), sent.clone());
+            async move {
+                for n in 0..STORM {
+                    let id = say(room.clone(), format!("storm-{run}-{n:03}")).await;
+                    sent.lock().unwrap().push(id);
+                }
+            }
+        });
+        let prefix = format!("storm-{run}-");
+        let mut collections = 0;
+        for request in 1000.. {
+            let flooding = !flood.is_finished();
+            // Every other one from the very first: that one pages back through what the
+            // event cache keeps on disk while sync brings more.
+            let from = {
+                let sent = sent.lock().unwrap();
+                sent.len()
+                    .checked_sub(40)
+                    .filter(|_| request % 2 == 0)
+                    .map_or_else(|| first.clone(), |at| sent[at].clone())
+            };
+            handle.send(MatrixCmd::Collect(CollectCmd::Unread {
+                request,
+                room_id: room_id.clone(),
+                from: Some(from),
+                newest: 50,
+            }));
+            let CollectEvent::Unread { result, .. } = answer(&mut events, request).await else {
+                panic!("not the answer to what is unread");
+            };
+            let unread = result.expect("what is unread");
+            collections += 1;
+            let numbers: Vec<usize> = bodies(&unread)
+                .iter()
+                .filter_map(|body| body.strip_prefix(&prefix)?.parse().ok())
+                .collect();
+            assert!(
+                numbers.windows(2).all(|pair| pair[0] < pair[1]),
+                "collection {collections} holds a message twice or out of order: {}; {}",
+                shape(&unread),
+                seen()
+            );
+            if !flooding {
+                break;
+            }
+        }
+        flood.await.expect("the flood was sent");
+        // The worker's sync and store stop before their folder goes.
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
         let _ = other.matrix_auth().logout().await;
