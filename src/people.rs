@@ -3,12 +3,15 @@
 use std::fmt;
 
 use crate::lineedit::LineEdit;
-use crate::manage::{BanPrompt, Confirm, FIELD_MAX, RoleChooser};
+use crate::manage::{BanPrompt, Confirm, RoleChooser};
 use crate::matrix::{
     Change, OwnProfile, OwnProfileAction, RoomMember, UserProfile, UserSharedRoom,
     UserVerifyStatus, fallback_localpart,
 };
 use crate::text::is_blank;
+
+/// The longest display name servers accept: its input stops there.
+pub const PROFILE_NAME_MAX: usize = 255;
 
 /// Context about the app session that controls which User Info rows are shown and enabled.
 #[derive(Debug, Clone, Copy, Default)]
@@ -420,7 +423,7 @@ impl OwnProfilePopup {
     pub fn new(user_id: Option<String>, profile: Option<&OwnProfile>) -> Self {
         let current_name = profile.and_then(|p| p.display_name.clone());
         let current_avatar = profile.and_then(|p| p.avatar.clone());
-        let mut display_name = LineEdit::new().with_max_bytes(FIELD_MAX);
+        let mut display_name = LineEdit::new().with_max_bytes(PROFILE_NAME_MAX);
         if let Some(name) = &current_name {
             display_name.set(name);
         }

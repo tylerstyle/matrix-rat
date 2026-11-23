@@ -15,12 +15,10 @@ use crate::matrix::{
 use crate::modal::Modal;
 use crate::model::MsgKind;
 use crate::people::{
-    OwnProfilePopup, UserAction, UserInfoCtx, UserInfoPopup, UserInfoRow, UserPending,
+    OwnProfilePopup, PROFILE_NAME_MAX, UserAction, UserInfoCtx, UserInfoPopup, UserInfoRow,
+    UserPending,
 };
 use crate::text::{is_blank, sanitize_line};
-
-/// Maximum length of a Matrix display name.
-const PROFILE_NAME_MAX: usize = 255;
 
 /// The display name to set from what was typed (`None` clears it), after the checks
 /// every way of setting it shares.
@@ -1957,14 +1955,15 @@ mod tests {
         for _ in 0..8 {
             app.on_event(key(KeyCode::Backspace));
         }
+        // Typing stops at the limit; what the submit check refuses is not typed.
         let too_long = "a".repeat(PROFILE_NAME_MAX + 1);
         type_text(&mut app, &too_long);
-        app.on_event(key(KeyCode::Enter));
-        assert!(drain_cmds(&mut commands).is_empty());
         assert!(matches!(
             &app.modal,
-            Some(Modal::OwnProfile(f)) if f.error.as_deref().is_some_and(|e| e.contains("too long"))
+            Some(Modal::OwnProfile(f)) if f.display_name.len() == PROFILE_NAME_MAX
         ));
+        assert!(checked_display_name(&too_long).is_err_and(|e| e.contains("too long")));
+        assert!(checked_display_name(&too_long[1..]).is_ok());
 
         // Clear and set valid display name.
         app.on_event(Event::Key(KeyEvent::new(

@@ -12,7 +12,7 @@ use super::{
 use crate::action::{Action, Pane};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::manage::{
-    Address, BanPrompt, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NewPopup, Pending,
+    Address, BanPrompt, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NAME_MAX, NewPopup, Pending,
     PermAction, PreviewButton, RoleChooser, RoomSetting, SettingSubview, Stage, address_entries,
     clean_input, normalize_alias_input, parse_address, parse_alias_local, parse_user,
     validate_permissions_draft,
@@ -29,8 +29,6 @@ use crate::text::sanitize_line;
 /// than this and opening it by itself would come as a surprise.
 pub(super) const OPEN_WITHIN: Duration = Duration::from_secs(60);
 pub(super) const NO_ACCOUNT: &str = "The demo has no account to do this with.";
-/// What servers accept for a room name.
-const NAME_MAX: usize = 255;
 
 #[derive(Default)]
 pub struct ManageState {
@@ -1609,7 +1607,13 @@ impl App {
                         | InfoRow::Setting(_)
                         | InfoRow::Member(_) => crate::text::sanitize_line(&details.topic),
                     });
-                info.editing = Some((row, LineEdit::with_text(current).with_max_bytes(FIELD_MAX)));
+                // A name stops where sending would refuse it.
+                let limit = if row == InfoRow::Topic {
+                    FIELD_MAX
+                } else {
+                    NAME_MAX
+                };
+                info.editing = Some((row, LineEdit::with_text(current).with_max_bytes(limit)));
                 return;
             }
             InfoRow::Pinned => return self.open_pinned_of(&room_id),
@@ -5007,6 +5011,29 @@ mod tests {
         assert_eq!(new_popup(&app).stage, Stage::Invite);
         app.on_matrix(MatrixEvent::Rooms(Vec::new()));
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn the_inline_name_edits_stop_at_what_a_server_takes_and_the_topic_does_not() {
+        let (mut app, _terminal, mut commands) = connected();
+        with_info(&mut app, &mut commands);
+        for row in [InfoRow::Name, InfoRow::Topic] {
+            info_mut(&mut app).select(row);
+            assert_eq!(info(&app).current(), Some(row));
+            app.on_event(key(KeyCode::Enter));
+            app.on_event(Event::Paste("y".repeat(FIELD_MAX + 10)));
+            let typed = info(&app).editing.as_ref().unwrap().1.len();
+            assert_eq!(
+                typed,
+                if row == InfoRow::Name {
+                    NAME_MAX
+                } else {
+                    FIELD_MAX
+                }
+            );
+            app.on_event(key(KeyCode::Esc));
+            assert!(info(&app).editing.is_none());
+        }
     }
 
     #[test]
