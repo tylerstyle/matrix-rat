@@ -1,6 +1,6 @@
-//! Archiving a room as Markdown and catching up on what is unread, on `App`: the
-//! popup of each, what is asked of the worker, the summary command that is started,
-//! and what comes back.
+//! Archiving a room as Markdown and catching up on what is unread (or on the last
+//! messages, `/catchup N`), on `App`: the popup of each, what is asked of the worker,
+//! the summary command that is started, and what comes back.
 //!
 //! Both are about the room that room-level commands are about (the open one, or in
 //! the room list the one under the cursor). The worker collects the messages
@@ -137,10 +137,23 @@ impl ArchivePopup {
     }
 }
 
+/// What the messages given to the summary command are, for the popup to say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Of {
+    /// Unread ones.
+    Unread,
+    /// The newest, read or not: where the user stopped reading was not found.
+    Newest,
+    /// The last ones, read or not, as many as were `asked` for (`/catchup N`) or, if
+    /// fewer, as there were: `stopped` says whether the room has no more
+    /// (`None`) or loading ended before.
+    Last { asked: usize, stopped: Option<Cut> },
+}
+
 /// How far catching up is.
 #[derive(Clone, PartialEq, Eq)]
 pub enum CatchUpStage {
-    /// The worker collects what is unread.
+    /// The worker collects what is unread, or the last messages.
     Collecting {
         request: u64,
         loaded: usize,
@@ -151,22 +164,22 @@ pub enum CatchUpStage {
         text: String,
         messages: usize,
     },
-    /// The user's command has the text. `known`: of unread messages; otherwise of
-    /// the newest ones, read or not.
+    /// The user's command has the text. `cut`: there were more than a summary
+    /// holds, and these are the newest.
     Summarising {
         run: u64,
         messages: usize,
         cut: bool,
-        known: bool,
+        of: Of,
     },
     /// The summary, for the user alone.
     Done {
         summary: String,
         messages: usize,
         cut: bool,
-        known: bool,
+        of: Of,
     },
-    /// Nothing is unread.
+    /// Nothing is unread (or, of the last messages, none was found).
     Nothing,
     Failed(String),
 }
@@ -178,6 +191,9 @@ pub struct CatchUpPopup {
     /// The name of the program that summarises, for the user to see where the text
     /// goes.
     pub program: String,
+    /// How many of the last messages were asked for (`/catchup N`); without it,
+    /// what is unread.
+    pub last: Option<usize>,
     pub stage: CatchUpStage,
     /// Lines the summary is scrolled down by, and how many fit (set when drawn).
     pub scroll: usize,
@@ -416,15 +432,8 @@ impl App {
     /// in a popup. Not without a command; nothing is asked for where nothing is
     /// unread.
     pub(super) fn open_catch_up(&mut self) {
-        // The program may have come or gone since the setting was made.
-        self.collect.look_up();
-        let command = match self.summary_command() {
-            Ok(command) => command,
-            Err(why) => return self.show_toast(why.message()),
-        };
-        let index = match self.collect_target() {
-            Ok(index) => index,
-            Err(why) => return self.show_toast(why),
+        let Some((command, index)) = self.catch_up_target() else {
+            return;
         };
         // The open room counts as read once it is looked at; its "new" line still
         // says from where it was unread.
@@ -437,7 +446,6 @@ impl App {
             return self.show_toast(format!("Nothing is unread in {}", room.name));
         }
         let room_id = room.id.clone();
-        let room_name = room.name.clone();
         // Should where reading stopped not be found: as many as the room counts as
         // unread, or a handful.
         let newest = match usize::try_from(room.unread).unwrap_or(0) {
@@ -445,20 +453,72 @@ impl App {
             unread => unread.min(SUMMARY_MESSAGES),
         };
         let request = self.next_collect_request();
-        self.stop_summary();
-        self.open_modal(Modal::Collect(Popup::CatchUp(CatchUpPopup {
-            room_name,
-            program: command.name(),
-            stage: CatchUpStage::Collecting { request, loaded: 0 },
-            scroll: 0,
-            page: 1,
-        })));
+        self.show_collecting(&command, index, None, request);
         self.send_matrix(MatrixCmd::Collect(CollectCmd::Unread {
             request,
             room_id,
             from,
             newest,
         }));
+    }
+
+    /// `/catchup N`: has the user's command summarise the last `count` messages of
+    /// the room, read or not, in a popup; also where nothing is unread. Not without
+    /// a command.
+    pub(super) fn open_catch_up_last(&mut self, count: usize) {
+        let Some((command, index)) = self.catch_up_target() else {
+            return;
+        };
+        let room_id = self.rooms[index].id.clone();
+        let request = self.next_collect_request();
+        self.show_collecting(&command, index, Some(count), request);
+        self.send_matrix(MatrixCmd::Collect(CollectCmd::Last {
+            request,
+            room_id,
+            count,
+        }));
+    }
+
+    /// The summary command and the room to catch up on; `None` once the user has
+    /// been told why there is none.
+    fn catch_up_target(&mut self) -> Option<(catchup::Command, usize)> {
+        // The program may have come or gone since the setting was made.
+        self.collect.look_up();
+        let command = match self.summary_command() {
+            Ok(command) => command,
+            Err(why) => {
+                self.show_toast(why.message());
+                return None;
+            }
+        };
+        match self.collect_target() {
+            Ok(index) => Some((command, index)),
+            Err(why) => {
+                self.show_toast(why);
+                None
+            }
+        }
+    }
+
+    /// The popup of catching up on the room at `index`, while the worker collects
+    /// for `request`; `last` as in [`CatchUpPopup::last`].
+    fn show_collecting(
+        &mut self,
+        command: &catchup::Command,
+        index: usize,
+        last: Option<usize>,
+        request: u64,
+    ) {
+        self.stop_summary();
+        let room_name = self.rooms[index].name.clone();
+        self.open_modal(Modal::Collect(Popup::CatchUp(CatchUpPopup {
+            room_name,
+            program: command.name(),
+            last,
+            stage: CatchUpStage::Collecting { request, loaded: 0 },
+            scroll: 0,
+            page: 1,
+        })));
     }
 
     fn on_unread_text(&mut self, request: u64, result: Result<UnreadText, String>) {
@@ -473,16 +533,26 @@ impl App {
             Err(why) => {
                 popup.stage = CatchUpStage::Failed(format!("Could not load the messages: {why}"));
             }
-            Ok(unread) if unread.messages == 0 => popup.stage = CatchUpStage::Nothing,
-            // Not known what is unread: the text stays here until the user has said
-            // that the newest messages may go to the command.
-            Ok(unread) if !unread.known => {
-                popup.stage = CatchUpStage::Asking {
-                    text: unread.text,
-                    messages: unread.messages,
-                };
-            }
-            Ok(unread) => self.start_summary(unread.text, unread.messages, unread.cut, true),
+            Ok(text) if text.messages == 0 => popup.stage = CatchUpStage::Nothing,
+            Ok(text) => match popup.last {
+                // The last messages, read or not, are what was asked for.
+                Some(asked) => {
+                    let of = Of::Last {
+                        asked,
+                        stopped: text.stopped,
+                    };
+                    self.start_summary(text.text, text.messages, text.cut, of);
+                }
+                // Not known what is unread: the text stays here until the user has
+                // said that the newest messages may go to the command.
+                None if !text.known => {
+                    popup.stage = CatchUpStage::Asking {
+                        text: text.text,
+                        messages: text.messages,
+                    };
+                }
+                None => self.start_summary(text.text, text.messages, text.cut, Of::Unread),
+            },
         }
     }
 
@@ -495,11 +565,11 @@ impl App {
             return;
         };
         let (text, messages) = (std::mem::take(text), *messages);
-        self.start_summary(text, messages, false, false);
+        self.start_summary(text, messages, false, Of::Newest);
     }
 
     /// Hands `text` to the summary command, for the popup that is open.
-    fn start_summary(&mut self, text: String, messages: usize, cut: bool, known: bool) {
+    fn start_summary(&mut self, text: String, messages: usize, cut: bool, of: Of) {
         let command = self.summary_command();
         let Some(Modal::Collect(Popup::CatchUp(popup))) = &mut self.modal else {
             return;
@@ -518,7 +588,7 @@ impl App {
             run,
             messages,
             cut,
-            known,
+            of,
         };
         let (stop, stopped) = oneshot::channel();
         self.collect.running = Some((run, stop));
@@ -568,7 +638,7 @@ impl App {
             run,
             messages,
             cut,
-            known,
+            of,
         } = popup.stage
         else {
             return;
@@ -581,7 +651,7 @@ impl App {
                 summary,
                 messages,
                 cut,
-                known,
+                of,
             },
             Outcome::Failed(failure) => CatchUpStage::Failed(failure.message().to_owned()),
             Outcome::Stopped => CatchUpStage::Failed("Stopped".to_owned()),
@@ -1149,8 +1219,207 @@ mod tests {
                 messages,
                 cut,
                 known,
+                stopped: None,
             }),
         }));
+    }
+
+    /// Types `text` into the composer and presses Enter.
+    fn run(app: &mut App, text: &str) {
+        app.perform(Action::Focus(Pane::Composer));
+        app.composer.set_text(text);
+        app.perform(Action::Send);
+    }
+
+    /// The answer of the worker to `/catchup N`: `messages` of the last ones.
+    fn last_of(app: &mut App, request: u64, messages: usize, cut: bool, stopped: Option<Cut>) {
+        app.on_matrix(crate::matrix::MatrixEvent::Collect(CollectEvent::Unread {
+            request,
+            result: Ok(UnreadText {
+                text: "[2026-11-20 14:03] Ann: the secret plan\n".repeat(messages),
+                messages,
+                cut,
+                known: false,
+                stopped,
+            }),
+        }));
+    }
+
+    /// `/catchup 5` in the open room, where nothing is unread, through to its summary.
+    #[test]
+    fn catchup_with_a_number_summarises_the_last_messages_read_or_not() {
+        let (mut app, mut commands) = app();
+        with_command(&mut app);
+        // Nothing is unread in the open room: `/catchup` alone says so, as before.
+        run(&mut app, "/catchup");
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.toast.clone().unwrap().0,
+            "Nothing is unread in Alpha Plans"
+        );
+        assert!(asked(&mut commands).is_empty());
+
+        run(&mut app, "/catchup 5");
+        assert!(app.composer.is_empty());
+        assert_eq!(
+            asked(&mut commands),
+            ["Collect(Last(request 1, !a:example.org, 5 messages))"]
+        );
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Collect(Popup::CatchUp(CatchUpPopup {
+                last: Some(5),
+                stage: CatchUpStage::Collecting { request: 1, .. },
+                ..
+            })))
+        ));
+        let shown = flat(&screen(&mut app));
+        assert!(
+            shown.contains("Loading the last 5 messages… 0 messages looked at."),
+            "{shown}"
+        );
+        assert!(shown.contains("Their text is then given"), "{shown}");
+
+        // The answer goes to the command at once: no question, as they were asked for.
+        last_of(&mut app, 1, 5, false, None);
+        let request = app.take_summary_start().expect("started at once");
+        assert_eq!(request.input.lines().count(), 5);
+        assert!(matches!(
+            catch_up_stage(&app),
+            CatchUpStage::Summarising {
+                messages: 5,
+                of: Of::Last { asked: 5, .. },
+                ..
+            }
+        ));
+        app.on_summary(catchup::Done {
+            id: request.id,
+            outcome: Outcome::Summary("Ann has a plan.".to_owned()),
+        });
+        let shown = flat(&screen(&mut app));
+        assert!(
+            shown.contains("Summary of the last 5 messages, by sh."),
+            "{shown}"
+        );
+        assert!(shown.contains("Ann has a plan."), "{shown}");
+        assert!(shown.contains("Only you see this"), "{shown}");
+        // Nothing was sent to the room, and nothing marked as read.
+        assert!(asked(&mut commands).is_empty());
+    }
+
+    /// The summary of the last messages says when it holds fewer than were asked for,
+    /// and why; and when there were none.
+    #[test]
+    fn fewer_last_messages_than_asked_for_are_summarised_and_it_says_why() {
+        let done = |messages: usize, cut: bool, stopped: Option<Cut>| {
+            let (mut app, mut commands) = app();
+            with_command(&mut app);
+            run(&mut app, "/catchup 50");
+            assert_eq!(asked(&mut commands).len(), 1);
+            last_of(&mut app, 1, messages, cut, stopped);
+            let request = app.take_summary_start().expect("started");
+            assert_eq!(request.input.lines().count(), messages);
+            app.on_summary(catchup::Done {
+                id: request.id,
+                outcome: Outcome::Summary("Ann has a plan.".to_owned()),
+            });
+            flat(&screen(&mut app))
+        };
+        let shown = done(12, false, None);
+        assert!(
+            shown.contains("Summary of the last 12 messages (the room has no more), by sh."),
+            "{shown}"
+        );
+        let shown = done(12, false, Some(Cut::LoadFailed));
+        assert!(
+            shown.contains("Summary of the last 12 messages (older ones could not be loaded)"),
+            "{shown}"
+        );
+        let shown = done(12, false, Some(Cut::Limit));
+        assert!(
+            shown.contains("(older ones could not be loaded)"),
+            "{shown}"
+        );
+        // More text than a summary takes: the newest of them, and it says so.
+        let shown = done(40, true, None);
+        assert!(
+            shown.contains(
+                "Summary of the newest 40 messages (the text of more is too long for one \
+                 summary), by sh."
+            ),
+            "{shown}"
+        );
+        assert!(!shown.contains("the room has no more"), "{shown}");
+
+        // None at all: nothing is started.
+        let (mut app, mut commands) = app();
+        with_command(&mut app);
+        run(&mut app, "/catchup 50");
+        asked(&mut commands);
+        last_of(&mut app, 1, 0, false, None);
+        assert!(*catch_up_stage(&app) == CatchUpStage::Nothing);
+        assert!(app.take_summary_start().is_none());
+        let shown = flat(&screen(&mut app));
+        assert!(
+            shown.contains("No messages were found in this room."),
+            "{shown}"
+        );
+    }
+
+    /// Anything after `/catchup` but a whole number from 1 to 300 is refused with one
+    /// line that says what it takes; the draft stays to be fixed, nothing is asked.
+    #[test]
+    fn catchup_refuses_anything_but_a_number_of_last_messages_from_1_to_300() {
+        let (mut app, mut commands) = app();
+        with_command(&mut app);
+        let usage =
+            "/catchup takes nothing (what is unread) or a number of last messages from 1 to 300";
+        for text in [
+            "/catchup 0",
+            "/catchup 301",
+            "/catchup 99999999999999999999999",
+            "/catchup word",
+            "/catchup -3",
+            "/catchup +5",
+            "/catchup 1.5",
+            "/catchup 5 more",
+            "/catchup ５",
+        ] {
+            app.toast = None;
+            run(&mut app, text);
+            assert_eq!(app.toast.clone().unwrap().0, usage, "{text}");
+            assert_eq!(app.composer.text(), text);
+            assert!(app.modal.is_none(), "{text}");
+        }
+        assert!(asked(&mut commands).is_empty());
+        // The ends of the range are taken, spaces around the number too.
+        for (text, count) in [("/catchup 1", 1), ("/catchup  300 ", 300)] {
+            app.modal = None;
+            run(&mut app, text);
+            let sent = asked(&mut commands);
+            assert_eq!(sent.len(), 1, "{text}");
+            assert!(
+                sent[0].ends_with(&format!(", {count} messages))")),
+                "{sent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn catchup_with_a_number_needs_a_summary_command_and_a_room_too() {
+        let (mut app, mut commands) = app();
+        run(&mut app, "/catchup 5");
+        assert!(app.modal.is_none());
+        assert!(app.toast.clone().unwrap().0.contains("summary_command"));
+        assert!(asked(&mut commands).is_empty());
+
+        with_command(&mut app);
+        app.rooms[0].kind = RoomKind::Invite;
+        app.toast = None;
+        run(&mut app, "/catchup 5");
+        assert!(app.modal.is_none());
+        assert!(app.toast.is_some());
+        assert!(asked(&mut commands).is_empty());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Collecting a stretch of a room's messages as text: for an archive of the room,
-//! written to a file here, and for a summary of what is unread, handed to the app.
+//! written to a file here, and for a summary of what is unread or of the last
+//! messages, handed to the app.
 //!
 //! Like the agent channel (`super::agent`) this keeps apart from the timeline of the
 //! open room: a collection gets a timeline of its own from the SDK, on the same event
@@ -48,7 +49,8 @@ use crate::model::{Message, Namesakes};
 
 /// The most events one archive takes; of a room with more, the newest.
 pub const ARCHIVE_EVENTS: usize = 5_000;
-/// How many events are loaded at most to find where the user stopped reading.
+/// How many events are loaded at most for a summary: to find where the user stopped
+/// reading, or the last messages asked for (some events are no message of their own).
 const UNREAD_EVENTS: usize = collect::SUMMARY_MESSAGES + 50;
 /// How many of the oldest loaded events must be older than an archive wants before
 /// loading ends.
@@ -82,6 +84,13 @@ pub enum CollectCmd {
         /// How many of the newest messages to take where none of them is found;
         /// the answer then says that it is not known what is unread.
         newest: usize,
+    },
+    /// The last `count` messages of a joined room as text for a summary, read or not
+    /// (`/catchup N`); answered with [`CollectEvent::Unread`] too.
+    Last {
+        request: u64,
+        room_id: String,
+        count: usize,
     },
     /// Write the messages of a joined room into a new Markdown file in `dir`;
     /// answered with [`CollectEvent::Archived`].
@@ -127,6 +136,14 @@ impl CollectCmd {
                     Some(format!("from: {}", from.is_some())),
                 ],
             ),
+            Self::Last {
+                request: r,
+                room_id,
+                count,
+            } => (
+                "Last",
+                vec![request(r), id(room_id), Some(format!("{count} messages"))],
+            ),
             Self::Archive {
                 request: r,
                 room_id,
@@ -142,18 +159,23 @@ impl CollectCmd {
     }
 }
 
-/// What is unread in a room, as text.
+/// What is unread in a room, or its last messages, as text.
 #[derive(Clone, PartialEq, Eq)]
 pub struct UnreadText {
     /// One message a line, oldest first (see [`collect::summary_line`]).
     pub text: String,
     /// How many messages are in it.
     pub messages: usize,
-    /// There is more unread than this: these are the newest.
+    /// There is more unread (or more of the last messages asked for) than a summary
+    /// holds: these are the newest.
     pub cut: bool,
     /// Where the user stopped reading was found, so these are unread ones. Without
     /// it they are the newest messages of the room, read or not.
     pub known: bool,
+    /// Why loading ended before it found what it looked for, if it did: the room may
+    /// have older messages than were looked at. `None`: it found it, or reached the
+    /// room's first message.
+    pub stopped: Option<Cut>,
 }
 
 /// Hand-written: the text is what people wrote.
@@ -163,6 +185,7 @@ impl std::fmt::Debug for UnreadText {
             .field("messages", &self.messages)
             .field("cut", &self.cut)
             .field("known", &self.known)
+            .field("stopped", &self.stopped)
             .finish_non_exhaustive()
     }
 }
@@ -188,7 +211,8 @@ impl std::fmt::Debug for Archived {
 pub enum CollectEvent {
     /// A collection goes on: so many events are loaded by now.
     Progress { request: u64, loaded: usize },
-    /// Outcome of [`CollectCmd::Unread`]; the reason of a failure is for the user.
+    /// Outcome of [`CollectCmd::Unread`] and [`CollectCmd::Last`]; the reason of a
+    /// failure is for the user.
     Unread {
         request: u64,
         result: Result<UnreadText, String>,
@@ -282,28 +306,12 @@ impl Collector {
                 room_id,
                 from,
                 newest,
-            } => {
-                let room = super::agent::joined_room(&self.client, &self.left, &room_id);
-                let events = self.events.clone();
-                let ignored = self.ignored.clone();
-                self.running.spawn(async move {
-                    let work = async {
-                        let progress = Progress::new(&events, request);
-                        unread(&room?, from, newest, &ignored, &progress).await
-                    };
-                    let result = match tokio::time::timeout(UNREAD_BUDGET, work).await {
-                        Ok(result) => result,
-                        Err(_) => Err(anyhow!("loading the messages took too long")),
-                    };
-                    if let Err(err) = &result {
-                        tracing::warn!(why = %logsafe::kind_any(err), "could not collect what is unread");
-                    }
-                    let _ = events.send(MatrixEvent::Collect(CollectEvent::Unread {
-                        request,
-                        result: result.map_err(|err| format!("{err:#}")),
-                    }));
-                });
-            }
+            } => self.summary_text(request, &room_id, Wanted::Unread { from, newest }),
+            CollectCmd::Last {
+                request,
+                room_id,
+                count,
+            } => self.summary_text(request, &room_id, Wanted::Last(count)),
             CollectCmd::Archive {
                 request,
                 room_id,
@@ -333,10 +341,47 @@ impl Collector {
         }
     }
 
+    /// Collects the text for a summary that `wanted` says, and answers with
+    /// [`CollectEvent::Unread`].
+    fn summary_text(&mut self, request: u64, room_id: &str, wanted: Wanted) {
+        let room = super::agent::joined_room(&self.client, &self.left, room_id);
+        let events = self.events.clone();
+        let ignored = self.ignored.clone();
+        self.running.spawn(async move {
+            let work = async {
+                let progress = Progress::new(&events, request);
+                let room = room?;
+                match wanted {
+                    Wanted::Unread { from, newest } => {
+                        unread(&room, from, newest, &ignored, &progress).await
+                    }
+                    Wanted::Last(count) => last(&room, count, &ignored, &progress).await,
+                }
+            };
+            let result = match tokio::time::timeout(UNREAD_BUDGET, work).await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow!("loading the messages took too long")),
+            };
+            if let Err(err) = &result {
+                tracing::warn!(why = %logsafe::kind_any(err), "could not collect the text for a summary");
+            }
+            let _ = events.send(MatrixEvent::Collect(CollectEvent::Unread {
+                request,
+                result: result.map_err(|err| format!("{err:#}")),
+            }));
+        });
+    }
+
     pub fn stop(&mut self) {
         self.running.abort_all();
         while self.running.try_join_next().is_some() {}
     }
+}
+
+/// What a summary is to be of (see [`CollectCmd::Unread`] and [`CollectCmd::Last`]).
+enum Wanted {
+    Unread { from: Option<String>, newest: usize },
+    Last(usize),
 }
 
 /// Tells the app how far a collection is.
@@ -844,7 +889,7 @@ async fn unread(
             .await
             .map(|(id, _)| id.to_string()),
     );
-    let (items, _) = load(&timeline, UNREAD_EVENTS, progress, |items| {
+    let (items, stopped) = load(&timeline, UNREAD_EVENTS, progress, |items| {
         has_marker(items)
             || from.iter().chain(&read).any(|id| has_event(items, id))
             // The app's line, where it has one, is looked for beyond our own messages.
@@ -863,14 +908,51 @@ async fn unread(
     let slots = slots(&items, &own, &ignored.borrow());
     let read: Vec<&str> = read.iter().map(String::as_str).collect();
     let members = member_names(room).await;
-    Ok(unread_text(
-        &slots,
-        &members,
-        from.as_deref(),
-        &read,
-        newest,
-        &chrono::Local,
-    ))
+    Ok(UnreadText {
+        stopped,
+        ..unread_text(
+            &slots,
+            &members,
+            from.as_deref(),
+            &read,
+            newest,
+            &chrono::Local,
+        )
+    })
+}
+
+/// Collects the last `count` messages of `room`, read or not.
+async fn last(
+    room: &Room,
+    count: usize,
+    ignored: &watch::Receiver<IgnoredSet>,
+    progress: &Progress<'_>,
+) -> Result<UnreadText> {
+    let timeline = open(room).await?;
+    let own = room.own_user_id().to_owned();
+    // Not borrowed across the waits below.
+    let ignored = ignored.borrow().clone();
+    let (items, stopped) = load(&timeline, UNREAD_EVENTS, progress, |items| {
+        line_count(items, &own, &ignored) >= count
+    })
+    .await;
+    let items = without_repeats(items, event_key, undecryptable);
+    let slots = slots(&items, &own, &ignored);
+    let members = member_names(room).await;
+    Ok(last_text(&slots, &members, count, stopped, &chrono::Local))
+}
+
+/// How many lines the text for a summary of `items` would have: each event once
+/// (see [`without_repeats`]), and only those the app shows as a message.
+fn line_count(
+    items: &Items,
+    own: &UserId,
+    ignored: &std::collections::HashSet<OwnedUserId>,
+) -> usize {
+    let items = without_repeats(items.clone(), event_key, undecryptable);
+    messages_of(&items, own, ignored)
+        .filter(|message| collect::entry(message).is_some())
+        .count()
 }
 
 /// The text of what is unread in `slots` (a room's timeline, oldest first).
@@ -901,14 +983,64 @@ where
         let read = read.iter().filter_map(|id| place(id));
         line.into_iter().chain(read).max().map(|at| at + 1)
     });
-    // Two people of one name among what is loaded and the room's members are told
-    // apart, as in the timeline.
+    let mut lines = summary_lines(slots, members, start.unwrap_or(0), zone);
+    if start.is_none() {
+        lines.drain(..lines.len().saturating_sub(newest));
+    }
+    let (text, kept) = collect::summary_text(&lines);
+    UnreadText {
+        text,
+        messages: kept,
+        cut: kept < lines.len(),
+        known: start.is_some(),
+        stopped: None,
+    }
+}
+
+/// The text of the last `count` messages in `slots` (a room's timeline, oldest
+/// first), read or not; `stopped` is why loading ended early, if it did. Where the
+/// text of them all is more than a summary holds, the newest that fit, and it says
+/// so. People of one name are told apart as in [`unread_text`].
+fn last_text<Tz: chrono::TimeZone>(
+    slots: &[Slot],
+    members: &[(String, String)],
+    count: usize,
+    stopped: Option<Cut>,
+    zone: &Tz,
+) -> UnreadText
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let mut lines = summary_lines(slots, members, 0, zone);
+    lines.drain(..lines.len().saturating_sub(count));
+    let (text, kept) = collect::summary_text(&lines);
+    UnreadText {
+        text,
+        messages: kept,
+        cut: kept < lines.len(),
+        known: false,
+        stopped,
+    }
+}
+
+/// A line for a summary of each message in `slots` from the slot `from` on. Two
+/// people of one name among all the slots and the room's `members` (names and IDs)
+/// are told apart, as in the timeline.
+fn summary_lines<Tz: chrono::TimeZone>(
+    slots: &[Slot],
+    members: &[(String, String)],
+    from: usize,
+    zone: &Tz,
+) -> Vec<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
     let mut namesakes = Namesakes::default();
     for message in slots.iter().filter_map(|slot| slot.message.as_ref()) {
         namesakes.learn(message);
     }
     namesakes.learn_members(pairs(members));
-    let mut lines: Vec<String> = slots[start.unwrap_or(0)..]
+    slots[from..]
         .iter()
         .filter_map(|slot| {
             let message = slot.message.as_ref()?;
@@ -920,17 +1052,7 @@ where
             collect::entry(&message)
         })
         .map(|entry| collect::summary_line(zone, &entry))
-        .collect();
-    if start.is_none() {
-        lines.drain(..lines.len().saturating_sub(newest));
-    }
-    let (text, kept) = collect::summary_text(&lines);
-    UnreadText {
-        text,
-        messages: kept,
-        cut: kept < lines.len(),
-        known: start.is_some(),
-    }
+        .collect()
 }
 
 /// Sets its flag when dropped: the task that held it was given up.
@@ -1330,6 +1452,82 @@ mod tests {
         assert!(unread.text.starts_with("[2026-11-20 14:03] Bob: m5\n"));
     }
 
+    /// `/catchup N`: the newest N messages, oldest first, whatever was read; the
+    /// "new" line and events the app shows nothing of are no messages.
+    #[test]
+    fn the_last_messages_are_the_newest_read_or_not() {
+        let slots = [
+            with_id("$1", "Ann", "one"),
+            with_id("$2", "Bob", "two"),
+            line(),
+            with_id("$3", "Ann", "three"),
+            hidden("$4"),
+            with_id("$5", "Bob", "four"),
+        ];
+        let last = last_text(&slots, &[], 3, None, &Utc);
+        assert_eq!(
+            last.text,
+            "[2026-11-20 14:03] Bob: two\n[2026-11-20 14:03] Ann: three\n\
+             [2026-11-20 14:03] Bob: four\n"
+        );
+        assert_eq!(
+            (last.messages, last.cut, last.known, last.stopped),
+            (3, false, false, None)
+        );
+        assert_eq!(last_text(&slots, &[], 1, None, &Utc).messages, 1);
+        assert!(
+            last_text(&slots, &[], 1, None, &Utc)
+                .text
+                .ends_with("Bob: four\n")
+        );
+    }
+
+    /// Fewer messages than asked for: all there are, and why loading ended is told.
+    #[test]
+    fn of_fewer_messages_than_asked_for_all_are_taken() {
+        let slots = [with_id("$1", "Ann", "one"), with_id("$2", "Bob", "two")];
+        let last = last_text(&slots, &[], 50, None, &Utc);
+        assert_eq!(last.messages, 2);
+        assert!(!last.cut && last.stopped.is_none());
+        assert!(last.text.starts_with("[2026-11-20 14:03] Ann: one\n"));
+        let last = last_text(&slots, &[], 50, Some(Cut::LoadFailed), &Utc);
+        assert_eq!((last.messages, last.stopped), (2, Some(Cut::LoadFailed)));
+        // A room without any message.
+        let last = last_text(&[line(), hidden("$1")], &[], 50, None, &Utc);
+        assert_eq!(
+            (last.text.as_str(), last.messages, last.cut),
+            ("", 0, false)
+        );
+    }
+
+    /// The last N hold more text than a summary takes: the newest that fit, cut from
+    /// the oldest, and it says so.
+    #[test]
+    fn the_last_messages_are_cut_from_the_oldest_where_their_text_is_too_long() {
+        let slots: Vec<Slot> = (0..12)
+            .map(|n| with_id(&format!("${n}"), "Ann", &format!("{n}{}", "x".repeat(4999))))
+            .collect();
+        let last = last_text(&slots, &[], 10, None, &Utc);
+        // 10 asked for (2 to 11), of which the newest 4 fit.
+        assert_eq!(last.messages, 4);
+        assert!(last.cut);
+        assert!(last.text.chars().count() <= collect::SUMMARY_CHARS + 1);
+        assert!(
+            last.text.starts_with("[2026-11-20 14:03] Ann: 8x"),
+            "{}",
+            &last.text[..40]
+        );
+        assert!(last.text.lines().last().unwrap().contains("Ann: 11x"));
+        // All of them fit: not cut.
+        let slots: Vec<Slot> = (0..collect::SUMMARY_MESSAGES + 5)
+            .map(|n| with_id(&format!("${n}"), "Bob", &format!("m{n}")))
+            .collect();
+        let last = last_text(&slots, &[], collect::SUMMARY_MESSAGES, None, &Utc);
+        assert_eq!(last.messages, collect::SUMMARY_MESSAGES);
+        assert!(!last.cut);
+        assert!(last.text.starts_with("[2026-11-20 14:03] Bob: m5\n"));
+    }
+
     #[test]
     fn an_archive_is_written_to_a_new_private_file_with_the_days_it_covers() {
         use std::os::unix::fs::PermissionsExt;
@@ -1431,6 +1629,8 @@ mod tests {
             unread.text,
             "[2026-11-20 14:03] bob (@bob:elsewhere.org): there\n"
         );
+        // The same of the last messages: the namesake beyond the last one counts.
+        assert_eq!(last_text(&slots, &[], 1, None, &Utc).text, unread.text);
     }
 
     /// A line about someone who wrote nothing loaded (banned, say) and goes by the name
@@ -1465,6 +1665,7 @@ mod tests {
             "{}",
             unread.text
         );
+        assert_eq!(last_text(&slots, &members, 5, None, &Utc).text, unread.text);
     }
 
     /// An archive counts the room's members too.

@@ -6,6 +6,7 @@ use super::App;
 use super::people::checked_display_name;
 use super::rooms::{NO_ACCOUNT, room_text_change};
 use crate::action::Action;
+use crate::collect::SUMMARY_MESSAGES;
 use crate::complete::{Member, MentionKind, MentionMark};
 use crate::manage::{Address, Confirm, InfoRow, Stage, clean_input, parse_address, parse_user};
 use crate::matrix::{MatrixCmd, fallback_localpart};
@@ -59,7 +60,8 @@ impl RoomCommand {
         })
     }
 
-    /// What goes after the name, for when it is missing.
+    /// What goes after the name, for when it is missing (or, for a command that takes
+    /// nothing or only a number, not what it takes).
     fn usage(self, name: &str) -> String {
         let (what, form) = match self {
             Self::Join => ("a room", "<#room:server, room ID or link>"),
@@ -77,7 +79,10 @@ impl RoomCommand {
                 return "/archive takes nothing after it: it asks how far back".into();
             }
             Self::CatchUp => {
-                return "/catchup takes nothing after it: it summarises what is unread here".into();
+                return format!(
+                    "/catchup takes nothing (what is unread) or a number of last messages \
+                     from 1 to {SUMMARY_MESSAGES}"
+                );
             }
         };
         format!("/{name} needs {what}: /{name} {form}")
@@ -127,6 +132,24 @@ pub(super) fn parse(text: &str) -> Option<Typed<'_>> {
         arg: text[arg_start..].trim_end(),
         arg_start,
     })
+}
+
+/// What `/catchup` was given: nothing (`None`: what is unread is summarised), or how
+/// many of the last messages, a whole number from 1 to [`SUMMARY_MESSAGES`] in plain
+/// digits. Anything else is refused with how the command is used.
+fn last_count(arg: &str) -> Result<Option<usize>, String> {
+    if arg.is_empty() {
+        return Ok(None);
+    }
+    let count = arg
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| arg.parse::<usize>().ok())
+        .flatten();
+    match count {
+        Some(count @ 1..=SUMMARY_MESSAGES) => Ok(Some(count)),
+        Some(_) | None => Err(RoomCommand::CatchUp.usage("catchup")),
+    }
 }
 
 /// The person a command names.
@@ -279,9 +302,11 @@ impl App {
         }
         let bare = matches!(
             typed.command,
-            RoomCommand::Leave | RoomCommand::Help | RoomCommand::Archive | RoomCommand::CatchUp
+            RoomCommand::Leave | RoomCommand::Help | RoomCommand::Archive
         );
-        let missing = !bare && typed.arg.is_empty();
+        // `/catchup` takes a number or nothing, and looks at it itself.
+        let optional = typed.command == RoomCommand::CatchUp;
+        let missing = !bare && !optional && typed.arg.is_empty();
         // `/leave #elsewhere` must not leave the open room.
         let extra = bare && !typed.arg.is_empty();
         if missing || extra {
@@ -401,8 +426,13 @@ impl App {
                 Ok(false)
             }
             RoomCommand::CatchUp => {
+                // A number that is not one is a typo to fix, whatever room is open.
+                let last = last_count(typed.arg)?;
                 self.open_room_or_say()?;
-                self.perform(Action::CatchUp);
+                match last {
+                    None => self.perform(Action::CatchUp),
+                    Some(count) => self.open_catch_up_last(count),
+                }
                 Ok(false)
             }
             RoomCommand::Help => {
@@ -670,6 +700,36 @@ mod tests {
             "/msg needs someone: /msg <user>"
         );
         assert!(RoomCommand::Leave.usage("leave").contains("open room"));
+        assert_eq!(
+            RoomCommand::CatchUp.usage("catchup"),
+            "/catchup takes nothing (what is unread) or a number of last messages from 1 to 300"
+        );
+    }
+
+    #[test]
+    fn catchup_takes_nothing_or_a_whole_number_from_1_to_300() {
+        assert_eq!(last_count(""), Ok(None));
+        for (arg, count) in [("1", 1), ("42", 42), ("300", 300), ("007", 7)] {
+            assert_eq!(last_count(arg), Ok(Some(count)), "{arg}");
+        }
+        let usage = RoomCommand::CatchUp.usage("catchup");
+        for arg in [
+            "0",
+            "301",
+            "18446744073709551616",
+            "word",
+            "-3",
+            "+5",
+            "1.5",
+            "1e2",
+            "5 more",
+            "٣",
+            "５",
+        ] {
+            assert_eq!(last_count(arg), Err(usage.clone()), "{arg}");
+        }
+        // As typed: the spaces around it are not part of it.
+        assert_eq!(parse("/catchup  12 ").unwrap().arg, "12");
     }
 
     #[test]

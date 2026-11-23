@@ -2730,6 +2730,19 @@ mod tests {
             format!("{command:?}"),
             "Collect(Unread(request 7, from: true))"
         );
+        let command = MatrixCmd::Collect(CollectCmd::Last {
+            request: 8,
+            room_id: "!room:example.org".into(),
+            count: 50,
+        });
+        assert_eq!(
+            format!("{command:?}"),
+            "Collect(Last(request 8, 50 messages))"
+        );
+        assert_eq!(
+            command.describe(),
+            "Collect(Last(request 8, !room:example.org, 50 messages))"
+        );
         for (event, shown) in [
             (
                 CollectEvent::Progress {
@@ -2746,6 +2759,7 @@ mod tests {
                         messages: 1,
                         cut: false,
                         known: true,
+                        stopped: None,
                     }),
                 },
                 "Collect(Unread(request 7, 1 messages))",

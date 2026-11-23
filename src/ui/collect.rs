@@ -11,7 +11,7 @@ use super::hit::HitId;
 use super::modal::{centered, popup};
 use crate::app::App;
 use crate::app::collect::{
-    ArchivePopup, ArchiveStage, CLICK_CLOSE, CLICK_COPY, CLICK_GO, CatchUpPopup, CatchUpStage,
+    ArchivePopup, ArchiveStage, CLICK_CLOSE, CLICK_COPY, CLICK_GO, CatchUpPopup, CatchUpStage, Of,
     Popup, count, cut_note,
 };
 use crate::collect::Span as Stretch;
@@ -198,15 +198,19 @@ fn draw_catch_up(frame: &mut Frame, app: &mut App, area: Rect, catch_up: &mut Ca
     let mut body: Vec<Row> = Vec::new();
     let (footer, buttons): (&str, Buttons) = match &catch_up.stage {
         CatchUpStage::Collecting { loaded, .. } => {
+            let (what, its) = match catch_up.last {
+                Some(last) => (format!("the last {}", count(last, "")), "Their"),
+                None => ("what is unread".to_owned(), "Its"),
+            };
             head.extend(sentences(
                 &theme,
-                &format!("Loading what is unread… {loaded} messages looked at."),
+                &format!("Loading {what}… {loaded} messages looked at."),
                 room,
                 Role::Text,
             ));
             head.extend(sentences(
                 &theme,
-                &format!("Its text is then given to your summary command ({program})."),
+                &format!("{its} text is then given to your summary command ({program})."),
                 room,
                 Role::Muted,
             ));
@@ -253,21 +257,9 @@ fn draw_catch_up(frame: &mut Frame, app: &mut App, area: Rect, catch_up: &mut Ca
             summary,
             messages,
             cut,
-            known,
+            of,
         } => {
-            let what = match (*known, *cut) {
-                (true, false) => {
-                    format!("Summary of {}, by {program}.", count(*messages, "unread"))
-                }
-                (true, true) => format!(
-                    "Summary of the newest {} (there are more), by {program}.",
-                    count(*messages, "unread")
-                ),
-                (false, _) => format!(
-                    "Summary of the newest {}, read or not, by {program}.",
-                    count(*messages, "")
-                ),
-            };
+            let what = summarised(*messages, *cut, *of, &program);
             head.extend(sentences(&theme, &what, room, Role::SidebarSection));
             head.extend(sentences(
                 &theme,
@@ -282,12 +274,11 @@ fn draw_catch_up(frame: &mut Frame, app: &mut App, area: Rect, catch_up: &mut Ca
             ("↑↓ scroll · c copy · Esc close", SUMMARY)
         }
         CatchUpStage::Nothing => {
-            head.extend(sentences(
-                &theme,
-                "Nothing is unread in this room.",
-                room,
-                Role::Text,
-            ));
+            let nothing = match catch_up.last {
+                Some(_) => "No messages were found in this room.",
+                None => "Nothing is unread in this room.",
+            };
+            head.extend(sentences(&theme, nothing, room, Role::Text));
             ("Enter close", CLOSE)
         }
         CatchUpStage::Failed(why) => {
@@ -327,6 +318,42 @@ fn draw_catch_up(frame: &mut Frame, app: &mut App, area: Rect, catch_up: &mut Ca
         frame.render_widget(line, Rect::new(inner.x, inner.y + n as u16, inner.width, 1));
     }
     draw_buttons(frame, app, &theme, inner, buttons);
+}
+
+/// What a summary is of: `messages` of what `of` says, by `program`; `cut`: there
+/// were more than a summary holds, and these are the newest.
+fn summarised(messages: usize, cut: bool, of: Of, program: &str) -> String {
+    match (of, cut) {
+        (Of::Unread, false) => {
+            format!("Summary of {}, by {program}.", count(messages, "unread"))
+        }
+        (Of::Unread, true) => format!(
+            "Summary of the newest {} (there are more), by {program}.",
+            count(messages, "unread")
+        ),
+        (Of::Newest, _) => format!(
+            "Summary of the newest {}, read or not, by {program}.",
+            count(messages, "")
+        ),
+        (Of::Last { .. }, true) => format!(
+            "Summary of the newest {} (the text of more is too long for one summary), \
+             by {program}.",
+            count(messages, "")
+        ),
+        (Of::Last { asked, stopped }, false) => {
+            let fewer = if messages >= asked {
+                ""
+            } else if stopped.is_none() {
+                " (the room has no more)"
+            } else {
+                " (older ones could not be loaded)"
+            };
+            format!(
+                "Summary of the last {}{fewer}, by {program}.",
+                count(messages, "")
+            )
+        }
+    }
 }
 
 /// The buttons as clickable pills on the last row inside the popup.
