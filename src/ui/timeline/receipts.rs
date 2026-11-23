@@ -115,11 +115,11 @@ pub(super) fn mark(row: &mut Row, read_by: &ReadBy, direct: bool, max_width: usi
             .find(|col| *col < at && col + usize::from(EMOTE_CELLS.0) > at)
             .unwrap_or(at);
         cut(&mut row.line, from);
+        let said = row.line.width();
         // An emoji's picture cut into is not drawn over the marker, and what could be
         // clicked there (a link, the thread line) ends before it.
         row.emotes
-            .retain(|spot| usize::from(spot.col) + usize::from(EMOTE_CELLS.0) <= at);
-        let said = row.line.width();
+            .retain(|spot| usize::from(spot.col) + usize::from(EMOTE_CELLS.0) <= said);
         row.hits.retain_mut(|(from, to, _)| {
             // (What is aligned after the marker keeps its own.)
             if usize::from(*from) < end {
@@ -668,6 +668,41 @@ mod tests {
         let text = row.line.to_string();
         assert_eq!(text, format!("{}…  ✓", "x".repeat(36)));
         assert!(row.emotes.is_empty());
+    }
+
+    /// The edges of that: a picture that starts at the "…", one that ends right before
+    /// it, and one after a wide character.
+    #[test]
+    fn a_picture_at_the_edge_of_the_marker_is_dropped_or_kept_whole() {
+        use crate::ui::timeline::EmoteSpot;
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let marked = |line: String, col: u16| {
+            let mut row = Row {
+                line: Line::from(line),
+                msg: Some(0),
+                source: 0,
+                hits: Vec::new(),
+                image: None,
+                emotes: vec![EmoteSpot {
+                    col,
+                    url: "mxc://a/b".into(),
+                }],
+                audio: None,
+                free: Free::End,
+            };
+            mark(&mut row, &readers(&["bob"], 1), false, 40, &theme);
+            assert_eq!(width(&row.line.to_string()), 40);
+            (row.line.to_string(), row.emotes.len())
+        };
+        // Starting at the "…" (column 37): gone, with its cells.
+        let (text, kept) = marked(format!("{}  ", "x".repeat(37)), 37);
+        assert_eq!((text, kept), (format!("{}… ✓", "x".repeat(37)), 0));
+        // Ending right before it: whole, and the "…" follows it.
+        let (text, kept) = marked(format!("{}  y", "x".repeat(35)), 35);
+        assert_eq!((text, kept), (format!("{}  … ✓", "x".repeat(35)), 1));
+        // After a character of two columns, split: both cells go.
+        let (text, kept) = marked(format!("{}  ", "日".repeat(18)), 36);
+        assert_eq!((text, kept), (format!("{}…  ✓", "日".repeat(18)), 0));
     }
 
     #[test]
