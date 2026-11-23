@@ -9,9 +9,9 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-23, with 1.1.0 begun (§6.1); releases up to 1.0.2. The
-plans of 0.8 and 0.9 moved to [`docs/history/`](history/) on 2026-11-20, the road to 1.0 on
-2026-11-21.
+Last brought up to date: 2026-11-23, with 1.0.3 begun (§6.1) and 1.1.0 planned (§6.2);
+releases up to 1.0.2. The plans of 0.8 and 0.9 moved to [`docs/history/`](history/) on
+2026-11-20, the road to 1.0 on 2026-11-21.
 
 ## 1. What it is for
 
@@ -159,10 +159,11 @@ What 0.8, 0.9 and 1.0 were planned as is kept in
 [`history/1.0-road.md`](history/1.0-road.md) (features first, then the passes over the code as
 it would ship: the user, 2026-11-20).
 
-### 6.1 1.1.0 (next)
+### 6.1 1.0.3 (next)
 
-What the user decides after using 1.0 for a while (from 2026-11-21 on). Nothing of it is built
-yet; each piece is written and reviewed as in §4.
+Asked for by the user on 2026-11-23, right after 1.0.2: "start working on 1.0.3 with catchup N
+and the graphical issues over ssh plus the investigation of the race and known bugs you
+described." Each piece is written and reviewed as in §4.
 
 - **`/catchup N`** (the user's idea, 2026-11-21): summarise the last N messages of the open
   room, read or not, the way `/catchup` does for what is unread (same limits: at most 300
@@ -182,6 +183,19 @@ yet; each piece is written and reviewed as in §4.
   the server test name every message it got, catch the shape, and decide where a copy that the
   SDK put after newer events belongs (the later copy is kept in place today, because the SDK
   puts the read marker by it).
+- **Three small known bugs** left open in earlier reviews (§7): a half emoji box before the
+  read receipts (`… ✓`) on a cut last row (`src/ui/timeline/receipts.rs`, M29 review); an emoji
+  picture that failed to load is never tried again until it drops out of the cache
+  (`SmallState::Failed` in `src/images.rs`, M29); the "new room" and "new space" forms take a
+  name of up to 1024 bytes and refuse it on sending above 255, and a space's name from the
+  server is not cut to 255 (`FIELD_MAX` in `src/manage.rs`, `summary_of` in
+  `src/matrix/spaces.rs`, M30).
+
+### 6.2 1.1.0
+
+What the user decides after using 1.0 for a while (from 2026-11-21 on). Nothing of it is built
+yet; each piece is written and reviewed as in §4.
+
 - **notify 9** (published 2026-11-21; the file watcher behind theme reloading): kept out of
   1.0.2, which took only compatible updates. Its breaking changes reach how watch errors are
   matched (`src/logsafe.rs`) and how events and watching the same path again behave
@@ -206,7 +220,7 @@ yet; each piece is written and reviewed as in §4.
   without Esc, Ctrl or Alt. Since the same profile is used from the desktop too, a per-start
   switch (`--mobile`) may suit better than a setting in `config.toml`.
 
-### 6.2 Later, after 1.0.0 or by demand
+### 6.3 Later, after 1.0.0 or by demand
 
 - **Calls.** Voice calls wait until the SDK can join calls itself; with them a line in the
   room saying that a call is running, and a key that opens it in the browser. Video after
@@ -223,7 +237,7 @@ yet; each piece is written and reviewed as in §4.
   expose it).
 - **A numbered decisions file**, should §5 outgrow a table.
 
-### 6.3 Not wanted or not pursued
+### 6.4 Not wanted or not pursued
 
 - **By the user's decision** (2026-11-20 unless dated otherwise): a plugin system; sticker
   packs beyond the picker that exists; an image generator; a lock screen; popping out a
@@ -281,7 +295,7 @@ yet; each piece is written and reviewed as in §4.
   after a flood of 518 messages, what is unread ended with an older message (`flood-478`) for
   30 seconds, so a copy seems to have landed after newer ones, where keeping the later copy
   in place shows it as the newest. Three reruns passed. The test names only the first and last
-  message, so the shape is inferred, not seen; for 1.1.0 (§6.1).
+  message, so the shape is inferred, not seen; for 1.0.3 (§6.1).
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.
