@@ -152,6 +152,7 @@ Rust 1.96 or newer.
 | 2026-11-20 | Composer symbols: the emoji for now; a monochrome look later. |
 | 2026-11-20 | Rooms bar: counts in superscript, `(n)>` opens the room list, and the room icons win over the label (it shrinks to `☰`). |
 | 2026-11-21 | The memory and CPU pass is measured with the user's own account: the user runs a build of the 1.0 state for a day with `scripts/measure.sh` beside it, which reads only `/proc`. |
+| 2026-11-23 | Several messages of one person in a row: a muted `·` in the indent on the first line of each further message, under the header's `●` (1.1.0, §6.1). |
 
 ## 6. What comes next
 
@@ -195,7 +196,8 @@ yet; each piece is written and reviewed as in §4.
   run of one sender's messages has one header (`● name  time`), every message's text sits
   behind the same two-space indent (`INDENT`), and the empty row comes only before the next
   sender (`Flow::next` and `Before` in `src/ui/timeline.rs`); only a reaction row parts two
-  messages of a run. Suggestions, for the user to choose (one, or one as a setting):
+  messages of a run. **Chosen by the user (2026-11-23): suggestion 1, the dot** ("We go with
+  your idea, the dot."). The suggestions were:
   1. a mark in the indent on the first line of each further message of the run, muted, such as
      `·` under the header's `●`: no row more, readable without colour (`NO_COLOR`, 256
      colours over ssh);
