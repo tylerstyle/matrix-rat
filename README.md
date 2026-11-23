@@ -640,7 +640,8 @@ There is no command that lists or removes profiles; a profile is its two folders
   N messages of the open room instead, read or not and without asking: for when
   scrolling through a room has marked everything as read. The same limit of 24,000
   characters applies (the newest that fit are kept, and the result says so), and a
-  room with fewer messages gives all it has, which the result says too. Anything else
+  room with fewer messages gives all it has, which the result says too; it looks no
+  further back than the room's newest 600 events. Anything else
   after `/catchup` is refused. `c` copies the summary, `Esc` closes it and stops the
   program if it still runs (it is given 3 minutes). matrix-rat has no service of its
   own for this and starts nothing until you set a command and ask for a summary.

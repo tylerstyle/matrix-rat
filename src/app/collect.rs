@@ -179,8 +179,13 @@ pub enum CatchUpStage {
         cut: bool,
         of: Of,
     },
-    /// Nothing is unread (or, of the last messages, none was found).
+    /// Nothing is unread (or, of the last messages, none was found, back to the
+    /// room's first message).
     Nothing,
+    /// Of the last messages, none was found in the newest
+    /// [`LAST_EVENTS`](crate::matrix::LAST_EVENTS) events, and the room has more:
+    /// loading ended there.
+    NothingInNewest,
     Failed(String),
 }
 
@@ -229,6 +234,7 @@ impl std::fmt::Debug for Popup {
                     CatchUpStage::Summarising { .. } => "Summarising",
                     CatchUpStage::Done { .. } => "Done",
                     CatchUpStage::Nothing => "Nothing",
+                    CatchUpStage::NothingInNewest => "NothingInNewest",
                     CatchUpStage::Failed(_) => "Failed",
                 },
             ),
@@ -533,7 +539,17 @@ impl App {
             Err(why) => {
                 popup.stage = CatchUpStage::Failed(format!("Could not load the messages: {why}"));
             }
-            Ok(text) if text.messages == 0 => popup.stage = CatchUpStage::Nothing,
+            Ok(text) if text.messages == 0 => {
+                popup.stage = match (popup.last, text.stopped) {
+                    // Of the last messages, none is no answer where loading ended
+                    // before the room's first message.
+                    (Some(_), Some(Cut::LoadFailed)) => {
+                        CatchUpStage::Failed("Could not load the messages.".to_owned())
+                    }
+                    (Some(_), Some(Cut::Limit)) => CatchUpStage::NothingInNewest,
+                    (Some(_), None) | (None, _) => CatchUpStage::Nothing,
+                }
+            }
             Ok(text) => match popup.last {
                 // The last messages, read or not, are what was asked for.
                 Some(asked) => {
@@ -751,6 +767,7 @@ impl App {
                             CatchUpStage::Collecting { .. } | CatchUpStage::Summarising { .. } => {}
                             CatchUpStage::Done { .. }
                             | CatchUpStage::Nothing
+                            | CatchUpStage::NothingInNewest
                             | CatchUpStage::Failed(_) => self.close_collect(),
                         }
                     }
@@ -822,7 +839,7 @@ mod tests {
     use super::*;
     use crate::action::{Action, Pane};
     use crate::app::ui;
-    use crate::matrix::MatrixHandle;
+    use crate::matrix::{LAST_EVENTS, MatrixHandle};
     use crate::model::{Room, RoomKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1308,7 +1325,7 @@ mod tests {
     }
 
     /// The summary of the last messages says when it holds fewer than were asked for,
-    /// and why; and when there were none.
+    /// and why.
     #[test]
     fn fewer_last_messages_than_asked_for_are_summarised_and_it_says_why() {
         let done = |messages: usize, cut: bool, stopped: Option<Cut>| {
@@ -1335,11 +1352,17 @@ mod tests {
             shown.contains("Summary of the last 12 messages (older ones could not be loaded)"),
             "{shown}"
         );
+        // Loading stopped at its bound: nothing failed, and the room has more.
         let shown = done(12, false, Some(Cut::Limit));
         assert!(
-            shown.contains("(older ones could not be loaded)"),
+            shown.contains(&format!(
+                "Summary of the last 12 messages (the room has more, but catching up looks \
+                 at its newest {} events only), by sh.",
+                thousands(LAST_EVENTS)
+            )),
             "{shown}"
         );
+        assert!(!shown.contains("could not be loaded"), "{shown}");
         // More text than a summary takes: the newest of them, and it says so.
         let shown = done(40, true, None);
         assert!(
@@ -1350,20 +1373,67 @@ mod tests {
             "{shown}"
         );
         assert!(!shown.contains("the room has no more"), "{shown}");
+    }
 
-        // None at all: nothing is started.
-        let (mut app, mut commands) = app();
-        with_command(&mut app);
-        run(&mut app, "/catchup 50");
-        asked(&mut commands);
-        last_of(&mut app, 1, 0, false, None);
-        assert!(*catch_up_stage(&app) == CatchUpStage::Nothing);
-        assert!(app.take_summary_start().is_none());
-        let shown = flat(&screen(&mut app));
+    /// None of the last messages at all: nothing is started, and it says whether the
+    /// room has none, or loading failed or stopped at its bound before the room's
+    /// first message.
+    #[test]
+    fn no_last_messages_say_whether_the_room_has_none_or_loading_ended_first() {
+        let nothing = |stopped: Option<Cut>| {
+            let (mut app, mut commands) = app();
+            with_command(&mut app);
+            run(&mut app, "/catchup 50");
+            assert_eq!(asked(&mut commands).len(), 1);
+            last_of(&mut app, 1, 0, false, stopped);
+            assert!(app.take_summary_start().is_none());
+            let stage = catch_up_stage(&app).clone();
+            let shown = flat(&screen(&mut app));
+            // Enter closes the popup.
+            app.on_event(key(KeyCode::Enter));
+            assert!(app.modal.is_none());
+            (stage, shown)
+        };
+        let (stage, shown) = nothing(None);
+        assert!(stage == CatchUpStage::Nothing);
         assert!(
             shown.contains("No messages were found in this room."),
             "{shown}"
         );
+
+        let (stage, shown) = nothing(Some(Cut::LoadFailed));
+        assert!(stage == CatchUpStage::Failed("Could not load the messages.".to_owned()));
+        assert!(shown.contains("Could not load the messages."), "{shown}");
+        assert!(!shown.contains("No messages were found"), "{shown}");
+
+        let (stage, shown) = nothing(Some(Cut::Limit));
+        assert!(stage == CatchUpStage::NothingInNewest);
+        assert!(
+            shown.contains(&format!(
+                "No messages were found in the newest {} events of this room; catching up \
+                 looks no further back.",
+                thousands(LAST_EVENTS)
+            )),
+            "{shown}"
+        );
+        assert!(!shown.contains("in this room."), "{shown}");
+
+        // What is unread is as before: nothing unread is nothing unread.
+        for stopped in [Some(Cut::LoadFailed), Some(Cut::Limit)] {
+            let (mut app, _commands) = catching_up();
+            app.on_matrix(crate::matrix::MatrixEvent::Collect(CollectEvent::Unread {
+                request: 1,
+                result: Ok(UnreadText {
+                    text: String::new(),
+                    messages: 0,
+                    cut: false,
+                    known: true,
+                    stopped,
+                }),
+            }));
+            assert!(*catch_up_stage(&app) == CatchUpStage::Nothing);
+            assert!(flat(&screen(&mut app)).contains("Nothing is unread"));
+        }
     }
 
     /// Anything after `/catchup` but a whole number from 1 to 300 is refused with one

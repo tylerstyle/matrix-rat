@@ -12,11 +12,11 @@ use super::modal::{centered, popup};
 use crate::app::App;
 use crate::app::collect::{
     ArchivePopup, ArchiveStage, CLICK_CLOSE, CLICK_COPY, CLICK_GO, CatchUpPopup, CatchUpStage, Of,
-    Popup, count, cut_note,
+    Popup, count, cut_note, thousands,
 };
-use crate::collect::Span as Stretch;
+use crate::collect::{Cut, Span as Stretch};
 use crate::files;
-use crate::matrix::ARCHIVE_EVENTS;
+use crate::matrix::{ARCHIVE_EVENTS, LAST_EVENTS};
 use crate::text::{sanitize_line, truncate, width, wrap_at_spaces};
 use crate::theme::{Role, Theme};
 
@@ -281,6 +281,19 @@ fn draw_catch_up(frame: &mut Frame, app: &mut App, area: Rect, catch_up: &mut Ca
             head.extend(sentences(&theme, nothing, room, Role::Text));
             ("Enter close", CLOSE)
         }
+        CatchUpStage::NothingInNewest => {
+            head.extend(sentences(
+                &theme,
+                &format!(
+                    "No messages were found in the newest {} events of this room; catching \
+                     up looks no further back.",
+                    thousands(LAST_EVENTS)
+                ),
+                room,
+                Role::Text,
+            ));
+            ("Enter close", CLOSE)
+        }
         CatchUpStage::Failed(why) => {
             head.extend(sentences(&theme, &sanitize_line(why), room, Role::Error));
             ("Enter close", CLOSE)
@@ -342,11 +355,17 @@ fn summarised(messages: usize, cut: bool, of: Of, program: &str) -> String {
         ),
         (Of::Last { asked, stopped }, false) => {
             let fewer = if messages >= asked {
-                ""
-            } else if stopped.is_none() {
-                " (the room has no more)"
+                String::new()
             } else {
-                " (older ones could not be loaded)"
+                match stopped {
+                    None => " (the room has no more)".to_owned(),
+                    Some(Cut::LoadFailed) => " (older ones could not be loaded)".to_owned(),
+                    Some(Cut::Limit) => format!(
+                        " (the room has more, but catching up looks at its newest {} events \
+                         only)",
+                        thousands(LAST_EVENTS)
+                    ),
+                }
             };
             format!(
                 "Summary of the last {}{fewer}, by {program}.",

@@ -49,9 +49,14 @@ use crate::model::{Message, Namesakes};
 
 /// The most events one archive takes; of a room with more, the newest.
 pub const ARCHIVE_EVENTS: usize = 5_000;
-/// How many events are loaded at most for a summary: to find where the user stopped
-/// reading, or the last messages asked for (some events are no message of their own).
+/// How many events are loaded at most to find where the user stopped reading.
 const UNREAD_EVENTS: usize = collect::SUMMARY_MESSAGES + 50;
+/// How many events are loaded at most for the last messages asked for (`/catchup N`).
+/// More than [`UNREAD_EVENTS`]: the bound counts every event loaded, also those that
+/// are no message to summarise (state events that are not shown, those of ignored
+/// people, the second copy of one the SDK delivered twice), and as many as a summary
+/// holds may be asked for. A room of little else still ends somewhere.
+pub const LAST_EVENTS: usize = 2 * collect::SUMMARY_MESSAGES;
 /// How many of the oldest loaded events must be older than an archive wants before
 /// loading ends.
 const OLDEST: usize = 5;
@@ -932,7 +937,7 @@ async fn last(
     let own = room.own_user_id().to_owned();
     // Not borrowed across the waits below.
     let ignored = ignored.borrow().clone();
-    let (items, stopped) = load(&timeline, UNREAD_EVENTS, progress, |items| {
+    let (items, stopped) = load(&timeline, LAST_EVENTS, progress, |items| {
         line_count(items, &own, &ignored) >= count
     })
     .await;

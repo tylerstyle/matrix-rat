@@ -35,7 +35,7 @@ mod upload;
 mod verify;
 
 pub use agent::{AgentCmd, AgentEvent, MAX_WATCHED as AGENT_MAX_WATCHED};
-pub use collect::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, UnreadText};
+pub use collect::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, LAST_EVENTS, UnreadText};
 pub use devices::{
     BackupUpload, DevicesCmd, DevicesEvent, ServerBackup, Session, SessionList, SessionTrust,
     SignOutOutcome,
