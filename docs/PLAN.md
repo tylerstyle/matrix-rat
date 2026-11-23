@@ -55,7 +55,7 @@ cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
 
 One binary crate, about 190,000 lines of Rust with its tests (945 unit tests and 43 tests against
 a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0; 1113 and 45 at 0.9.1;
-1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1, besides 12 measurements that are run by hand).
+1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1 and 1.0.2, besides 12 measurements that are run by hand).
 
 **Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.19.1, pinned exactly (every minor
 release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`; `ratatui-image` and `image` for
@@ -178,6 +178,10 @@ yet; each piece is written and reviewed as in §4.
   nearest-colour mapping that uses the grey ramp too and keeps the roles apart, a cue for the
   cursor that does not rest on colour alone (as `high-contrast` underlines it), and a test
   that every built-in theme keeps cursor, open room and background apart in 256 colours.
+- **An event twice in what is unread, after newer ones** (seen once on 2026-11-23, §7): make
+  the server test name every message it got, catch the shape, and decide where a copy that the
+  SDK put after newer events belongs (the later copy is kept in place today, because the SDK
+  puts the read marker by it).
 - **notify 9** (published 2026-11-21; the file watcher behind theme reloading): kept out of
   1.0.2, which took only compatible updates. Its breaking changes reach how watch errors are
   matched (`src/logsafe.rs`) and how events and watching the same path again behave
@@ -273,6 +277,11 @@ yet; each piece is written and reviewed as in §4.
   stays as a safety net when the SDK is updated: upstream `main` can still apply updates twice when
   a timeline falls more than 32 updates behind (`RecvError::Lagged` reloads the events but keeps
   the old receiver; checked 2026-11-21, reported as matrix-rust-sdk issue #7533).
+  Seen once more on 2026-11-23, in the same test on the 1.0.2 release commit (no SDK change):
+  after a flood of 518 messages, what is unread ended with an older message (`flood-478`) for
+  30 seconds, so a copy seems to have landed after newer ones, where keeping the later copy
+  in place shows it as the newest. Three reruns passed. The test names only the first and last
+  message, so the shape is inferred, not seen; for 1.1.0 (§6.1).
 - **Small review notes left open on purpose** are in the review files: a half emoji box before
   the read marker when a row is cut, no retry of emoji pictures that failed to load, the
   field limit of the "new room" form.
