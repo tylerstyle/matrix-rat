@@ -1042,6 +1042,7 @@ impl ImageStore {
         }
         match result {
             Ok(decoded) => {
+                avatar.failures = 0;
                 avatar.state = SmallState::Ready {
                     pixels: decoded.pixels,
                     encoded: Vec::new(),
@@ -1183,6 +1184,7 @@ impl ImageStore {
             Ok(decoded) => {
                 // Two cells instead of the name: the lines are laid out again.
                 self.emote_rev += 1;
+                small.failures = 0;
                 small.state = SmallState::Ready {
                     pixels: decoded.pixels,
                     encoded: Vec::new(),
@@ -2682,6 +2684,48 @@ mod tests {
         assert_eq!(store.take_emote_requests(), [url]);
         store.on_emote(url, Ok(decoded(64, 64)));
         assert!(store.emote_ready(url));
+        assert_eq!(store.emotes[url].failures, 0);
+    }
+
+    /// Failed pictures that are all due at once are fetched a few at a time.
+    #[test]
+    fn failed_pictures_due_at_once_are_fetched_only_a_few_at_a_time() {
+        let mut store = ImageStore::new(kitty());
+        let urls: Vec<String> = (0..EMOTE_IN_FLIGHT + 3)
+            .map(|n| format!("mxc://example.org/e{n}"))
+            .collect();
+        store.begin_frame();
+        for url in &urls {
+            store.emotes.insert(
+                url.clone(),
+                Small {
+                    state: SmallState::Failed {
+                        retry_at: Instant::now(),
+                    },
+                    used: 0,
+                    failures: 1,
+                },
+            );
+        }
+        store.request_emotes(urls.iter().map(String::as_str));
+        assert_eq!(store.take_emote_requests().len(), EMOTE_IN_FLIGHT);
+    }
+
+    /// A room picture that failed stays failed, whatever time it is.
+    #[test]
+    fn a_failed_room_picture_is_not_tried_again() {
+        let mut store = ImageStore::new(kitty());
+        let url = "mxc://example.org/room";
+        store.begin_frame();
+        assert!(store.request_avatar(url).is_none());
+        assert_eq!(store.take_avatar_requests().len(), 1);
+        store.on_avatar(url, Err("could not be loaded".into()));
+        store.avatars.get_mut(url).unwrap().state = SmallState::Failed {
+            retry_at: Instant::now(),
+        };
+        store.begin_frame();
+        assert!(store.request_avatar(url).is_none());
+        assert!(store.take_avatar_requests().is_empty());
     }
 
     #[test]
