@@ -199,6 +199,7 @@ fn draw_catch_up(frame: &mut Frame, app: &mut App, area: Rect, catch_up: &mut Ca
     let (footer, buttons): (&str, Buttons) = match &catch_up.stage {
         CatchUpStage::Collecting { loaded, .. } => {
             let (what, its) = match catch_up.last {
+                Some(1) => ("the last message".to_owned(), "Its"),
                 Some(last) => (format!("the last {}", count(last, "")), "Their"),
                 None => ("what is unread".to_owned(), "Its"),
             };

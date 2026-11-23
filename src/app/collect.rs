@@ -425,7 +425,7 @@ impl App {
         self.save_setting("summary_command", self.collect.summary_setting().to_owned());
         let said = match self.summary_command() {
             Ok(command) => format!(
-                "Catching up gives the unread text of a room to {}",
+                "Catching up gives the unread text, or the last N (/catchup N), to {}",
                 command.name()
             ),
             Err(NoCommand::NotSet) => "Catching up is off: no summary command".to_owned(),
@@ -1472,6 +1472,14 @@ mod tests {
                 sent[0].ends_with(&format!(", {count} messages))")),
                 "{sent:?}"
             );
+            // One message is "it".
+            let shown = flat(&screen(&mut app));
+            let (what, its) = match count {
+                1 => ("the last message", "Its text"),
+                _ => ("the last 300 messages", "Their text"),
+            };
+            assert!(shown.contains(&format!("Loading {what}…")), "{shown}");
+            assert!(shown.contains(its), "{shown}");
         }
     }
 
@@ -1764,6 +1772,7 @@ mod tests {
         assert_eq!(app.collect.summary_setting(), "/bin/sh -c cat");
         assert_eq!(app.summary_setting_text(), "/bin/sh -c cat");
         assert!(app.toast.clone().unwrap().0.contains("to sh"));
+        assert!(app.toast.clone().unwrap().0.contains("(/catchup N)"));
         app.set_summary_command("no-such-summary-program-anywhere");
         assert!(app.summary_setting_text().ends_with("(not found)"));
         app.set_summary_command("");

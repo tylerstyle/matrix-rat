@@ -642,6 +642,22 @@ mod tests {
         insta::assert_snapshot!("settings_small_bottom", bottom);
     }
 
+    /// The summary command's hint names `/catchup N` and is whole in the two lines a
+    /// hint has, down to what an online service gets.
+    #[test]
+    fn the_summary_command_hint_is_whole_in_its_two_lines() {
+        use crate::modal::{Modal, Setting, SettingsMenu};
+        let mut app = App::demo();
+        render(&mut app, 100, 30);
+        app.modal = Some(Modal::Settings(SettingsMenu::select(
+            Setting::SummaryCommand,
+            false,
+        )));
+        let shown = render(&mut app, 100, 30);
+        assert!(shown.contains("(/catchup N)"), "{shown}");
+        assert!(shown.contains("gets encrypted text too."), "{shown}");
+    }
+
     #[test]
     fn room_previews() {
         let mut app = App::demo();

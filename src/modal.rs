@@ -775,7 +775,7 @@ impl Setting {
                 "On: transcripts and translations survive a restart, in a file that holds them unencrypted. Off: they last while the app runs, and the file is removed."
             }
             Setting::SummaryCommand => {
-                "A command of your own for Catch up: it reads a room's unread messages and prints a summary. An online service gets the text of encrypted rooms too. Enter to change; empty for none."
+                "Reads unread text, or the last N (/catchup N), and prints a summary. An online service gets encrypted text too."
             }
             Setting::Keys => {
                 "Edit key bindings or switch presets (F1 still opens the key overview)."
