@@ -729,14 +729,14 @@ impl Setting {
                 "Show the latest message under each room (and larger room pictures)."
             }
             Setting::LinkPreviews => {
-                "Under a message, what its first link is about. Your homeserver fetches the link, so it learns it; in encrypted rooms only with \"all rooms\"."
+                "Previews a first link. Your homeserver fetches the link, so it learns it; in encrypted rooms only with \"all rooms\"."
             }
             Setting::Mouse => "Off: the terminal's own text selection works instead of clicking.",
             Setting::EscClosesChat => {
-                "Esc in the composer, with nothing left to cancel, closes the chat and goes to the room list. Off: Esc stops at the composer."
+                "Esc in the composer, with nothing left to cancel, goes to the room list. Off: Esc stops at the composer."
             }
             Setting::RoomsBar => {
-                "While the room list is hidden: a line above the chat. Rooms goes to the list; rooms with new notifications show there, a click opens one."
+                "Room list hidden: a line above the chat. Rooms opens the list; a click opens a room with new notifications."
             }
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",
@@ -757,25 +757,25 @@ impl Setting {
                 "What x plays voice and audio with: auto, or a command (the file is added). Enter to change."
             }
             Setting::AudioRecorder => {
-                "What records voice messages: auto, or a command that writes raw sound (16-bit, mono, 48 kHz) to its output. Enter to change."
+                "What records voice messages: auto, or a command that writes raw sound (16-bit, mono, 48 kHz) to its output."
             }
             Setting::TranscribeCommand => {
-                "What turns voice and audio into text under the message, on this machine: auto (whisper-cli with the model below), or a command (the file is added, the text is what it prints). Enter to change."
+                "Audio to text on this machine: auto (whisper-cli, model below), or a command: given the file, it prints the text."
             }
             Setting::TranscribeModel => {
-                "The model file whisper-cli is given, such as ~/models/ggml-base.bin. Without one, auto does not offer transcribing. Enter to change."
+                "whisper-cli's model file, such as ~/models/ggml-base.bin. Without one, auto does not offer transcribing."
             }
             Setting::TranslateCommand => {
-                "A command that reads a message and prints its translation; {lang} in it is the language below. With a service, the text of encrypted rooms leaves this machine. Empty: not offered. Enter to change."
+                "Reads a message, prints it in {lang} (set below). With a service, the text of encrypted rooms leaves this machine."
             }
             Setting::TranslateLanguage => {
                 "The language messages are translated into, as your command wants it (en, German). Enter to change."
             }
             Setting::KeepNotes => {
-                "On: transcripts and translations survive a restart, in a file that holds them unencrypted. Off: they last while the app runs, and the file is removed."
+                "On: transcripts and translations survive restarts, unencrypted in a file. Off: until you quit; the file goes."
             }
             Setting::SummaryCommand => {
-                "Reads unread text, or the last N (/catchup N), and prints a summary. An online service gets encrypted text too."
+                "Your Catch up command: summarises unread text or the last N (/catchup N). An online service gets encrypted text too."
             }
             Setting::Keys => {
                 "Edit key bindings or switch presets (F1 still opens the key overview)."

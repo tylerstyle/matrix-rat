@@ -642,20 +642,62 @@ mod tests {
         insta::assert_snapshot!("settings_small_bottom", bottom);
     }
 
-    /// The summary command's hint names `/catchup N` and is whole in the two lines a
-    /// hint has, down to what an online service gets.
+    /// Every hint the settings can show is whole in the two lines it has, as ratatui
+    /// wraps it in the box at its full width: down to its last words, which are often
+    /// what leaves the machine or how a value is cleared.
     #[test]
-    fn the_summary_command_hint_is_whole_in_its_two_lines() {
+    fn every_settings_hint_is_whole_in_its_two_lines() {
         use crate::modal::{Modal, Setting, SettingsMenu};
-        let mut app = App::demo();
-        render(&mut app, 100, 30);
-        app.modal = Some(Modal::Settings(SettingsMenu::select(
-            Setting::SummaryCommand,
-            false,
-        )));
-        let shown = render(&mut app, 100, 30);
-        assert!(shown.contains("(/catchup N)"), "{shown}");
-        assert!(shown.contains("gets encrypted text too."), "{shown}");
+        // Room for the box at its full width and every row: the hint gets its two
+        // lines.
+        let (width, height) = (100, 70);
+        let mut checked = 0;
+        for show_theme_pair in [false, true] {
+            for setting in Setting::ALL {
+                let menu = SettingsMenu::select(setting, show_theme_pair);
+                if !menu.shows(setting) {
+                    continue;
+                }
+                let mut app = App::demo();
+                app.modal = Some(Modal::Settings(menu));
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| super::draw(frame, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let text = |y: u16, xs: std::ops::Range<u16>| -> String {
+                    xs.map(|x| buffer[(x, y)].symbol()).collect()
+                };
+                // The box: its top border carries the title.
+                let (top, left) = (0..height)
+                    .find_map(|y| {
+                        (0..width - 10)
+                            .find(|&x| text(y, x..x + 10) == "╭ Settings")
+                            .map(|x| (y, x))
+                    })
+                    .expect("the settings box");
+                let right = (left + 1..width)
+                    .find(|&x| buffer[(x, top)].symbol() == "╮")
+                    .expect("its right corner");
+                let bottom = (top + 1..height)
+                    .find(|&y| buffer[(left, y)].symbol() == "╰")
+                    .expect("its bottom");
+                assert_eq!(right - left + 1, 62, "the box at its full width");
+                // What is inside, row by row; the hint is at the end.
+                let inside = (top + 1..bottom)
+                    .map(|y| text(y, left + 1..right).trim().to_owned())
+                    .filter(|row| !row.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let hint = setting.hint();
+                assert!(
+                    inside.ends_with(hint),
+                    "{setting:?}: {hint}\n{}",
+                    render(&mut app, width, height)
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, Setting::ALL.len() * 2 - 2);
+        assert!(Setting::SummaryCommand.hint().contains("(/catchup N)"));
     }
 
     #[test]
