@@ -31,7 +31,7 @@ notifications and themes that follow your desktop are all there.
 | 🔐 **Private by default** | End-to-end encryption, device verification by emoji comparison, recovery key, and warnings on messages that cannot be fully trusted. See where your account is logged in and sign sessions out, check your key backup, move message keys between devices in a file, and read why a message could not be decrypted. |
 | 🖼️ **Pictures in the terminal** | Inline images and a full-window viewer: real graphics in terminals with the kitty graphics protocol, coloured blocks elsewhere. Room pictures in the list and custom emoji in the text (kitty graphics only; coloured initials and `:names:` otherwise). |
 | 💬 **Everything a chat needs** | Replies, edits, reactions, threads, polls, stickers and custom emoji, voice messages (record and play in the app, with optional local transcripts and message translations), mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
-| 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread (your other clients see that too) or everything as read, save messages for later with reminders (`b`, `B`), summarise what is unread (`/catchup`), or archive a room as Markdown (`/archive`). |
+| 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread (your other clients see that too) or everything as read, save messages for later with reminders (`b`, `B`), summarise what is unread or the last messages (`/catchup [N]`), or archive a room as Markdown (`/archive`). |
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, or `Alt-I` for the picture in the clipboard; `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
 | 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
@@ -227,7 +227,7 @@ before anything changes:
 | `/topic <text>` | changes the open room's topic, where you may |
 | `/roomname <name>` | renames the open room, where you may |
 | `/archive` | asks how far back, then writes the open room's messages to a Markdown file (text only) |
-| `/catchup` | summarises what is unread in the open room with your `summary_command`, for you alone |
+| `/catchup [N]` | summarises what is unread in the open room with your `summary_command`, for you alone; with a number from 1 to 300, its last N messages instead, read or not |
 | `/help` | shows the keys |
 
 A `<user>` is a full ID (`@name:server`), a link to them, or the display name or the part
@@ -453,7 +453,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `translate_command` | the command line that translates a message (`L`). Empty (default): translating is not offered. It gets the message's text on its standard input, the language as `{lang}` in its arguments and in the variable `MATRIX_RAT_TRANSLATE_TO`, and writes the translation to its standard output (split into words like `$EDITOR`, no shell). Also **Translate with** in the settings. See Good to know |
 | `translate_language` | the language to translate into, handed to your command as you write it (`"en"` by default; a code or a name, whatever your command understands). Also **Translate into** in the settings |
 | `keep_notes` | `false` (default): transcripts and translations are gone when matrix-rat ends. `true` keeps them in `notes.json` in the profile's data folder, **as plain text outside the encrypted store** (see Good to know). Also **Keep transcripts** in the settings |
-| `summary_command` | the program that summarises unread messages for **Catch up**: a command line of your own (split into words like `$EDITOR`, no shell). It gets the unread text on its standard input, one message a line, and must print the summary and end with exit code 0. Empty (default): catching up is not offered. Also **Summary command** in the settings. With an online service the text of encrypted rooms leaves your machine: see Good to know |
+| `summary_command` | the program that summarises unread messages (or the last ones, `/catchup N`) for **Catch up**: a command line of your own (split into words like `$EDITOR`, no shell). It gets their text on its standard input, one message a line, and must print the summary and end with exit code 0. Empty (default): catching up is not offered. Also **Summary command** in the settings. With an online service the text of encrypted rooms leaves your machine: see Good to know |
 | `mouse` | turn off to use the terminal's own text selection |
 | `images` (file only) | `"auto"`, `"halfblocks"` or `"off"` |
 | `notification_icon` (file only) | the program's icon in desktop notifications: `"color"` (default), `"outline"` (a line drawing in one colour) or `"generic"` (the desktop's own new-message icon). matrix-rat's icons are used when they are installed (the Nix package does that, see [`assets/`](assets/README.md)), else the desktop's own |
@@ -639,7 +639,13 @@ There is no command that lists or removes profiles; a profile is its two folders
   marked as read. If matrix-rat cannot find where you stopped reading, it gives the
   program nothing and asks first whether to summarise the newest messages instead (as
   many as the room counts as unread, else 50), and the result then says that these
-  were the newest, read or not. `c` copies the summary, `Esc` closes it and stops the
+  were the newest, read or not. **`/catchup N`** (N from 1 to 300) summarises the last
+  N messages of the open room instead, read or not and without asking: for when
+  scrolling through a room has marked everything as read. The same limit of 24,000
+  characters applies (the newest that fit are kept, and the result says so), and a
+  room with fewer messages gives all it has, which the result says too; it looks no
+  further back than the room's newest 600 events. Anything else
+  after `/catchup` is refused. `c` copies the summary, `Esc` closes it and stops the
   program if it still runs (it is given 3 minutes). matrix-rat has no service of its
   own for this and starts nothing until you set a command and ask for a summary.
   **With a command that sends its input to an online service, the text of the room
