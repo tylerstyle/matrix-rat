@@ -7,9 +7,11 @@
 //! like for text. Everywhere else pictures are drawn with coloured half blocks.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::io::Cursor;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits, Rgba, RgbaImage};
@@ -23,6 +25,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::config::ImageMode;
 use crate::model::{DEMO_IMAGE, ImageInfo, ImageSource, MediaRef};
 use crate::termquery;
+use crate::time::Instant;
 
 /// The largest picture drawn between messages, in cells.
 pub const MAX_COLS: u16 = 40;
@@ -706,11 +709,16 @@ impl std::fmt::Debug for ImageStore {
 
 impl ImageStore {
     pub fn new(graphics: Graphics) -> Self {
-        // Ids start somewhere arbitrary so two instances in one terminal do not clash.
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.subsec_nanos())
-            ^ std::process::id().rotate_left(16);
+        // Ids start somewhere arbitrary so two instances in one terminal do not clash: the
+        // standard library's randomly keyed hasher gives the start (the keys come from the
+        // system's random source, so two processes differ however close in time they start),
+        // and a counter keeps stores of one process apart should the hasher repeat itself.
+        static STORES: AtomicU32 = AtomicU32::new(0);
+        let seed = std::hash::RandomState::new()
+            .hash_one(STORES.fetch_add(1, Ordering::Relaxed))
+            .to_le_bytes();
+        let seed = u32::from_le_bytes([seed[0], seed[1], seed[2], seed[3]])
+            ^ u32::from_le_bytes([seed[4], seed[5], seed[6], seed[7]]);
         Self {
             graphics,
             entries: HashMap::new(),
