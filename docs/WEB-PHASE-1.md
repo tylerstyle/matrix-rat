@@ -71,10 +71,12 @@ today's code paths: the new names re-export what is used now.
    **Lint policy:** `#![warn(clippy::wildcard_enum_match_arm)]` exempts foreign enums only.
    `input::KeyCode` and `input::MouseEventKind` stand in for foreign ones (a popup ignores the
    keys it does not use, and new variants come from the terminal, not from us), so they keep
-   the exemption: the 44 `#[expect(…, reason = "foreign crossterm::…")]` keep their place with
-   the reason "input events stand in for the terminal's (crate::input)" (two of them match
-   `MouseEventKind`: `app.rs:4631`, `app/menu.rs:335`). Our other enums stay
-   matched in full. Scope: 45 files, tests included (helpers keep them short).
+   the exemption: the 41 `#[expect(…, reason = "foreign crossterm::…")]` (39 on `KeyCode`, 2 on
+   `MouseEventKind`: `app.rs:4631`, `app/menu.rs:335`) keep their place with the reason "input
+   events stand in for the terminal's (crate::input)". Our other enums stay matched in full.
+   `KeyCode` copies all of crossterm's variants (media and modifier keys included), so the
+   conversion is total and a key nobody binds still reaches `on_key` as today. Scope: 45
+   files, tests included (helpers keep them short).
 3. **Runtime.** A `crate::rt` module: `spawn`, `JoinHandle`, `JoinSet`, `sleep`, `sleep_until`,
    `timeout`, `timeout_at`, `interval`, taking `crate::time::Instant` for deadlines (so the
    three bridges at `app.rs:518`, `matrix/left.rs:326`, `matrix/rooms.rs:432` go away; there is
