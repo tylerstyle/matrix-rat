@@ -689,13 +689,13 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::Action;
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
     use crate::matrix::{MatrixEvent, MatrixHandle, RoomCategory, RoomSummary};
     use crate::model::Room;
 
@@ -838,7 +838,7 @@ mod tests {
     }
 
     fn press(app: &mut App, code: KeyCode, mods: KeyModifiers) {
-        app.on_event(Event::Key(KeyEvent::new(code, mods)));
+        app.on_event(InputEvent::Key(KeyEvent::new(code, mods)));
     }
 
     fn palette_titles(app: &mut App) -> Vec<String> {

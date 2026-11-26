@@ -773,9 +773,6 @@ impl App {
 mod tests {
     use std::sync::Arc;
 
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use matrix_sdk::ruma::events::room::MediaSource;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -784,6 +781,9 @@ mod tests {
     use super::*;
     use crate::action::Pane;
     use crate::audio::Kind;
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{MatrixEvent, MatrixHandle, SyncStatus};
     use crate::model::{Attachment, ItemRef, MediaKind, RoomKind};
 
@@ -812,8 +812,8 @@ mod tests {
         }
     }
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     /// A voice message `id`, twelve seconds long, with a waveform if `waveform`.
@@ -1173,8 +1173,8 @@ mod tests {
         let mut request = fetched(&mut app, id, &dir);
         // The viewer handles its keys itself.
         app.on_viewer_key(
-            crossterm::event::KeyCode::Char('z'),
-            crossterm::event::KeyModifiers::CONTROL,
+            crate::input::KeyCode::Char('z'),
+            crate::input::KeyModifiers::CONTROL,
         );
         assert!(app.suspend_requested);
         assert_eq!(request.control.try_recv(), Ok(Control::Stop));
@@ -1360,7 +1360,7 @@ mod tests {
         let column = (0..buffer.area.width)
             .find(|x| buffer[(*x, row)].symbol() == "▶")
             .unwrap();
-        let click = Event::Mouse(MouseEvent {
+        let click = InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,

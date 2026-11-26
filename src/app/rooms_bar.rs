@@ -69,11 +69,11 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
     use crate::action::Action;
     use crate::config::Config;
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
     use crate::matrix::{MatrixEvent, RoomCategory, RoomSummary};
     use crate::model::{Room, RoomKind};
 
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn the_key_opens_the_newest_active_room_and_then_the_next_one() {
         let mut app = app();
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('n'),
             KeyModifiers::ALT,
         )));

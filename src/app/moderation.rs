@@ -2,11 +2,10 @@
 
 use std::collections::HashSet;
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
 use super::rooms::NO_ACCOUNT;
 use crate::action::Pane;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::EditKeys;
 use crate::matrix::{ManageCmd, MatrixCmd};
 use crate::modal::{Modal, PinnedPopup, ReasonConfirmKind, ReasonConfirmPopup};
@@ -706,15 +705,15 @@ impl App {
 mod tests {
     use super::*;
     use crate::action::Action;
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{
         Change, ManageCmd, ManageEvent, MatrixEvent, MatrixHandle, MemberRole, RoomDetails,
         RoomMember,
     };
     use crate::model::{MsgKind, RoomPower, SendState};
     use crate::ui;
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -725,16 +724,16 @@ mod tests {
     const BOB: &str = "@bob:example.org";
     const CAROL: &str = "@carol:example.org";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn key_mod(code: KeyCode, mods: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, mods))
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, mods))
     }
 
-    fn click(col: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(col: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,
             row,

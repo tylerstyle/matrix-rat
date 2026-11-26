@@ -871,9 +871,6 @@ impl App {
 mod tests {
     use std::sync::Arc;
 
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use matrix_sdk::ruma::events::room::MediaSource;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -881,14 +878,17 @@ mod tests {
 
     use super::*;
     use crate::action::{Action, Pane};
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{MatrixEvent, MatrixHandle, SyncStatus};
     use crate::model::{Attachment, AudioMeta, ItemRef, MediaKind, Room, RoomKind};
     use crate::textcmd::tests::Dir;
     use crate::textcmd::{Done, Failure, Output};
     use crate::ui::hit::HitId;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn voice(id: &str) -> Message {
@@ -1536,7 +1536,7 @@ mod tests {
                 })
         };
         let click = |app: &mut App, (column, row): (u16, u16)| {
-            app.on_event(Event::Mouse(MouseEvent {
+            app.on_event(InputEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column,
                 row,
@@ -1948,7 +1948,7 @@ mod tests {
                 .collect()
         };
         let mouse = |app: &mut App, kind: MouseEventKind, (column, row): (u16, u16)| {
-            app.on_event(Event::Mouse(MouseEvent {
+            app.on_event(InputEvent::Mouse(MouseEvent {
                 kind,
                 column,
                 row,

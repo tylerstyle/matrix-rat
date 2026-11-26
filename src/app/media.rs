@@ -116,7 +116,7 @@ impl App {
         }
         if self.keymap.lookup(
             crate::keymap::Context::Timeline,
-            crossterm::event::KeyEvent::new(code, mods),
+            crate::input::KeyEvent::new(code, mods),
         ) == Some(crate::action::Action::Save)
         {
             if !self.save_attachment(false) {
@@ -126,7 +126,7 @@ impl App {
         }
         if self.keymap.lookup(
             crate::keymap::Context::Timeline,
-            crossterm::event::KeyEvent::new(code, mods),
+            crate::input::KeyEvent::new(code, mods),
         ) == Some(crate::action::Action::OpenExternal)
         {
             if !self.save_attachment_for(true, crate::action::Action::OpenExternal) {
@@ -154,12 +154,12 @@ mod tests {
 
     const KEY: &str = "mxc://example.org/cat";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,
@@ -464,7 +464,7 @@ mod tests {
         assert!(screen(&terminal).contains("cat.png: too large to show (34 MB)"));
 
         // The wheel does not scroll what is behind; a click anywhere closes.
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 40,
             row: 10,
@@ -615,14 +615,14 @@ mod tests {
 
         // Narrower than the picture: it is fitted to the pane again.
         terminal.backend_mut().resize(36, 20);
-        app.on_event(Event::Resize(36, 20));
+        app.on_event(InputEvent::Resize(36, 20));
         frame(&mut app, &mut terminal);
         let cells = picture_cells(terminal.backend().buffer());
         assert!(!cells.is_empty() && cells.len() < 320);
         assert!(cells.iter().all(|(x, _)| *x < 35));
 
         terminal.backend_mut().resize(80, 30);
-        app.on_event(Event::Resize(80, 30));
+        app.on_event(InputEvent::Resize(80, 30));
         app.open_room(1);
         frame(&mut app, &mut terminal);
         assert!(screen(&terminal).contains("nothing to see"));
@@ -697,7 +697,7 @@ mod tests {
 
         // After a resize the terminal may have forgotten it: sent again, old one freed.
         app.timeline.scroll = usize::MAX;
-        app.on_event(Event::Resize(80, 30));
+        app.on_event(InputEvent::Resize(80, 30));
         frame(&mut app, &mut terminal);
         let cells = kitty_cells(terminal.backend().buffer());
         assert!(cells[0].2.starts_with("\x1b_G"));
@@ -1302,12 +1302,12 @@ mod tests {
 
         // The room list hidden in a narrow window: nothing of it stays.
         terminal.backend_mut().resize(50, 20);
-        app.on_event(Event::Resize(50, 20));
+        app.on_event(InputEvent::Resize(50, 20));
         frame(&mut app, &mut terminal);
         assert!(kitty_cells(terminal.backend().buffer()).is_empty());
         // Back: after a resize it is sent to the terminal again.
         terminal.backend_mut().resize(80, 30);
-        app.on_event(Event::Resize(80, 30));
+        app.on_event(InputEvent::Resize(80, 30));
         frame(&mut app, &mut terminal);
         let cells = kitty_cells(terminal.backend().buffer());
         assert_eq!(cells.len(), 2);

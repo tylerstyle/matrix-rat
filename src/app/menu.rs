@@ -4,10 +4,9 @@
 //! The menu remembers what it is about by id. The thing is looked up again when an
 //! entry is run, and a menu whose thing is gone closes (`menu_follow`).
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-
 use super::App;
 use crate::action::{Action, Pane};
+use crate::input::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crate::keymap::Context;
 use crate::manage::{Click, InfoRow};
 use crate::matrix::MatrixCmd;
@@ -333,7 +332,7 @@ impl App {
         let open = self.menu_open();
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::MouseEventKind"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) if open => {
@@ -401,7 +400,7 @@ impl App {
         };
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             KeyCode::Esc | KeyCode::Left => self.modal = None,
@@ -654,26 +653,26 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::Event;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
+    use crate::input::InputEvent;
     use crate::matrix::{MatrixEvent, MatrixHandle, RoomCategory, RoomSummary};
     use crate::model::{Message, ReadBy, Reader, SendState};
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     /// Alt-↑: from the composer to the newest message, whatever the composer holds.
-    fn alt_up() -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT))
+    fn alt_up() -> InputEvent {
+        InputEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT))
     }
 
-    fn mouse(button: MouseButton, column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn mouse(button: MouseButton, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(button),
             column,
             row,
@@ -681,11 +680,11 @@ mod tests {
         })
     }
 
-    fn right(column: u16, row: u16) -> Event {
+    fn right(column: u16, row: u16) -> InputEvent {
         mouse(MouseButton::Right, column, row)
     }
 
-    fn left(column: u16, row: u16) -> Event {
+    fn left(column: u16, row: u16) -> InputEvent {
         mouse(MouseButton::Left, column, row)
     }
 
@@ -1332,8 +1331,8 @@ mod tests {
         assert!(app.modal.is_none());
     }
 
-    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind,
             column,
             row,

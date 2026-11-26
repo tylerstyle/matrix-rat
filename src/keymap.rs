@@ -3,10 +3,9 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use crate::action::{Action, Dir, Pane};
 use crate::config::{Config, KeyOverrideEdit, RawKeyConfig, RawKeyValue};
+use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Context {
@@ -1011,7 +1010,7 @@ pub fn normalize(key: KeyEvent) -> (KeyCode, KeyModifiers) {
     let mut mods = key.modifiers & (CTRL | ALT | SHIFT);
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "foreign crossterm::event::KeyCode"
+        reason = "input events stand in for the terminal's (crate::input)"
     )]
     let code = match key.code {
         Char(c) => {
@@ -1040,7 +1039,7 @@ pub fn validate_binding(context: Context, code: KeyCode, mods: KeyModifiers) -> 
     if mods == CTRL {
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             Char('i') => return Err("Ctrl-I collides with Tab in terminal input".to_owned()),
@@ -1161,7 +1160,7 @@ pub fn from_key_event(context: Context, key: KeyEvent) -> Result<(KeyCode, KeyMo
     let (code, mods) = normalize(key);
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "foreign crossterm::event::KeyCode"
+        reason = "input events stand in for the terminal's (crate::input)"
     )]
     match code {
         Char(_)
@@ -1202,7 +1201,7 @@ pub fn format_label(code: KeyCode, mods: KeyModifiers) -> String {
     }
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "foreign crossterm::event::KeyCode"
+        reason = "input events stand in for the terminal's (crate::input)"
     )]
     match code {
         KeyCode::Enter => out.push_str("Enter"),
@@ -1249,7 +1248,7 @@ pub fn format_config_key(code: KeyCode, mods: KeyModifiers) -> String {
     }
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "foreign crossterm::event::KeyCode"
+        reason = "input events stand in for the terminal's (crate::input)"
     )]
     match code {
         KeyCode::Enter => out.push_str("enter"),

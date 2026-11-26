@@ -1,11 +1,10 @@
 //! UI handlers and worker integration for User Info and Own Profile popups.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
 use super::rooms::NO_ACCOUNT;
 use crate::action::Pane;
 use crate::complete::MentionMark;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::EditKeys;
 use crate::manage::{Confirm, InfoRow};
 use crate::matrix::{
@@ -402,7 +401,7 @@ impl App {
         if let Some(chooser) = &mut popup.role_chooser {
             #[expect(
                 clippy::wildcard_enum_match_arm,
-                reason = "foreign crossterm::event::KeyCode"
+                reason = "input events stand in for the terminal's (crate::input)"
             )]
             match code {
                 KeyCode::Up => chooser.step(-1),
@@ -416,7 +415,7 @@ impl App {
         }
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             KeyCode::Up | KeyCode::BackTab => popup.step(-1, &ctx),
@@ -1260,7 +1259,6 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
 
-    use crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -1268,6 +1266,7 @@ mod tests {
     use crate::action::Action;
     use crate::complete::MentionKind;
     use crate::config::Config;
+    use crate::input::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use crate::manage::InfoRow;
     use crate::matrix::{
         ManageEvent, MatrixEvent, MatrixHandle, MemberRole, NotifyLevel, RoomCategory, RoomDetails,
@@ -1315,12 +1314,12 @@ mod tests {
         }
     }
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,
@@ -1966,7 +1965,7 @@ mod tests {
         assert!(checked_display_name(&too_long[1..]).is_ok());
 
         // Clear and set valid display name.
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
         )));
@@ -2102,7 +2101,7 @@ mod tests {
             result: Ok(Box::new(updated_details)),
         }));
         app.on_event(key(KeyCode::Enter));
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
         )));

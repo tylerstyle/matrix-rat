@@ -1,9 +1,8 @@
 //! Command palette integration on `App`: opening, input, execution, and tests.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
 use crate::action::Action;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::modal::{Modal, Setting, SettingsMenu};
 use crate::model::{MsgKind, RoomKind, SendState};
@@ -365,29 +364,29 @@ mod tests {
     use super::*;
     use crate::action::Pane;
     use crate::app::{ComposeMode, ui};
-    use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+    use crate::input::{InputEvent, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(crate::input::KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn key_mod(code: KeyCode, mods: KeyModifiers) -> Event {
-        Event::Key(crossterm::event::KeyEvent::new(code, mods))
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> InputEvent {
+        InputEvent::Key(crate::input::KeyEvent::new(code, mods))
     }
 
     /// Alt-↑: from the composer to the newest message, whatever the composer holds.
-    fn alt_up() -> Event {
+    fn alt_up() -> InputEvent {
         key_mod(KeyCode::Up, KeyModifiers::ALT)
     }
 
-    fn ctrl_p() -> Event {
+    fn ctrl_p() -> InputEvent {
         key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL)
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,
@@ -752,13 +751,13 @@ mod tests {
 
         // Paste wide query longer than popup width and verify redraw + Ctrl-U reset work.
         let long_query = "日本語".repeat(30);
-        app.on_event(Event::Paste(long_query));
+        app.on_event(InputEvent::Paste(long_query));
         redraw(&mut app, &mut terminal);
         app.on_event(key_mod(KeyCode::Char('u'), KeyModifiers::CONTROL));
         redraw(&mut app, &mut terminal);
 
         // Filter to the wide room and jump to it.
-        app.on_event(Event::Paste("日本語".into()));
+        app.on_event(InputEvent::Paste("日本語".into()));
         redraw(&mut app, &mut terminal);
         app.on_event(key(KeyCode::Enter));
         assert!(app.modal.is_none());
@@ -768,7 +767,7 @@ mod tests {
         let tl_scroll = app.timeline.scroll;
         app.on_event(ctrl_p());
         redraw(&mut app, &mut terminal);
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 40,
             row: 15,
@@ -806,7 +805,7 @@ mod tests {
 
         // Paste multiline text and click inside the rendered query row.
         app.on_event(ctrl('u'));
-        app.on_event(Event::Paste("theme\nsecond".into()));
+        app.on_event(InputEvent::Paste("theme\nsecond".into()));
         redraw(&mut app, &mut terminal);
         let (col, row) = find(&terminal, "theme");
         app.on_event(click(col + 2, row)); // th|eme

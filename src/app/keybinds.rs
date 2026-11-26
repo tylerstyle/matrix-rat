@@ -1,9 +1,8 @@
 //! Key-bindings editor modal interaction and config persistence.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use super::App;
 use crate::action::Action;
+use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 use crate::keymap::{
     self, Context, Editor, EditorButton, EditorStage, Keymap, Preset, format_label,
     persist_overrides,
@@ -330,23 +329,23 @@ mod tests {
     use super::*;
     use crate::action::Pane;
     use crate::config::Config;
+    use crate::input::{InputEvent, MouseButton, MouseEvent, MouseEventKind};
     use crate::modal::LoginForm;
     use crate::ui;
-    use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn key_mod(code: KeyCode, mods: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, mods))
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, mods))
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,
@@ -354,8 +353,8 @@ mod tests {
         })
     }
 
-    fn wheel(down: bool, column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn wheel(down: bool, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: if down {
                 MouseEventKind::ScrollDown
             } else {

@@ -9,13 +9,13 @@
 
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::oneshot;
 
 use super::App;
 use crate::catchup::{self, NoCommand, Outcome};
 use crate::collect::{Cut, SUMMARY_MESSAGES, Span};
 use crate::files;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::matrix::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, MatrixCmd, UnreadText};
 use crate::modal::Modal;
 use crate::model::MsgKind;
@@ -755,7 +755,7 @@ impl App {
                 let page = popup.page.saturating_sub(1).max(1) as isize;
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => self.close_collect(),
@@ -833,19 +833,19 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyEvent};
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::{Action, Pane};
     use crate::app::ui;
+    use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::{LAST_EVENTS, MatrixHandle};
     use crate::model::{Room, RoomKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn app() -> (App, UnboundedReceiver<MatrixCmd>) {

@@ -2,9 +2,8 @@
 //! something first needs them, and the sticker picker. (Custom emoji are offered in the
 //! emoji picker too; see `App::pick_emoji`.)
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::{App, ComposeMode};
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::EditKeys;
 use crate::matrix::{EmoteCatalog, MatrixCmd};
 use crate::modal::{Modal, StickerPicker};
@@ -214,15 +213,15 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::app::{Config, MatrixHandle};
+    use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::{CustomEmoji, EmotePack, MatrixEvent, StickerItem};
-    use crossterm::event::{Event, KeyEvent};
     use std::path::PathBuf;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     const ROOM: &str = "!room:example.org";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn typed(app: &mut App, text: &str) {

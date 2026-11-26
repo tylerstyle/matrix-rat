@@ -289,13 +289,13 @@ impl App {
 mod tests {
     use std::time::Duration;
 
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::Action;
     use crate::app::ComposeMode;
     use crate::complete::MentionMark;
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
     use crate::matrix::{MatrixCmd, MatrixHandle};
     use crate::model::{ItemRef, Message, Room, RoomKind};
 
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn the_key_works_in_the_composer_only() {
-        let alt_v = || Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        let alt_v = || InputEvent::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
         // What it does depends on $VISUAL / $EDITOR of the machine running the test: a
         // request, or the toast that says how to set one. Either way something happens.
         let (mut app, _commands) = connected();

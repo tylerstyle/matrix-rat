@@ -1,9 +1,8 @@
 //! The threads popup: the threads of a room, newest activity first, as the homeserver
 //! lists them a page at a time, and those the room's loaded messages know of.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::EditKeys;
 use crate::matrix::{MatrixCmd, ThreadPage};
 use crate::modal::{Modal, ThreadsLoad, ThreadsPopup};
@@ -346,20 +345,20 @@ fn refilter(popup: &mut ThreadsPopup) {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::{Action, Pane};
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{DetachedTimeline, MatrixEvent, MatrixHandle, SyncStatus};
     use crate::model::{Message, Room, RoomKind, ThreadSummary};
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn type_text(app: &mut App, text: &str) {
@@ -390,7 +389,7 @@ mod tests {
         let before = &line[..line.find(needle).unwrap()];
         // The backend prints a quote before each row.
         let column = crate::text::width(before) as u16 - 1;
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: column + 1,
             row: row as u16,
@@ -700,7 +699,7 @@ mod tests {
         assert!(app.modal.is_some());
 
         app.on_matrix(page(&app, vec![thread(3, "cid", "three")], Some("t3")));
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 40,
             row: 12,
@@ -726,7 +725,7 @@ mod tests {
         type_text(&mut app, "lunch");
         assert_eq!(roots(&app), ["$root1", "$root3"]);
         assert!(screen(&mut app, &mut terminal).contains("2 matching"));
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
         )));
@@ -736,11 +735,11 @@ mod tests {
         assert!(roots(&app).is_empty());
         assert!(screen(&mut app, &mut terminal).contains("No matching threads."));
         // A paste goes into the filter too.
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
         )));
-        app.on_event(Event::Paste("BOB".into()));
+        app.on_event(InputEvent::Paste("BOB".into()));
         assert_eq!(roots(&app), ["$root2"]);
         assert_eq!(popup(&app).selected, 0);
         // Nothing was asked of the server for it, also where it has more.

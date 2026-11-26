@@ -1,8 +1,7 @@
 //! Poll creation, editing, voting, and `/poll` command handling.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::{App, ComposeMode, Pane};
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::{EditKeys, EditOutcome};
 use crate::matrix::MatrixCmd;
 use crate::modal::{Modal, PollFormPopup, PollFormSlot, PollVotePopup};

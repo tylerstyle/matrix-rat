@@ -154,19 +154,19 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use matrix_sdk::ruma::OwnedMxcUri;
     use matrix_sdk::ruma::events::room::MediaSource;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::{Action, Pane};
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
     use crate::matrix::{MatrixEvent, MatrixHandle};
     use crate::modal::Modal;
     use crate::model::{ItemRef, Message, Room, RoomKind};
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn file_message(name: &str, size: u64) -> Message {
@@ -328,7 +328,7 @@ mod tests {
         }
         app.on_event(key(KeyCode::Enter));
         assert!(matches!(&app.modal, Some(Modal::Settings(m)) if m.editing.is_some()));
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
         )));
@@ -340,11 +340,11 @@ mod tests {
         assert!(matches!(&app.modal, Some(Modal::Settings(m)) if m.editing.is_none()));
         assert_eq!(app.download_dir, "~/Downloads");
         app.on_event(key(KeyCode::Enter));
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
         )));
-        app.on_event(Event::Paste("~/inbox\nsecond line".to_owned()));
+        app.on_event(InputEvent::Paste("~/inbox\nsecond line".to_owned()));
         app.on_event(key(KeyCode::Enter));
         assert_eq!(app.download_dir, "~/inbox");
         assert!(app.download_dir().ends_with("inbox"));

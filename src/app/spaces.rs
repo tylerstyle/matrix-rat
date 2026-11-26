@@ -745,9 +745,6 @@ const DEMO_OUTSIDE: (&str, &str) = ("!burrow:example.org", "burrow");
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -755,6 +752,9 @@ mod tests {
     use super::*;
     use crate::action::{Action, Pane};
     use crate::app::ui;
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::manage::{Click, NewPopup, PreviewButton, Stage};
     use crate::matrix::{
         ManageEvent, MatrixCmd, MatrixEvent, MatrixHandle, PreviewJoinRule, PreviewMembership,
@@ -767,8 +767,8 @@ mod tests {
     const CHEESE: &str = "!cheese:example.org";
     const OUTSIDE: &str = "!outside:example.org";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn type_text(app: &mut App, text: &str) {
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn creating_a_space_selects_it_once_the_list_has_it() {
         let (mut app, _terminal, mut commands) = connected();
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('n'),
             KeyModifiers::CONTROL,
         )));
@@ -1128,7 +1128,7 @@ mod tests {
         assert!(matches!(app.modal, Some(Modal::Palette(_))));
         screen(&mut app, &mut terminal);
         sent(&mut commands);
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 1,
             row: 1,
@@ -1279,7 +1279,7 @@ mod tests {
         app.on_event(key(KeyCode::Up));
         assert_eq!(info(&app).current(), Some(InfoRow::Child(0)));
         assert!(!info(&app).typing_blind());
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Delete,
             KeyModifiers::CONTROL,
         )));
@@ -1670,7 +1670,7 @@ mod tests {
         app.select_space(Some(0));
         let text = screen(&mut app, &mut terminal);
         let (column, row) = find(&text, "Work");
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Right),
             column,
             row,

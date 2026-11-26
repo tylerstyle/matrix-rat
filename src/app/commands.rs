@@ -831,13 +831,13 @@ mod tests {
     }
 
     mod in_the_app {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         use tokio::sync::mpsc::UnboundedReceiver;
 
         use crate::action::{Action, Pane};
         use crate::app::App;
         use crate::complete::Member;
         use crate::config::Config;
+        use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
         use crate::manage::{Confirm, InfoRow, Stage};
         use crate::matrix::{
             ManageCmd, MatrixCmd, MatrixEvent, MatrixHandle, RoomCategory, RoomSummary,
@@ -942,8 +942,8 @@ mod tests {
             app.toast.as_ref().map_or("", |(text, _)| text.as_str())
         }
 
-        fn key(code: KeyCode) -> Event {
-            Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+        fn key(code: KeyCode) -> InputEvent {
+            InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
         }
 
         #[test]

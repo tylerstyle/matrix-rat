@@ -1,9 +1,8 @@
 //! The app's side of the notification keywords popup: opening it, typing and removing,
 //! and the worker's answers. The demo has no server and works on a list of its own.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::keywords::{KeywordsPopup, Pending, check_keyword};
 use crate::lineedit::EditKeys;
 use crate::matrix::{KeywordsCmd, KeywordsEvent, MatrixCmd, shown_keywords};
@@ -224,9 +223,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -234,17 +230,20 @@ mod tests {
     use crate::action::Action;
     use crate::app::App;
     use crate::config::Config;
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::keywords::KeywordsPopup;
     use crate::matrix::{KeywordsCmd, KeywordsEvent, MatrixCmd, MatrixEvent, MatrixHandle};
     use crate::modal::{Modal, Setting};
     use crate::ui;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn click(col: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(col: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,
             row,
@@ -386,7 +385,7 @@ mod tests {
     #[test]
     fn a_keyword_is_added_after_the_checks_and_the_list_follows() {
         let (mut app, mut terminal, mut commands) = with_list(&["lunch"]);
-        let clear = Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let clear = InputEvent::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         let long = "x".repeat(65);
         for (typed, error) in [
             ("", "Type a word to add."),
@@ -396,7 +395,7 @@ mod tests {
             (long.as_str(), "A keyword can have at most 64 characters."),
         ] {
             app.on_event(clear.clone());
-            app.on_event(Event::Paste(typed.to_owned()));
+            app.on_event(InputEvent::Paste(typed.to_owned()));
             app.on_event(key(KeyCode::Enter));
             find(&screen(&mut app, &mut terminal), error);
         }
@@ -406,7 +405,7 @@ mod tests {
         assert!(popup(&app).error.is_none());
 
         // Control characters never get into the field; the rest is trimmed.
-        app.on_event(Event::Paste("  dep\u{1b}[2Jloy  ".to_owned()));
+        app.on_event(InputEvent::Paste("  dep\u{1b}[2Jloy  ".to_owned()));
         app.on_event(key(KeyCode::Enter));
         let asked = sent(&mut commands);
         let [KeywordsCmd::Add { request, keyword }] = &asked[..] else {

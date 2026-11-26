@@ -8,11 +8,10 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
 use super::global_search::find_target_message;
 use crate::action::Action;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::EditKeys;
 use crate::matrix::{MatrixCmd, Notice, SAVED_MAX_FETCH, SavedCmd, SavedEvent};
 use crate::modal::Modal;
@@ -463,7 +462,7 @@ impl App {
             let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
             #[expect(
                 clippy::wildcard_enum_match_arm,
-                reason = "foreign crossterm::event::KeyCode"
+                reason = "input events stand in for the terminal's (crate::input)"
             )]
             match code {
                 KeyCode::Esc => self.saved_escape(),
@@ -846,9 +845,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -856,6 +852,9 @@ mod tests {
     use super::*;
     use crate::action::Pane;
     use crate::config::Config;
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{MatrixEvent, MatrixHandle};
     use crate::model::{ItemRef, Room, RoomKind};
     use crate::notify::NotifyMode;
@@ -865,12 +864,12 @@ mod tests {
 
     const ROOM: &str = "!garden:example.org";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn click(col: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(col: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,
             row,
@@ -1409,7 +1408,7 @@ mod tests {
     fn a_time_can_be_pasted_and_a_click_chooses() {
         let (mut app, mut terminal, _commands) = connected();
         app.perform(Action::RemindMe);
-        app.on_event(Event::Paste("2h\nmore".into()));
+        app.on_event(InputEvent::Paste("2h\nmore".into()));
         assert_eq!(form(&app).input.as_str(), "2h");
         app.on_event(key(KeyCode::Enter));
         assert_eq!(

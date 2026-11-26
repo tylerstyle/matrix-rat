@@ -557,14 +557,13 @@ impl App {
 mod tests {
     use std::path::PathBuf;
 
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
-
     use super::*;
     use crate::action::{Action, Pane};
     use crate::app::ComposeMode;
     use crate::audio::recorder::{Env, NoRecorder, Seen, Tool};
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::modal::Modal;
     use crate::ui::hit::HitId;
 
@@ -610,12 +609,12 @@ mod tests {
         request.control.try_recv().ok()
     }
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind,
             column,
             row,
@@ -647,8 +646,8 @@ mod tests {
         format!("{}", terminal.backend())
     }
 
-    fn alt_m() -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))
+    fn alt_m() -> InputEvent {
+        InputEvent::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))
     }
 
     /// A folder of programs that are never run, removed at the end.
@@ -904,7 +903,7 @@ mod tests {
         type Way = fn(&mut App);
         let ways: [(&str, Way); 4] = [
             ("another room", |app| app.open_room(1)),
-            ("the window", |app| app.on_event(Event::FocusLost)),
+            ("the window", |app| app.on_event(InputEvent::FocusLost)),
             ("suspend", |app| app.perform(Action::Suspend)),
             ("a tick elsewhere", |app| {
                 app.active = 1;
@@ -1653,7 +1652,7 @@ mod tests {
     fn clicking_play_on_a_waiting_voice_note_plays_and_stops_it_without_removing_the_file() {
         use crate::audio::{Control, End, Kind, NoPlayer, PlayerEvent, PlayerUpdate};
 
-        let alt_l = || Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
+        let alt_l = || InputEvent::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
         let down = MouseEventKind::Down(MouseButton::Left);
 
         let dir = Bin::new("preview", &[]);
@@ -1761,7 +1760,7 @@ mod tests {
     fn multiple_waiting_voice_notes_can_be_played_removed_and_sent_independently() {
         use crate::audio::{Control, Kind};
 
-        let alt_l = || Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
+        let alt_l = || InputEvent::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
         let dir = Bin::new("multi", &[]);
         let mut app = offered();
         app.set_test_player(Kind::Other, dir.0.clone());

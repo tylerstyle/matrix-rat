@@ -98,19 +98,19 @@ mod tests {
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
 
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::Action;
     use crate::app::ComposeMode;
     use crate::clipboard::Ran;
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
     use crate::matrix::{MatrixCmd, MatrixEvent, MatrixHandle};
     use crate::model::{ItemRef, Message, Room, RoomKind};
     use crate::upload::tests::Scratch;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn remote(id: &str, body: &str) -> Message {
@@ -262,7 +262,7 @@ mod tests {
         paste(&mut app, &dir.0);
         let path = attached(&app);
         app.composer.insert("caption");
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL,
         )));
@@ -294,7 +294,7 @@ mod tests {
         // Taken off while another send is out: it goes when that one is answered.
         let notes = dir.file("notes.txt", b"hello");
         app.open_room(1);
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         app.on_event(key(KeyCode::Enter));
         assert_eq!(sent_files(&mut commands), std::slice::from_ref(&notes));
         app.open_room(0);
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn the_key_works_in_the_composer_only() {
-        let alt_i = || Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
+        let alt_i = || InputEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
         // What it does depends on the desktop of the machine running the test: a
         // request, or the toast that says there is no clipboard. Nothing is run.
         let (mut app, _commands) = connected();

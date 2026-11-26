@@ -49,10 +49,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
-};
+use crossterm::event::EventStream;
 use futures::StreamExt;
 use ratatui::layout::Rect;
 use tokio::signal::unix::{SignalKind, signal};
@@ -62,6 +59,10 @@ use crate::action::{Action, Dir, Pane};
 use crate::composer::Composer;
 use crate::config::Config;
 use crate::format::Outgoing;
+use crate::input::{
+    InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use crate::keymap::{self, Context, Keymap};
 use crate::lineedit::{EditKeys, EditOutcome, LineEdit};
 use crate::matrix::{
@@ -3547,7 +3548,7 @@ impl App {
                 }
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Tab | KeyCode::Down => form.next(),
@@ -3572,7 +3573,7 @@ impl App {
             {
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => self.close_modal(),
@@ -3587,7 +3588,7 @@ impl App {
                 let page = picker.rows.max(1) as isize;
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => self.modal = None,
@@ -3618,7 +3619,7 @@ impl App {
             {
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => menu.editing = None,
@@ -3673,7 +3674,7 @@ impl App {
                 let setting = menu.current();
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc | KeyCode::F(2) => self.modal = None,
@@ -4287,19 +4288,19 @@ impl App {
 
     // ----- input ---------------------------------------------------------------------
 
-    pub fn on_event(&mut self, event: Event) {
+    pub fn on_event(&mut self, event: InputEvent) {
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
+            InputEvent::Key(key) if key.kind != KeyEventKind::Release => {
                 self.on_key(key);
                 self.update_typing();
                 self.note_draft();
             }
-            Event::Mouse(mouse) => {
+            InputEvent::Mouse(mouse) => {
                 self.on_mouse(mouse);
                 self.update_typing();
                 self.note_draft();
             }
-            Event::Paste(mut text) => {
+            InputEvent::Paste(mut text) => {
                 // A secret is taken as it is and our copy of it wiped; everything
                 // else goes the usual way.
                 if self.paste_secret(&text) {
@@ -4310,23 +4311,24 @@ impl App {
                 self.update_typing();
                 self.note_draft();
             }
-            Event::Resize(..) => {
+            InputEvent::Resize(..) => {
                 // A resized terminal may have dropped the pictures it was sent.
                 self.images.forget_encoded();
                 self.dirty = true;
             }
-            Event::FocusGained => {
+            InputEvent::FocusGained => {
                 self.window_focused = true;
                 self.found.focus_reports = true;
                 self.dirty = true;
             }
-            Event::FocusLost => {
+            InputEvent::FocusLost => {
                 // Nobody watches the microphone from another window.
                 self.stop_recording();
                 self.window_focused = false;
                 self.found.focus_reports = true;
             }
-            _ => {}
+            // A key coming up: only presses (and their repeats) count.
+            InputEvent::Key(_) => {}
         }
     }
 
@@ -4490,7 +4492,7 @@ impl App {
         let mut handled = true;
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             KeyCode::Char(c) if !ctrl && !alt => self.type_char(c),
@@ -4630,7 +4632,7 @@ impl App {
         }
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::MouseEventKind"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -5597,7 +5599,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             }
             tokio::select! {
                 event = events.next() => match event {
-                    Some(Ok(event)) => app.on_event(event),
+                    Some(Ok(event)) => app.on_event(event.into()),
                     Some(Err(err)) => return Err(err.into()),
                     None => break,
                 },
@@ -5674,21 +5676,21 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn key_mod(code: KeyCode, mods: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, mods))
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, mods))
     }
 
     /// Alt-↑: from the composer to the newest message, whatever the composer holds.
-    fn alt_up() -> Event {
+    fn alt_up() -> InputEvent {
         key_mod(KeyCode::Up, KeyModifiers::ALT)
     }
 
-    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind,
             column,
             row,
@@ -5696,7 +5698,7 @@ mod tests {
         })
     }
 
-    fn click(column: u16, row: u16) -> Event {
+    fn click(column: u16, row: u16) -> InputEvent {
         mouse(MouseEventKind::Down(MouseButton::Left), column, row)
     }
 
@@ -5791,6 +5793,23 @@ mod tests {
         app.on_event(key(KeyCode::Down));
         assert_eq!(app.focus, Pane::Composer);
         assert_eq!(app.timeline.selected, None);
+    }
+
+    #[test]
+    fn key_releases_are_ignored_and_repeats_count() {
+        let (mut app, _) = drawn();
+        assert_eq!(app.focus, Pane::Composer);
+        let with_kind = |c, kind| {
+            InputEvent::Key(KeyEvent {
+                kind,
+                ..KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+            })
+        };
+        app.on_event(with_kind('a', KeyEventKind::Press));
+        app.on_event(with_kind('a', KeyEventKind::Release));
+        app.on_event(with_kind('b', KeyEventKind::Repeat));
+        app.on_event(with_kind('b', KeyEventKind::Release));
+        assert_eq!(app.composer.text(), "ab");
     }
 
     #[test]
@@ -6565,7 +6584,7 @@ mod tests {
         // Nothing lands in a draft nobody sees.
         type_text(&mut app, "bo");
         assert_eq!(app.sidebar.filter.as_str(), "bo");
-        app.on_event(Event::Paste("b".into()));
+        app.on_event(InputEvent::Paste("b".into()));
         assert_eq!(app.sidebar.filter.as_str(), "bob");
         assert!(app.composer.is_empty());
         assert!(app.attachments().is_empty());
@@ -6978,7 +6997,7 @@ mod tests {
         assert_eq!(app.focus, Pane::Sidebar);
     }
 
-    fn alt(c: char) -> Event {
+    fn alt(c: char) -> InputEvent {
         key_mod(KeyCode::Char(c), KeyModifiers::ALT)
     }
 
@@ -7727,11 +7746,11 @@ mod tests {
         assert_eq!(marked_read(&mut commands), 1);
 
         // Not while the terminal window is in the background.
-        app.on_event(Event::FocusLost);
+        app.on_event(InputEvent::FocusLost);
         app.on_matrix(timeline(&app, many(52)));
         frame(&mut app, &mut terminal);
         assert_eq!(marked_read(&mut commands), 0);
-        app.on_event(Event::FocusGained);
+        app.on_event(InputEvent::FocusGained);
         frame(&mut app, &mut terminal);
         assert_eq!(marked_read(&mut commands), 1);
 
@@ -8775,7 +8794,7 @@ mod tests {
         assert!(app.pending_notices.is_empty());
         // Another room, or the same room with the window in the background.
         app.on_matrix(notice("!b"));
-        app.on_event(Event::FocusLost);
+        app.on_event(InputEvent::FocusLost);
         app.on_matrix(notice("!a"));
         let (notices, mode, preview) = app.take_notices();
         assert_eq!(
@@ -8844,7 +8863,7 @@ mod tests {
         assert_eq!(shown, NOTICE_MOST);
         // Not while scrolled back or behind the help: then it is not on screen.
         app.shown_notices.clear();
-        app.on_event(Event::FocusGained);
+        app.on_event(InputEvent::FocusGained);
         app.help_open = true;
         app.on_matrix(notice("!a"));
         assert_eq!(app.take_notices().0.len(), 1);
@@ -9013,7 +9032,7 @@ mod tests {
         assert_eq!(app.theme.name, first);
 
         app.on_event(alt_up());
-        app.on_event(Event::Paste("a\r\nb".into()));
+        app.on_event(InputEvent::Paste("a\r\nb".into()));
         assert_eq!(app.focus, Pane::Composer);
         assert_eq!(app.composer.text(), "a\nb");
     }

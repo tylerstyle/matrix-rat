@@ -3,10 +3,9 @@
 use std::fmt;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use super::{App, TimelineState};
 use crate::action::{Action, Pane};
+use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 use crate::keymap::Context;
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::search::{query_terms, window_snippet};
@@ -644,8 +643,8 @@ pub(super) fn find_target_message(
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::MatrixHandle;
-    use crossterm::event::{Event, KeyEvent};
     use tokio::sync::mpsc::error::TryRecvError;
 
     fn test_app_with_matrix() -> (
@@ -682,8 +681,8 @@ mod tests {
         (app, rx, handle)
     }
 
-    fn key_event(code: KeyCode, mods: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, mods))
+    fn key_event(code: KeyCode, mods: KeyModifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, mods))
     }
 
     #[test]
@@ -972,7 +971,7 @@ mod tests {
 
     #[test]
     fn toggle_backdrop_wheel_hit_click_and_demo_search() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use crate::input::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
 
         let (mut app, mut rx, _handle) = test_app_with_matrix();
@@ -988,7 +987,7 @@ mod tests {
         app.hits.clear();
         app.hits
             .add(Rect::new(0, 0, 100, 30), crate::ui::hit::HitId::Backdrop);
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 1,
             row: 1,
@@ -1019,7 +1018,7 @@ mod tests {
         if let Some(Modal::GlobalSearch(s)) = &mut demo.modal {
             s.rows = 5;
         }
-        demo.on_event(Event::Mouse(MouseEvent {
+        demo.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 50,
             row: 15,
@@ -1037,7 +1036,7 @@ mod tests {
             Rect::new(10, 10, 50, 2),
             crate::ui::hit::HitId::GlobalSearch(0),
         );
-        demo.on_event(Event::Mouse(MouseEvent {
+        demo.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 15,
             row: 10,
@@ -1048,7 +1047,7 @@ mod tests {
 
     #[test]
     fn a_click_on_a_drawn_card_opens_its_hit_and_one_on_the_query_opens_none() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use crate::input::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -1084,7 +1083,7 @@ mod tests {
             format!("{}", terminal.backend())
         };
         let click = |app: &mut App, row: usize| {
-            app.on_event(Event::Mouse(MouseEvent {
+            app.on_event(InputEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 20,
                 row: row as u16,
@@ -1316,7 +1315,7 @@ mod tests {
 
     #[test]
     fn pending_jump_cancelled_on_selection_typing_scroll_and_popup_while_opening() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use crate::input::{MouseButton, MouseEvent, MouseEventKind};
 
         let start_opening =
             |app: &mut App, rx: &mut tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>| {
@@ -1407,7 +1406,7 @@ mod tests {
                 ratatui::layout::Rect::new(25, 5, 40, 1),
                 crate::ui::hit::HitId::Message(0),
             );
-            app.on_event(Event::Mouse(MouseEvent {
+            app.on_event(InputEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 30,
                 row: 5,
@@ -1442,7 +1441,7 @@ mod tests {
                 ratatui::layout::Rect::new(20, 0, 60, 20),
                 crate::ui::hit::HitId::Pane(Pane::Timeline),
             );
-            app.on_event(Event::Mouse(MouseEvent {
+            app.on_event(InputEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollUp,
                 column: 30,
                 row: 10,
