@@ -58,6 +58,12 @@ notify-rust = { version = "4.19.0", default-features = false, features = ["z"] }
 zbus = { version = "6.3.0", default-features = false, features = ["default-rt", "proxy"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }
 
+# The browser has no `std::time` clock: `crate::time` takes its types from here.
+[target.'cfg(target_family = "wasm")'.dependencies]
+web-time = "1"
+# The browser's clock for chrono's `Local`/`Utc::now`.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "wasmbind"] }
+
 [dev-dependencies]
 insta = "1"
 

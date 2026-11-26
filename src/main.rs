@@ -59,6 +59,7 @@ mod testbus;
 mod text;
 mod textcmd;
 mod theme;
+mod time;
 mod ui;
 mod upload;
 mod verify;

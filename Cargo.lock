@@ -2915,6 +2915,7 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "url",
+ "web-time",
  "zbus",
  "zeroize",
 ]
