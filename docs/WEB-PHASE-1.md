@@ -3,7 +3,7 @@
 Part of 1.2.0 ([`PLAN.md`](PLAN.md) §6.2). Written 2026-11-26 from an inventory of the code at
 `8b5ee15`, revised the same night after matrix-agy's review
 (`.claude/agy/review-web-phase1-design.md`, Task 46: two blockers, two high, four medium
-findings, all taken in). Phase 1 changes nothing a user of the terminal app can see; at its end
+findings, all taken in; Task 47 re-review: OK, its four implementation notes taken in too). Phase 1 changes nothing a user of the terminal app can see; at its end
 the core of matrix-rat builds for the browser (`wasm32-unknown-unknown`) and a web shell can be
 added in phase 2.
 
@@ -72,7 +72,8 @@ today's code paths: the new names re-export what is used now.
    `input::KeyCode` and `input::MouseEventKind` stand in for foreign ones (a popup ignores the
    keys it does not use, and new variants come from the terminal, not from us), so they keep
    the exemption: the 44 `#[expect(…, reason = "foreign crossterm::…")]` keep their place with
-   the reason "key codes stand in for the terminal's (crate::input)". Our other enums stay
+   the reason "input events stand in for the terminal's (crate::input)" (two of them match
+   `MouseEventKind`: `app.rs:4631`, `app/menu.rs:335`). Our other enums stay
    matched in full. Scope: 45 files, tests included (helpers keep them short).
 3. **Runtime.** A `crate::rt` module: `spawn`, `JoinHandle`, `JoinSet`, `sleep`, `sleep_until`,
    `timeout`, `timeout_at`, `interval`, taking `crate::time::Instant` for deadlines (so the
@@ -106,16 +107,24 @@ today's code paths: the new names re-export what is used now.
    private mode). On native `FsStorage` keeps exactly today's behaviour: `config_dir` shared
    (0644) vs `data_dir` per profile (0600, directories 0700), tmp + rename, `toml_edit`
    keeping comments. The logout clean-up of `saved.json` and `notes.json` moves from the worker
-   (`matrix/session.rs:365-371`) to `App`, on the logout event, through `Storage::remove`; the
-   stores and the search index stay the worker's.
+   (`matrix/session.rs:365-371`) to `App`, through `Storage::remove`, **only for an explicit
+   logout**: today `SessionEnd::Expired` and `SessionEnd::LoggedOut` both end in
+   `MatrixEvent::LoginRequired` (`matrix/mod.rs:1567-1597`), and an expired session keeps
+   `saved.json` (`session.rs:363-364`), so the worker gets a distinct logged-out event or `App`
+   clears them when it asked for the logout. The stores and the search index stay the worker's.
 5. **Pure types apart from runners.** Before anything is cfg'd out, the modules that mix data
    with programs or files are split, so step 7 becomes mechanical: `notify` (`NotifyMode`,
-   `AppIcon`, `NotifyIcon`, `DueReminder`, `IconCache` data vs the D-Bus/OSC senders), `audio`
+   `AppIcon`, `NotifyIcon`, `DueReminder` vs the D-Bus/OSC senders; `IconCache`, an on-disk
+   0600 PNG cache that `App` only holds to clear and to hand back with the notices, moves to the
+   terminal shell instead of being split), `audio`
    (`TempAudio`, `Control`, `End`, `PlayerEvent`, `PlayerUpdate`, `Reported`, `Request`, record
    types, `clock`/`length`/`bars`/`played`/`WAVE_BARS` vs players, recorders, temp files),
    `doctor` (report, popup, `Found` vs the probes), `matrix/keyring` (`SecretStoreMode` vs the
    Secret Service), `files` (`LARGE_FILE`, `safe_name`, `opens_safely` vs the writers),
-   `upload` (`Chosen`, `too_large` vs file opening), `images` (`Pixels`, `Decoded`, `Graphics`,
+   `upload` (`Chosen`, `too_large`, `command_argument`, `dropped_files` vs file opening;
+   `App` also calls `upload::check`, `command_files`, `complete`, `prepare` at `app/attach.rs:261,
+   375,427,500`, `app/paste_picture.rs:66`, `app.rs:5294-5333`, which go through step 4's
+   boundary or get browser stubs in 7b), `images` (`Pixels`, `Decoded`, `Graphics`,
    `Protocol`, the size constants, `human_size`, `fit_cells`, decoding vs ratatui-image,
    termquery and the encoder thread), `notes`/`textcmd` (`Command`, `Step`, `Failure`,
    `BadCommand`, `MAX_OUTPUT` vs running), `catchup` (data vs running), `editor` (`Request` vs
@@ -149,8 +158,8 @@ today's code paths: the new names re-export what is used now.
      `indexeddb`; ui: `js`), tokio with `sync`/`macros`, chrono `wasmbind`, gloo-timers,
      `wasm-bindgen-futures`, and `tracing-subscriber` without `env-filter`. `clap`, `etcetera`,
      `shlex`, crossterm, ratatui-image, notify, notify-rust, zbus, libc, signal-hook,
-     tracing-appender and tokio's rt-multi-thread/process/net/signal/io-std/io-util are native
-     only. getrandom 0.3/0.4 need `getrandom_backend="wasm_js"` (`.cargo/config.toml` under
+     tracing-appender and tokio's rt-multi-thread/time/process/net/signal/io-std/io-util are
+     native only. getrandom 0.3/0.4 need `getrandom_backend="wasm_js"` (`.cargo/config.toml` under
      `[target.wasm32-unknown-unknown]`) and 0.2 its `js` feature. The gate:
      `cargo check --lib --target wasm32-unknown-unknown`, in `scripts/check.sh` (nixpkgs' rustc
      has the browser std; `cargo check` needs no linker) and in CI.
