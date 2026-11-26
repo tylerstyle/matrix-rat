@@ -155,6 +155,7 @@ Rust 1.96 or newer.
 | 2026-11-23 | Several messages of one person in a row: a muted `·` in the indent on the first line of each further message, under the header's `●` (1.1.0, §6.1). |
 | 2026-11-26 | matrix-rat in the browser and as a phone app (a PWA, iOS and Android) with ratzilla: the main goal of 1.2.0 (§6.2). A test build (phase 0) runs beside 1.1.0 first and decides go or no-go. |
 | 2026-11-26 | The web app is served by GitHub Pages from this repository; only the app's files are there, all data stays on the device. |
+| 2026-11-26 | The test build is hosted locally first (hpserver; desktop by ssh tunnel, phones on the Wi-Fi); notifications while the web app is closed wait (phase 4). |
 | 2026-11-26 | No unlock prompt for the web app ("Almost no one is doing that to any other messenger they use"), as no lock screen for the terminal app. |
 
 ## 6. What comes next
@@ -242,7 +243,7 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
 - **Data:** the phone talks to the homeservers directly; GitHub Pages serves only the app's
   files (built by CI from release tags, checksums published). Fonts bundled, no analytics, a
   strict content security policy. No unlock prompt (decided).
-- **Notifications while closed** (open): a web app can only be woken by its browser's push
+- **Notifications while closed** (later: "Keep notifications for later", the user, 2026-11-26): a web app can only be woken by its browser's push
   service (Apple, Google, Mozilla) with keys of its own; that needs a small gateway from the
   homeserver's push to Web Push (Sygnal can do it, or a few dozen lines), reachable from the
   internet. ntfy's built-in Matrix gateway hands the raw push to an ntfy topic for UnifiedPush
