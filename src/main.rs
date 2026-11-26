@@ -30,6 +30,7 @@ mod focus;
 mod format;
 mod highlight;
 mod images;
+mod input;
 mod keymap;
 mod keywords;
 mod lineedit;
