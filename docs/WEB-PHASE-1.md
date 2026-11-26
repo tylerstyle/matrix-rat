@@ -1,15 +1,20 @@
 # Web app, phase 1: the core without the terminal and the OS
 
 Part of 1.2.0 ([`PLAN.md`](PLAN.md) §6.2). Written 2026-11-26 from an inventory of the code at
-`8b5ee15`. Phase 1 changes nothing a user of the terminal app can see; at its end the core of
-matrix-rat builds for the browser (`wasm32-unknown-unknown`) and a web shell can be added in
-phase 2.
+`8b5ee15`, revised the same night after matrix-agy's review
+(`.claude/agy/review-web-phase1-design.md`, Task 46: two blockers, two high, four medium
+findings, all taken in). Phase 1 changes nothing a user of the terminal app can see; at its end
+the core of matrix-rat builds for the browser (`wasm32-unknown-unknown`) and a web shell can be
+added in phase 2.
 
 ## Where the code stands
 
-- `src/ui/**` and the pure state modules (`model.rs`, `composer.rs`, `modal.rs`, `menu.rs`,
-  `palette.rs`) call nothing platform-specific. `ui::draw(frame, &mut app)` works with any
-  ratatui backend, ratzilla's too.
+- The drawing (`ui::draw(frame, &mut app)`) works with any ratatui backend, ratzilla's too, and
+  most of `src/ui/**` and the state modules (`composer.rs`, `modal.rs`, `palette.rs`) call
+  nothing platform-specific. **Not yet free:** `ui/image.rs` (ratatui-image), and `ui/doctor.rs`,
+  `ui/attach.rs`, `ui/audio.rs`, `ui/composer.rs`, `ui/status.rs`, `ui/collect.rs`, `model.rs`,
+  `menu.rs`, which import pure types or helpers from modules that also run programs or touch
+  files (`doctor`, `upload`, `audio`, `files`, `notes` → `textcmd`).
 - `app::run` (`app.rs:5380-5668`) is already a shell around `App`: `App` asks for effects
   (`take_editor_request`, `take_paste_request`, `take_audio_start`, `take_record_start`,
   `take_note_starts`, `take_summary_start`, `pending_copy`, `take_notices_with_icons`,
@@ -19,20 +24,26 @@ phase 2.
   `matrix::spawn_with` with `tokio::spawn`; the client is built in one place
   (`matrix/session.rs:222-279`).
 
-What ties the rest to the terminal, the OS and tokio (non-test lines):
+What ties the rest to the terminal, the OS and tokio (non-test unless said):
 
 | Tie | Size | Where |
 |---|---|---|
-| crossterm key/mouse types in app logic | 25 files; key types 664, mouse 29 | `app.rs`, 21 `app/*.rs`, `keymap.rs` (~117), `lineedit.rs` |
+| crossterm key/mouse types | 28 non-test + 17 test-only files; key types 664 lines | `app.rs`, 22 `app/*.rs`, `keymap.rs` (~117), `lineedit.rs`, `doctor.rs`, `terminal.rs`, `termquery.rs` |
 | `std::time::Instant` (panics in the browser) | ~95 `now()`, 211 lines | app fields, `app/*`, `images.rs`, `notify.rs`, `highlight.rs` (inside the draw), matrix |
-| `SystemTime::now`, `process::id` | 17 | `images.rs:710-713` (core), temp-file names (native) |
-| tokio spawn / `JoinSet` | ~74 sites, ~63 in `src/matrix` | worker, `app.rs` loop |
+| `SystemTime::now`, `process::id` | 25 | core: `images.rs:710-713`, `matrix/notify.rs:172`; the rest temp-file names (native) |
+| tokio spawn / `JoinSet` | ~74 sites, ~63 in `src/matrix`; 12 worker `JoinSet`s | worker, `app.rs` loop |
 | tokio time | ~128 | matrix ~76, app ~13 |
-| `spawn_blocking` | 18 | 13 in matrix (media, collect, devices, people, search, session, upload) |
+| `spawn_blocking` | 16 | 13 in matrix (3 of `media.rs`'s 5 decode pictures), `app.rs` ×2, `audio/record.rs` |
+| `+ Send` bounds besides spawn | — | `matrix/verify.rs:972` (`SasStream`), `manage.rs:921,1463-1514`, `paging.rs:29`, `rooms.rs:274,280,555,570,608`, `verify.rs:668` |
 | tokio process/net/signal, libc, zbus, notify-rust, signal-hook | — | audio, textcmd, catchup, agent, notify, portal, keyring, watch, termquery, clipboard |
+| `std::os::unix`, `libc`, `etcetera` outside those | — | `matrix/devices.rs:10,784,846,864`, `upload.rs:6,76`, `files.rs:116,127,169,177,229`, `paths.rs:6,62`, `audio.rs:221,275`, `notes.rs:20`, `saved.rs:559,580`, `matrix/session.rs:4,283` |
+| native-only error types | — | `logsafe.rs:165-194,302-310` (tokio `JoinError`/`Elapsed`, zbus, notify, `KeyringError`) |
+| SDK features the browser lacks | — | `matrix/session.rs` (sqlite store, `LocalServerBuilder` from `sso-login`, search index), `matrix/search.rs:210` (`experimental-search`) |
 | files | — | config, themes, notes, saved, session, stores, downloads, uploads, logs, lock |
-| `App` calling the OS itself | ~35 sites | `open_in_browser` (4), `focus::raise_window`, `flush_images` → stdout, `save_setting` (~25 callers), `fs::metadata` (3), upload checks, `Theme::available` (`read_dir`), OS probes in `App::new_in_scheme` |
-| ratatui-image | `images.rs`, `ui/image.rs` | pulls in `rustix` (termios) unconditionally: likely does not build for wasm |
+| `App` calling the OS itself | ~35 sites | `open_in_browser` (4), `focus::raise_window`, `flush_images` → stdout, `save_setting` (~25 callers), `fs::metadata` (3), upload checks, `Theme::available` (`read_dir`), PATH probes at start **and when settings change** (`audio::choose_here`, `recorder::choose_here`, `catchup::choose_here`, transcriber), `audio::remove_leftovers` (`app/playback.rs:309`) |
+| the worker deleting app data | — | `matrix/session.rs:365-371` removes `saved.json` and `notes.json` at logout |
+| ratatui-image | `images.rs`, `ui/image.rs` | `rustix` (stdio, termios, fs) under `cfg(not(windows))`, not optional: cannot build for the browser |
+| default features | `Cargo.toml` | ratatui's default pulls crossterm; matrix-sdk's pulls sqlite and aws-lc; matrix-sdk-ui's pulls aws-lc |
 
 ## The plan, in steps
 
@@ -41,65 +52,117 @@ same (unit tests green, `scripts/check.sh` green, the server tests where the wor
 touched), and is reviewed by matrix-agy before the next starts. The native build keeps exactly
 today's code paths: the new names re-export what is used now.
 
-1. **Time.** A `crate::time` module re-exporting `web_time::{Instant, SystemTime}` (already in
-   the tree through ruma; on native it is `std::time` itself, so nothing changes). All
-   `std::time::Instant`/`SystemTime` uses in the core go through it; tokio's `Instant` bridges
-   (`app.rs:518`, `matrix/left.rs:326`, `matrix/rooms.rs:432`) keep working because on native
-   the type is the same. chrono gets `wasmbind` for the browser only. `ImageStore::new`'s
-   clock-and-pid name (`images.rs:710-713`) becomes a counter plus random bytes.
+1. **Time.** `web-time = "1"` as a direct dependency (it is in the tree through ruma) and a
+   `crate::time` module with the one `Instant` and `SystemTime` of the crate: `std::time`'s on
+   native (so nothing changes), `web_time`'s in the browser. All core uses go through it,
+   `matrix/notify.rs:172` included. chrono gets `wasmbind` for the browser only.
+   `ImageStore::new`'s clock-and-pid name (`images.rs:710-713`) becomes an `AtomicU32` counter
+   plus `RandomState::new().hash_one(…)`, as `audio/temp.rs:142` already does (no `rand`).
 2. **Input events.** A `crate::input` module with our own `KeyCode`, `KeyModifiers`,
-   `KeyEvent` (with `kind`), `MouseEvent`, `MouseEventKind`, `MouseButton` and an
-   `InputEvent { Key, Mouse, Paste, Resize, Focus }`, **named and shaped like crossterm's
-   where we use them**, so most of the change is the `use` lines. `From<crossterm::event::Event>`
-   lives at the terminal edge only (`terminal.rs`/the shell); phase 2 adds the ratzilla one.
-   `keymap.rs`'s tables, parser, labels and `validate_binding` (Ctrl-I = Tab etc.: terminal
-   rules, kept for the terminal) move to the new types. `App::on_event` takes `InputEvent`.
-   Tests use the new types (helpers keep them short).
+   `KeyEvent` (with `KeyEventKind` Press/Repeat/Release; `KeyEventState` is unused and left
+   out), `MouseEvent`, `MouseEventKind`, `MouseButton` and an
+   `InputEvent { Key, Mouse, Paste, Resize, Focus }`, **named and shaped like crossterm's where
+   we use them**, so most of the change is the `use` lines. `KeyModifiers` is a small `u8`
+   newtype with `NONE/SHIFT/CONTROL/ALT/SUPER/HYPER/META`, `|`, `&`, `contains`, `intersects`,
+   `is_empty` (no `bitflags`). `From<crossterm::event::Event>` lives at the terminal edge only;
+   phase 2 adds the ratzilla one. Release events are dropped exactly where they are today.
+   `keymap.rs`'s tables, parser, labels and `validate_binding` (Ctrl-I = Tab etc., terminal
+   rules kept for the terminal) move to the new types.
+   **Lint policy:** `#![warn(clippy::wildcard_enum_match_arm)]` exempts foreign enums only.
+   `input::KeyCode` and `input::MouseEventKind` stand in for foreign ones (a popup ignores the
+   keys it does not use, and new variants come from the terminal, not from us), so they keep
+   the exemption: the 44 `#[expect(…, reason = "foreign crossterm::…")]` keep their place with
+   the reason "key codes stand in for the terminal's (crate::input)". Our other enums stay
+   matched in full. Scope: 45 files, tests included (helpers keep them short).
 3. **Runtime.** A `crate::rt` module: `spawn`, `JoinHandle`, `JoinSet`, `sleep`, `sleep_until`,
-   `timeout`, `timeout_at`, `interval`, `Instant` (tokio's). On native these are re-exports of
-   tokio. In the browser: matrix-sdk-common's `executor::spawn` (`spawn_local`), gloo timers,
-   and a small `JoinSet` substitute (`FuturesUnordered` + abort handles). Bounds use
-   matrix-sdk's `SendOutsideWasm`, so the worker future may be `!Send` in the browser while it
-   stays `Send` on native. `spawn_blocking` stays native-only: the 13 worker sites (file
-   writes, archive, key export, search pruning) are file work that phase 2 replaces anyway;
+   `timeout`, `timeout_at`, `interval`, taking `crate::time::Instant` for deadlines (so the
+   three bridges at `app.rs:518`, `matrix/left.rs:326`, `matrix/rooms.rs:432` go away; there is
+   no second `Instant`). On native: tokio, converting the deadline with `.into()`. In the
+   browser: `wasm_bindgen_futures::spawn_local` and gloo timers (deadline → remaining duration,
+   clamped to `u32::MAX` ms as `matrix-sdk-common/src/sleep.rs` does), and two things of our
+   own, because the obvious substitutes are wrong:
+   - **`JoinHandle::is_finished`:** matrix-sdk-common's browser handle answers
+     `abort_handle.is_aborted()`, so a task that ended normally never reads as finished;
+     `matrix/paging.rs:44` would wedge paging and `matrix/media.rs:274` would keep finished
+     handles. Ours sets a flag from a guard inside the spawned task.
+   - **`JoinSet`:** tokio's runs a task as soon as it is spawned, and our 12 worker sets only
+     call `spawn`, `try_join_next` and `abort_all`, never `join_next`. A `FuturesUnordered` would
+     leave the tasks unpolled. Ours spawns each task at once, keeps its handle and flag,
+     `try_join_next` reaps finished ones without waiting, and dropping the set aborts the rest,
+     as tokio's does.
+   Bounds use matrix-sdk's `SendOutsideWasm`: on `spawn` and on the other `+ Send` bounds
+   listed above (`SasStream`: `sas.changes()` is `!Send` in the browser). `spawn_blocking`
+   stays native-only: the worker sites are file work and picture decoding that phase 2 handles;
    they get a cfg'd path, not a shim.
 4. **Effects out of `App`.** What `App` does to the OS itself becomes a request the shell
    carries out, as the existing `take_*` pattern does: opening a URL, raising the window,
-   writing image clean-up bytes (`flush_images`), the OS probes at start (truecolor, NO_COLOR,
-   players, recorder, transcriber, summary command, ssh) become a `Facts`/`Capabilities` value
-   the shell hands to `App::new_in_scheme`. Persistence (config, themes list, notes, saved) goes
-   through a small synchronous `Storage` trait (`read`, `write`, `remove`, `list`) held by
-   `App`: on native the current code (0700 directories, tmp + rename) moves behind it; in the
-   browser it will be `localStorage` (these files are small). File checks for uploads stay in
-   `App` but behind the same native boundary.
-5. **The shell.** `app::run` moves to `src/shell/terminal.rs` (with `terminal.rs`,
+   writing image clean-up bytes (`flush_images`), removing audio leftovers. The OS probes, at
+   start and when a setting changes them, go through a small `Probes` seam (truecolor,
+   NO_COLOR, ssh, player, recorder, transcriber, translator, summary command); in the browser
+   it answers "not available". Persistence goes through a synchronous `Storage` trait held by
+   `App`, with typed keys (`Config`, `Theme(name)`, `Notes`, `Saved`) and operations `read`,
+   `write`, `remove`, `list`, `set_aside` (for `saved.rs`'s rename of a damaged or other
+   account's file), all returning `Result` (the browser's `localStorage` can refuse: quota,
+   private mode). On native `FsStorage` keeps exactly today's behaviour: `config_dir` shared
+   (0644) vs `data_dir` per profile (0600, directories 0700), tmp + rename, `toml_edit`
+   keeping comments. The logout clean-up of `saved.json` and `notes.json` moves from the worker
+   (`matrix/session.rs:365-371`) to `App`, on the logout event, through `Storage::remove`; the
+   stores and the search index stay the worker's.
+5. **Pure types apart from runners.** Before anything is cfg'd out, the modules that mix data
+   with programs or files are split, so step 7 becomes mechanical: `notify` (`NotifyMode`,
+   `AppIcon`, `NotifyIcon`, `DueReminder`, `IconCache` data vs the D-Bus/OSC senders), `audio`
+   (`TempAudio`, `Control`, `End`, `PlayerEvent`, `PlayerUpdate`, `Reported`, `Request`, record
+   types, `clock`/`length`/`bars`/`played`/`WAVE_BARS` vs players, recorders, temp files),
+   `doctor` (report, popup, `Found` vs the probes), `matrix/keyring` (`SecretStoreMode` vs the
+   Secret Service), `files` (`LARGE_FILE`, `safe_name`, `opens_safely` vs the writers),
+   `upload` (`Chosen`, `too_large` vs file opening), `images` (`Pixels`, `Decoded`, `Graphics`,
+   `Protocol`, the size constants, `human_size`, `fit_cells`, decoding vs ratatui-image,
+   termquery and the encoder thread), `notes`/`textcmd` (`Command`, `Step`, `Failure`,
+   `BadCommand`, `MAX_OUTPUT` vs running), `catchup` (data vs running), `editor` (`Request` vs
+   running), `clipboard` (data vs `wl-paste`/`xclip`), `paths` (the profile's names vs
+   `etcetera` and permissions).
+6. **The shell.** `app::run` moves to `src/shell/terminal.rs` (with `terminal.rs`,
    `termquery.rs`, the editor/suspend handling, signals, the theme/portal watchers, the
    desktop notifications and the audio/note/summary runners), leaving `App` with a
    platform-free surface: `on_input`, `on_matrix`, `on_tick`, the `take_*` effects,
    `ui::draw`, `after_draw`.
-6. **Native-only modules behind `cfg`.** `agent/**`, `matrix/agent.rs`, `audio/*` children,
-   `textcmd`, `catchup` runner, `notify` (desktop/terminal), `portal`, `keyring` (zbus),
-   `watch`, `lock`, `focus`, `clipboard` (picture paste), `editor`, `termquery`, `logging`,
-   `doctor`, the CLI in `main.rs`: compiled only for `not(target_family = "wasm")`. Their
-   counterparts in the browser are phase 2's.
-7. **Library + target-specific dependencies, and the gate.** The modules move from `main.rs`
-   into `src/lib.rs` (the binary becomes a thin `main.rs` using it). `Cargo.toml` splits
-   dependencies by target: native keeps today's set (matrix-sdk with `bundled-sqlite`,
-   `sso-login`, `socks`, `experimental-search`; crossterm; ratatui-image; tokio with
-   rt-multi-thread/process/net/signal/io-std; notify; notify-rust; zbus; libc; signal-hook;
-   tracing-appender); the browser gets matrix-sdk with `js` + `indexeddb`, matrix-sdk-ui with
-   `js`, tokio with `sync`/`macros` only, chrono `wasmbind`, gloo-timers. Images in the
-   browser: a placeholder ("[picture]", click opens it) until phase 4. The gate:
-   `cargo check --lib --target wasm32-unknown-unknown` passes, in `scripts/check.sh` and in CI.
+7. **Native-only behind `cfg`, as a library, with the gate.** Two parts, each reviewed:
+   - **7a, on native only:** the modules move from `main.rs` into `src/lib.rs`, which takes the
+     crate-level attributes (`recursion_limit`, the two test-only allows, the
+     `wildcard_enum_match_arm` warning; `main.rs` keeps them for itself); `main.rs` becomes the
+     CLI using the library, and its ~650 lines of tests move into the library modules they
+     reach into (no `#[doc(hidden)] pub` shims).
+   - **7b, the browser:** compiled only for `not(target_family = "wasm")`: `agent/**`,
+     `matrix/agent.rs`, the runner halves from step 5, `portal`, `watch`, `lock`, `focus`,
+     `termquery`, `logging`, the CLI; `logsafe.rs`'s arms for native-only error types (a
+     browser arm for `crate::rt`'s timeout error); in `matrix/devices.rs` the key export and
+     import. Browser stubs, so `matrix/mod.rs` still compiles: `matrix/session.rs` (shared
+     `ReauthKind`, `ReauthTarget`, `ActiveSession`, `RestoreOutcome`, `ReauthOutcome`; phase 2
+     fills in login and the IndexedDB stores), `matrix/search.rs` (shared `SearchHit`; no local
+     index), `images`/`ui/image.rs` (a "[picture]" placeholder; a click opens it, phase 4 draws
+     it). `Cargo.toml` by target: shared `ratatui` with `default-features = false` and
+     `all-widgets`, `layout-cache`, `macros`, `underline-color` (+ `crossterm` on native);
+     native keeps today's matrix-sdk features (`bundled-sqlite`, `sso-login`, `socks`, `qrcode`
+     (unused in `src/`, kept for parity, its own decision later), `experimental-search`) and
+     matrix-sdk-ui's default; the browser gets matrix-sdk and matrix-sdk-ui with
+     `default-features = false` (`e2e-encryption`, `automatic-room-key-forwarding`, `js`,
+     `indexeddb`; ui: `js`), tokio with `sync`/`macros`, chrono `wasmbind`, gloo-timers,
+     `wasm-bindgen-futures`, and `tracing-subscriber` without `env-filter`. `clap`, `etcetera`,
+     `shlex`, crossterm, ratatui-image, notify, notify-rust, zbus, libc, signal-hook,
+     tracing-appender and tokio's rt-multi-thread/process/net/signal/io-std/io-util are native
+     only. getrandom 0.3/0.4 need `getrandom_backend="wasm_js"` (`.cargo/config.toml` under
+     `[target.wasm32-unknown-unknown]`) and 0.2 its `js` feature. The gate:
+     `cargo check --lib --target wasm32-unknown-unknown`, in `scripts/check.sh` (nixpkgs' rustc
+     has the browser std; `cargo check` needs no linker) and in CI.
 
 ## Not in phase 1
 
 - The worker protocol's file paths (`OutgoingFile{path}`, `SaveFile{dir}`, `FetchAudio{dir}`,
   `AudioFetched(TempAudio)`, `SetOwnAvatar{path}`, key export/import, archive export): they
-  compile in the browser (std's path types exist) and are given byte/Blob variants in phase 2
+  compile in the browser (std's path types exist) and get byte/Blob variants in phase 2
   together with the browser's file picker and downloads.
-- Login by OAuth redirect, the IndexedDB stores and session restore in the browser (phase 2,
-  from the phase 0 test build).
+- Login by OAuth redirect, the IndexedDB stores, session restore and the `localStorage`
+  `Storage` in the browser (phase 2, from the phase 0 test build), and the ratzilla shell.
 - The search index (`experimental-search`, tantivy): native only; the browser goes without
   local search at first.
 - A crate split into a workspace: not needed for the gate; can come later if `cfg` gets
@@ -107,12 +170,11 @@ today's code paths: the new names re-export what is used now.
 
 ## Open questions
 
-1. **Merging into `main`.** Phase 1 does not change behaviour, but it touches 100+ files. If
-   each reviewed step is merged into `main` soon, the 1.1.0 work (the dot in
-   `ui/timeline.rs`, notify 9 in `watch.rs`, the mobile layout) builds on it and 1.1.0 ships
-   with it; if `web-seams` waits until 1.1.0 is out, it has to be brought up to date with
-   1.1.0 (conflicts in the same files). For the user to decide.
-2. **ratatui-image in the browser:** confirm with `cargo check` that `rustix` breaks it; if so,
-   images stay native-only (step 7) unless a feature of ratatui-image avoids it.
-3. **What the phase 0 test build finds** about matrix-sdk 0.19.1 in the browser (features,
+1. **Merging into `main`** (for the user). matrix-agy's view, which I share: nothing of
+   `web-seams` goes into `main` before phase 0 says "go" (the browser indirections should not
+   ship in 1.1.0 if phase 0 fails). After "go": if 1.1.0 holds only notify 9 and the dot, ship
+   1.1.0 first and merge the steps right after (they barely meet `watch.rs` and
+   `ui/timeline.rs`); if the `--mobile` work (keymap, `app/*`, `ui/*`) goes into 1.1.0 after
+   "go", merge the reviewed steps first, so it builds on `crate::input` and `Probes`.
+2. **What the phase 0 test build finds** about matrix-sdk 0.19.1 in the browser (features,
    `!Send` futures, IndexedDB) may change steps 3 and 7.
