@@ -1,7 +1,6 @@
 //! Moderation actions, pinned messages popup, and message forwarding on `App`.
 
 use std::collections::HashSet;
-use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -14,6 +13,7 @@ use crate::modal::{Modal, PinnedPopup, ReasonConfirmKind, ReasonConfirmPopup};
 use crate::model::{ItemRef, Message, MsgKind, PinnedMessage, ReadBy, Room, SendState};
 use crate::palette::{ForwardTarget, Palette};
 use crate::text::sanitize_line;
+use crate::time::Instant;
 
 impl App {
     pub(super) fn can_redact_message(room: &Room, message: &Message) -> bool {

@@ -71,7 +71,7 @@ fn run(mut command: Command, capture: bool) -> Option<Vec<u8>> {
             out
         })
     });
-    let started = std::time::Instant::now();
+    let started = crate::time::Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -231,7 +231,7 @@ mod tests {
     fn a_program_that_never_ends_is_given_up_on() {
         let mut slow = Command::new("sleep");
         slow.arg("30");
-        let started = std::time::Instant::now();
+        let started = crate::time::Instant::now();
         assert!(run(slow, true).is_none());
         assert!(started.elapsed() < PATIENCE + Duration::from_secs(2));
         let mut quick = Command::new("sh");
@@ -244,7 +244,7 @@ mod tests {
         // the output is not wanted.
         let mut lingering = Command::new("sh");
         lingering.args(["-c", "sleep 30 & exit 0"]);
-        let started = std::time::Instant::now();
+        let started = crate::time::Instant::now();
         assert_eq!(run(lingering, false), Some(Vec::new()));
         assert!(started.elapsed() < Duration::from_secs(2));
     }

@@ -776,8 +776,8 @@ impl Staging {
     fn create(parent: &Path) -> std::io::Result<Self> {
         let mut last = None;
         for attempt in 0..16u32 {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let nanos = crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .map_or(0, |since| since.subsec_nanos());
             let dir = parent.join(format!(
                 ".matrix-rat-keys-{}-{nanos:09}-{attempt}",

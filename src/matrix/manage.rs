@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use matrix_sdk::notification_settings::{NotificationSettings, RoomNotificationMode};
 use matrix_sdk::ruma::api::client::membership::get_member_events;
@@ -33,6 +33,7 @@ use super::MatrixEvent;
 use super::spaces::{SpaceDetails, SpaceEdit};
 use crate::model::RoomPower;
 use crate::text::{sanitize, sanitize_line, truncate};
+use crate::time::Instant;
 
 /// Above this many members, the list is asked for again at most this often while the
 /// room info is open: the request is a big one.

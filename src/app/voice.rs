@@ -10,7 +10,7 @@
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -23,6 +23,7 @@ use crate::audio::record::{
 use crate::audio::{self, TempAudio, recorder};
 use crate::keymap::Context;
 use crate::matrix::VoiceMeta;
+use crate::time::Instant;
 use crate::ui::Mic;
 
 /// A press on the microphone shorter than this is a click: the recording runs on until
@@ -658,8 +659,8 @@ mod tests {
             let dir = std::env::temp_dir().join(format!(
                 "matrix-rat-voice-{name}-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                crate::time::SystemTime::now()
+                    .duration_since(crate::time::UNIX_EPOCH)
                     .unwrap()
                     .as_nanos()
             ));

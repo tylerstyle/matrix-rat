@@ -46,7 +46,7 @@ pub use voice::{RecordingView, TakePhase};
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{
@@ -77,6 +77,7 @@ use crate::model::{
 use crate::paths::Paths;
 use crate::terminal::{self, TerminalGuard};
 use crate::theme::{ColorScheme, DEFAULT_THEME, Theme, truecolor_supported};
+use crate::time::Instant;
 use crate::ui::hit::{Button, HitId, HitMap, InputTarget};
 use crate::ui::{self, SIDEBAR_MIN, max_sidebar};
 
@@ -416,11 +417,11 @@ pub struct App {
     /// Monotonic counter for active/debounced user directory searches.
     pub(super) user_search_gen: u64,
     /// Deadline timer start for debounced user directory lookups in `NewPopup`.
-    pub(super) user_search_debounce: Option<std::time::Instant>,
+    pub(super) user_search_debounce: Option<crate::time::Instant>,
     /// Monotonic counter for active/debounced public room directory searches.
     pub(super) dir_search_gen: u64,
     /// Deadline timer start for debounced public room directory searches in `NewPopup`.
-    pub(super) dir_search_debounce: Option<std::time::Instant>,
+    pub(super) dir_search_debounce: Option<crate::time::Instant>,
     /// The account's sessions and the key backup, for their popups.
     pub devices: crate::devices::DevicesState,
     /// The notification keywords popup's watch and requests (and the demo's list).
@@ -8363,8 +8364,8 @@ mod tests {
 
     #[test]
     fn paired_themes_follow_scheme_changes_and_f3_updates_active_slot() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
@@ -8427,8 +8428,8 @@ mod tests {
 
     #[test]
     fn unpaired_theme_ignores_live_scheme_changes() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(

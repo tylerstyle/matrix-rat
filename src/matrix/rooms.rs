@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures::{StreamExt, pin_mut};
@@ -31,6 +31,7 @@ use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
 use crate::format::Outgoing;
 use crate::logsafe;
 use crate::model::ItemRef;
+use crate::time::Instant;
 
 /// Recently used timelines stay alive so going back to a room is instant and keeps the
 /// history that was already loaded.
@@ -2257,7 +2258,7 @@ impl UnreadFlags {
         let task = tokio::spawn(async move {
             let mut sent: std::collections::HashMap<
                 matrix_sdk::ruma::OwnedRoomId,
-                (bool, std::time::Instant),
+                (bool, crate::time::Instant),
             > = Default::default();
             while let Some((room, unread)) = wanted.recv().await {
                 sent.retain(|_, (_, at)| at.elapsed() < Self::TRUST_SENT);
@@ -2278,7 +2279,7 @@ impl UnreadFlags {
                     .await
                 {
                     Ok(_) => {
-                        let at = std::time::Instant::now();
+                        let at = crate::time::Instant::now();
                         sent.insert(room.room_id().to_owned(), (unread, at));
                     }
                     Err(err) => {
@@ -3696,7 +3697,7 @@ mod tests {
 
         // `drop_idle` drops unshown room B while keeping restored room A.
         timelines
-            .drop_idle(std::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
+            .drop_idle(crate::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
         let cached: Vec<&str> = timelines.cache.iter().map(|c| c.key.as_str()).collect();
         assert_eq!(cached, [room_a]);
         drop(server);
@@ -4196,7 +4197,7 @@ mod tests {
         timelines.on_opened(opened).await;
         assert!(timelines.before_jump.is_some());
         timelines
-            .drop_idle(std::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
+            .drop_idle(crate::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
         assert!(timelines.before_jump.is_none());
 
         // ...and drops it immediately when the UI paginates the jump's generation.
@@ -4848,7 +4849,7 @@ mod tests {
                 generation: 1,
                 kind: super::StreamKind::Live,
             }),
-            at: std::time::Instant::now(),
+            at: crate::time::Instant::now(),
         });
         timelines
             .handle(MatrixCmd::CancelOpenEvent { generation: 2 })

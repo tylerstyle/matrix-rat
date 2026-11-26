@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use matrix_sdk::Client;
 use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEventContent};
@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 
 use super::{MatrixEvent, UserMatch};
 use crate::text::{is_blank, sanitize_line};
+use crate::time::Instant;
 
 pub(super) type IgnoredSet = Arc<HashSet<OwnedUserId>>;
 
@@ -361,8 +362,8 @@ mod tests {
         tokio::sync::mpsc::UnboundedReceiver<MatrixEvent>,
         String,
     ) {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
@@ -515,8 +516,8 @@ mod tests {
         let outcome = tokio::spawn(async move {
         // Create a public room (so continuwuity indexes members in `/user_directory/search`)
         // and invite bob.
-        let tag = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let tag = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
         h1.send(MatrixCmd::Manage(ManageCmd::Create {

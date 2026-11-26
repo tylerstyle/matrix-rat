@@ -128,8 +128,8 @@ impl TempFile {
     /// put swap and backup files next to the file they edit.
     pub fn create(dir: &Path, text: &str) -> io::Result<Self> {
         Self::create_in(dir, text).or_else(|_| {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let nanos = crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .map_or(0, |since| since.subsec_nanos());
             let own = std::env::temp_dir().join(format!(
                 "matrix-rat-compose-{}-{nanos:x}",
@@ -156,8 +156,8 @@ impl TempFile {
             fs::create_dir_all(dir)?;
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
         }
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .map_or(0, |since| since.subsec_nanos());
         let mut last = io::Error::from(io::ErrorKind::AlreadyExists);
         for _ in 0..8 {
@@ -281,8 +281,8 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "matrix-rat-test-{name}-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                crate::time::SystemTime::now()
+                    .duration_since(crate::time::UNIX_EPOCH)
                     .unwrap()
                     .as_nanos()
             ));

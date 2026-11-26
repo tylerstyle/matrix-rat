@@ -9,7 +9,7 @@
 //! is through.
 
 use std::collections::{BTreeSet, HashMap};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::App;
 use crate::action::Pane;
@@ -17,6 +17,7 @@ use crate::matrix::MatrixCmd;
 #[cfg(test)]
 use crate::model::RoomKind;
 use crate::model::{ItemRef, Message, MsgKind};
+use crate::time::Instant;
 
 /// Identity of the line among the open room's messages.
 const LINE_ID: &str = "unread-line";

@@ -893,7 +893,7 @@ mod tests {
         )
         .await;
         let client = fake::client(&server).await;
-        let started = std::time::Instant::now();
+        let started = crate::time::Instant::now();
         let named = names_within(
             &client,
             &RoomId::parse(SPACE).unwrap(),

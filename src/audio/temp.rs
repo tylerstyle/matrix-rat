@@ -136,8 +136,8 @@ fn random_hex() -> String {
         .map(|()| u64::from_ne_bytes(bytes))
         .unwrap_or_else(|_| {
             use std::hash::BuildHasher;
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let nanos = crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos());
             std::hash::RandomState::new().hash_one((nanos, std::process::id()))
         });

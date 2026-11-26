@@ -13,7 +13,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -29,6 +29,7 @@ use crate::keymap::Context;
 use crate::matrix::MatrixCmd;
 use crate::model::{AudioMeta, Message, Room};
 use crate::palette::AudioCaps;
+use crate::time::Instant;
 
 /// The sound there is, and what plays it.
 pub struct AudioState {
@@ -794,8 +795,8 @@ mod tests {
             // Short: a socket's path in it must fit a socket's address.
             let path = std::env::temp_dir().join(format!(
                 "mr-{name}-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                crate::time::SystemTime::now()
+                    .duration_since(crate::time::UNIX_EPOCH)
                     .unwrap()
                     .as_nanos()
                     % 1_000_000_000

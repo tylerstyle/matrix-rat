@@ -2094,7 +2094,7 @@ impl Worker {
             // A room's timeline left unused for long goes (see `rooms::IDLE_TIMELINE`).
             let timelines_idle = timelines.idle_due();
             tokio::select! {
-                () = timelines_idle => timelines.drop_idle(std::time::Instant::now()),
+                () = timelines_idle => timelines.drop_idle(crate::time::Instant::now()),
                 Some(diffs) = space_changes.next() => {
                     for diff in diffs {
                         diff.apply(&mut space_filters);

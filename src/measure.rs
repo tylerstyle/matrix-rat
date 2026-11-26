@@ -8,7 +8,9 @@
 //!
 //! What they print are sizes and times, never anything of an account.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::time::Instant;
 
 /// Bytes the allocator has handed out and not taken back, over all its arenas: glibc's
 /// own count, chunk headers and rounding included, plus what it mapped for large

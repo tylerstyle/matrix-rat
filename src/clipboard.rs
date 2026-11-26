@@ -20,11 +20,12 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use image::ImageFormat;
 
 use crate::images::human_size;
+use crate::time::Instant;
 use crate::upload::FALLBACK_LIMIT;
 
 /// How long the whole reading may take, both runs of the tool together. A clipboard

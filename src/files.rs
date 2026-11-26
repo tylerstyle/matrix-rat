@@ -119,8 +119,8 @@ pub fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBu
     // The data goes into a new hidden file first (never an existing one).
     let mut partial = None;
     for attempt in 0..100u32 {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         let path = dir.join(format!(
             ".matrix-rat-{}-{nanos}-{attempt}.part",
@@ -169,8 +169,8 @@ impl NewFile {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(dir)?;
         for attempt in 0..100u32 {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let nanos = crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .map_or(0, |d| d.subsec_nanos());
             let partial = dir.join(format!(
                 ".matrix-rat-{}-{nanos}-{attempt}.part",

@@ -1018,8 +1018,8 @@ mod tests {
     fn prune_search_dir_removes_only_non_joined_room_dirs() {
         let dir = std::env::temp_dir().join(format!(
             "matrix-rat-prune-search-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -1175,8 +1175,8 @@ mod tests {
             .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
         let token = std::env::var("MATRIX_RAT_TEST_REGISTRATION_TOKEN")
             .unwrap_or_else(|_| "devtoken".to_owned());
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let stamp = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
         let username = format!("ratsearch{stamp}");

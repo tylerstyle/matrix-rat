@@ -144,7 +144,7 @@ mod tests {
     }
 
     /// A Wayland clipboard holding `content` as a PNG.
-    fn clipboard(content: Vec<u8>) -> impl FnMut(&[&str], u64, std::time::Instant) -> Ran {
+    fn clipboard(content: Vec<u8>) -> impl FnMut(&[&str], u64, crate::time::Instant) -> Ran {
         move |argv, _, _| {
             if argv.contains(&"--list-types") {
                 Ran::Output(b"text/html\nimage/png\n".to_vec())
@@ -159,7 +159,7 @@ mod tests {
     fn paste_with(
         app: &mut App,
         dir: &Path,
-        runner: impl FnMut(&[&str], u64, std::time::Instant) -> Ran,
+        runner: impl FnMut(&[&str], u64, crate::time::Instant) -> Ran,
     ) -> Option<Request> {
         app.request_paste_with(vec![Tool::WlPaste]);
         let request = app.take_paste_request()?;

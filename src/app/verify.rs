@@ -349,7 +349,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use crate::time::Instant;
 
     use crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;

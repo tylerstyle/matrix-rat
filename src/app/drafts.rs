@@ -7,13 +7,14 @@
 //! for it is), and a reply is stored as plain text: what it answered is not restored.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::attach::Scope;
 use super::{App, ComposeMode};
 use crate::matrix::MatrixCmd;
 #[cfg(test)]
 use crate::model::RoomKind;
+use crate::time::Instant;
 
 /// How long nothing must be typed before the draft is saved, so that a crash or a
 /// kill loses little.

@@ -1,6 +1,6 @@
 //! UI state and handlers for ignoring users, reporting content, and finding people.
 
-use std::time::Instant;
+use crate::time::Instant;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -387,7 +387,8 @@ impl super::App {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use crate::time::Instant;
+    use std::time::Duration;
 
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,

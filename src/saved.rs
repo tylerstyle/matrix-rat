@@ -1134,7 +1134,7 @@ pub struct Waiting {
     pub request: u64,
     /// Those the worker has not answered for yet.
     pub items: Vec<SavedItem>,
-    pub since: std::time::Instant,
+    pub since: crate::time::Instant,
 }
 
 /// What the app keeps about saved messages.
@@ -1152,7 +1152,7 @@ pub struct SavedState {
     pub notices: Vec<crate::notify::DueReminder>,
     /// The message whose removal was asked about (its reminder still waits), and
     /// when: `(room, event)`.
-    pub confirm: Option<((String, String), std::time::Instant)>,
+    pub confirm: Option<((String, String), crate::time::Instant)>,
 }
 
 /// Hand-written: only counts.
@@ -2038,7 +2038,7 @@ pub mod tests {
             waiting: vec![Waiting {
                 request: 1,
                 items: vec![saved.clone()],
-                since: std::time::Instant::now(),
+                since: crate::time::Instant::now(),
             }],
             notices: vec![crate::notify::DueReminder {
                 notice: crate::matrix::Notice {
@@ -2054,7 +2054,7 @@ pub mod tests {
             }],
             confirm: Some((
                 ("!secret-room:example.org".into(), "$secret-event".into()),
-                std::time::Instant::now(),
+                crate::time::Instant::now(),
             )),
             ..SavedState::default()
         };

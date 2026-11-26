@@ -1,7 +1,7 @@
 //! Global search across loaded messages in all joined rooms (`Ctrl-G`).
 
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -15,6 +15,7 @@ use crate::modal::Modal;
 #[cfg(test)]
 use crate::model::RoomKind;
 use crate::model::{ItemRef, Message, MsgKind};
+use crate::time::Instant;
 
 /// Pause after typing before sending a search query to the index worker.
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);

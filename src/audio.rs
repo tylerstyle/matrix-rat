@@ -360,8 +360,8 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "matrix-rat-audio-{name}-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                crate::time::SystemTime::now()
+                    .duration_since(crate::time::UNIX_EPOCH)
                     .unwrap()
                     .as_nanos()
             ));

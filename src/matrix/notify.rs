@@ -1,7 +1,7 @@
 //! Turns the SDK's notifications (messages that the account's push rules say deserve
 //! one) into plain notices for the UI, which decides whether to show them.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedTimelineEvent;
 use matrix_sdk::ruma::events::room::message::MessageType;
@@ -15,6 +15,7 @@ use super::MatrixEvent;
 use super::left::LeftRooms;
 use super::safety::{IgnoredSet, is_ignored_in};
 use crate::text::{sanitize_line, truncate};
+use crate::time::{SystemTime, UNIX_EPOCH};
 
 /// Messages older than this when they arrive are history catching up, not news.
 const FRESH: Duration = Duration::from_secs(120);
@@ -49,7 +50,7 @@ const SETTLE: Duration = Duration::from_secs(20);
 struct WatchState {
     events: Option<UnboundedSender<MatrixEvent>>,
     /// When the first room list arrived: the session is up from then on.
-    armed: Option<std::time::Instant>,
+    armed: Option<crate::time::Instant>,
     /// Rooms whose invitation has been announced.
     invited: std::collections::HashSet<String>,
 }
@@ -65,7 +66,7 @@ impl Watch {
     /// settled after this, however long the start took.
     pub fn arm(&self) {
         let mut state = self.0.lock().expect("not poisoned");
-        state.armed.get_or_insert_with(std::time::Instant::now);
+        state.armed.get_or_insert_with(crate::time::Instant::now);
     }
 }
 

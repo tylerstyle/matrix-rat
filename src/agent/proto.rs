@@ -1274,7 +1274,7 @@ mod tests {
     async fn a_write_to_a_peer_that_does_not_read_gives_up() {
         let (mut writer, _reader) = tokio::io::duplex(16);
         let line = "x".repeat(1000);
-        let began = std::time::Instant::now();
+        let began = crate::time::Instant::now();
         let outcome = write_line(&mut writer, &line, Duration::from_millis(50)).await;
         assert_eq!(outcome.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         assert!(began.elapsed() < Duration::from_secs(2));

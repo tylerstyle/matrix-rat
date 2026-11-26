@@ -2,7 +2,7 @@
 //! creating one, putting rooms into a space and taking them out. The popups' state is
 //! in `crate::manage`; the worker's side in `crate::matrix::spaces`.
 
-use std::time::Instant;
+use crate::time::Instant;
 
 use super::App;
 use super::rooms::{NO_ACCOUNT, OPEN_WITHIN};

@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::authentication::matrix::MatrixSession;
@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use crate::matrix::spaces::fake;
 use crate::measure::{Times, grew, heap_in_use, mb, time_runs};
 use crate::model::Message;
+use crate::time::Instant;
 
 pub(super) const ROOM: &str = "!measure:localhost";
 /// The word only the sample room's last message has (see [`wait_indexed`]).

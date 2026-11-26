@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::StreamExt;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName, get_profile};
@@ -28,6 +28,7 @@ use super::manage::{
 };
 use super::safety;
 use crate::text::{is_blank, sanitize_line};
+use crate::time::Instant;
 use crate::upload;
 
 /// Bound profile and cross-signing queries so an unreachable peer homeserver cannot stall the UI.

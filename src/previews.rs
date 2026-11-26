@@ -12,9 +12,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::text::{is_blank, sanitize_line};
+use crate::time::Instant;
 
 /// Answers (and "nothing to show" answers) kept; the oldest go first.
 pub const MAX_ENTRIES: usize = 200;

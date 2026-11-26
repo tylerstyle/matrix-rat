@@ -6,7 +6,7 @@
 //! notification only when notifications show text at all.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -22,6 +22,7 @@ use crate::saved::{
     SavedText, Stage, WhenError, parse_when, when_label,
 };
 use crate::text::{sanitize_line, truncate};
+use crate::time::Instant;
 
 /// How long a due reminder waits for its message's text before its notification goes
 /// out without it (offline, say).

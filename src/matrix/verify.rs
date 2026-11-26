@@ -9,7 +9,7 @@ use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::{Stream, StreamExt, pin_mut};
 use matrix_sdk::Client;
@@ -47,6 +47,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use super::{MatrixEvent, RecoveryStatus, Secret, recovery_status};
 use crate::text::sanitize_line;
+use crate::time::Instant;
 
 // ----- what the UI sees ---------------------------------------------------------------
 
@@ -2060,8 +2061,8 @@ pub(super) mod tests {
     pub(in crate::matrix) async fn new_account(prefix: &str) -> (String, String) {
         let token = std::env::var("MATRIX_RAT_TEST_REGISTRATION_TOKEN")
             .unwrap_or_else(|_| "devtoken".to_owned());
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let stamp = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
         let name = format!("{prefix}{stamp}");
@@ -2388,8 +2389,8 @@ pub(super) mod tests {
             .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
         let token = std::env::var("MATRIX_RAT_TEST_REGISTRATION_TOKEN")
             .unwrap_or_else(|_| "devtoken".to_owned());
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let stamp = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
         let name = format!("rathistory{stamp}");
@@ -2752,7 +2753,7 @@ pub(super) mod tests {
             answer: Answer::Accept,
         }));
         let requester = tokio::spawn(run_requester(v_request));
-        let began = std::time::Instant::now();
+        let began = crate::time::Instant::now();
         let run = async {
             loop {
                 let update = next_update(&mut u_events, "U").await;

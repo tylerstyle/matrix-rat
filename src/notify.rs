@@ -8,7 +8,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use ratatui::style::Color;
@@ -18,6 +18,7 @@ use crate::images::Pixels;
 use crate::matrix::Notice;
 use crate::text::truncate;
 use crate::theme::{Role, Theme};
+use crate::time::Instant;
 
 pub const TILE_SIZE: u32 = 96;
 const GLYPH_COLS: u32 = 5;

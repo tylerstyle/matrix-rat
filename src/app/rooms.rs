@@ -1,7 +1,7 @@
 //! Room management on `App`: joining, direct chats, creating, inviting, leaving, and
 //! the room info view. The popups' state lives in `crate::manage`.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -24,6 +24,7 @@ use crate::matrix::{
 use crate::modal::Modal;
 use crate::model::{MsgKind, RoomKind};
 use crate::text::sanitize_line;
+use crate::time::Instant;
 
 /// A room that was joined or created shows up in the room list a moment later. Longer
 /// than this and opening it by itself would come as a surprise.

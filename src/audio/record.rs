@@ -1140,7 +1140,7 @@ mod tests {
             ..Limits::default()
         };
         let session = start(&dir, capture(&dir, 2, "exit 0"), slow(&dir), limits);
-        let began = std::time::Instant::now();
+        let began = crate::time::Instant::now();
         let (last, folder) = session.end().await;
         assert_eq!(failure(last), Failure::TooLarge);
         assert!(

@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
@@ -33,6 +33,8 @@ use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::{Client, Room, RoomState};
 use tokio::sync::Notify;
 use tokio::task::{JoinHandle, JoinSet};
+
+use crate::time::Instant;
 
 /// A room that shows up as joined this long after it was left is asked about.
 const ASK_AFTER: Duration = Duration::from_secs(10);
