@@ -9,7 +9,7 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-23, with 1.1.0 planned (§6.1); releases up to 1.0.3. The
+Last brought up to date: 2026-11-26, with 1.1.0 (§6.1) and 1.2.0 (§6.2) planned; releases up to 1.0.3. The
 plans of 0.8 and 0.9 moved to [`docs/history/`](history/) on 2026-11-20, the road to 1.0 on
 2026-11-21.
 
@@ -153,6 +153,9 @@ Rust 1.96 or newer.
 | 2026-11-20 | Rooms bar: counts in superscript, `(n)>` opens the room list, and the room icons win over the label (it shrinks to `☰`). |
 | 2026-11-21 | The memory and CPU pass is measured with the user's own account: the user runs a build of the 1.0 state for a day with `scripts/measure.sh` beside it, which reads only `/proc`. |
 | 2026-11-23 | Several messages of one person in a row: a muted `·` in the indent on the first line of each further message, under the header's `●` (1.1.0, §6.1). |
+| 2026-11-26 | matrix-rat in the browser and as a phone app (a PWA, iOS and Android) with ratzilla: the main goal of 1.2.0 (§6.2). A test build (phase 0) runs beside 1.1.0 first and decides go or no-go. |
+| 2026-11-26 | The web app is served by GitHub Pages from this repository; only the app's files are there, all data stays on the device. |
+| 2026-11-26 | No unlock prompt for the web app ("Almost no one is doing that to any other messenger they use"), as no lock screen for the terminal app. |
 
 ## 6. What comes next
 
@@ -209,7 +212,49 @@ yet; each piece is written and reviewed as in §4.
   cursor did over ssh). Whatever is chosen also has to fit selection (`↑` from the composer),
   replies and threads, the read marker and the receipts row, and the room view's snapshots.
 
-### 6.2 Later, after 1.0.0 or by demand
+### 6.2 1.2.0: in the browser and on phones (ratzilla)
+
+Decided by the user on 2026-11-26, after research the same day. matrix-rat built for the
+browser (WebAssembly) with [ratzilla](https://github.com/ratatui/ratzilla), ratatui's web
+backend, and installable on iOS and Android as a home-screen app (a PWA).
+
+- **What carries over:** drawing (`ui::draw`) and key handling (`App::on_key`) as they are.
+  matrix-sdk and matrix-sdk-ui 0.19.1 build for the browser (feature `js`; upstream CI checks
+  it) with the IndexedDB stores (state, crypto, event cache, media), as Element Web's
+  encryption does.
+- **What does not:** `serve`, `mcp`, the agent socket; `$EDITOR`, translate and summary
+  commands; the local search index (`experimental-search`); mpv and voice recording; terminal
+  graphics; D-Bus notifications and the keyring; files in the profile directory. Each gets a
+  web counterpart or is left out (browser notifications, HTML audio, half-block pictures
+  first, the browser's storage, OAuth login by redirect).
+- **The work:** separating the app from the terminal and the OS behind small interfaces
+  (2026-11-26: crossterm's key types in 45 files, `std::fs` in 67, processes in 57,
+  `tokio::spawn` in 38 and its timers in 470 places, `Instant`/`SystemTime` in 52, which
+  panic in the browser). The terminal app stays the same at every step.
+- **ratzilla's gaps for phones** (0.3.1): only `keydown` and mouse events, so no paste, touch
+  or input-method typing; its issue #192 (input dead after a resize; the phone keyboard
+  resizes the page). Ratatui's contribution rules accept AI-assisted PRs with disclosure.
+- **Phones:** a narrow layout (shared with the ssh `--mobile` work of 1.1.0), an HTML key bar
+  (Esc, Tab, Ctrl, Alt, arrows, palette), the composer as a native text field (autocorrect,
+  dictation, any language), tap = click, long press = right-click, swipe = scroll; installed
+  from Safari (Add to Home Screen) or Chrome (Install app); offline start by a service worker
+  that updates only when the user confirms.
+- **Data:** the phone talks to the homeservers directly; GitHub Pages serves only the app's
+  files (built by CI from release tags, checksums published). Fonts bundled, no analytics, a
+  strict content security policy. No unlock prompt (decided).
+- **Notifications while closed** (open): a web app can only be woken by its browser's push
+  service (Apple, Google, Mozilla) with keys of its own; that needs a small gateway from the
+  homeserver's push to Web Push (Sygnal can do it, or a few dozen lines), reachable from the
+  internet. ntfy's built-in Matrix gateway hands the raw push to an ntfy topic for UnifiedPush
+  apps on Android; it cannot reach the web app. Content-free either way (`event_id_only`).
+  Until then: notifications while the app is open; Beeper on the phone notifies meanwhile.
+- **Phases:** 0 a test build beside 1.1.0 (login, room list, one room; on an iPhone and an
+  Android phone; answers: does Beeper's server allow browser requests (CORS), how big is the
+  download, how fast on a phone, does matrix.org's OAuth accept the Pages address); 1 the
+  interfaces; 2 the web app; 3 the phone version; 4 later: real pictures, voice, push, app
+  stores.
+
+### 6.3 Later, after 1.0.0 or by demand
 
 - **Calls.** Voice calls wait until the SDK can join calls itself; with them a line in the
   room saying that a call is running, and a key that opens it in the browser. Video after
@@ -226,7 +271,7 @@ yet; each piece is written and reviewed as in §4.
   expose it).
 - **A numbered decisions file**, should §5 outgrow a table.
 
-### 6.3 Not wanted or not pursued
+### 6.4 Not wanted or not pursued
 
 - **By the user's decision** (2026-11-20 unless dated otherwise): a plugin system; sticker
   packs beyond the picker that exists; an image generator; a lock screen; popping out a
