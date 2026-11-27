@@ -5590,7 +5590,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let (summary_news, mut summary_back) = tokio::sync::mpsc::unbounded_channel();
     let mut summaries = rt::JoinSet::new();
     // What the worker said while the external editor had the terminal.
-    let mut held_events = external_editor::HeldEvents::default();
+    let mut held_events = terminal::external_editor::HeldEvents::default();
 
     // An error ends the loop, not the function: what runs after it (players stopped,
     // the worker shut down cleanly) runs for an error too, and the error is returned
@@ -5637,7 +5637,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 let editor = tokio::task::spawn_blocking(move || {
                     crate::editor::edit(&request, &dir, crate::editor::run_command)
                 });
-                let outcome = external_editor::hold_events_while(
+                let outcome = terminal::external_editor::hold_events_while(
                     editor,
                     matrix_events.as_mut(),
                     &mut held_events,
@@ -5739,7 +5739,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                     Some(Err(err)) => return Err(err.into()),
                     None => break,
                 },
-                Some(event) = external_editor::next_matrix_event(
+                Some(event) = terminal::external_editor::next_matrix_event(
                     &mut held_events,
                     matrix_events.as_mut(),
                 ) => app.on_matrix(event),

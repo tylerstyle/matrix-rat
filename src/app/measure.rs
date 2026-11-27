@@ -457,7 +457,7 @@ async fn measure_interface_cost_of_a_change_and_a_frame() {
 #[tokio::test]
 #[ignore = "a measurement: run alone and in release, see crate::measure"]
 async fn measure_news_waiting_while_the_editor_runs() {
-    use super::external_editor::{HeldEvents, hold_events_while};
+    use crate::shell::terminal::external_editor::{HeldEvents, hold_events_while};
     const CHANGES: usize = 20;
     if !crate::measure::wanted() {
         return;
