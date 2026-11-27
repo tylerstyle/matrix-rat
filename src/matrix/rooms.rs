@@ -1843,12 +1843,12 @@ impl Timelines {
                     for target in failed_parts(&timeline, &wanted, false).await {
                         dropped |= timeline.abort_send(&wanted, target).await.sdk()?;
                     }
-                    // Aborting only wakes the room's queue: after a failure taken as
-                    // passing it is stopped, and what waits behind would stay there.
-                    timeline.room().send_queue().set_enabled(true);
                     if !dropped {
                         bail!(NOTHING_WAITS);
                     }
+                    // Aborting only wakes the room's queue: after a failure taken as
+                    // passing it is stopped, and what waits behind would stay there.
+                    timeline.room().send_queue().set_enabled(true);
                     Ok(())
                 })
                 .await;
