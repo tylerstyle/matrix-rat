@@ -148,7 +148,10 @@ today's code paths: the new names re-export what is used now.
      `matrix/agent.rs`, the runner halves from step 5, `portal`, `watch`, `lock`, `focus`,
      `termquery`, `logging`, the CLI; `logsafe.rs`'s arms for native-only error types (a
      browser arm for `crate::rt`'s timeout error); in `matrix/devices.rs` the key export and
-     import. Browser stubs, so `matrix/mod.rs` still compiles: `matrix/session.rs` (shared
+     import, with the checks `App` makes of the key file's path (`app/devices.rs`: metadata,
+     `is_dir`); the check that a saved download is still there (`app/files.rs`,
+     `path.exists()`); `FsStorage` (Unix file modes) and the test-only `Storage::files` hook.
+     Browser stubs, so `matrix/mod.rs` still compiles: `matrix/session.rs` (shared
      `ReauthKind`, `ReauthTarget`, `ActiveSession`, `RestoreOutcome`, `ReauthOutcome`; phase 2
      fills in login and the IndexedDB stores), `matrix/search.rs` (shared `SearchHit`; no local
      index), `images`/`ui/image.rs` (a "[picture]" placeholder; a click opens it, phase 4 draws
