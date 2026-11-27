@@ -51,7 +51,8 @@ const PUSH_TITLE: &str = "\x1b[22;0t";
 /// Puts the saved titles back (`CSI 23 ; 0 t`).
 const POP_TITLE: &str = "\x1b[23;0t";
 
-/// Restores the terminal when dropped. Also restored by the panic hook.
+/// Restores the terminal when dropped. Also restored by the panic hook, for a panic that
+/// ends the app.
 #[derive(Debug)]
 pub struct TerminalGuard {
     _private: (),
@@ -311,22 +312,66 @@ pub fn restore() {
     }
 }
 
+/// Installed by the first [`TerminalGuard::enter`], on the thread that runs the interface:
+/// the main thread, whose `block_on` runs the app's loop (see `main`). Before it, and in
+/// `serve`, `mcp` and the other commands, which never take the terminal, the standard hook
+/// is all there is.
 fn install_panic_hook() {
     static INSTALLED: AtomicBool = AtomicBool::new(false);
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
+    let interface = std::thread::current().id();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore();
         // Where, not what: a panic's message can quote the text it failed on. The
-        // whole message still goes to the terminal, below.
+        // whole message still goes to the terminal, below, for a panic that ends the app.
         match info.location() {
             Some(at) => tracing::error!(file = place(at.file()), line = at.line(), "panic"),
             None => tracing::error!("panic"),
         }
-        previous(info);
+        let on_interface = std::thread::current().id() == interface;
+        match on_panic(on_interface, on_screen()) {
+            OnPanic::HandBack => {
+                restore();
+                previous(info);
+            }
+            OnPanic::LogOnly => {}
+        }
     }));
+}
+
+/// What the panic hook does besides the log line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OnPanic {
+    /// Hands the terminal back and prints the panic, as the standard hook does.
+    HandBack,
+    /// Nothing: the interface goes on, on a screen that is left as it is.
+    LogOnly,
+}
+
+/// What a panic is to the screen: `on_interface`, it is on the thread that runs the
+/// interface; `on_screen`, the app has the terminal ([`on_screen`]).
+///
+/// A panic on the interface's thread ends the app: the terminal is handed back so that
+/// the shell after it works, and the panic is printed there. One on another thread ends
+/// only its own task or thread, or is caught (tokio takes a panicking task as a failed
+/// one; `matrix::paging` catches matrix-sdk's of matrix-rust-sdk #5416, but the hook runs
+/// before any catch), and the app goes on: handing the terminal back under it, and
+/// printing over its screen, left it running on a broken terminal. When nothing of the
+/// app is on the terminal, there is nothing to break.
+fn on_panic(on_interface: bool, on_screen: bool) -> OnPanic {
+    if on_interface || !on_screen {
+        OnPanic::HandBack
+    } else {
+        OnPanic::LogOnly
+    }
+}
+
+/// Whether the app has the terminal: raw mode, or its screen (between [`release`] and
+/// [`resume`], around Ctrl-Z and the external editor, it has neither).
+fn on_screen() -> bool {
+    RAW.load(Ordering::SeqCst) || ACTIVE.load(Ordering::SeqCst)
 }
 
 /// The file a panic happened in, without the directories before it: the path of a
@@ -350,7 +395,7 @@ mod tests {
     use ratatui::layout::{Position, Size};
     use ratatui::widgets::Paragraph;
 
-    use super::{EnableMouseButtons, POP_TITLE, PUSH_TITLE, base64, place};
+    use super::{EnableMouseButtons, OnPanic, POP_TITLE, PUSH_TITLE, base64, on_panic, place};
 
     /// A terminal that cannot say where its cursor is, as while the event stream's reader
     /// thread waits: asking returns an error instead of the two-second wait.
@@ -450,6 +495,20 @@ mod tests {
             "ratatui-0.30.2/src/buffer.rs"
         );
         assert_eq!(place("/home/alice/elsewhere/lib.rs"), "lib.rs");
+    }
+
+    #[test]
+    fn only_a_panic_that_ends_the_app_hands_the_terminal_back() {
+        // On the interface's thread: the app ends, and the shell gets the terminal back
+        // with the panic printed on it.
+        assert_eq!(on_panic(true, true), OnPanic::HandBack);
+        assert_eq!(on_panic(true, false), OnPanic::HandBack);
+        // On another thread (a task of the Matrix worker, a picture being decoded): the
+        // app goes on, on its screen, which is left alone.
+        assert_eq!(on_panic(false, true), OnPanic::LogOnly);
+        // ...unless the app does not have the terminal (the editor has it, or the app
+        // has ended): then it is as before.
+        assert_eq!(on_panic(false, false), OnPanic::HandBack);
     }
 
     #[test]
