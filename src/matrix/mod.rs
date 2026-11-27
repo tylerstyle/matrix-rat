@@ -3,6 +3,7 @@
 
 #[cfg(not(target_family = "wasm"))]
 mod agent;
+mod auth;
 mod collect;
 mod convert;
 mod devices;
@@ -24,7 +25,10 @@ mod rooms;
 mod safety;
 mod saved;
 pub(crate) mod search;
+#[cfg(not(target_family = "wasm"))]
 mod session;
+#[cfg(target_family = "wasm")]
+use auth::browser as session;
 #[cfg(test)]
 pub(crate) use rooms::measure::sample_messages;
 #[cfg(test)]

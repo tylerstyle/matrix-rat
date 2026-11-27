@@ -5,9 +5,12 @@ use std::fmt;
 use std::path::Path;
 
 use chrono::{DateTime, Local};
+#[cfg(not(target_family = "wasm"))]
 use futures::StreamExt;
 use matrix_sdk::deserialized_responses::TimelineEvent;
-use matrix_sdk::event_cache::{RedecryptorReport, RoomEventCache};
+#[cfg(not(target_family = "wasm"))]
+use matrix_sdk::event_cache::RedecryptorReport;
+use matrix_sdk::event_cache::RoomEventCache;
 use matrix_sdk::ruma::events::relation::RelationType;
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::room::message::{
@@ -54,6 +57,7 @@ impl fmt::Debug for SearchHit {
 /// joined. Called when no `RoomIndex` handles are open (startup before sync/search, and
 /// session shutdown after dropping the `Client`) because `matrix-sdk 0.19.1` keeps an
 /// in-memory `HashMap<OwnedRoomId, RoomIndex>` without a public room-removal API.
+#[cfg(not(target_family = "wasm"))]
 fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<String>) {
     let Ok(entries) = std::fs::read_dir(search_dir) else {
         return;
@@ -89,6 +93,7 @@ pub(super) fn joined_room_ids(client: &Client, left: &LeftRooms) -> HashSet<Stri
 }
 
 /// Prunes non-joined room search index directories using the client's restored room list.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) async fn prune_stale_search_indexes(client: &Client, search_dir: &Path) {
     // Before the session: nothing was left in it yet.
     let joined = joined_room_ids(client, &LeftRooms::default());
@@ -97,10 +102,15 @@ pub(crate) async fn prune_stale_search_indexes(client: &Client, search_dir: &Pat
 
 /// [`prune_search_dir`] on the blocking threads: an index is a folder of many files,
 /// and the worker's loop must not stop for them.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) async fn prune_search_dir_off_loop(search_dir: &Path, joined: HashSet<String>) {
     let search_dir = search_dir.to_owned();
     let _ = tokio::task::spawn_blocking(move || prune_search_dir(&search_dir, &joined)).await;
 }
+
+/// The browser keeps no index (no `experimental-search`): there is nothing to prune.
+#[cfg(target_family = "wasm")]
+pub(crate) async fn prune_search_dir_off_loop(_search_dir: &Path, _joined: HashSet<String>) {}
 
 pub(super) struct Searcher {
     client: Client,
@@ -118,7 +128,11 @@ impl Searcher {
         ignored: watch::Receiver<IgnoredSet>,
         left: LeftRooms,
     ) -> Self {
+        #[cfg(not(target_family = "wasm"))]
         let redecrypt_task = Some(rt::spawn(index_redecrypted(client.clone())));
+        // The browser keeps no index to add to.
+        #[cfg(target_family = "wasm")]
+        let redecrypt_task = None;
         Self {
             client,
             events,
@@ -167,6 +181,7 @@ impl Drop for Searcher {
 /// `RoomEventCacheUpdate`, bypassing `RoomEventCacheLinkedChunkUpdate` where
 /// the SDK's `search_indexing_task` listens. Forwarding `ResolvedUtds` reports
 /// keeps encrypted rooms searchable once keys arrive later.
+#[cfg(not(target_family = "wasm"))]
 async fn index_redecrypted(client: Client) {
     let stream = client.event_cache().subscribe_to_decryption_reports();
     tokio::pin!(stream);
@@ -289,6 +304,7 @@ async fn try_decrypt_utd(room: &Room, event: &TimelineEvent) -> Option<TimelineE
     (!decrypted.kind.is_utd()).then_some(decrypted)
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn run_search(
     client: Client,
     events: UnboundedSender<MatrixEvent>,
@@ -389,6 +405,25 @@ async fn run_search(
         hits: batch,
         done: true,
         note,
+    });
+}
+
+/// The browser has no local index (no `experimental-search`): a search ends at once,
+/// with nothing found and a note that says why.
+#[cfg(target_family = "wasm")]
+async fn run_search(
+    _client: Client,
+    events: UnboundedSender<MatrixEvent>,
+    _ignored: watch::Receiver<IgnoredSet>,
+    _left: &LeftRooms,
+    generation: u64,
+    _query: String,
+) {
+    let _ = events.send(MatrixEvent::SearchResults {
+        generation,
+        hits: Vec::new(),
+        done: true,
+        note: Some("Searching messages is not available in the browser".to_owned()),
     });
 }
 

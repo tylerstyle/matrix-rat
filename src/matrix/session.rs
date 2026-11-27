@@ -22,6 +22,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
 use super::MatrixEvent;
+pub use super::auth::{ActiveSession, ReauthKind, ReauthOutcome, ReauthTarget, RestoreOutcome};
 use super::keyring::{
     KeyringBackend, KeyringKey, PassphraseFileStore, SecretServiceKeyring, SecretStoreMode,
     prepare_passphrase_for_save, resolve_passphrase,
@@ -31,70 +32,6 @@ use crate::paths::Paths;
 const DEVICE_NAME: &str = "matrix-rat";
 /// Shown to the user by the homeserver during a browser login.
 const CLIENT_URI: &str = "https://github.com/tylerstyle/matrix-rat";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReauthKind {
-    Password,
-    Browser,
-}
-
-/// Identity and auth kind preserved across a soft logout so logging in again keeps the same
-/// device and local encrypted store.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReauthTarget {
-    pub homeserver: String,
-    pub user_id: String,
-    pub device_id: String,
-    pub kind: ReauthKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
-}
-
-/// Hand-written: the server, the account and the device stay out of logs.
-impl std::fmt::Debug for ReauthTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReauthTarget")
-            .field("kind", &self.kind)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ReauthTarget {
-    pub fn keyring_key(&self, profile: &str) -> KeyringKey {
-        KeyringKey::new(profile, &self.user_id, &self.device_id)
-    }
-}
-
-/// Live session state kept by the Matrix worker while running.
-pub struct ActiveSession {
-    pub client: Client,
-    pub passphrase: String,
-    pub in_keyring: bool,
-    pub target: ReauthTarget,
-}
-
-pub enum RestoreOutcome {
-    /// No `session.json` exists yet.
-    NoSession,
-    /// Saved session restored cleanly.
-    Restored(ActiveSession),
-    /// Server soft-logged-out (or saved `soft_logout` marker); prompt re-auth against the
-    /// same device and store.
-    NeedReauth {
-        target: ReauthTarget,
-        passphrase: String,
-        in_keyring: bool,
-    },
-    /// Keyring/store cannot be opened safely right now; `session.json` and `<data>/store`
-    /// have been kept untouched.
-    Blocked(String),
-}
-
-pub struct ReauthOutcome {
-    pub session: ActiveSession,
-    pub kept_device: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReauthDecision {
