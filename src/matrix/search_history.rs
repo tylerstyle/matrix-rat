@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use chrono::{Datelike, Days, NaiveDate};
 use futures::FutureExt;
-use matrix_sdk::Client;
 use matrix_sdk::event_cache::{
     BackPaginationOutcome, EventCache, RoomPagination, SearchBackfillStrategy,
 };
 use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, RoomId};
+use matrix_sdk::{Client, RoomState};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::MatrixEvent;
@@ -404,14 +404,16 @@ async fn run(client: Client, delay: bool, mut ended: EndReport) {
         cache
             .run_search_backfill(SearchBackfillStrategy::Foreground)
             .await;
-        deepen(&client, cache).await;
+        deepen(&client, cache).await
     };
     match rt::timeout(TIME_LIMIT, sweep).await {
-        Ok(()) => {
+        Ok(true) => {
             let elapsed_s = started.elapsed().as_secs();
             tracing::info!(elapsed_s, "search history done");
             ended.finished = true;
         }
+        // Stopped, as at the time limit: the setting may try again.
+        Ok(false) => tracing::warn!("search history stopped: the SDK failed"),
         Err(_) => tracing::warn!("search history stopped at the time limit"),
     }
 }
@@ -428,21 +430,27 @@ async fn run(client: Client, delay: bool, mut ended: EndReport) {
 ///
 /// Here each room is held while it is walked, so every batch goes on from the last: back
 /// to 13 weeks, the room's start, or [`MAX_BATCHES`]. One room at a time, so at most one
-/// room's older events are in memory; the room shrinks back when it is let go.
-async fn deepen(client: &Client, cache: &EventCache) {
+/// room's older events are in memory; the room shrinks back when it is let go. False if
+/// the SDK panicked and the walk ended there.
+async fn deepen(client: &Client, cache: &EventCache) -> bool {
     let back_ms = BACK_DAYS * 24 * 60 * 60 * 1000;
     let oldest = u64::from(MilliSecondsSinceUnixEpoch::now().get()).saturating_sub(back_ms);
     let mut rooms = client.joined_rooms();
     rooms.retain(|room| !room.is_space());
     rooms.sort_by_key(|room| std::cmp::Reverse(room.recency_stamp()));
     for (n, room) in rooms.iter().enumerate() {
+        // Left during the run (as the SDK's queue checks too).
+        if room.state() != RoomState::Joined {
+            continue;
+        }
         if n > 0 {
             rt::sleep(ROOM_PACING).await;
         }
         if !walk(cache, room.room_id(), oldest).await {
-            return;
+            return false;
         }
     }
+    true
 }
 
 /// Walks one room back to `oldest` (ms since the epoch); false if the SDK panicked, and
@@ -489,7 +497,10 @@ async fn walk(cache: &EventCache, room_id: &RoomId, oldest: u64) -> bool {
 
 /// One batch of the room's older events; `Ok(None)` on an error, `Err` if the SDK
 /// panicked (matrix-rust-sdk #5416, see `paging::backwards`), looked at again every
-/// [`LOOK_AGAIN`] while it loads. Nothing of the error or the panic is kept.
+/// [`LOOK_AGAIN`] while it loads. Nothing of the error or the panic is kept. Unlike
+/// `paging::backwards` it does not clear the event caches: from the background that would
+/// empty the open room's timeline under the user; the user's own paging of that room
+/// clears them if the panic comes back there.
 async fn page(pagination: &RoomPagination) -> Result<Option<BackPaginationOutcome>, ()> {
     let batch = AssertUnwindSafe(pagination.run_backwards_once(BATCH)).catch_unwind();
     futures::pin_mut!(batch);
