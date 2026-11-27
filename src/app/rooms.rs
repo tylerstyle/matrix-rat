@@ -605,11 +605,11 @@ impl App {
         }
     }
 
-    pub(super) fn dir_search_debounce_deadline(&self) -> Option<Instant> {
+    pub(crate) fn dir_search_debounce_deadline(&self) -> Option<Instant> {
         search_debounce_deadline(self.dir_search_debounce)
     }
 
-    pub(super) fn tick_dir_search(&mut self) {
+    pub(crate) fn tick_dir_search(&mut self) {
         if take_due_search_debounce(&mut self.dir_search_debounce) {
             self.dispatch_armed_dir_search();
         }

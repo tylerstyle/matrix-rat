@@ -313,7 +313,7 @@ pub struct App {
     /// handed back.
     title_written: Option<String>,
     /// What the app learned about where it runs, for the doctor's report.
-    found: doctor::Found,
+    pub(crate) found: doctor::Found,
     /// Show who has read up to where (the `read_markers` setting).
     pub read_markers: bool,
     /// Whether clicks go to the app; the event loop applies changes to the terminal.
@@ -380,7 +380,7 @@ pub struct App {
     /// The configuration is the storage's, to write changed settings to and to
     /// notice a changed `theme` setting in. Not in the demo, which changes nothing
     /// for good.
-    config_stored: bool,
+    pub(crate) config_stored: bool,
     /// The `theme`, `theme_dark`, and `theme_light` settings as last read from the
     /// configuration.
     config_theme: String,
@@ -429,7 +429,7 @@ pub struct App {
     /// Cross-room / event jump waiting for worker `/context` load.
     pending_jump: Option<global_search::PendingJump>,
     /// Matrix link or address passed on the command line, opened once after login/rooms arrive.
-    startup_target: Option<String>,
+    pub(crate) startup_target: Option<String>,
     /// Since when the target's room has been missing from a list that counts as synced.
     startup_missing_since: Option<Instant>,
     /// How long such a room is waited for: right after a login the first lists are not
@@ -2465,7 +2465,7 @@ impl App {
     }
 
     /// Opens `startup_target` once login/rooms/sync conditions allow it.
-    pub(super) fn maybe_open_startup_target(&mut self) {
+    pub(crate) fn maybe_open_startup_target(&mut self) {
         let Some(raw) = self.startup_target.as_deref() else {
             return;
         };
@@ -5348,7 +5348,7 @@ impl App {
         }
     }
 
-    fn on_tick(&mut self) {
+    pub(crate) fn on_tick(&mut self) {
         self.verify_tick();
         self.maybe_open_startup_target();
         self.devices_watch();

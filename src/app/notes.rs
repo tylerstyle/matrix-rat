@@ -215,7 +215,7 @@ impl App {
     /// restarts. Notes are read only once `LoggedIn` names the account (see
     /// [`Self::load_notes`]); what was kept while `keep_notes` was on is removed if
     /// the setting is off.
-    pub(super) fn keep_notes_stored(&mut self, dir: PathBuf) {
+    pub(crate) fn keep_notes_stored(&mut self, dir: PathBuf) {
         self.notes.dir = Some(dir);
         if !self.notes.keep {
             let _ = self.storage.remove(&Key::Notes, Removal::Value);
@@ -246,7 +246,7 @@ impl App {
     }
 
     /// Programs for the event loop to start.
-    pub(super) fn take_note_starts(&mut self) -> Vec<textcmd::Request> {
+    pub(crate) fn take_note_starts(&mut self) -> Vec<textcmd::Request> {
         std::mem::take(&mut self.notes.starts)
     }
 
@@ -650,7 +650,7 @@ impl App {
 
     /// Stops every program: each is told to end (or its download given up) and its
     /// "…ing" note goes. Finished notes stay. The app ends, or the account goes.
-    pub(super) fn stop_notes(&mut self) {
+    pub(crate) fn stop_notes(&mut self) {
         let running: Vec<(String, NoteKind)> = self
             .notes
             .runs
@@ -713,7 +713,7 @@ impl App {
     }
 
     /// A program's last word: its text becomes the note.
-    pub(super) fn on_note_done(&mut self, done: textcmd::Done) {
+    pub(crate) fn on_note_done(&mut self, done: textcmd::Done) {
         let Some(at) = self.notes.runs.iter().position(|run| run.id == done.id) else {
             // Stopped meanwhile.
             return;

@@ -166,7 +166,7 @@ impl AttachState {
     }
 
     /// A send was handed to the worker and not answered yet.
-    pub(super) fn sends_out(&self) -> bool {
+    pub(crate) fn sends_out(&self) -> bool {
         !self.handed.is_empty()
     }
 

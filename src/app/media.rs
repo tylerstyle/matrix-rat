@@ -8,14 +8,14 @@ use crate::images::{EncodeDone, Graphics, ImageStore};
 impl App {
     /// Sets up pictures for the real terminal. The receiver delivers viewer pictures
     /// that were prepared on another thread; pass them to [`App::on_image_encoded`].
-    pub(super) fn start_images(&mut self, graphics: Graphics) -> UnboundedReceiver<EncodeDone> {
+    pub(crate) fn start_images(&mut self, graphics: Graphics) -> UnboundedReceiver<EncodeDone> {
         let (sender, receiver) = unbounded_channel();
         self.images = ImageStore::new(graphics);
         self.images.set_encoder(sender);
         receiver
     }
 
-    pub(super) fn on_image_encoded(&mut self, done: EncodeDone) {
+    pub(crate) fn on_image_encoded(&mut self, done: EncodeDone) {
         self.images.on_encoded(done);
         self.dirty = true;
     }
@@ -46,7 +46,7 @@ impl App {
 
     /// What tells the terminal to free the pictures that are no longer shown (`all`:
     /// every picture, before quitting), for the event loop to write between frames.
-    pub(super) fn image_cleanup(&mut self, all: bool) -> String {
+    pub(crate) fn image_cleanup(&mut self, all: bool) -> String {
         self.images.cleanup_sequence(all)
     }
 

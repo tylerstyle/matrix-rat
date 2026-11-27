@@ -317,11 +317,11 @@ impl super::App {
         }
     }
 
-    pub(super) fn user_search_debounce_deadline(&self) -> Option<Instant> {
+    pub(crate) fn user_search_debounce_deadline(&self) -> Option<Instant> {
         search_debounce_deadline(self.user_search_debounce)
     }
 
-    pub(super) fn tick_user_search(&mut self) {
+    pub(crate) fn tick_user_search(&mut self) {
         if !take_due_search_debounce(&mut self.user_search_debounce) {
             return;
         }

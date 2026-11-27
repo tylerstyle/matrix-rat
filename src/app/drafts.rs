@@ -350,7 +350,7 @@ impl App {
     /// order to stop. The worker takes them in this order. Also drops the UI's copy of
     /// the command sender so the channel can close without dropping `App` (and its
     /// temporary voice/picture files) before the worker finishes reading them.
-    pub(super) fn shut_down_worker(&mut self) {
+    pub(crate) fn shut_down_worker(&mut self) {
         self.save_draft();
         self.send_matrix(MatrixCmd::Shutdown);
         self.matrix = None;
