@@ -524,11 +524,6 @@ impl App {
                 return;
             }
         };
-        let socket = if player.controllable() {
-            self.audio.dir.as_deref().and_then(audio::socket_path)
-        } else {
-            None
-        };
         // One sound at a time.
         self.stop_audio();
         self.audio.next_id += 1;
@@ -555,7 +550,8 @@ impl App {
             id,
             player,
             file,
-            socket,
+            // Named by the shell, which starts the player.
+            socket: None,
             control: receiver,
         });
         self.dirty = true;
@@ -649,11 +645,6 @@ impl App {
             self.audio.current = None;
             return;
         };
-        let socket = if player.controllable() {
-            self.audio.dir.as_deref().and_then(audio::socket_path)
-        } else {
-            None
-        };
         let (control, receiver) = unbounded_channel();
         if let Some(sound) = &mut self.audio.current {
             sound.phase = Phase::Playing(Playing {
@@ -667,7 +658,8 @@ impl App {
             id,
             player,
             file: Arc::new(file),
-            socket,
+            // Named by the shell, which starts the player.
+            socket: None,
             control: receiver,
         });
     }
@@ -934,18 +926,8 @@ mod tests {
         let mut request = fetched(&mut app, 1, &dir);
         assert_eq!(request.id, 1);
         assert_eq!(request.player.kind(), Kind::Mpv);
-        // mpv gets a control socket in the private folder, where a path that long can
-        // be a socket's address (the test's folder may be too deep for one).
-        assert_eq!(
-            request.socket.is_some(),
-            audio::socket_path(&dir.0).is_some()
-        );
-        assert!(
-            request
-                .socket
-                .as_ref()
-                .is_none_or(|socket| socket.starts_with(&dir.0))
-        );
+        // mpv's control socket is named by the shell, which starts it.
+        assert!(request.socket.is_none());
         assert!(!app.audio_loading());
         assert!(matches!(
             app.audio_in(&room),

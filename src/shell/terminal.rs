@@ -428,6 +428,14 @@ fn carry_out(requests: Vec<OsRequest>, notice_icons: &icon_cache::IconCache) {
     }
 }
 
+/// Names mpv's control socket in `dir`, the private folder of sounds, before the player
+/// starts: other players get none.
+fn name_socket(request: &mut crate::audio::Request, dir: &std::path::Path) {
+    if request.player.controllable() {
+        request.socket = crate::audio::socket_path(dir);
+    }
+}
+
 /// Tells the terminal to free the pictures that are no longer shown (`all`: every
 /// picture, before quitting). Written between frames, never during a draw.
 fn flush_images(app: &mut App, all: bool) {
@@ -621,7 +629,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                     let _ = back.send(crate::clipboard::Done { id, result });
                 });
             }
-            if let Some(request) = app.take_audio_start() {
+            if let Some(mut request) = app.take_audio_start() {
+                name_socket(&mut request, &paths.audio_dir());
                 // A task on the async threads, which live as long as the app: the player is
                 // started from there (see `audio::play`).
                 players.spawn(crate::audio::run(request, player_news.clone()));
@@ -968,5 +977,39 @@ mod tests {
         assert!(!dir.exists());
         assert_eq!(cache.ensure_file(&tile, epoch), None);
         assert!(!dir.exists());
+    }
+
+    /// mpv gets a control socket in the private folder of sounds, where a path that
+    /// long can be a socket's address (the test's folder may be too deep for one);
+    /// other players get none.
+    #[test]
+    fn mpv_gets_its_socket_named_by_the_shell() {
+        use crate::audio::{Kind, Player, Request, TempAudio};
+        let root = crate::notify::tests::TempDir::new("shell-socket");
+        let request = |kind| {
+            let file = TempAudio::create(&root.0, Some("audio/ogg"), b"OggS").unwrap();
+            let (_control, receiver) = tokio::sync::mpsc::unbounded_channel();
+            Request {
+                id: 1,
+                player: Player::for_test("/bin/true".into(), kind),
+                file: std::sync::Arc::new(file),
+                socket: None,
+                control: receiver,
+            }
+        };
+        let mut mpv = request(Kind::Mpv);
+        super::name_socket(&mut mpv, &root.0);
+        assert_eq!(
+            mpv.socket.is_some(),
+            crate::audio::socket_path(&root.0).is_some()
+        );
+        assert!(
+            mpv.socket
+                .as_ref()
+                .is_none_or(|socket| socket.starts_with(&root.0))
+        );
+        let mut other = request(Kind::PwPlay);
+        super::name_socket(&mut other, &root.0);
+        assert!(other.socket.is_none());
     }
 }

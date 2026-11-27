@@ -387,8 +387,8 @@ pub struct Request {
     /// Removed when the last owner drops it (on player exit for downloaded messages;
     /// kept alive by a waiting voice note while it remains in the composer).
     pub file: std::sync::Arc<TempAudio>,
-    /// Where mpv opens its control socket; `None` for other players, or when no path
-    /// would do.
+    /// Where mpv opens its control socket: named by the shell that starts the player
+    /// (`App` leaves it out). `None` for other players, or when no path would do.
     pub socket: Option<PathBuf>,
     /// Closed by the app (dropped): stop.
     pub control: UnboundedReceiver<Control>,
