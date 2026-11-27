@@ -153,7 +153,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matrix-rat-title-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("config.toml");
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         app.perform(Action::Setting(Setting::WindowTitle));
         assert!(app.window_title);
         assert!(Config::load(&file).unwrap().window_title);

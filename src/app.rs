@@ -77,6 +77,7 @@ use crate::model::{
 use crate::paths::Paths;
 use crate::probes::Probes;
 use crate::rt::{self, MissedTickBehavior};
+use crate::storage::{Key, Storage};
 use crate::terminal::{self, TerminalGuard};
 use crate::theme::{ColorScheme, DEFAULT_THEME, Theme};
 use crate::time::Instant;
@@ -376,8 +377,10 @@ pub struct App {
     /// The theme the user asked for, which may not exist yet (a generator may still
     /// have to write it).
     wanted_theme: String,
-    /// Where the configuration lives, to notice a changed `theme` setting.
-    config_file: Option<PathBuf>,
+    /// The configuration is the storage's, to write changed settings to and to
+    /// notice a changed `theme` setting in. Not in the demo, which changes nothing
+    /// for good.
+    config_stored: bool,
     /// The `theme`, `theme_dark`, and `theme_light` settings as last read from the
     /// configuration.
     config_theme: String,
@@ -392,7 +395,6 @@ pub struct App {
     pub verify: crate::verify::VerifyState,
     pub theme: Theme,
     theme_names: Vec<String>,
-    themes_dir: PathBuf,
     truecolor: bool,
     /// The user asked for no colours (`NO_COLOR`): every theme is shown without them.
     no_color: bool,
@@ -464,6 +466,9 @@ pub struct App {
     probes: Box<dyn Probes>,
     /// What the desktop is asked to do; the event loop takes it.
     os_requests: Vec<OsRequest>,
+    /// Where the configuration, the user's themes, the kept notes and the saved
+    /// messages are kept: the shell's, read and written by key.
+    storage: Box<dyn Storage>,
 }
 
 /// Hand-written: the app holds everything private there is (messages, drafts, ids,
@@ -571,7 +576,8 @@ impl App {
     #[cfg(test)]
     pub fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
         let probes = Box::new(crate::probes::TestProbes::default());
-        let mut app = Self::new_in_scheme(config, themes_dir, probes, matrix, ColorScheme::Dark);
+        let storage = Box::new(crate::storage::FsStorage::default().with_themes(themes_dir));
+        let mut app = Self::new_in_scheme(config, storage, probes, matrix, ColorScheme::Dark);
         // Tests may well run inside a desktop that would obey: no window is raised.
         app.notification_click_command = None;
         // Nor do they depend on the players and recorders the machine has, or on
@@ -582,14 +588,14 @@ impl App {
 
     pub(crate) fn new_in_scheme(
         config: &Config,
-        themes_dir: PathBuf,
+        storage: Box<dyn Storage>,
         probes: Box<dyn Probes>,
         matrix: Option<MatrixHandle>,
         color_scheme: ColorScheme,
     ) -> Self {
         let truecolor = probes.truecolor();
         let default_theme = Theme::builtin(DEFAULT_THEME).expect("default theme");
-        let mut app = Self::with_theme(default_theme, probes);
+        let mut app = Self::with_theme(default_theme, probes, storage);
         if matrix.is_some() {
             app.rooms.clear();
             app.sync = Some(SyncStatus::Connecting);
@@ -600,8 +606,7 @@ impl App {
         if app.no_color {
             app.theme.strip_colors();
         }
-        app.theme_names = Theme::available(&themes_dir);
-        app.themes_dir = themes_dir;
+        app.theme_names = Theme::available(app.storage.as_ref());
         app.sidebar.width = config.sidebar_width;
         app.sidebar.hidden = config.sidebar_hidden;
         app.typing_notices = config.typing_notices;
@@ -669,13 +674,14 @@ impl App {
         let mut app = Self::with_theme(
             Theme::builtin(DEFAULT_THEME).expect("default theme"),
             Box::new(crate::probes::TestProbes::default()),
+            Box::new(crate::storage::FsStorage::default()),
         );
         // Not the machine's own folder, so screens look the same everywhere.
         app.download_dir = "~/Downloads".to_owned();
         app
     }
 
-    fn with_theme(theme: Theme, probes: Box<dyn Probes>) -> Self {
+    fn with_theme(theme: Theme, probes: Box<dyn Probes>, storage: Box<dyn Storage>) -> Self {
         Self {
             rooms: demo_rooms(),
             active: 0,
@@ -747,7 +753,7 @@ impl App {
             theme_dark: None,
             theme_light: None,
             wanted_theme: DEFAULT_THEME.to_owned(),
-            config_file: None,
+            config_stored: false,
             config_theme: String::new(),
             config_theme_dark: None,
             config_theme_light: None,
@@ -757,7 +763,6 @@ impl App {
             verify: Default::default(),
             theme,
             theme_names: Theme::builtin_names(),
-            themes_dir: PathBuf::new(),
             truecolor: true,
             no_color: false,
             hits: HitMap::default(),
@@ -801,6 +806,7 @@ impl App {
             collect: Default::default(),
             probes,
             os_requests: Vec::new(),
+            storage,
         }
     }
 
@@ -921,6 +927,23 @@ impl App {
         std::mem::take(&mut self.os_requests)
     }
 
+    /// For tests: the configuration is the file at `file`, written to as the
+    /// running app writes its own.
+    #[cfg(test)]
+    pub(crate) fn set_config_file(&mut self, file: &std::path::Path) {
+        let files = self.storage.files().expect("the app's storage is files");
+        *files = std::mem::take(files).with_config(file);
+        self.config_stored = true;
+    }
+
+    /// For tests: the saved messages are kept in the file `file`.
+    #[cfg(test)]
+    pub(crate) fn set_saved_file(&mut self, file: &std::path::Path) {
+        let files = self.storage.files().expect("the app's storage is files");
+        *files = std::mem::take(files).with_saved(file);
+        self.bookmarks.stored = true;
+    }
+
     /// For tests: what was asked to be opened since the last look.
     #[cfg(test)]
     pub(crate) fn take_opened(&mut self) -> Vec<String> {
@@ -950,8 +973,10 @@ impl App {
     /// pop up messages, and a theme that a generator has yet to write is just awaited.
     pub fn reload_theme(&mut self) {
         self.dirty = true;
-        self.theme_names = Theme::available(&self.themes_dir);
-        let loaded = self.config_file.as_deref().map(Config::load);
+        self.theme_names = Theme::available(self.storage.as_ref());
+        let loaded = self
+            .config_stored
+            .then(|| Config::load_from(self.storage.as_ref()));
         // What the doctor says about the file follows it; the settings themselves
         // (but the theme) are read at start only.
         match &loaded {
@@ -988,8 +1013,8 @@ impl App {
             menu.show_theme_pair = true;
         }
         let name = self.wanted_theme.clone();
-        let exists = Theme::builtin(&name).is_some()
-            || self.themes_dir.join(format!("{name}.toml")).exists();
+        let exists =
+            Theme::builtin(&name).is_some() || self.storage.exists(&Key::Theme(name.clone()));
         if exists {
             self.set_theme(&name);
         }
@@ -1025,7 +1050,7 @@ impl App {
 
     fn set_theme(&mut self, name: &str) {
         self.wanted_theme = name.to_owned();
-        match Theme::load(name, &self.themes_dir) {
+        match Theme::load(name, self.storage.as_ref()) {
             Ok(mut theme) => {
                 for warning in &theme.warnings {
                     tracing::warn!(theme = name, "{warning}");
@@ -1055,7 +1080,7 @@ impl App {
     /// Moves to the next or previous theme and remembers the choice.
     fn step_theme(&mut self, delta: isize) {
         // Look again: a generator may have written a new theme since.
-        self.theme_names = Theme::available(&self.themes_dir);
+        self.theme_names = Theme::available(self.storage.as_ref());
         let count = self.theme_names.len() as isize;
         let at = self
             .theme_names
@@ -1068,7 +1093,7 @@ impl App {
 
     /// Cycles `theme_dark` or `theme_light` through `(unset)` and available themes.
     fn step_slot_theme(&mut self, slot: ColorScheme, delta: isize) {
-        self.theme_names = Theme::available(&self.themes_dir);
+        self.theme_names = Theme::available(self.storage.as_ref());
         let current = match slot {
             ColorScheme::Dark => self.theme_dark.as_deref(),
             ColorScheme::Light => self.theme_light.as_deref(),
@@ -1158,10 +1183,10 @@ impl App {
 
     /// Writes one setting to the configuration file (there is none in demo mode).
     fn save_setting(&mut self, key: &str, value: impl Into<toml_edit::Value>) {
-        let Some(file) = &self.config_file else {
+        if !self.config_stored {
             return;
-        };
-        if let Err(err) = crate::config::save_setting(file, key, value) {
+        }
+        if let Err(err) = crate::config::save_setting(self.storage.as_ref(), key, value) {
             tracing::warn!(why = %crate::logsafe::kind_any(&err), key, "could not save setting");
             self.show_toast(format!("Could not save the setting: {err:#}"));
         }
@@ -1169,10 +1194,10 @@ impl App {
 
     /// Removes one setting from the configuration file (there is none in demo mode).
     fn remove_setting(&mut self, key: &str) {
-        let Some(file) = &self.config_file else {
+        if !self.config_stored {
             return;
-        };
-        if let Err(err) = crate::config::remove_setting(file, key) {
+        }
+        if let Err(err) = crate::config::remove_setting(self.storage.as_ref(), key) {
             tracing::warn!(why = %crate::logsafe::kind_any(&err), key, "could not remove setting");
             self.show_toast(format!("Could not save the setting: {err:#}"));
         }
@@ -3816,8 +3841,8 @@ impl App {
                 if matches!(self.modal, Some(Modal::Login(_))) {
                     self.modal = None;
                 }
-                if let Some(file) = self.bookmarks.file.clone() {
-                    self.load_saved(file, &user_id);
+                if self.bookmarks.stored {
+                    self.load_saved(&user_id);
                 }
                 self.load_notes(&user_id);
                 self.user_id = Some(user_id);
@@ -5489,7 +5514,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     };
     let mut app = App::new_in_scheme(
         config,
-        paths.themes_dir(),
+        Box::new(crate::storage::FsStorage::new(paths)),
         Box::new(crate::probes::NativeProbes),
         matrix.clone(),
         initial_scheme,
@@ -5499,9 +5524,9 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // The demo is for looking around: what is changed there is not written into the
     // real configuration.
     if !demo {
-        app.config_file = Some(paths.config_file());
+        app.config_stored = true;
         // Read when a session is up: whose list it is must be known first.
-        app.bookmarks.file = Some(paths.saved_file());
+        app.bookmarks.stored = true;
     }
     app.startup_target = target;
     // Copies of sounds and mpv's sockets; what an earlier run left there goes now.
@@ -5509,7 +5534,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     app.set_audio_dir(paths.audio_dir());
     // The demo keeps no notes in a file, as it writes no settings.
     if !demo {
-        app.set_note_paths(paths.audio_dir(), paths.notes_file());
+        app.keep_notes_stored(paths.audio_dir());
     }
     if demo {
         app.add_demo_space();
@@ -5774,6 +5799,57 @@ mod tests {
         Box::new(crate::probes::TestProbes::default())
     }
 
+    /// Files, with the user's themes in `dir`.
+    fn themes_in(dir: PathBuf) -> Box<dyn Storage> {
+        Box::new(crate::storage::FsStorage::default().with_themes(dir))
+    }
+
+    /// What the app keeps (settings, themes, notes, saved messages) it reads and
+    /// writes through its storage alone: one without files does as well.
+    #[test]
+    fn what_the_app_keeps_goes_through_its_storage() {
+        use crate::storage::MemStorage;
+        let storage = MemStorage::default();
+        storage.put(&Key::Theme("mine".into()), b"[palette]\n");
+        storage.put(&Key::Notes, b"kept from before");
+        storage.put(
+            &Key::Saved,
+            br#"{"version":1,"owner":"@someone:example.org","items":[]}"#,
+        );
+        let mut app = App::new_in_scheme(
+            &Config::default(),
+            Box::new(storage.clone()),
+            test_probes(),
+            None,
+            ColorScheme::Dark,
+        );
+        assert!(app.theme_names.contains(&"mine".to_owned()));
+        app.set_theme("mine");
+        assert_eq!(app.theme.name, "mine");
+
+        // As in the demo: settings change, nothing is written.
+        app.change_setting(Setting::Mouse, 0);
+        assert!(!storage.exists(&Key::Config));
+        app.config_stored = true;
+        app.change_setting(Setting::Mouse, 0);
+        let config = String::from_utf8(storage.read(&Key::Config).unwrap().unwrap()).unwrap();
+        assert!(config.contains("mouse = "), "{config}");
+        app.apply_theme("mine".to_owned());
+        assert_eq!(Config::load_from(&storage).unwrap().theme, "mine");
+
+        // `keep_notes` is off: what was kept goes.
+        app.keep_notes_stored(PathBuf::new());
+        assert!(!storage.exists(&Key::Notes));
+        // Another account's list is set aside, not shown.
+        app.bookmarks.stored = true;
+        app.load_saved("@me:example.org");
+        assert!(app.toast.as_ref().unwrap().0.contains("another account"));
+        assert_eq!(
+            storage.names(),
+            ["config", "saved.other-account", "theme/mine"]
+        );
+    }
+
     /// The machine is asked what it has at start, and again for the one thing a
     /// setting changes (or an action needs), never looked at by the app itself; where
     /// nothing is there, the settings say so.
@@ -5785,7 +5861,7 @@ mod tests {
         let config = Config::default();
         let mut app = App::new_in_scheme(
             &config,
-            PathBuf::new(),
+            Box::new(crate::storage::MemStorage::default()),
             Box::new(probes),
             None,
             ColorScheme::Dark,
@@ -6986,7 +7062,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matrix-rat-esc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("config.toml");
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         // The settings row (and the palette's entry) writes it to the configuration.
         app.perform(Action::Setting(Setting::EscClosesChat));
         assert!(!app.esc_closes_chat);
@@ -8523,7 +8599,7 @@ mod tests {
         // Lives next to the themes directory, not inside it.
         let config_file = dir.with_extension("config.toml");
         std::fs::write(&config_file, "theme = \"terminal\"\n").unwrap();
-        app.config_file = Some(config_file.clone());
+        app.set_config_file(&config_file);
         app.reload_theme();
         assert_eq!(app.theme.name, "terminal");
         // F3 moves on from the theme in use, and finds newly written themes.
@@ -8565,7 +8641,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let themes_dir = dir.join("themes");
         std::fs::create_dir_all(&themes_dir).unwrap();
-        let names = Theme::available(&themes_dir);
+        let names =
+            Theme::available(&crate::storage::FsStorage::default().with_themes(&themes_dir));
         let dark_name = names
             .iter()
             .find(|n| *n != "terminal")
@@ -8585,8 +8662,14 @@ mod tests {
         .unwrap();
         let cfg = Config::load(&file).unwrap();
 
-        let mut app = App::new_in_scheme(&cfg, themes_dir, test_probes(), None, ColorScheme::Dark);
-        app.config_file = Some(file.clone());
+        let mut app = App::new_in_scheme(
+            &cfg,
+            themes_in(themes_dir),
+            test_probes(),
+            None,
+            ColorScheme::Dark,
+        );
+        app.set_config_file(&file);
         assert_eq!(app.color_scheme, ColorScheme::Dark);
         assert_eq!(app.theme.name, dark_name);
         assert_eq!(app.wanted_theme, dark_name);
@@ -8635,12 +8718,12 @@ mod tests {
         let cfg = Config::load(&file).unwrap();
         let mut term_app = App::new_in_scheme(
             &cfg,
-            themes_dir.clone(),
+            themes_in(themes_dir.clone()),
             test_probes(),
             None,
             ColorScheme::Dark,
         );
-        term_app.config_file = Some(file.clone());
+        term_app.set_config_file(&file);
         assert_eq!(term_app.theme.name, "terminal");
         term_app.on_color_scheme(ColorScheme::Light);
         assert_eq!(term_app.color_scheme, ColorScheme::Light);
@@ -8652,9 +8735,14 @@ mod tests {
         let gen_file = dir.join("gen.toml");
         std::fs::write(&gen_file, "theme = \"generated\"\n").unwrap();
         let gen_cfg = Config::load(&gen_file).unwrap();
-        let mut gen_app =
-            App::new_in_scheme(&gen_cfg, themes_dir, test_probes(), None, ColorScheme::Dark);
-        gen_app.config_file = Some(gen_file.clone());
+        let mut gen_app = App::new_in_scheme(
+            &gen_cfg,
+            themes_in(themes_dir),
+            test_probes(),
+            None,
+            ColorScheme::Dark,
+        );
+        gen_app.set_config_file(&gen_file);
         assert_eq!(gen_app.wanted_theme, "generated");
         gen_app.on_color_scheme(ColorScheme::Light);
         assert_eq!(gen_app.wanted_theme, "generated");
@@ -8730,7 +8818,7 @@ mod tests {
         let file = dir.join("config.toml");
         std::fs::write(&file, "# mine\nsidebar_width = 30\n").unwrap();
         let (mut app, mut terminal) = drawn();
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
 
         app.on_event(key(KeyCode::F(2)));
         assert!(matches!(app.modal, Some(Modal::Settings(_))));
@@ -11043,7 +11131,7 @@ mod tests {
             done: false,
         };
         app.bookmarks.store.add(kept.clone()).unwrap();
-        app.bookmarks.file = Some("/home/alice/saved.json".into());
+        app.bookmarks.stored = true;
         app.bookmarks.waiting.push(crate::saved::Waiting {
             request: 1,
             items: vec![kept],

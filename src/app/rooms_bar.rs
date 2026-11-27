@@ -367,7 +367,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matrix-rat-rooms-bar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("config.toml");
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         assert_eq!(app.setting_value(Setting::RoomsBar), "on");
         app.perform(Action::Setting(Setting::RoomsBar));
         assert!(!app.rooms_bar);

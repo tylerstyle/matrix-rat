@@ -177,7 +177,7 @@ impl App {
         if self.modal.is_some() || self.images.viewer_open() {
             return;
         }
-        self.theme_names = Theme::available(&self.themes_dir);
+        self.theme_names = Theme::available(self.storage.as_ref());
         let ctx = self.palette_context();
         self.open_modal(Modal::Palette(Palette::open(ctx)));
     }
@@ -277,7 +277,7 @@ impl App {
                 }
             }
             Target::Theme(name) => {
-                self.theme_names = Theme::available(&self.themes_dir);
+                self.theme_names = Theme::available(self.storage.as_ref());
                 if let Some(index) = self.theme_names.iter().position(|n| n == &name) {
                     self.perform(Action::SelectTheme(index));
                 } else {

@@ -16,13 +16,13 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::storage::{Key, Removal, Storage};
 use crate::textcmd::{self, BadCommand, Command, Failure, MAX_OUTPUT, Step};
 
 /// The most notes kept; the oldest go first.
@@ -271,52 +271,33 @@ impl Notes {
             .collect()
     }
 
-    /// Writes the finished notes of `owner` to `file`, owner-only, in one step. They
-    /// are message text in plain form: only done where the user turned `keep_notes` on.
-    pub fn save(&self, file: &Path, owner: &str) -> io::Result<()> {
+    /// Writes the finished notes of `owner` to `storage` (on this system the file,
+    /// owner-only, in one step). They are message text in plain form: only done where
+    /// the user turned `keep_notes` on.
+    pub fn save(&self, storage: &dyn Storage, owner: &str) -> anyhow::Result<()> {
         let kept = FileOut {
             version: FILE_VERSION,
             owner,
             notes: self.kept(),
         };
         let json = serde_json::to_vec(&kept).map_err(io::Error::other)?;
-        let temporary = file.with_extension("json.new");
-        // A leftover of an earlier try, or anything else lying there, is not written
-        // through: the file is made anew, for the owner only.
-        let _ = std::fs::remove_file(&temporary);
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        let written = out
-            .write_all(&json)
-            .and_then(|()| out.flush())
-            .and_then(|()| std::fs::rename(&temporary, file));
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        written
+        storage.write(&Key::Notes, &json)
     }
 
-    /// Takes in the notes of `owner` from `file`, as far as they are sound: bounded in
-    /// number and size, and made safe for the screen again (the file may have been
+    /// Takes in the notes of `owner` from `storage`, as far as they are sound: bounded
+    /// in number and size, and made safe for the screen again (the file may have been
     /// written by anything). A file that is not there, not a plain file (a link is not
-    /// followed), too large, of another version or not readable gives none.
+    /// followed), too large (see `FsStorage`), of another version or not readable
+    /// gives none.
     ///
     /// A file without an owner (from before notes named their account) or belonging to
     /// another account is ignored and removed from disk, so its plain message text is
     /// never shown to the wrong person.
-    pub fn load(&mut self, file: &Path, owner: &str) {
+    pub fn load(&mut self, storage: &dyn Storage, owner: &str) {
         if owner.is_empty() {
             return;
         }
-        let plain = std::fs::symlink_metadata(file)
-            .is_ok_and(|meta| meta.file_type().is_file() && meta.len() <= MAX_FILE);
-        if !plain {
-            return;
-        }
-        let Ok(bytes) = std::fs::read(file) else {
+        let Ok(Some(bytes)) = storage.read(&Key::Notes) else {
             return;
         };
         let kept = match serde_json::from_slice::<FileIn>(&bytes) {
@@ -328,7 +309,7 @@ impl Notes {
         };
         if kept.owner.as_deref() != Some(owner) {
             tracing::debug!("dropping kept notes file without a matching owner");
-            let _ = remove_file(file);
+            let _ = storage.remove(&Key::Notes, Removal::Value);
             return;
         }
         // Only what is sound counts toward the bound, and the newest of that stay.
@@ -353,16 +334,8 @@ impl Notes {
 
 /// The file's format; a file of another is not read.
 const FILE_VERSION: u32 = 1;
-/// The largest file read: far more than `save` ever writes.
-const MAX_FILE: u64 = 16 * 1024 * 1024;
-
-/// Removes the file of kept notes (the setting was turned off). Not there: fine.
-pub fn remove_file(file: &Path) -> io::Result<()> {
-    match std::fs::remove_file(file) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
-        _ => Ok(()),
-    }
-}
+/// The largest file read (by `FsStorage`): far more than `save` ever writes.
+pub(crate) const MAX_FILE: u64 = 16 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct FileOut<'a> {
@@ -734,6 +707,7 @@ impl TranslateFound {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::FsStorage;
     use crate::textcmd::tests::Dir;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1000,15 +974,16 @@ mod tests {
         notes.set("$b", NoteKind::Translation, NoteState::Running);
         notes.set("$c", NoteKind::Translation, NoteState::Failed("no".into()));
         let owner = "@alice:example.org";
+        let files = FsStorage::default().with_notes(&file);
         // Something lying where the new file is made first is not written through.
         std::fs::write(dir.0.join("notes.json.new"), b"old").unwrap();
-        notes.save(&file, owner).unwrap();
+        notes.save(&files, owner).unwrap();
         let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert!(!dir.0.join("notes.json.new").exists());
 
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert_eq!(back.map.len(), 2, "only what was finished is kept");
         assert_eq!(
             back.get("$a", NoteKind::Transcript).unwrap().state,
@@ -1020,7 +995,7 @@ mod tests {
 
         // Another account's file is dropped (not loaded, and removed).
         let mut wrong = Notes::default();
-        wrong.load(&file, "@bob:example.org");
+        wrong.load(&files, "@bob:example.org");
         assert!(wrong.is_empty());
         assert!(!file.exists());
 
@@ -1031,7 +1006,7 @@ mod tests {
         )
         .unwrap();
         let mut legacy = Notes::default();
-        legacy.load(&file, owner);
+        legacy.load(&files, owner);
         assert!(legacy.is_empty());
         assert!(!file.exists());
 
@@ -1048,7 +1023,7 @@ mod tests {
         );
         std::fs::write(&file, json).unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         // 204 of them are sound: the two that are not take nobody's place.
         assert_eq!(back.map.len(), MAX_NOTES);
         assert_eq!(
@@ -1065,20 +1040,23 @@ mod tests {
         );
         std::fs::write(&file, &json).unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert!(back.is_empty());
         assert!(file.exists());
 
         // Not JSON, or not there: no notes, no error.
         std::fs::write(&file, b"not json").unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
-        back.load(&dir.0.join("missing.json"), owner);
+        back.load(&files, owner);
+        back.load(
+            &FsStorage::default().with_notes(dir.0.join("missing.json")),
+            owner,
+        );
         assert!(back.is_empty());
 
-        remove_file(&file).unwrap();
+        files.remove(&Key::Notes, Removal::Value).unwrap();
         assert!(!file.exists());
-        remove_file(&file).unwrap();
+        files.remove(&Key::Notes, Removal::Value).unwrap();
     }
 
     #[test]
@@ -1086,6 +1064,7 @@ mod tests {
         let dir = Dir::new("notes-odd");
         let file = dir.0.join("notes.json");
         let owner = "@alice:example.org";
+        let files = FsStorage::default().with_notes(&file);
         let good = format!(
             r#"{{"version":1,"owner":"{owner}","notes":[{{"event":"$a","kind":"transcript","text":"t"}}]}}"#
         );
@@ -1102,9 +1081,9 @@ mod tests {
         std::fs::write(&elsewhere, &good).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert!(back.is_empty());
-        notes.save(&file, owner).unwrap();
+        notes.save(&files, owner).unwrap();
         assert!(
             std::fs::symlink_metadata(&file)
                 .unwrap()
@@ -1123,7 +1102,7 @@ mod tests {
             .set_len(MAX_FILE + 1)
             .unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert!(back.is_empty());
         std::fs::remove_file(&file).unwrap();
 
@@ -1131,12 +1110,12 @@ mod tests {
         std::fs::create_dir(&file).unwrap();
         std::fs::write(file.join("inside"), b"kept").unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert!(back.is_empty());
-        assert!(notes.save(&file, owner).is_err());
+        assert!(notes.save(&files, owner).is_err());
         assert_eq!(std::fs::read(file.join("inside")).unwrap(), b"kept");
         assert!(!dir.0.join("notes.json.new").exists());
-        assert!(remove_file(&file).is_err());
+        assert!(files.remove(&Key::Notes, Removal::Value).is_err());
     }
 
     #[test]
@@ -1156,10 +1135,10 @@ mod tests {
         assert!(note.is_of(7) && !note.is_of(8));
         // Kept with the note.
         let dir = Dir::new("notes-source");
-        let file = dir.0.join("notes.json");
-        notes.save(&file, "@alice:example.org").unwrap();
+        let files = FsStorage::default().with_notes(dir.0.join("notes.json"));
+        notes.save(&files, "@alice:example.org").unwrap();
         let mut back = Notes::default();
-        back.load(&file, "@alice:example.org");
+        back.load(&files, "@alice:example.org");
         assert_eq!(back.get("$a", NoteKind::Translation).unwrap().source, 7);
         // One of which nothing is known is taken as it is.
         notes.set_from("$b", NoteKind::Translation, NoteState::Done("t".into()), 0);

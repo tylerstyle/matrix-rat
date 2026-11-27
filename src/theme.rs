@@ -11,6 +11,8 @@ use anyhow::{Context, Result, anyhow};
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 
+use crate::storage::{Key, Listing, Storage};
+
 const BUILTIN: &[(&str, &str)] = &[
     ("rat-dark", include_str!("../themes/rat-dark.toml")),
     (
@@ -213,36 +215,32 @@ impl Theme {
         Some(Self::parse(source, name).expect("built-in themes are valid"))
     }
 
-    pub fn from_file(path: &Path) -> Result<Theme> {
-        let source = std::fs::read_to_string(path)
-            .with_context(|| format!("could not read {}", path.display()))?;
-        let fallback = path
+    /// The user's theme `name`, as `storage` keeps it.
+    fn from_storage(storage: &dyn Storage, name: &str) -> Result<Theme> {
+        let key = Key::Theme(name.to_owned());
+        let source = crate::storage::read_found(storage, &key)?;
+        // As the file's name has it (`name` may hold a folder).
+        let file = format!("{name}.toml");
+        let fallback = Path::new(&file)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("custom");
-        Self::parse(&source, fallback).with_context(|| format!("in {}", path.display()))
+        Self::parse(&source, fallback).with_context(|| format!("in {}", storage.describe(&key)))
     }
 
-    /// Looks in `themes_dir` first so users can override a built-in by name.
-    pub fn load(name: &str, themes_dir: &Path) -> Result<Theme> {
-        let file = themes_dir.join(format!("{name}.toml"));
-        if file.exists() {
-            return Self::from_file(&file);
+    /// Looks among the user's themes first so users can override a built-in by name.
+    pub fn load(name: &str, storage: &dyn Storage) -> Result<Theme> {
+        if storage.exists(&Key::Theme(name.to_owned())) {
+            return Self::from_storage(storage, name);
         }
         Self::builtin(name).ok_or_else(|| anyhow!("unknown theme {name:?}"))
     }
 
-    /// Built-in names plus `*.toml` files in `themes_dir`, without duplicates.
-    pub fn available(themes_dir: &Path) -> Vec<String> {
+    /// Built-in names plus the user's themes, without duplicates.
+    pub fn available(storage: &dyn Storage) -> Vec<String> {
         let mut names = Self::builtin_names();
-        if let Ok(entries) = std::fs::read_dir(themes_dir) {
-            let mut extra: Vec<String> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
-                .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
-                .filter(|n| !names.contains(n))
-                .collect();
+        if let Ok(found) = storage.list(Listing::Themes) {
+            let mut extra: Vec<String> = found.into_iter().filter(|n| !names.contains(n)).collect();
             extra.sort();
             names.extend(extra);
         }

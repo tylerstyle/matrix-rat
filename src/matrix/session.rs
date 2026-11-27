@@ -362,7 +362,11 @@ pub async fn clear_with<K: KeyringBackend>(
     let _ = tokio::task::spawn_blocking(move || {
         // What the account saved for later names its rooms and messages: it goes with
         // the account. (A session the server merely ended keeps it: see `forget`.)
-        crate::saved::remove_files(&paths.saved_file());
+        let _ = crate::storage::Storage::remove(
+            &crate::storage::FsStorage::new(&paths),
+            &crate::storage::Key::Saved,
+            crate::storage::Removal::All,
+        );
         let _ = std::fs::remove_dir_all(paths.store_dir());
         let _ = std::fs::remove_dir_all(paths.data_dir.join("store.previous"));
         let _ = std::fs::remove_dir_all(paths.search_dir());

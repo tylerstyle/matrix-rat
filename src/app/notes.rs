@@ -25,6 +25,7 @@ use crate::notes::{
     self, NoTranscriber, NoTranslator, NoteKind, NoteState, Notes, Transcriber, Translator,
 };
 use crate::palette::{NoteCaps, NoteOffer};
+use crate::storage::{Key, Removal, Storage};
 use crate::textcmd;
 
 /// The notes, what makes them, and what is on its way.
@@ -40,8 +41,8 @@ pub struct NotesState {
     pub translate_language: String,
     /// The `keep_notes` setting.
     pub keep: bool,
-    /// Where kept notes go; `None` in the demo and in tests: nothing is written.
-    file: Option<PathBuf>,
+    /// Kept notes go to the storage; not in the demo and in tests: nothing is written.
+    stored: bool,
     /// Which account the kept notes belong to; set once logged in and cleared when the
     /// session ends. Nothing is read or written without one.
     owner: Option<String>,
@@ -67,7 +68,7 @@ impl Default for NotesState {
             translator: Err(NoTranslator::NotSet),
             translate_language: notes::DEFAULT_LANGUAGE.to_owned(),
             keep: notes::KEEP_BY_DEFAULT,
-            file: None,
+            stored: false,
             owner: None,
             dir: None,
             next_id: 0,
@@ -85,7 +86,7 @@ impl fmt::Debug for NotesState {
             .field("transcriber", &self.transcriber)
             .field("translator", &self.translator)
             .field("keep", &self.keep)
-            .field("file", &self.file.is_some())
+            .field("stored", &self.stored)
             .field("owner", &self.owner.is_some())
             .field("dir", &self.dir.is_some())
             .field("runs", &self.runs)
@@ -173,9 +174,9 @@ impl NotesState {
         self.runs.iter().find(|run| run.event == event)
     }
 
-    fn save(&self) -> std::io::Result<()> {
-        match (&self.file, &self.owner, self.keep) {
-            (Some(file), Some(owner), true) => self.notes.save(file, owner),
+    fn save(&self, storage: &dyn Storage) -> anyhow::Result<()> {
+        match (self.stored, &self.owner, self.keep) {
+            (true, Some(owner), true) => self.notes.save(storage, owner),
             _ => Ok(()),
         }
     }
@@ -210,15 +211,24 @@ fn own_text(message: &Message) -> Option<String> {
 }
 
 impl App {
-    /// Where the copies of sounds go, and where notes are kept across restarts.
-    /// Notes are read only once `LoggedIn` names the account (see [`Self::load_notes`]);
-    /// a file left from when `keep_notes` was on is removed if the setting is off.
-    pub(super) fn set_note_paths(&mut self, dir: PathBuf, file: PathBuf) {
+    /// Where the copies of sounds go, and that notes are kept in the storage across
+    /// restarts. Notes are read only once `LoggedIn` names the account (see
+    /// [`Self::load_notes`]); what was kept while `keep_notes` was on is removed if
+    /// the setting is off.
+    pub(super) fn keep_notes_stored(&mut self, dir: PathBuf) {
         self.notes.dir = Some(dir);
         if !self.notes.keep {
-            let _ = notes::remove_file(&file);
+            let _ = self.storage.remove(&Key::Notes, Removal::Value);
         }
-        self.notes.file = Some(file);
+        self.notes.stored = true;
+    }
+
+    /// For tests: notes are kept in the file `file`, the copies of sounds go to `dir`.
+    #[cfg(test)]
+    pub(super) fn set_note_paths(&mut self, dir: PathBuf, file: PathBuf) {
+        let files = self.storage.files().expect("the app's storage is files");
+        *files = std::mem::take(files).with_notes(file);
+        self.keep_notes_stored(dir);
     }
 
     /// Reads the kept notes for `owner` once the session is up. A file with no owner,
@@ -226,11 +236,11 @@ impl App {
     pub(super) fn load_notes(&mut self, owner: &str) {
         self.notes.notes.clear();
         self.notes.owner = Some(owner.to_owned());
-        if let Some(file) = &self.notes.file {
+        if self.notes.stored {
             if self.notes.keep {
-                self.notes.notes.load(file, owner);
+                self.notes.notes.load(self.storage.as_ref(), owner);
             } else {
-                let _ = notes::remove_file(file);
+                let _ = self.storage.remove(&Key::Notes, Removal::Value);
             }
         }
     }
@@ -595,10 +605,10 @@ impl App {
     /// Deletes the kept-notes file on disk (when logging out or when the profile has no
     /// session).
     pub(super) fn remove_notes_file(&mut self) {
-        if let Some(file) = &self.notes.file
-            && let Err(err) = notes::remove_file(file)
+        if self.notes.stored
+            && let Err(err) = self.storage.remove(&Key::Notes, Removal::Value)
         {
-            tracing::warn!(why = %crate::logsafe::kind(&err), "could not remove the notes");
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not remove the notes");
         }
     }
 
@@ -723,8 +733,8 @@ impl App {
 
     /// The file of kept notes follows a change, where they are kept.
     fn note_kept(&mut self) {
-        if let Err(err) = self.notes.save() {
-            tracing::warn!(why = %crate::logsafe::kind(&err), "could not keep the notes");
+        if let Err(err) = self.notes.save(self.storage.as_ref()) {
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not keep the notes");
             self.show_toast("The notes could not be written to their file");
         }
     }
@@ -838,13 +848,13 @@ impl App {
     pub(super) fn toggle_keep_notes(&mut self) {
         self.notes.keep = !self.notes.keep;
         self.save_setting("keep_notes", self.notes.keep);
-        let done = match (&self.notes.file, self.notes.keep) {
-            (Some(_), true) => self.notes.save(),
-            (Some(file), false) => notes::remove_file(file),
-            (None, _) => Ok(()),
+        let done = match (self.notes.stored, self.notes.keep) {
+            (true, true) => self.notes.save(self.storage.as_ref()),
+            (true, false) => self.storage.remove(&Key::Notes, Removal::Value),
+            (false, _) => Ok(()),
         };
         if let Err(err) = done {
-            tracing::warn!(why = %crate::logsafe::kind(&err), "could not write or remove the notes");
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not write or remove the notes");
             self.show_toast("The file of notes could not be written or removed");
         }
     }

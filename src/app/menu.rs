@@ -1722,7 +1722,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matrix-rat-markers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("config.toml");
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         app.perform(Action::Setting(crate::modal::Setting::ReadMarkers));
         assert!(!crate::config::Config::load(&file).unwrap().read_markers);
         assert!(!screen(&mut app, &mut terminal).contains("✓"));

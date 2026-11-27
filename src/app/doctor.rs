@@ -366,7 +366,7 @@ mod tests {
         let mut app = App::new(&config, dir.join("themes"), None);
         assert_eq!(app.found.ignored_settings, ["mouse"]);
         assert_eq!(app.found.key_problems, 1);
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         // Mended in an editor while the app runs.
         std::fs::write(&file, "images = \"sixel\"\n").unwrap();
         app.reload_theme();

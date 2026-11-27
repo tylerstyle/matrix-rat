@@ -245,7 +245,7 @@ impl App {
         touched: &[(Context, Action)],
     ) {
         if let Err(err) = persist_overrides(
-            self.config_file.as_deref(),
+            self.config_stored.then_some(self.storage.as_ref()),
             &self.keymap,
             preset,
             clear_all,
@@ -533,7 +533,7 @@ mod tests {
 
         let cfg = Config::load(&file).unwrap();
         let mut app = App::new(&cfg, PathBuf::new(), None);
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         let mut term = terminal(100, 30);
 
         // F1 still opens plain Help.

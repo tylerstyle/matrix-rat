@@ -508,7 +508,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("config.toml");
         let (mut app, _terminal, _commands) = app_with(Vec::new(), false, LinkPreviews::Off);
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         assert_eq!(app.setting_value(Setting::LinkPreviews), "off");
         for (value, saved) in [
             ("unencrypted rooms", "unencrypted"),

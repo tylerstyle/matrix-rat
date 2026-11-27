@@ -2035,13 +2035,13 @@ impl Editor {
 
 /// Persists changes to the affected actions (plus optional preset change) in `config.toml`.
 pub fn persist_overrides(
-    path: Option<&std::path::Path>,
+    storage: Option<&dyn crate::storage::Storage>,
     keymap: &Keymap,
     preset: Option<Preset>,
     clear_all: bool,
     touched: &[(Context, Action)],
 ) -> std::io::Result<()> {
-    let Some(path) = path else {
+    let Some(storage) = storage else {
         return Ok(());
     };
     let mut computed: Vec<(Context, ActionSpec, Option<Vec<String>>)> = Vec::new();
@@ -2063,7 +2063,7 @@ pub fn persist_overrides(
             keys: keys.as_deref(),
         })
         .collect();
-    crate::config::save_key_changes(path, preset.map(Preset::name), clear_all, &edits)
+    crate::config::save_key_changes(storage, preset.map(Preset::name), clear_all, &edits)
         .map_err(std::io::Error::other)
 }
 
