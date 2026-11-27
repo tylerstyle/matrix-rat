@@ -3084,6 +3084,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "gloo-utils",
+ "growable-bloom-filter",
  "hkdf",
  "js-sys",
  "matrix-sdk-base",

@@ -8,36 +8,29 @@ description = "A mouse-friendly, themeable Matrix client for the terminal"
 repository = "https://github.com/tylerstyle/matrix-rat"
 
 [dependencies]
-# Matrix. Pinned exactly: every minor release has breaking changes.
-matrix-sdk = { version = "=0.19.1", features = ["bundled-sqlite", "sso-login", "socks", "qrcode", "experimental-search"] }
-matrix-sdk-ui = "=0.19.1"
+# What the core uses on both targets: the app, the drawing and the Matrix worker. What
+# only the terminal, the OS, the command line and `serve` use is in the next section, the
+# browser's own in the one after it (`cargo check --lib --target wasm32-unknown-unknown`).
+
+# Matrix: the SDK and its timeline are given per target below.
 # For decrypting attachments we download ourselves; same version as the SDK.
 matrix-sdk-base = { version = "=0.19.1", features = ["e2e-encryption"] }
 
-# TUI
-ratatui = "0.30.2"
-crossterm = { version = "0.29", features = ["event-stream"] }
+# TUI. No default features, which would pull crossterm into the browser; the native
+# section adds its defaults back. `std`, which crossterm turns on: without it the layout
+# cache wants a critical-section implementation.
+ratatui = { version = "0.30.2", default-features = false, features = ["all-widgets", "layout-cache", "macros", "underline-color", "std"] }
 
-# Runtime
-# `process`, `net` and `io-util`: the audio player and mpv's control socket (src/audio),
-# and the agent socket (src/agent). `io-std`: the MCP server on stdin and stdout.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "process", "net", "io-util", "io-std"] }
+# Runtime: tokio per target below.
 futures = "0.3"
 
 # Support
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-etcetera = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-signal-hook = "0.3"
-# Splits $VISUAL / $EDITOR into words the way a shell does; already in the tree.
-shlex = "2"
-libc = "0.2"
 toml = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
+tracing-subscriber = "0.3"
 unicode-segmentation = "1"
 url = "2"
 unicode-width = "0.2"
@@ -49,17 +42,50 @@ mime = "0.3"
 zeroize = "1"
 comrak = { version = "1.0.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-notify = "8"
 toml_edit = "0.25.19"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }
+
+# Native only: the terminal, the OS, the command line, `serve` and its clients. Every
+# crate here has the same version and features as before the browser build existed.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+# Matrix. Pinned exactly: every minor release has breaking changes.
+matrix-sdk = { version = "=0.19.1", features = ["bundled-sqlite", "sso-login", "socks", "qrcode", "experimental-search"] }
+matrix-sdk-ui = "=0.19.1"
+
+# TUI: ratatui with its default features, crossterm among them.
+ratatui = "0.30.2"
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+# Runtime
+# `process`, `net` and `io-util`: the audio player and mpv's control socket (src/audio),
+# and the agent socket (src/agent). `io-std`: the MCP server on stdin and stdout.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "process", "net", "io-util", "io-std"] }
+
+# Support
+clap = { version = "4", features = ["derive"] }
+etcetera = "0.11"
+signal-hook = "0.3"
+# Splits $VISUAL / $EDITOR into words the way a shell does; already in the tree.
+shlex = "2"
+libc = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+notify = "8"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 notify-rust = { version = "4.19.0", default-features = false, features = ["z"] }
 # Same version & features notify-rust already pulls in, to watch XDG portal appearance.
 zbus = { version = "6.3.0", default-features = false, features = ["default-rt", "proxy"] }
-syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }
 
-# The browser has no `std::time` clock: `crate::time` takes its types from here.
+# The browser (`wasm32-unknown-unknown`).
 [target.'cfg(target_family = "wasm")'.dependencies]
+# The SDK without SQLite, the local login server, the search index and rustls with aws-lc
+# (C code): the browser's fetch, IndexedDB for the stores (phase 2) and the JS glue.
+matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-encryption", "automatic-room-key-forwarding", "js", "indexeddb"] }
+matrix-sdk-ui = { version = "=0.19.1", default-features = false, features = ["js"] }
+# Channels, locks and `select!`; tasks and timers are crate::rt's.
+tokio = { version = "1", features = ["sync", "macros"] }
+# The browser has no `std::time` clock: `crate::time` takes its types from here.
 web-time = "1"
 # The browser's clock for chrono's `Local`/`Utc::now`.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "wasmbind"] }
