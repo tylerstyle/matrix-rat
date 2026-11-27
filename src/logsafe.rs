@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use matrix_sdk::ruma::api::error::Error as ServerError;
 
-use crate::matrix::KeyringError;
+use crate::matrix::{KeyringError, PageError};
 
 /// The reduced form of an error, safe to log. Small and `Copy`, so it can be made in
 /// the log line itself.
@@ -161,6 +161,11 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
     }
     if find::<serde_json::Error>(err).is_some() {
         return Some(Why::Word("unreadable data"));
+    }
+    // A page that failed with the timeline's error says nothing more: its cause, next
+    // along the chain, does.
+    if let Some(PageError::Panicked) = find::<PageError>(err) {
+        return Some(Why::Word("SDK panicked"));
     }
     if let Some(err) = find::<tokio::task::JoinError>(err) {
         return Some(Why::Word(if err.is_panic() {

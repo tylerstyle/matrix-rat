@@ -42,6 +42,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::MatrixEvent;
+use super::paging;
 use super::safety::IgnoredSet;
 use crate::collect::{self, Cut, Span};
 use crate::logsafe;
@@ -823,7 +824,7 @@ async fn load(
         |loaded| progress.tell(loaded),
         enough,
         |ask| async move {
-            match tokio::time::timeout(PAGE_TIMEOUT, timeline.paginate_backwards(ask)).await {
+            match tokio::time::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
                 Ok(Ok(reached_start)) => Some(reached_start),
                 Ok(Err(err)) => {
                     tracing::debug!(why = %logsafe::kind(&err), "collect: could not load older messages");
