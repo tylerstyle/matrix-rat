@@ -105,6 +105,27 @@ pub enum ComposeMode {
     Edit(usize),
 }
 
+/// What `App` asks of the desktop. The shell does it (see `run`): `App` starts no
+/// program and touches no window itself.
+#[derive(Clone, PartialEq, Eq)]
+pub enum OsRequest {
+    /// A link, or a saved file, for the desktop's program for it (`xdg-open`).
+    Open(String),
+    /// Our window to the front: a desktop notification was clicked. The
+    /// `notification_click_command` setting (see `focus`).
+    RaiseWindow(String),
+}
+
+/// Hand-written: a link, a file's path and a command line are the user's.
+impl std::fmt::Debug for OsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Open(_) => "Open",
+            Self::RaiseWindow(_) => "RaiseWindow",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SideRow {
     Section(RoomKind),
@@ -441,6 +462,8 @@ pub struct App {
     /// What the machine has (colours, programs, SSH), asked of the shell's probes at
     /// start and when a setting changes what is to be found.
     probes: Box<dyn Probes>,
+    /// What the desktop is asked to do; the event loop takes it.
+    os_requests: Vec<OsRequest>,
 }
 
 /// Hand-written: the app holds everything private there is (messages, drafts, ids,
@@ -506,6 +529,7 @@ impl std::fmt::Debug for App {
             .field("audio", &self.audio)
             .field("notes", &self.notes)
             .field("collect", &self.collect)
+            .field("os_requests", &self.os_requests)
             .finish_non_exhaustive()
     }
 }
@@ -776,6 +800,7 @@ impl App {
             notes: Default::default(),
             collect: Default::default(),
             probes,
+            os_requests: Vec::new(),
         }
     }
 
@@ -883,6 +908,34 @@ impl App {
     }
 
     // ----- state changes -------------------------------------------------------------
+
+    /// Asks for `target` (a link, or a saved file's path) to be opened by the
+    /// desktop's program for it. Best effort: the login form, for one, also shows
+    /// the address to open by hand.
+    pub(super) fn open_externally(&mut self, target: String) {
+        self.os_requests.push(OsRequest::Open(target));
+    }
+
+    /// What the desktop is to do, for the event loop.
+    pub fn take_os_requests(&mut self) -> Vec<OsRequest> {
+        std::mem::take(&mut self.os_requests)
+    }
+
+    /// For tests: what was asked to be opened since the last look.
+    #[cfg(test)]
+    pub(crate) fn take_opened(&mut self) -> Vec<String> {
+        let (opened, rest) = std::mem::take(&mut self.os_requests)
+            .into_iter()
+            .partition::<Vec<_>, _>(|request| matches!(request, OsRequest::Open(_)));
+        self.os_requests = rest;
+        opened
+            .into_iter()
+            .filter_map(|request| match request {
+                OsRequest::Open(target) => Some(target),
+                OsRequest::RaiseWindow(_) => None,
+            })
+            .collect()
+    }
 
     pub fn show_toast(&mut self, text: impl Into<String>) {
         // Toasts often quote what a server or another person said.
@@ -1431,7 +1484,8 @@ impl App {
         // The click was on the desktop, maybe with another window in front: ask for
         // ours to be shown.
         if let Some(command) = &self.notification_click_command {
-            crate::focus::raise_window(command);
+            self.os_requests
+                .push(OsRequest::RaiseWindow(command.clone()));
         }
         // A jump to a message that is still on its way would take the view
         // somewhere else afterwards.
@@ -2253,7 +2307,7 @@ impl App {
         };
         if !self.try_open_matrix_link(&url) {
             if self.matrix.is_some() {
-                open_in_browser(&url);
+                self.open_externally(url.clone());
             }
             self.show_toast(format!("Opening {url}"));
         }
@@ -3753,7 +3807,7 @@ impl App {
                 }
             }
             MatrixEvent::BrowserLoginUrl(url) => {
-                open_in_browser(&url);
+                self.open_externally(url.clone());
                 if let Some(Modal::Login(form)) = &mut self.modal {
                     form.browser_url = Some(url);
                 }
@@ -5356,8 +5410,8 @@ pub(super) fn validate_avatar_path(raw: &str, limit: Option<u64>) -> Result<Path
     Ok(path.clone())
 }
 
-/// Best effort; the login form also shows the address to open by hand.
-#[cfg(not(test))]
+/// Hands a link or a file to the desktop's program for it. Best effort; the login
+/// form also shows the address to open by hand.
 fn open_in_browser(url: &str) {
     use std::process::{Command, Stdio};
     let _ = Command::new("xdg-open")
@@ -5368,15 +5422,26 @@ fn open_in_browser(url: &str) {
         .spawn();
 }
 
-#[cfg(test)]
-thread_local! {
-    static TEST_OPENED_URLS: std::cell::RefCell<Vec<String>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+/// Does what the app asked of the desktop.
+fn carry_out(requests: Vec<OsRequest>) {
+    for request in requests {
+        match request {
+            OsRequest::Open(target) => open_in_browser(&target),
+            OsRequest::RaiseWindow(command) => crate::focus::raise_window(&command),
+        }
+    }
 }
 
-#[cfg(test)]
-fn open_in_browser(url: &str) {
-    TEST_OPENED_URLS.with(|urls| urls.borrow_mut().push(url.to_owned()));
+/// Tells the terminal to free the pictures that are no longer shown (`all`: every
+/// picture, before quitting). Written between frames, never during a draw.
+fn flush_images(app: &mut App, all: bool) {
+    use std::io::Write;
+    let sequence = app.image_cleanup(all);
+    if !sequence.is_empty() {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(sequence.as_bytes());
+        let _ = out.flush();
+    }
 }
 
 /// Waits up to `grace` for `tasks` to end on their own. Returns `false` if any task
@@ -5440,6 +5505,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     }
     app.startup_target = target;
     // Copies of sounds and mpv's sockets; what an earlier run left there goes now.
+    crate::audio::remove_leftovers(&paths.audio_dir());
     app.set_audio_dir(paths.audio_dir());
     // The demo keeps no notes in a file, as it writes no settings.
     if !demo {
@@ -5486,6 +5552,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // write in flight was cancelled; matrix-sdk-sqlite panics over that.
     let outcome = async {
         while !app.should_quit {
+            // What the app asked of the desktop, as soon as it asked.
+            carry_out(app.take_os_requests());
             if app.suspend_requested {
                 app.suspend_requested = false;
                 // What played or recorded was told to stop: wait for them to end, and abort
@@ -5497,7 +5565,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 }
                 // The terminal frees its copies of the pictures now, in case we are
                 // never resumed; they are sent again when drawn.
-                app.flush_images(true);
+                flush_images(&mut app, true);
                 terminal::suspend(&mut terminal)?;
                 // The shell's title was put back meanwhile.
                 app.window_title_lost();
@@ -5510,7 +5578,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                     app.cancel_recording();
                 }
                 // As for Ctrl-Z: the terminal frees its copies of the pictures now.
-                app.flush_images(true);
+                flush_images(&mut app, true);
                 // Its reader thread would take the keys meant for the editor: the stream
                 // is dropped, and a new one is read from once we are back.
                 drop(std::mem::replace(&mut events, EventStream::new()));
@@ -5613,7 +5681,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 app.dirty = false;
                 terminal.draw(|frame| ui::draw(frame, &mut app))?;
                 app.after_draw();
-                app.flush_images(false);
+                flush_images(&mut app, false);
                 // Only when the count changed, and never with the setting off.
                 if let Some(title) = app.take_window_title() {
                     terminal::write_window_title(&title)?;
@@ -5653,7 +5721,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         Ok::<(), anyhow::Error>(())
     }
     .await;
-    app.flush_images(true);
+    flush_images(&mut app, true);
     // What plays stops with the app, and its file goes; a player that does not end in
     // time is killed as its task is dropped.
     app.stop_audio();
@@ -9581,6 +9649,24 @@ mod tests {
         }
     }
 
+    /// The window is raised by the event loop, asked by the app: in tests, which
+    /// may run inside a desktop that would obey, nothing is asked at all.
+    #[test]
+    fn a_clicked_notification_asks_for_the_window_to_come_to_the_front() {
+        let (mut app, _commands) = with_worker();
+        app.on_matrix(clicked("!b"));
+        assert_eq!(app.take_os_requests(), []);
+        app.notification_click_command = Some("raise-me".to_owned());
+        app.on_matrix(clicked("!a"));
+        let asked = app.take_os_requests();
+        assert_eq!(asked, [OsRequest::RaiseWindow("raise-me".to_owned())]);
+        // Nothing of the command in debug output.
+        assert_eq!(format!("{asked:?}"), "[RaiseWindow]");
+        // A room that is gone raises nothing.
+        app.on_matrix(clicked("!gone"));
+        assert_eq!(app.take_os_requests(), []);
+    }
+
     #[test]
     fn a_clicked_notification_opens_its_room_like_the_room_list_does() {
         let (mut app, mut commands) = with_worker();
@@ -9786,10 +9872,6 @@ mod tests {
         app.modal = None;
         app.on_matrix(clicked("!b"));
         assert_eq!(commands_sent(&mut commands), Vec::<String>::new());
-    }
-
-    fn take_opened_urls() -> Vec<String> {
-        TEST_OPENED_URLS.with(|urls| std::mem::take(&mut *urls.borrow_mut()))
     }
 
     fn screen_text(terminal: &Terminal<TestBackend>) -> String {
@@ -10329,7 +10411,6 @@ mod tests {
 
     #[test]
     fn opening_links_handles_event_room_user_broken_and_http() {
-        let _ = take_opened_urls();
         let (mut app, _terminal, mut commands) = connected();
         app.rooms[0].alias = Some("#alpha:example.org".into());
         app.rooms[0].messages = vec![remote("1", "ann", "already here")];
@@ -10343,7 +10424,7 @@ mod tests {
             drain(&mut commands),
             [format!("OpenEvent(!b:example.org, generation {jump1_gen})")]
         );
-        assert!(take_opened_urls().is_empty());
+        assert!(app.take_opened().is_empty());
 
         // 2. Joined event by room alias ($ev1 loaded in room 0 -> selects locally and cancels prior jump).
         assert!(app.try_open_matrix_link("matrix:r/alpha:example.org/e/ev1"));
@@ -10360,7 +10441,7 @@ mod tests {
             Some("Join this room before jumping to a message in it")
         );
         assert!(drain(&mut commands).is_empty());
-        assert!(take_opened_urls().is_empty());
+        assert!(app.take_opened().is_empty());
 
         // 4. Joined room link -> switches room.
         assert!(app.try_open_matrix_link("https://matrix.to/#/%21b:example.org"));
@@ -10402,7 +10483,7 @@ mod tests {
         // 7. Broken Matrix link -> toast, never launches browser.
         assert!(app.try_open_matrix_link("https://matrix.to/#/not-valid"));
         assert!(app.toast.is_some());
-        assert!(take_opened_urls().is_empty());
+        assert!(app.take_opened().is_empty());
 
         // 8. Normal HTTP link inside a selected message -> opens external browser.
         let web = remote("2", "ann", "see https://example.com/docs");
@@ -10410,7 +10491,7 @@ mod tests {
         app.timeline.selected = Some(app.rooms[app.active].messages.len() - 1);
         app.set_focus(Pane::Timeline);
         app.perform(Action::Open);
-        assert_eq!(take_opened_urls(), ["https://example.com/docs"]);
+        assert_eq!(app.take_opened(), ["https://example.com/docs"]);
     }
 
     #[test]

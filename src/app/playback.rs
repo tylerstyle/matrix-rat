@@ -301,9 +301,9 @@ impl Sound {
 }
 
 impl App {
-    /// Where the copies of sounds go; what an earlier run left there is swept away.
+    /// Where the copies of sounds go (the event loop has swept away what an earlier
+    /// run left there).
     pub(super) fn set_audio_dir(&mut self, dir: PathBuf) {
-        audio::remove_leftovers(&dir);
         self.audio.dir = Some(dir);
     }
 

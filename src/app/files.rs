@@ -131,7 +131,7 @@ impl App {
     /// gets shown or played. Anything else stays saved and is named, not launched.
     fn open_saved(&mut self, path: &std::path::Path) {
         if files::opens_safely(path) {
-            super::open_in_browser(&path.to_string_lossy());
+            self.open_externally(path.to_string_lossy().into_owned());
         } else {
             self.show_toast(format!(
                 "Saved to {} (this file type is not opened automatically)",
@@ -446,11 +446,9 @@ mod tests {
         );
 
         // `o` on a location opens its geo: URI.
-        crate::app::TEST_OPENED_URLS.with(|u| u.borrow_mut().clear());
+        let _ = app.take_opened();
         app.timeline.selected = Some(2);
         app.on_event(key(KeyCode::Char('o')));
-        crate::app::TEST_OPENED_URLS.with(|u| {
-            assert_eq!(*u.borrow(), ["geo:51.5074,-0.1278"]);
-        });
+        assert_eq!(app.take_opened(), ["geo:51.5074,-0.1278"]);
     }
 }

@@ -157,7 +157,8 @@ impl App {
             (SessionStage::SignOut(_), Click::Confirm) => self.submit_sign_out(),
             (SessionStage::SignOut(sign_out), Click::OpenWeb) => {
                 if let Some(Some(url)) = &sign_out.web {
-                    super::open_in_browser(url);
+                    let url = url.clone();
+                    self.open_externally(url);
                     self.show_toast("Opened in your browser");
                 }
             }
@@ -1469,14 +1470,14 @@ mod tests {
         find(&text, "This server takes no password for this");
         find(&text, "https://account.example.org/account/");
         // The page opens only when chosen; Enter alone goes back.
-        crate::app::TEST_OPENED_URLS.with(|urls| urls.borrow_mut().clear());
+        let _ = app.take_opened();
         let (col, row) = find(&text, " Open in browser ");
         app.on_event(click(col + 1, row));
-        crate::app::TEST_OPENED_URLS.with(|urls| assert_eq!(*urls.borrow(), [url.to_owned()]));
+        assert_eq!(app.take_opened(), [url.to_owned()]);
         assert!(drain(&mut commands).is_empty());
         app.on_event(key(KeyCode::Enter));
         assert!(in_list(&app));
-        crate::app::TEST_OPENED_URLS.with(|urls| assert_eq!(urls.borrow().len(), 1));
+        assert!(app.take_opened().is_empty());
 
         // No page either: a plain explanation, and nothing to press but Back.
         let request = ask_to_sign_out(&mut app, &mut commands);

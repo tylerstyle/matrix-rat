@@ -496,7 +496,7 @@ mod tests {
                 KeyCode::Char('o'),
                 KeyModifiers::NONE,
             )));
-            super::super::TEST_OPENED_URLS.with(|urls| std::mem::take(&mut *urls.borrow_mut()))
+            app.take_opened()
         };
         assert_eq!(opened(&mut app), [A]);
     }

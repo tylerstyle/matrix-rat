@@ -1,7 +1,5 @@
 //! Pictures in the app: fetching what the timeline shows, and the viewer.
 
-use std::io::Write;
-
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::*;
@@ -46,15 +44,10 @@ impl App {
         self.send_avatar_requests();
     }
 
-    /// Tells the terminal to free the pictures that are no longer shown (`all`: every
-    /// picture, before quitting). Written between frames, never during a draw.
-    pub(super) fn flush_images(&mut self, all: bool) {
-        let sequence = self.images.cleanup_sequence(all);
-        if !sequence.is_empty() {
-            let mut out = std::io::stdout();
-            let _ = out.write_all(sequence.as_bytes());
-            let _ = out.flush();
-        }
+    /// What tells the terminal to free the pictures that are no longer shown (`all`:
+    /// every picture, before quitting), for the event loop to write between frames.
+    pub(super) fn image_cleanup(&mut self, all: bool) -> String {
+        self.images.cleanup_sequence(all)
     }
 
     /// Opens the viewer for the picture of a message. False if it has none.
