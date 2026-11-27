@@ -23,6 +23,7 @@ use ratatui_image::protocol::kitty::Kitty;
 use ratatui_image::sliced::SlicedProtocol;
 #[cfg(not(target_family = "wasm"))]
 use ratatui_image::{FontSize, Resize};
+#[cfg(any(not(target_family = "wasm"), test))]
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{
@@ -59,6 +60,9 @@ const RETRY_MAX: Duration = Duration::from_secs(30 * 60);
 /// Above this many pixels a kitty transmission is compressed, if the terminal can.
 #[cfg(any(not(target_family = "wasm"), test))]
 const COMPRESS_ABOVE: u32 = 512 * 512;
+/// Why the viewer shows no picture where nothing draws one (shown after its name).
+#[cfg(any(target_family = "wasm", test))]
+const NOT_DRAWN: &str = "pictures are not drawn in the browser yet";
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -310,14 +314,9 @@ pub enum ViewerContent<'a> {
     Ready(&'a mut Encoded),
 }
 
-/// A viewer encoding finished on another thread.
-#[cfg_attr(
-    target_family = "wasm",
-    expect(
-        dead_code,
-        reason = "the browser has no thread to encode on (App::start_images is the terminal's)"
-    )
-)]
+/// A viewer encoding finished on another thread. The terminal's alone: the browser
+/// has no thread to encode on (`App::start_images` is the terminal's).
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct EncodeDone {
     key: String,
     size: (u16, u16),
@@ -402,6 +401,7 @@ pub struct ImageStore {
     garbage: Vec<u32>,
     next_id: u32,
     /// Where finished viewer encodings go. Without it they are done on the spot.
+    #[cfg(any(not(target_family = "wasm"), test))]
     encoder: Option<UnboundedSender<EncodeDone>>,
     /// Room pictures by their `mxc://` address. They are tiny and have their own
     /// limit, apart from the pictures in messages.
@@ -457,6 +457,7 @@ impl ImageStore {
             unverified: Vec::new(),
             garbage: Vec::new(),
             next_id: seed,
+            #[cfg(any(not(target_family = "wasm"), test))]
             encoder: None,
             avatars: HashMap::new(),
             avatar_requests: Vec::new(),
@@ -1330,6 +1331,8 @@ impl ImageStore {
     /// What the viewer shows at `size` cells. Starts the encoding for that size if it
     /// is missing; `covered` as for [`ImageStore::inline`].
     pub fn viewer_content(&mut self, size: (u16, u16), covered: bool) -> ViewerContent<'_> {
+        #[cfg(target_family = "wasm")]
+        self.nothing_draws_the_viewer();
         let graphics = self.graphics;
         let hold = covered && self.is_kitty();
         let needs_encoding = match self.viewer.as_ref() {
@@ -1346,6 +1349,7 @@ impl ImageStore {
             _ => false,
         };
         let id = if needs_encoding { self.fresh_id() } else { 0 };
+        #[cfg(any(not(target_family = "wasm"), test))]
         let encoder = self.encoder.clone();
         let Some(viewer) = self.viewer.as_mut() else {
             return ViewerContent::Loading;
@@ -1357,6 +1361,7 @@ impl ImageStore {
         };
         if needs_encoding {
             Self::discard(&mut self.garbage, viewer.encoded.take());
+            #[cfg(any(not(target_family = "wasm"), test))]
             match encoder {
                 Some(sender) => {
                     viewer.encoding = Some(size);
@@ -1368,12 +1373,29 @@ impl ImageStore {
                 }
                 None => viewer.encoded = encode(&pixels, size, graphics, id),
             }
+            // No thread to encode on in the browser (where nothing gets here: see
+            // `nothing_draws_the_viewer`).
+            #[cfg(all(target_family = "wasm", not(test)))]
+            {
+                viewer.encoded = encode(&pixels, size, graphics, id);
+            }
         }
         match viewer.encoded.as_mut() {
             Some(encoded) if encoded.size == size && (encoded.shown || !hold) => {
                 ViewerContent::Ready(encoded)
             }
             _ => ViewerContent::Preparing,
+        }
+    }
+
+    /// Nothing here draws a picture into cells (the browser, until phase 4): once the
+    /// viewer's pixels are there it says so, instead of preparing the picture for ever.
+    #[cfg(any(target_family = "wasm", test))]
+    fn nothing_draws_the_viewer(&mut self) {
+        if let Some(viewer) = self.viewer.as_mut()
+            && matches!(viewer.state, ViewerState::Ready(_))
+        {
+            viewer.state = ViewerState::Failed(NOT_DRAWN.to_owned());
         }
     }
 
@@ -1667,6 +1689,30 @@ mod tests {
             store.viewer_content((30, 10), false),
             ViewerContent::Ready(_)
         ));
+    }
+
+    /// Where nothing draws pictures (the browser), the viewer says so once the picture
+    /// is there, and stays so: no "Preparing the picture…" for ever.
+    #[test]
+    fn where_nothing_draws_the_viewer_says_so_instead_of_preparing() {
+        let mut store = ImageStore::new(Graphics::halfblocks());
+        let image = remote_image("mxc://x/a", Some((2000, 1000)));
+        store.open_viewer(&image);
+        store.nothing_draws_the_viewer();
+        assert!(matches!(
+            store.viewer_content((20, 10), false),
+            ViewerContent::Loading
+        ));
+        store.on_loaded(&image.key, true, Ok(decoded(400, 200)));
+        assert_eq!(store.viewer_pixels(), Some((400, 200)));
+        for _ in 0..2 {
+            store.nothing_draws_the_viewer();
+            assert!(matches!(
+                store.viewer_content((20, 10), false),
+                ViewerContent::Failed(NOT_DRAWN)
+            ));
+        }
+        assert_eq!(store.viewer_pixels(), None);
     }
 
     #[test]
