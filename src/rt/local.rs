@@ -361,16 +361,21 @@ impl<T, P> fmt::Debug for JoinSet<T, P> {
 
 // --- Timers --------------------------------------------------------------------------
 
-/// Ends after the time it was made for, counted from when it was made (as tokio's).
+/// Ends after the time it was made for, counted from when it was made (as tokio's). One
+/// made for no time at all ends on its first poll, without a platform timer (in the browser
+/// that would be a `setTimeout(0)`, a task of its own, later).
 pub struct Sleep<P: Platform> {
-    timer: P::Sleep,
+    timer: Option<P::Sleep>,
 }
 
 impl<P: Platform> Future for Sleep<P> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        Pin::new(&mut self.timer).poll(cx)
+        match &mut self.timer {
+            Some(timer) => Pin::new(timer).poll(cx),
+            None => Poll::Ready(()),
+        }
     }
 }
 
@@ -383,7 +388,7 @@ impl<P: Platform> fmt::Debug for Sleep<P> {
 /// Ends `duration` from now.
 pub fn sleep<P: Platform>(duration: Duration) -> Sleep<P> {
     Sleep {
-        timer: P::sleep(duration),
+        timer: (!duration.is_zero()).then(|| P::sleep(duration)),
     }
 }
 
@@ -550,6 +555,7 @@ mod tests {
         static START: Instant = Instant::now();
         static PASSED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
         static SLEEPERS: RefCell<Vec<Waker>> = const { RefCell::new(Vec::new()) };
+        static TIMERS: Cell<usize> = const { Cell::new(0) };
     }
 
     impl Platform for Virtual {
@@ -560,6 +566,7 @@ mod tests {
         }
 
         fn sleep(duration: Duration) -> VirtualSleep {
+            TIMERS.set(TIMERS.get() + 1);
             VirtualSleep {
                 at: Self::now() + duration,
             }
@@ -844,6 +851,25 @@ mod tests {
         assert!((&mut until).now_or_never().is_none());
         advance(ms(5));
         assert!((&mut until).now_or_never().is_some());
+    }
+
+    #[test]
+    fn a_sleep_already_due_ends_at_once_without_a_platform_timer() {
+        let before = TIMERS.get();
+        assert!(sleep::<Virtual>(Duration::ZERO).now_or_never().is_some());
+        assert!(
+            sleep_until::<Virtual>(Virtual::now() - ms(1))
+                .now_or_never()
+                .is_some()
+        );
+        assert!(
+            sleep_until::<Virtual>(Virtual::now())
+                .now_or_never()
+                .is_some()
+        );
+        assert_eq!(TIMERS.get(), before, "no timer for a sleep already due");
+        let _real = sleep::<Virtual>(ms(1));
+        assert_eq!(TIMERS.get(), before + 1, "a real sleep still takes one");
     }
 
     #[test]
