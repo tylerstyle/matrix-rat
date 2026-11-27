@@ -97,7 +97,8 @@
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M457.8 125.9 L457.8 144.1" stroke-width="2.2" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M466.2 125.9 L466.2 144.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 143.9 L4.2 162.1" stroke-width="1" fill="none"/></g>
-<text x="8.4" y="157.5" textLength="445.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">  Back-pagination also survives restarts, which is a </text>
+<text x="8.4" y="157.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">· </text>
+<text x="25.2" y="157.5" textLength="428.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">Back-pagination also survives restarts, which is a </text>
 <g fill="#7fb4ca" stroke="#7fb4ca"><path d="M457.8 143.9 L457.8 162.1" stroke-width="2.2" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M466.2 143.9 L466.2 162.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 161.9 L4.2 180.1" stroke-width="1" fill="none"/></g>
