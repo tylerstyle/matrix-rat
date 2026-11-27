@@ -813,10 +813,10 @@ There is no command that lists or removes profiles; a profile is its two folders
   get your signing keys, so it cannot verify your other devices or other people, and
   older encrypted messages may stay locked. That can happen, rarely, when the new device
   said "They match" before the old one (a race in the Matrix library matrix-rat builds
-  on), or when the other device never sent the keys. Click it: verify this device again with another one (this time
-  the keys come along), or enter your recovery key. Starting a verification of this
-  session from the other device works too. matrix-rat waits 30 seconds after a
-  verification before it says so: the keys normally come within seconds.
+  on), or when the other device never sent the keys. Click it: verify this device again
+  with another one (this time the keys come along), or enter your recovery key. Starting
+  a verification of this session from the other device works too. matrix-rat waits 30
+  seconds after a verification before it says so: the keys normally come within seconds.
 - **Passwords, passphrases and the recovery key** are wiped from matrix-rat's own
   memory when they have been sent or their field is closed. A paste goes in as it is,
   spaces included; only its first line is taken, and control characters are dropped.
