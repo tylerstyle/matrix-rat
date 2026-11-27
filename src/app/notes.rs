@@ -53,6 +53,8 @@ pub struct NotesState {
     runs: Vec<Run>,
     /// Programs to start; the event loop takes them (see [`App::take_note_starts`]).
     starts: Vec<textcmd::Request>,
+    /// Files for converted sounds, asked of the shell (see [`App::take_wav_requests`]).
+    wavs: Vec<WavRequest>,
 }
 
 /// Before the app knows its system and its settings: nothing transcribes, nothing
@@ -74,6 +76,7 @@ impl Default for NotesState {
             next_id: 0,
             runs: Vec::new(),
             starts: Vec::new(),
+            wavs: Vec::new(),
         }
     }
 }
@@ -91,6 +94,7 @@ impl fmt::Debug for NotesState {
             .field("dir", &self.dir.is_some())
             .field("runs", &self.runs)
             .field("starts", &self.starts)
+            .field("wavs", &self.wavs)
             .finish_non_exhaustive()
     }
 }
@@ -121,8 +125,32 @@ impl fmt::Debug for Run {
 enum Phase {
     /// The sound's file is on its way from the worker.
     Fetching,
+    /// The sound is fetched and the program known; the shell makes the file the
+    /// converted sound goes to (see [`WavRequest`]).
+    Converting {
+        sound: TempAudio,
+        transcriber: Transcriber,
+    },
     /// The program runs; a word on this, or dropping it, stops it.
     Running(oneshot::Sender<()>),
+}
+
+/// An empty file for a transcription's converted sound, asked of the shell: in `dir`,
+/// the private folder of sounds, next to the fetched one and under the same kind of
+/// name; it goes with the run. Answered with [`App::on_wav_file`].
+pub struct WavRequest {
+    /// The run it is for.
+    pub id: u64,
+    pub dir: PathBuf,
+}
+
+/// Hand-written: the folder is in the user's runtime folder.
+impl fmt::Debug for WavRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WavRequest")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl NotesState {
@@ -561,8 +589,11 @@ impl App {
         let run = self.notes.runs.remove(at);
         // A program not started yet goes with its request (and its files).
         self.notes.starts.retain(|request| request.id != run.id);
+        self.notes.wavs.retain(|request| request.id != run.id);
         match run.phase {
             Phase::Fetching => self.send_matrix(MatrixCmd::CancelSpeech { id: run.id }),
+            // The fetched sound's file goes with it.
+            Phase::Converting { .. } => {}
             // The program's task kills it (also if it has gone already).
             Phase::Running(stop) => {
                 let _ = stop.send(());
@@ -673,43 +704,83 @@ impl App {
             return;
         };
         self.dirty = true;
-        let started = result.and_then(|sound| {
+        let ready = result.and_then(|sound| {
             let transcriber = self
                 .notes
                 .transcriber
                 .clone()
                 .map_err(|why| why.message().to_owned())?;
-            // The converted sound lies next to the fetched one, under the same kind
-            // of name, and goes with it.
-            let wav = match (&self.notes.dir, transcriber.converts()) {
-                (Some(dir), true) => Some(
-                    TempAudio::create(dir, Some("audio/wav"), &[])
-                        .map_err(|_| "it could not be put into a file".to_owned())?,
-                ),
-                _ => None,
-            };
-            let steps = transcriber.steps(sound.path(), wav.as_ref().map(TempAudio::path));
-            let (stop, cancel) = oneshot::channel();
-            let request = textcmd::Request {
-                id,
-                steps,
-                files: std::iter::once(sound).chain(wav).collect(),
-                cancel,
-            };
-            Ok((request, stop))
+            Ok((sound, transcriber))
         });
-        match started {
-            Ok((request, stop)) => {
-                self.notes.starts.push(request);
-                self.notes.runs[at].phase = Phase::Running(stop);
+        let (sound, transcriber) = match ready {
+            Ok(ready) => ready,
+            Err(why) => return self.fail_run(at, why),
+        };
+        // The converted sound lies next to the fetched one, under the same kind of
+        // name, and goes with it; its file is the shell's to make.
+        match (&self.notes.dir, transcriber.converts()) {
+            (Some(dir), true) => {
+                self.notes.wavs.push(WavRequest {
+                    id,
+                    dir: dir.clone(),
+                });
+                self.notes.runs[at].phase = Phase::Converting { sound, transcriber };
             }
-            Err(why) => {
-                let run = self.notes.runs.remove(at);
-                self.notes
-                    .notes
-                    .set(&run.event, run.kind, NoteState::Failed(why));
-            }
+            _ => self.start_transcription(at, sound, &transcriber, None),
         }
+    }
+
+    /// The files for converted sounds the shell is to make, each answered with
+    /// [`Self::on_wav_file`].
+    pub(crate) fn take_wav_requests(&mut self) -> Vec<WavRequest> {
+        std::mem::take(&mut self.notes.wavs)
+    }
+
+    /// The shell made the file for a converted sound, or could not: the program starts,
+    /// or the note says why not.
+    pub(crate) fn on_wav_file(&mut self, request: WavRequest, wav: std::io::Result<TempAudio>) {
+        let Some(at) = self.notes.runs.iter().position(|run| run.id == request.id) else {
+            // Given up meanwhile: the file goes with the answer.
+            return;
+        };
+        let phase = std::mem::replace(&mut self.notes.runs[at].phase, Phase::Fetching);
+        let Phase::Converting { sound, transcriber } = phase else {
+            self.notes.runs[at].phase = phase;
+            return;
+        };
+        self.dirty = true;
+        match wav {
+            Ok(wav) => self.start_transcription(at, sound, &transcriber, Some(wav)),
+            Err(_) => self.fail_run(at, "it could not be put into a file".to_owned()),
+        }
+    }
+
+    /// The program of run `at` is to start on the fetched sound (and `wav`, the file
+    /// for the converted sound, when the transcriber converts it).
+    fn start_transcription(
+        &mut self,
+        at: usize,
+        sound: TempAudio,
+        transcriber: &Transcriber,
+        wav: Option<TempAudio>,
+    ) {
+        let steps = transcriber.steps(sound.path(), wav.as_ref().map(TempAudio::path));
+        let (stop, cancel) = oneshot::channel();
+        self.notes.starts.push(textcmd::Request {
+            id: self.notes.runs[at].id,
+            steps,
+            files: std::iter::once(sound).chain(wav).collect(),
+            cancel,
+        });
+        self.notes.runs[at].phase = Phase::Running(stop);
+    }
+
+    /// Run `at` ends before its program started: the note says why.
+    fn fail_run(&mut self, at: usize, why: String) {
+        let run = self.notes.runs.remove(at);
+        self.notes
+            .notes
+            .set(&run.event, run.kind, NoteState::Failed(why));
     }
 
     /// A program's last word: its text becomes the note.
@@ -1001,13 +1072,17 @@ mod tests {
     }
 
     /// The worker's answer with the sound's file; the program's request, as the event
-    /// loop would take it.
+    /// loop would take it (once it made the converted sound's file, as the shell does).
     fn fetched(app: &mut App, id: u64, dir: &Dir) -> textcmd::Request {
         let file = TempAudio::create(dir.0.as_path(), Some("audio/ogg"), b"OggS").unwrap();
         app.on_matrix(MatrixEvent::SpeechFetched {
             id,
             result: Ok(file),
         });
+        for request in app.take_wav_requests() {
+            let wav = TempAudio::create(&request.dir, Some("audio/wav"), &[]);
+            app.on_wav_file(request, wav);
+        }
         let mut starts = app.take_note_starts();
         assert_eq!(starts.len(), 1);
         starts.remove(0)
@@ -1035,6 +1110,57 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
         format!("{}", terminal.backend())
+    }
+
+    #[test]
+    fn the_file_for_the_converted_sound_is_asked_of_the_shell() {
+        let dir = Dir::new("notes-wav");
+        let (mut app, _commands) = app_with(vec![voice("v1")], &dir, true);
+        let sounds = |dir: &Dir| std::fs::read_dir(dir.0.as_path()).unwrap().count();
+        select(&mut app, 0);
+        app.perform(Action::Transcribe);
+        let file = TempAudio::create(dir.0.as_path(), Some("audio/ogg"), b"OggS").unwrap();
+        app.on_matrix(MatrixEvent::SpeechFetched {
+            id: 1,
+            result: Ok(file),
+        });
+        // The app makes no file: the shell does, in the folder of sounds.
+        assert_eq!(sounds(&dir), 1);
+        let mut wavs = app.take_wav_requests();
+        assert_eq!(wavs.len(), 1);
+        assert_eq!((wavs[0].id, wavs[0].dir.as_path()), (1, dir.0.as_path()));
+        assert!(app.take_note_starts().is_empty());
+        // It could not: the note says so, and the fetched sound goes.
+        app.on_wav_file(wavs.remove(0), Err(std::io::Error::other("no room for it")));
+        assert_eq!(
+            note(&app, "$v1", NoteKind::Transcript),
+            Some(NoteState::Failed("it could not be put into a file".into()))
+        );
+        assert!(app.take_note_starts().is_empty());
+        assert_eq!(sounds(&dir), 0);
+
+        // Stopped while the file is made: nothing is asked any more, nothing starts,
+        // and a file made after all goes with the answer.
+        app.perform(Action::Transcribe);
+        let file = TempAudio::create(dir.0.as_path(), Some("audio/ogg"), b"OggS").unwrap();
+        app.on_matrix(MatrixEvent::SpeechFetched {
+            id: 2,
+            result: Ok(file),
+        });
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(note(&app, "$v1", NoteKind::Transcript), None);
+        assert!(app.take_wav_requests().is_empty());
+        assert_eq!(sounds(&dir), 0);
+        let late = TempAudio::create(dir.0.as_path(), Some("audio/wav"), &[]).unwrap();
+        app.on_wav_file(
+            WavRequest {
+                id: 2,
+                dir: dir.0.clone(),
+            },
+            Ok(late),
+        );
+        assert!(app.take_note_starts().is_empty());
+        assert_eq!(sounds(&dir), 0);
     }
 
     #[test]

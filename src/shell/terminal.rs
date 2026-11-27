@@ -641,6 +641,11 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
             }
             while players.try_join_next().is_some() {}
             while recorders.try_join_next().is_some() {}
+            // A transcription's converted sound gets its file next to the fetched one.
+            for request in app.take_wav_requests() {
+                let wav = crate::audio::TempAudio::create(&request.dir, Some("audio/wav"), &[]);
+                app.on_wav_file(request, wav);
+            }
             for request in app.take_note_starts() {
                 note_programs.spawn(crate::textcmd::run(request, note_news.clone()));
             }
