@@ -829,8 +829,11 @@ There is no command that lists or removes profiles; a profile is its two folders
   matrix-rat: it only reads the config, and asks the terminal what the app asks it at
   start (in a terminal only; piped elsewhere, those lines say "not asked"). The popup
   does not open over another one, such as the login form: use the command there.
-- **Logs** are in `~/.local/state/matrix-rat/<profile>/`. At the default level the app
-  keeps message text, passwords and keys out of them.
+- **Logs** are in `~/.local/state/matrix-rat/<profile>/`. By default they hold only the
+  app's own notes, without message text, passwords, keys, or room and user ids; the
+  libraries' lines stay out. `MATRIX_RAT_LOG` sets what goes in (for example
+  `MATRIX_RAT_LOG=matrix_rat=info,matrix_sdk=warn` to look into a problem of the
+  connection); what a library writes then goes in as it came, ids and all.
 - **Something stuck?** `Ctrl-Q` quits and `Ctrl-Z` suspends to the shell, also from
   behind a popup (unless you have bound those keys to something else).
 
