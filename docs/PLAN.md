@@ -254,6 +254,17 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
   download, how fast on a phone, does matrix.org's OAuth accept the Pages address); 1 the
   interfaces; 2 the web app; 3 the phone version; 4 later: real pictures, voice, push, app
   stores.
+- **Phase 0 on the user's iPhone** (2026-11-27): OAuth login to matrix.org works in Safari
+  and in the home-screen app (which needs its own login: iOS keeps its storage apart from
+  Safari's, and it is a device of its own); sending works; still logged in after the app was
+  closed for an hour; old messages decrypt after the recovery key. For phases 2 and 3, from
+  the test:
+  - **The on-screen keyboard squashes the chat:** the grid measures itself only when the
+    window resizes, and iOS shrinks only the visual viewport for the keyboard, so rows are
+    cut off (the input field is right). The grid follows the visual viewport: fewer rows
+    while the keyboard is open.
+  - **A Send button** next to the message field (the user): with the keyboard closed, a
+    message is sent without opening it again. Enter keeps sending.
 
 ### 6.3 Later, after 1.0.0 or by demand
 
