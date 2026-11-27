@@ -171,12 +171,28 @@ it would ship: the user, 2026-11-20).
 What the user decides after using 1.0 for a while (from 2026-11-21 on). Nothing of it is built
 yet; each piece is written and reviewed as in §4.
 
+**Decided by the user on 2026-11-27:** the two fixes to released code on `main` (a name for one
+room before sync; the SDK's panic while loading older messages) ship with 1.1.0, no 1.0.4.
+Order: phase 1 of the web app is finished (steps 6 and 7) and `web-seams` merged into `main`
+first, then all of 1.1.0 is built on top. 1.1.0 starts with matrix-sdk 0.20, then notify 9 and
+the dot. Building starts once all is talked through (2026-11-27).
+
+- **matrix-sdk 0.20** (published 2026-11-25; the user: "Yes, integrate the new sdk!"), first:
+  about 19 breaking changes in matrix-sdk and more in matrix-sdk-ui. It fixes the race that
+  put a batch of messages twice into a timeline (PR #7284; our `dup-block` fix stays as a safety
+  net) and an event-cache panic after shrinking a room's chunks (#7389); our catch of the
+  "chunk not found" panic (#5416) stays unless that is fixed too. To check with it: the SQLite
+  advisory in §7. Pinned exactly again (`=0.20.x`), for terminal and web at once.
+
 - **notify 9** (published 2026-11-21; the file watcher behind theme reloading): kept out of
   1.0.2, which took only compatible updates. Its breaking changes reach how watch errors are
   matched (`src/logsafe.rs`) and how events and watching the same path again behave
   (`src/watch.rs`); its guide is `docs/UPGRADING_V8_TO_V9.md` in notify-rs/notify. With its own
   review and the theme watcher tried by hand.
-- **Planning first: using it over ssh from a phone** (the user, 2026-11-21): "think about ssh
+- **Planning first: using it over ssh from a phone** (under discussion since 2026-11-27: the
+  user finds it moot next to the web app on phones, "That makes the --mobile version moot";
+  the narrow layout and every action without Esc, Ctrl or Alt would go to phase 3 instead;
+  not decided yet) (the user, 2026-11-21): "think about ssh
   problems rising from using onscreen keyboards without proper keys and the shortcuts, that
   fall because of it. ESC isn't always there. Alt and Ctrl also. Brainstorm, how this could be
   done when connecting from mobile. Maybe an option to pass for mobile friendly keybinds and
@@ -253,7 +269,8 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
   Android phone; answers: does Beeper's server allow browser requests (CORS), how big is the
   download, how fast on a phone, does matrix.org's OAuth accept the Pages address); 1 the
   interfaces; 2 the web app; 3 the phone version; 4 later: real pictures, voice, push, app
-  stores.
+  stores. **Versions** (the user, 2026-11-27): 1.2.0 is phase 2, the web app usable in
+  browsers and on phones at least as the test build is; 1.3.0 is phase 3, the phone version.
 - **Phase 0 on the user's iPhone** (2026-11-27): OAuth login to matrix.org works in Safari
   and in the home-screen app (which needs its own login: iOS keeps its storage apart from
   Safari's, and it is a device of its own); sending works; still logged in after the app was
