@@ -2597,6 +2597,17 @@ impl App {
             .is_some_and(Message::failed_any)
     }
 
+    /// Which change of ours to the selected message could not be sent, if it is on the
+    /// server (what Del throws away, see [`Message::failed_change`]). Of what is shown:
+    /// the open thread's messages while one is open.
+    pub(crate) fn selected_failed_change(&self) -> Option<crate::model::FailedChange> {
+        self.timeline
+            .selected
+            .and_then(|i| self.messages().get(i))
+            .filter(|message| message.state == SendState::Sent)
+            .and_then(Message::failed_change)
+    }
+
     /// System lines and the "new" marker cannot be selected.
     fn selectable(&self, index: usize) -> bool {
         self.messages()

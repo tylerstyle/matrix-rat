@@ -7,7 +7,7 @@ use crate::action::{Action, Dir, Pane};
 use crate::app::App;
 use crate::keymap::Context;
 use crate::matrix::SyncStatus;
-use crate::model::{FailedChange, Message, SendState};
+use crate::model::FailedChange;
 use crate::notes::NoteKind;
 use crate::text::width;
 use crate::theme::Role;
@@ -196,13 +196,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
                 push_action(&mut hints, Context::Timeline, A::Reply, "try again");
                 // What Del throws away of a message on the server: the change that did
                 // not go out.
-                let discard = match app
-                    .timeline
-                    .selected
-                    .and_then(|i| app.room()?.messages.get(i))
-                    .filter(|message| message.state == SendState::Sent)
-                    .and_then(Message::failed_change)
-                {
+                let discard = match app.selected_failed_change() {
                     Some(FailedChange::Edit) => "discard edit",
                     Some(FailedChange::Deletion) => "keep message",
                     Some(FailedChange::Reaction) => "remove reaction",

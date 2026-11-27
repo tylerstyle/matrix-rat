@@ -1052,6 +1052,23 @@ mod tests {
         assert!(drain(&mut commands).contains(&"Send(!a)".to_owned()));
     }
 
+    /// The status line names what Del throws away of the selected message of the open
+    /// thread, not of the room's message at the same place.
+    #[test]
+    fn the_status_line_names_a_failed_change_in_a_thread() {
+        let (mut app, mut terminal, _commands) = connected();
+        app.open_thread(5);
+        let mut messages = thread_messages();
+        messages[1].own = true;
+        messages[1].edit_error = Some("not allowed in this room".into());
+        app.on_matrix(update(&app, 2, messages));
+        app.perform(Action::Focus(Pane::Timeline));
+        app.timeline.selected = Some(1);
+        let text = screen(&mut app, &mut terminal);
+        let status = text.lines().last().unwrap();
+        assert!(status.contains("Del discard edit"), "{status}");
+    }
+
     #[test]
     fn drafts_of_the_thread_and_the_room_stay_apart() {
         let (mut app, _terminal, _commands) = connected();
