@@ -177,6 +177,14 @@ Order: phase 1 of the web app is finished (steps 6 and 7) and `web-seams` merged
 first, then all of 1.1.0 is built on top. 1.1.0 starts with matrix-sdk 0.20, then notify 9 (accepted) and
 the dot. `--mobile` is dropped (§6.4). Building starts once all is talked through (2026-11-27).
 
+- **Everything up to date first** (the user, 2026-11-27: "update all dependancies … Before
+  doing yet more work, get us up to date"): Rust 1.96 → **1.99**, the newest nixpkgs has (the
+  Nix package builds with it; 1.100.0, out on 2026-11-12, is not in nixpkgs yet, not even
+  unstable; the release binaries on GitHub already build with the newest stable); every
+  compatible update (29 crates on 2026-11-27, more once 1.96 no longer holds them back); the
+  breaking ones: matrix-sdk 0.20 (below), notify 9 (below) and signal-hook 0.4 (one call, the
+  terminal's suspend); the CI actions (cargo-deny-action 2.1.4). New features of 1.1.0 wait
+  until this is merged.
 - **matrix-sdk 0.20** (published 2026-11-25; the user: "Yes, integrate the new sdk!"), first:
   about 19 breaking changes in matrix-sdk and more in matrix-sdk-ui. It fixes the race that
   put a batch of messages twice into a timeline (PR #7284; our `dup-block` fix stays as a safety
