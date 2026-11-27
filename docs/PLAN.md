@@ -244,6 +244,13 @@ the dot. `--mobile` is dropped (§6.4). Building starts once all is talked throu
   Not proposed: alternating background shades, which vanish without colour (as the room
   cursor did over ssh). Whatever is chosen also has to fit selection (`↑` from the composer),
   replies and threads, the read marker and the receipts row, and the room view's snapshots.
+  **Built (2026-11-27, branch `dot-separator`):** `· ` (`DOT`) in place of `INDENT` on the
+  first row of a further message (`Before::further`), whatever that row shows (the quote of
+  a reply, a picture's top row, a poll's question, the text), in the header time's colour
+  (`timestamp`, foreground only, so a selection's background shows through); wrapped rows
+  keep the indent. An action line (`/me`) gets none: it names its sender and stands alone,
+  and the "new" line, a day divider and a room line bring the header back, as before. A
+  playing voice message keeps it (`AudioPart::dot`). No new theme key, no setting.
 
 ### 6.2 1.2.0: in the browser and on phones (ratzilla)
 

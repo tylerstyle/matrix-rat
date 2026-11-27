@@ -536,6 +536,12 @@ There is no command that lists or removes profiles; a profile is its two folders
   Changing what is in a space takes the right to do so there; where you may change the
   room as well, it names the space as its parent too. The demo (`--demo`) has a space to
   try all this on.
+- **Several messages in a row** from one person share one line with their name and time
+  (`● alice  09:15`); each message after the first starts with a muted `·` under that
+  `●`, on its first line only (the further lines of a long one keep the plain indent).
+  It takes no row of its own and is there without colours too (`NO_COLOR`). An action
+  (`/me`) names its sender itself and has none; after it, after the "new" line, a day's
+  line or a line of the room's (a join, say) the name comes again.
 - **Bridged chats** (Signal, WhatsApp…) show a quiet "sent on the sender's behalf" remark:
   the bridge encrypts for the people on the other side.
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
