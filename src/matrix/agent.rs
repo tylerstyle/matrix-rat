@@ -643,12 +643,13 @@ pub(super) fn messages(
 
 /// The events among `items`, each once: where its first copy stands, as its last copy
 /// has it, unless that one is still locked and another was decrypted. When a batch of
-/// events reaches a timeline while matrix-sdk-ui 0.19 builds it, the timeline can
-/// show the batch twice, and what happens to those events later (an edit, a
-/// deletion) reaches only the trailing copy, while a decryption reaches the copy the
-/// SDK finds first; the app keeps them the same way (`convert::EventDedup`). Told
-/// twice, the stale copy would pass for a message changed back, and the trailing one
-/// for a message that is new.
+/// events reaches a timeline while matrix-sdk-ui 0.19 builds it (fixed in 0.20.0), or
+/// one that fell behind its updates (still possible in 0.20.0, see
+/// `collect::without_repeats`), the timeline can show the batch twice, and what happens
+/// to those events later (an edit, a deletion) reaches only the trailing copy, while a
+/// decryption reaches the copy the SDK finds first; the app keeps them the same way
+/// (`convert::EventDedup`). Told twice, the stale copy would pass for a message changed
+/// back, and the trailing one for a message that is new.
 fn events_once(items: &Vector<Arc<TimelineItem>>) -> Vec<&TimelineItem> {
     let mut events: Vec<&TimelineItem> = Vec::new();
     let mut at: HashMap<&EventId, usize> = HashMap::new();

@@ -61,13 +61,14 @@ const LOOK_AGAIN: Duration = Duration::from_secs(1);
 /// Loads up to `count` older events into `timeline` (the SDK's `paginate_backwards`, which
 /// nothing else calls): whether the room's start was reached.
 ///
-/// matrix-sdk 0.19.1 can panic in there (matrix-rust-sdk #5416, still open): when a page
-/// from the server holds events the room's event cache has already stored, it drops the
-/// stored copies, and fails with "The chunk is not found" (its order tracker does not know
-/// where they are) or "failed to remove an event". The panic ended the task that asked,
-/// and with it what waited for the answer: the UI's "loading older messages" stayed for
-/// good, an agent's listener never became ready. Here it is a failed load like any other,
-/// which the caller handles as it handles an error.
+/// matrix-sdk 0.19.1 and 0.20.0 can panic in there (matrix-rust-sdk #5416, still open
+/// and not named as fixed in 0.20.0): when a page from the server holds events the
+/// room's event cache has already stored, it drops the stored copies, and fails with
+/// "The chunk is not found" (its order tracker does not know where they are) or "failed
+/// to remove an event". The panic ended the task that asked, and with it what waited for
+/// the answer: the UI's "loading older messages" stayed for good, an agent's listener
+/// never became ready. Here it is a failed load like any other, which the caller handles
+/// as it handles an error.
 ///
 /// The SDK shares one page between all who ask for it and a task of its own, and the one
 /// that happens to be working on it takes the panic. If that is not this one, this one may
@@ -79,10 +80,11 @@ const LOOK_AGAIN: Duration = Duration::from_secs(1);
 /// which a panic releases and does not poison, and its pagination status goes back to
 /// what it was (the guard for that is dropped as the panic unwinds), so the next page
 /// starts afresh. But the panic says that the room's events in memory and in the store
-/// disagree, and that can last: on the dev homeserver (its test account has an ignore
-/// list, for which the SDK clears all its caches at the start of each session), every
-/// later page of the room panicked too, and the room's new events were refused by the
-/// store, until the caches were cleared again.
+/// disagree, and that can last: on the dev homeserver with 0.19.1 (its test account has
+/// an ignore list, for which that version cleared all its caches at the start of each
+/// session; 0.20.0 no longer does, matrix-rust-sdk #7397), every later page of the room
+/// panicked too, and the room's new events were refused by the store, until the caches
+/// were cleared again.
 pub(super) async fn backwards(timeline: &Timeline, count: u16) -> Result<bool, PageError> {
     #[expect(
         clippy::disallowed_methods,
@@ -105,8 +107,9 @@ pub(super) async fn backwards(timeline: &Timeline, count: u16) -> Result<bool, P
 /// Clears all rooms' event caches after a panic: the room's events in memory and in the
 /// store disagree, and stay so (later pages panic too, the room's new events are refused
 /// by the store), so they are cleared and loaded anew, as the SDK itself does when the
-/// ignore list changes (0.19.1 has no public way to clear one room). Open rooms then page
-/// again. Whether they were cleared.
+/// ignore list changes (0.19.1 and 0.20.0 have no public way to clear one room). Open
+/// rooms then page again. Whether they were cleared: not if the client has no event
+/// cache (see [`super::cache`]) or the clear failed.
 ///
 /// In a task of its own, which the caller waits for: the SDK empties the store first and
 /// then reloads what it holds in memory, and a caller's timeout or abort between the two

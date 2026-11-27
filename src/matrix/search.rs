@@ -64,8 +64,8 @@ impl fmt::Debug for SearchHit {
 
 /// Removes persisted per-room search index directories whose room IDs are no longer
 /// joined. Called when no `RoomIndex` handles are open (startup before sync/search, and
-/// session shutdown after dropping the `Client`) because `matrix-sdk 0.19.1` keeps an
-/// in-memory `HashMap<OwnedRoomId, RoomIndex>` without a public room-removal API.
+/// session shutdown after dropping the `Client`) because matrix-sdk (0.19.1 and 0.20.0)
+/// keeps an in-memory `HashMap<OwnedRoomId, RoomIndex>` without a public room-removal API.
 #[cfg(not(target_family = "wasm"))]
 fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<String>) {
     let Ok(entries) = std::fs::read_dir(search_dir) else {

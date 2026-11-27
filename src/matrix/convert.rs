@@ -81,10 +81,11 @@ fn read_marker(item: &TimelineItem, last: bool) -> Option<Message> {
 /// - its item. The SDK never changes one: an edit, a reaction, a read receipt, a
 ///   decryption, a send state, the details of the message replied to, a sender's
 ///   profile or a thread's summary each put a new `Arc<TimelineItem>` in its place
-///   (matrix-sdk-ui 0.19.1: `TimelineItem::with_kind`, `ObservableItems::replace`), and
-///   nothing in an item changes behind a shared reference. What was made is found by
-///   the address of the item and holds the item, so that no other item can be put at
-///   that address while it is kept: the same address is the same item, unchanged.
+///   (matrix-sdk-ui 0.19.1 and 0.20.0: `TimelineItem::with_kind`,
+///   `ObservableItems::replace`), and nothing in an item changes behind a shared
+///   reference. What was made is found by the address of the item and holds the item,
+///   so that no other item can be put at that address while it is kept: the same
+///   address is the same item, unchanged.
 /// - whose account it is, whom the user ignores (hidden senders, reaction counts,
 ///   votes, quoted replies), and today's date and the local time's offset ("Today",
 ///   "Yesterday", the time). These are the same for every message; when one of them
@@ -294,6 +295,10 @@ impl EventDedup {
     /// Works around a `matrix-sdk-ui 0.19.1` race in `TimelineBuilder::build()` where a
     /// live sync batch can be replayed on top of `event_cache.events()`, leaving a block
     /// of events in the timeline twice while later updates target the trailing copy.
+    /// Fixed in 0.20.0 (matrix-rust-sdk PR #7284, and #7468 for updates sent out of
+    /// order); kept as a safety net, since a timeline that falls behind its updates
+    /// (`RecvError::Lagged`) reloads its events but keeps the old receiver and can still
+    /// apply them twice (matrix-rust-sdk issue #7533, not named as fixed in 0.20.0).
     pub(super) fn dedup(&mut self, messages: &mut Vec<Message>) {
         if messages.len() < 2 {
             return;

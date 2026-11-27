@@ -1438,8 +1438,9 @@ impl Timelines {
                         .and_then(|event| event.local_echo_send_handle())
                         .ok_or_else(|| anyhow!("this message is no longer waiting"))?;
                     handle.unwedge().await.sdk()?;
-                    // The SDK stops a room's queue after any failure; nothing would
-                    // be tried again without this.
+                    // The SDK stops a room's queue after a failure it takes as
+                    // passing, such as a network error (since 0.20.0 no longer after
+                    // the others); nothing would be tried again without this.
                     timeline.room().send_queue().set_enabled(true);
                     Ok(())
                 })
