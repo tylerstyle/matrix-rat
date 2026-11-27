@@ -1,7 +1,8 @@
 # matrix-rat 1.1.0 (draft)
 
 A draft of the release notes for 1.1.0, in the form of the GitHub releases of 1.0.x, kept
-up to date while 1.1.0 is built. So far: the move to matrix-sdk 0.20.
+up to date while 1.1.0 is built. So far: the move to matrix-sdk 0.20 and every other
+dependency brought up to date.
 
 matrix-rat now builds on matrix-sdk 0.20: search lists the newest matches first, a
 handful of fixes from the SDK, and the SQLite in the release archives is current again.
@@ -33,6 +34,9 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   said that its key had not arrived. No key will make it readable.
 - **The room list orders rooms without messages by their activity** among the others,
   instead of after all rooms with messages.
+- **Theme files are watched more calmly** (notify 9): reading a theme no longer wakes the
+  watch, and when the system's queue of file events runs over, the theme is reloaded,
+  since any file may have changed.
 
 ## Fixed
 
@@ -86,6 +90,9 @@ Through matrix-sdk 0.20:
   tantivy 0.27 for the search index. The SDK moved from anymap2 to anymap3 (one
   unmaintained crate less) and matrix-sdk-ui from chrono to jiff. No other dependency of
   matrix-rat changed for it.
+- **Rust 1.99 or newer** is needed to build matrix-rat (was 1.96).
+- notify 9 (from 8) for watching theme files, signal-hook 0.4 (from 0.3) for suspending
+  with `Ctrl-Z`, and every other dependency at its newest compatible version.
 
 <!-- Notes for the final text, not for the release:
 - "Until messages are loaded again, search finds fewer of them": if the search backfill of
