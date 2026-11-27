@@ -1,7 +1,7 @@
 # The interface thread must never wait: every call that blocks its thread is refused
 # unless the place says, with `#[expect(clippy::disallowed_methods, reason = "…")]`,
 # why it may (a thread of its own, a bounded wait, the program's entry point).
-# Tests are exempt (see the top of src/main.rs).
+# Tests are exempt (see the top of src/lib.rs and of src/main.rs).
 disallowed-methods = [
     { path = "std::thread::sleep", reason = "blocks its thread; on the interface thread nothing may wait" },
     { path = "std::process::Command::status", reason = "waits for the program to end" },

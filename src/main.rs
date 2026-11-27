@@ -7,72 +7,16 @@
 // or the test-only allow below.
 #![warn(clippy::wildcard_enum_match_arm)]
 #![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
-//! matrix-rat — a mouse-friendly Matrix client for the terminal.
-
-mod action;
-mod agent;
-mod app;
-mod archive;
-mod audio;
-mod catchup;
-mod clipboard;
-mod collect;
-mod complete;
-mod composer;
-mod config;
-mod details;
-mod devices;
-mod doctor;
-mod editor;
-mod emoji;
-mod files;
-mod focus;
-mod format;
-mod highlight;
-mod images;
-mod input;
-mod keymap;
-mod keywords;
-mod lineedit;
-mod lock;
-mod logging;
-mod logsafe;
-mod manage;
-mod matrix;
-#[cfg(test)]
-mod measure;
-mod menu;
-mod modal;
-mod model;
-mod notes;
-mod notify;
-mod palette;
-mod paths;
-mod people;
-mod portal;
-mod previews;
-mod probes;
-mod rich;
-mod rt;
-mod runtime;
-mod saved;
-mod shell;
-mod storage;
-#[cfg(test)]
-mod testbus;
-mod text;
-mod textcmd;
-mod theme;
-mod time;
-mod ui;
-mod upload;
-mod verify;
-mod watch;
+//! matrix-rat — a mouse-friendly Matrix client for the terminal: the command line. The
+//! client itself is the library (`src/lib.rs`); what this uses of it is `matrix_rat::cli`.
 
 use std::fmt;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use matrix_rat::cli::{
+    agent, config, doctor, lock, logging, logsafe, notify, paths, runtime, shell, theme, watch,
+};
 
 #[derive(Parser)]
 #[command(version, about)]
