@@ -19,7 +19,7 @@ use matrix_sdk::SendOutsideWasm;
 
 use crate::time::Instant;
 
-pub use tokio::task::{AbortHandle, JoinHandle, JoinSet};
+pub use tokio::task::{AbortHandle, JoinError, JoinHandle, JoinSet};
 pub use tokio::time::error::Elapsed;
 pub use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 

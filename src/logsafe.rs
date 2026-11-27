@@ -167,14 +167,14 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
     if let Some(PageError::Panicked { .. }) = find::<PageError>(err) {
         return Some(Why::Word("SDK panicked"));
     }
-    if let Some(err) = find::<tokio::task::JoinError>(err) {
+    if let Some(err) = find::<crate::rt::JoinError>(err) {
         return Some(Why::Word(if err.is_panic() {
             "task panicked"
         } else {
             "task cancelled"
         }));
     }
-    if find::<tokio::time::error::Elapsed>(err).is_some() {
+    if find::<crate::rt::Elapsed>(err).is_some() {
         return Some(TIMED_OUT);
     }
     if let Some(err) = find::<zbus::Error>(err) {
@@ -377,6 +377,16 @@ mod tests {
         for private in ["alice", "secret", "example.org", "session.json", "draft"] {
             assert!(!text.contains(private), "{private} in {text}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_timeout_and_a_task_that_gave_no_output_are_named_by_a_word() {
+        let late = crate::rt::timeout(std::time::Duration::ZERO, std::future::pending::<()>());
+        let err = anyhow::Error::from(late.await.unwrap_err()).context("!secret:example.org");
+        assert_eq!(kind_any(&err), TIMED_OUT);
+        let task = crate::rt::spawn(std::future::pending::<()>());
+        task.abort();
+        assert_eq!(kind(&task.await.unwrap_err()), Why::Word("task cancelled"));
     }
 
     #[test]
