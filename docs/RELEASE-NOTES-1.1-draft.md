@@ -116,5 +116,12 @@ Through matrix-sdk 0.20:
   build: the session was restored, history showed and decrypted, search found the old
   messages (newest first) after the index was rebuilt, and the verification state stayed.
   The SDK logs one warning per room while it rebuilds ("Recreating the search index").
-- The test with the user's real 1.0.3 profile is still to come before release (PLAN §6.1).
+- The user's real 1.0.3 profile (352 MB), 2026-11-27, with a release build of main `8776aa3`
+  (SDK 0.20 + all updates): a consistent copy (SQLite backup, integrity ok) on hpfury, opened
+  OFFLINE only (no network namespace: a copy that synced would be the user's device and take
+  to-device keys meant for the real client), with its own HOME. First start: no login form, no
+  panic, stores migrated and opened in under 0.5 s, verification state kept (device verified,
+  signing keys, backup on), message cache emptied as expected (its 87 MB file keeps its size
+  until SQLite reuses the pages); quit cleanly. Second start: 0.1 s to the same state. The copy
+  was deleted afterwards. To repeat with the release candidate before release.
 -->
