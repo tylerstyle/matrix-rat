@@ -612,6 +612,14 @@ impl App {
         }
     }
 
+    /// Removes the kept notes with whatever was left half written for them, quietly:
+    /// for a logout (see `forget_what_the_account_kept`).
+    pub(super) fn remove_all_notes(&mut self) {
+        if self.notes.stored {
+            let _ = self.storage.remove(&Key::Notes, Removal::All);
+        }
+    }
+
     /// A deleted message loses its notes, here and in the file of kept ones: what it
     /// said is to be gone. Called when the open room's messages change.
     pub(super) fn forget_notes_of_deleted(&mut self) {

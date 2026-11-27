@@ -1445,6 +1445,20 @@ impl App {
         }
     }
 
+    /// The user logged out and the worker has removed the session: what the account
+    /// kept in the storage goes too, with everything set aside or half written for it.
+    /// The saved messages name its rooms and messages; the kept notes are message text
+    /// in plain form. Best effort, and quiet, as the rest of the logout's clean-up.
+    /// (A session that merely ended keeps the saved messages: see `NeedLogin`.)
+    fn forget_what_the_account_kept(&mut self) {
+        if self.bookmarks.stored {
+            let _ = self
+                .storage
+                .remove(&Key::Saved, crate::storage::Removal::All);
+        }
+        self.remove_all_notes();
+    }
+
     /// A message that deserves a notification arrived. It is shown unless the user is
     /// looking right at it: the window has the focus and that room is open.
     fn on_notice(&mut self, notice: crate::matrix::Notice) {
@@ -3824,6 +3838,7 @@ impl App {
                 self.reset_session();
                 self.open_modal(Modal::Login(LoginForm::reauth(target, reason)));
             }
+            MatrixEvent::LoggedOut => self.forget_what_the_account_kept(),
             MatrixEvent::LoginFailed(error) => {
                 if let Some(Modal::Login(form)) = &mut self.modal {
                     form.busy = None;
@@ -5777,7 +5792,15 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         app.shut_down_worker();
         // Close every command sender so the worker also sees the channel end.
         drop(matrix);
-        let drained = async { while events.recv().await.is_some() {} };
+        let drained = async {
+            while let Some(event) = events.recv().await {
+                // A logout that ends while the app closes still takes along what the
+                // account kept here.
+                if matches!(event, MatrixEvent::LoggedOut) {
+                    app.on_matrix(event);
+                }
+            }
+        };
         let _ = rt::timeout(wait, drained).await;
     }
     drop(app);
@@ -5802,6 +5825,77 @@ mod tests {
     /// Files, with the user's themes in `dir`.
     fn themes_in(dir: PathBuf) -> Box<dyn Storage> {
         Box::new(crate::storage::FsStorage::default().with_themes(dir))
+    }
+
+    /// Only a logout the user asked for takes the saved messages along, once the
+    /// worker says it is done; the kept notes go whenever a login is needed, and a
+    /// soft logout keeps both for the same account's return.
+    #[test]
+    fn a_logout_takes_what_the_account_kept_and_an_ended_session_keeps_the_saved_list() {
+        use crate::storage::MemStorage;
+        let storage = MemStorage::default();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        let mut app = App::new_in_scheme(
+            &Config::default(),
+            Box::new(storage.clone()),
+            test_probes(),
+            Some(handle),
+            ColorScheme::Dark,
+        );
+        app.bookmarks.stored = true;
+        app.keep_notes_stored(PathBuf::new());
+        app.notes.keep = true;
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@me:example.org".into(),
+        });
+        // The account's list, something set aside of it, and kept notes.
+        storage.put(
+            &Key::Saved,
+            br#"{"version":1,"owner":"@me:example.org","items":[]}"#,
+        );
+        storage
+            .set_aside(&Key::Saved, "damaged", crate::storage::Aside::Copy)
+            .unwrap();
+        storage.put(&Key::Notes, b"{}");
+        storage.put(&Key::Config, b"");
+
+        // A soft logout keeps both.
+        app.on_matrix(MatrixEvent::NeedReauth {
+            target: crate::matrix::ReauthTarget {
+                homeserver: "https://example.org".into(),
+                user_id: "@me:example.org".into(),
+                device_id: "DEV1".into(),
+                kind: crate::matrix::ReauthKind::Password,
+                client_id: None,
+            },
+            reason: "session expired".into(),
+        });
+        assert_eq!(
+            storage.names(),
+            ["config", "notes", "saved", "saved.damaged"]
+        );
+        // A session the server ended (or a restore that failed): the notes go, the
+        // saved messages stay for the same account's next login.
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert_eq!(storage.names(), ["config", "saved", "saved.damaged"]);
+
+        // Logging out, asked twice: the notes go at once, the rest once the worker
+        // has removed the session.
+        app.modal = None;
+        storage.put(&Key::Notes, b"{}");
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@me:example.org".into(),
+        });
+        let _ = commands_sent(&mut commands);
+        app.on_event(key(KeyCode::F(2)));
+        app.change_setting(Setting::Logout, 0);
+        app.change_setting(Setting::Logout, 0);
+        assert_eq!(commands_sent(&mut commands), ["Logout"]);
+        assert_eq!(storage.names(), ["config", "saved", "saved.damaged"]);
+        app.on_matrix(MatrixEvent::LoggedOut);
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert_eq!(storage.names(), ["config"]);
+        assert_eq!(MatrixEvent::LoggedOut.describe(), "LoggedOut");
     }
 
     /// What the app keeps (settings, themes, notes, saved messages) it reads and

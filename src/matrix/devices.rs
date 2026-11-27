@@ -1349,10 +1349,13 @@ mod tests {
     /// Ends a worker's session on the server and stops the worker.
     async fn log_out(handle: MatrixHandle, mut events: UnboundedReceiver<MatrixEvent>) {
         handle.send(MatrixCmd::Logout);
+        // The app is told, for what it keeps, before the login form is asked for.
         wait_for(&mut events, "the logout", |e| {
-            matches!(e, MatrixEvent::NeedLogin { .. })
+            matches!(e, MatrixEvent::LoggedOut)
         })
         .await;
+        let next = events.recv().await.map(|event| event.describe());
+        assert_eq!(next.as_deref(), Some("NeedLogin(None)"));
         handle.send(MatrixCmd::Shutdown);
         while events.recv().await.is_some() {}
     }

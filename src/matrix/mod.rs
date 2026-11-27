@@ -855,6 +855,11 @@ pub enum MatrixEvent {
     LoggedIn {
         user_id: String,
     },
+    /// The user logged out (`MatrixCmd::Logout`) and the session's files here are
+    /// gone. What the account kept in the app's storage (saved messages, kept notes)
+    /// is the app's to remove. Comes before the `NeedLogin` that follows; a session
+    /// that merely ended (expired, or logged out from elsewhere) sends none.
+    LoggedOut,
     Sync(SyncStatus),
     /// The first sync of the session is through: what was missed while the app was
     /// not running has arrived (or is arriving in the open room right now). Sent
@@ -1147,6 +1152,7 @@ impl MatrixEvent {
             Self::LoginFailed(error) => ("LoginFailed", vec![text(error)]),
             Self::BrowserLoginUrl(_) => ("BrowserLoginUrl", vec![]),
             Self::LoggedIn { user_id } => ("LoggedIn", vec![id(user_id)]),
+            Self::LoggedOut => ("LoggedOut", vec![]),
             Self::Sync(status) => ("Sync", vec![Some(format!("{status:?}"))]),
             Self::CaughtUp => ("CaughtUp", vec![]),
             Self::Rooms(rooms) => ("Rooms", vec![Some(rooms.len().to_string())]),
@@ -1596,6 +1602,7 @@ impl Worker {
                 }
                 drop(active);
                 session::clear(&self.paths, Some(&target)).await;
+                self.emit(MatrixEvent::LoggedOut);
                 *pending = Some(PendingAuth::Fresh { reason });
             }
             Err(err) => {

@@ -70,6 +70,7 @@ fn snapshot_of(event: &MatrixEvent) -> Option<Snapshot<'_>> {
         | MatrixEvent::LoginFailed(_)
         | MatrixEvent::BrowserLoginUrl(_)
         | MatrixEvent::LoggedIn { .. }
+        | MatrixEvent::LoggedOut
         | MatrixEvent::Sync(_)
         | MatrixEvent::CaughtUp
         | MatrixEvent::Recovery(_)
