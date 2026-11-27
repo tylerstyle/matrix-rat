@@ -2193,6 +2193,23 @@ impl Worker {
                 () = own_members.finished() => own_members.ensure(&rooms, left).await,
                 Some(opened) = timelines.next_opened() => timelines.on_opened(opened).await,
                 Some(state) = sync_state.next() => {
+                    // Since matrix-sdk-ui 0.20 a token the server no longer takes ends
+                    // the service with an error (it went offline before). The session
+                    // change below says the same and comes first; this ends the
+                    // session the same way should that one be missed, so that it never
+                    // just stops with "sync error".
+                    if let State::Error(err) = &state
+                        && let Some(soft_logout) = token_rejected(err)
+                    {
+                        tracing::warn!(
+                            soft_logout,
+                            "the server no longer accepts this session"
+                        );
+                        if soft_logout {
+                            break SessionEnd::SoftLogout;
+                        }
+                        break SessionEnd::Expired;
+                    }
                     self.emit(MatrixEvent::Sync(sync_status(&state)));
                 }
                 Some(state) = list_state.next(), if !caught_up => {
@@ -2414,6 +2431,24 @@ fn caught_up_in(state: &matrix_sdk_ui::room_list_service::State) -> bool {
     matches!(state, State::SettingUp | State::Recovering | State::Running)
 }
 
+/// Whether the sync service ended because the server no longer takes the session's
+/// token, and if so whether it is a soft logout (the device may log in again), as the
+/// server said: what `SessionChange::UnknownToken` tells as well.
+fn token_rejected(err: &matrix_sdk_ui::sync_service::Error) -> Option<bool> {
+    use matrix_sdk::ruma::api::error::ErrorKind;
+    use matrix_sdk_ui::sync_service::Error;
+    use matrix_sdk_ui::{encryption_sync_service, room_list_service};
+    let (Error::RoomList(room_list_service::Error::SlidingSync(err))
+    | Error::EncryptionSync(encryption_sync_service::Error::SlidingSync(err))) = err
+    else {
+        return None;
+    };
+    let ErrorKind::UnknownToken(data) = err.client_api_error_kind()? else {
+        return None;
+    };
+    Some(data.soft_logout)
+}
+
 fn sync_status(state: &State) -> SyncStatus {
     match state {
         State::Idle => SyncStatus::Connecting,
@@ -2610,6 +2645,47 @@ async fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sync that ended on a token the server no longer takes ends the session as the
+    /// session change would (signing in again, or again on this device for a soft
+    /// logout); any other sync error does not.
+    #[test]
+    fn a_sync_that_ends_on_a_rejected_token_ends_the_session() {
+        use matrix_sdk::reqwest::StatusCode;
+        use matrix_sdk::ruma::api::error::{
+            ErrorBody, ErrorKind, FromHttpResponseError, StandardErrorBody, UnknownTokenErrorData,
+        };
+        use matrix_sdk_ui::sync_service::Error;
+        use matrix_sdk_ui::{encryption_sync_service, room_list_service};
+
+        let refused = |status: StatusCode, kind: ErrorKind| {
+            let answer = ErrorBody::Standard(StandardErrorBody::new(kind, "no".to_owned()))
+                .into_error(status);
+            matrix_sdk::Error::from(matrix_sdk::HttpError::from(FromHttpResponseError::Server(
+                matrix_sdk::RumaApiError::MatrixError(answer),
+            )))
+        };
+        let token = |soft_logout: bool| {
+            let mut data = UnknownTokenErrorData::new();
+            data.soft_logout = soft_logout;
+            refused(StatusCode::UNAUTHORIZED, ErrorKind::UnknownToken(data))
+        };
+        let rooms = |err| Error::RoomList(room_list_service::Error::SlidingSync(err));
+        let keys = |err| Error::EncryptionSync(encryption_sync_service::Error::SlidingSync(err));
+
+        assert_eq!(token_rejected(&rooms(token(false))), Some(false));
+        assert_eq!(token_rejected(&keys(token(false))), Some(false));
+        assert_eq!(token_rejected(&rooms(token(true))), Some(true));
+        assert_eq!(
+            token_rejected(&rooms(refused(StatusCode::FORBIDDEN, ErrorKind::Forbidden))),
+            None
+        );
+        assert_eq!(
+            token_rejected(&rooms(matrix_sdk::Error::InsufficientData)),
+            None
+        );
+        assert_eq!(token_rejected(&Error::Supervisor), None);
+    }
 
     #[tokio::test]
     async fn no_latest_message_is_followed_for_a_room_left_here() {
