@@ -2,7 +2,8 @@
 
 A draft of the release notes for 1.1.0, in the form of the GitHub releases of 1.0.x, kept
 up to date while 1.1.0 is built. So far: the move to matrix-sdk 0.20, every other
-dependency brought up to date, and a mark between messages of one person in a row.
+dependency brought up to date, a mark between messages of one person in a row, and a
+log without the libraries' lines.
 
 matrix-rat now builds on matrix-sdk 0.20: search lists the newest matches first, a
 handful of fixes from the SDK, and the SQLite in the release archives is current again.
@@ -42,6 +43,10 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   said that its key had not arrived. No key will make it readable.
 - **The room list orders rooms without messages by their activity** among the others,
   instead of after all rooms with messages.
+- **The log keeps the libraries out.** By default it holds only matrix-rat's own notes;
+  the lines of matrix-sdk and the other libraries, many of which carry room, user or
+  device ids or an error as it came, no longer go in. `MATRIX_RAT_LOG` still lets them in
+  to look into a problem (see **Good to know** in the README).
 - **Theme files are watched more calmly** (notify 9): reading a theme no longer wakes the
   watch, and when the system's queue of file events runs over, the theme is reloaded,
   since any file may have changed.
