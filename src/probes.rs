@@ -192,9 +192,9 @@ impl Probes for NothingHere {
         false
     }
 
-    fn player(&self, _: &str) -> Result<Player, NoPlayer> {
+    fn player(&self, setting: &str) -> Result<Player, NoPlayer> {
         self.ask("player");
-        Err(NoPlayer::NoneFound)
+        audio::choose(setting, None, None)
     }
 
     fn recorder(&self, setting: &str, ssh: bool) -> Result<Recorder, NoRecorder> {

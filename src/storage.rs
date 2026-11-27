@@ -437,7 +437,17 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub struct MemStorage {
-    entries: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<String, Vec<u8>>>>,
+    kept: std::rc::Rc<std::cell::RefCell<MemKept>>,
+}
+
+/// What a [`MemStorage`] keeps: the values by name, and apart from them what was set
+/// aside, by the name it was set aside from and its label (`label`, `label.1`…), so
+/// no value's name (a theme `a.b`) is taken for something set aside.
+#[cfg(test)]
+#[derive(Default)]
+struct MemKept {
+    entries: std::collections::BTreeMap<String, Vec<u8>>,
+    asides: std::collections::BTreeMap<(String, String), Vec<u8>>,
 }
 
 #[cfg(test)]
@@ -453,12 +463,21 @@ impl MemStorage {
 
     /// Every name kept (asides as `<key>.<label>`), in order.
     pub fn names(&self) -> Vec<String> {
-        self.entries.borrow().keys().cloned().collect()
+        let kept = self.kept.borrow();
+        let mut names: Vec<String> = kept.entries.keys().cloned().collect();
+        names.extend(
+            kept.asides
+                .keys()
+                .map(|(name, label)| format!("{name}.{label}")),
+        );
+        names.sort();
+        names
     }
 
     pub fn put(&self, key: &Key, bytes: &[u8]) {
-        self.entries
+        self.kept
             .borrow_mut()
+            .entries
             .insert(Self::name(key), bytes.to_vec());
     }
 }
@@ -466,11 +485,11 @@ impl MemStorage {
 #[cfg(test)]
 impl Storage for MemStorage {
     fn read(&self, key: &Key) -> Result<Option<Vec<u8>>> {
-        Ok(self.entries.borrow().get(&Self::name(key)).cloned())
+        Ok(self.kept.borrow().entries.get(&Self::name(key)).cloned())
     }
 
     fn exists(&self, key: &Key) -> bool {
-        self.entries.borrow().contains_key(&Self::name(key))
+        self.kept.borrow().entries.contains_key(&Self::name(key))
     }
 
     fn write(&self, key: &Key, bytes: &[u8]) -> Result<()> {
@@ -480,11 +499,10 @@ impl Storage for MemStorage {
 
     fn remove(&self, key: &Key, what: Removal) -> Result<()> {
         let name = Self::name(key);
-        let mut entries = self.entries.borrow_mut();
-        entries.remove(&name);
+        let mut kept = self.kept.borrow_mut();
+        kept.entries.remove(&name);
         if what == Removal::All {
-            let prefix = format!("{name}.");
-            entries.retain(|found, _| !found.starts_with(&prefix));
+            kept.asides.retain(|(from, _), _| *from != name);
         }
         Ok(())
     }
@@ -492,11 +510,11 @@ impl Storage for MemStorage {
     fn list(&self, of: Listing) -> Result<Vec<String>> {
         match of {
             Listing::Themes => Ok(self
-                .entries
+                .kept
                 .borrow()
+                .entries
                 .keys()
                 .filter_map(|name| name.strip_prefix("theme/"))
-                .filter(|name| !name.contains('.'))
                 .map(str::to_owned)
                 .collect()),
         }
@@ -504,21 +522,22 @@ impl Storage for MemStorage {
 
     fn set_aside(&self, key: &Key, label: &str, how: Aside) -> Result<()> {
         let name = Self::name(key);
-        let mut entries = self.entries.borrow_mut();
-        let value = entries
+        let mut kept = self.kept.borrow_mut();
+        let value = kept
+            .entries
             .get(&name)
             .cloned()
             .ok_or_else(|| io::Error::other("nothing"))?;
         let aside = (0..ASIDE_MOST)
             .map(|n| match n {
-                0 => format!("{name}.{label}"),
-                n => format!("{name}.{label}.{n}"),
+                0 => (name.clone(), label.to_owned()),
+                n => (name.clone(), format!("{label}.{n}")),
             })
-            .find(|candidate| !entries.contains_key(candidate))
+            .find(|candidate| !kept.asides.contains_key(candidate))
             .ok_or_else(|| io::Error::other("no name left"))?;
-        entries.insert(aside, value);
+        kept.asides.insert(aside, value);
         if how == Aside::Move {
-            entries.remove(&name);
+            kept.entries.remove(&name);
         }
         Ok(())
     }
@@ -617,6 +636,22 @@ mod tests {
             .remove(&Key::Theme("mine".into()), Removal::Value)
             .unwrap();
         assert!(storage.list(Listing::Themes).unwrap().is_empty());
+        // A theme's name may hold a dot: it is listed, and removing all of a theme
+        // whose name starts the same leaves it.
+        storage.write(&Key::Theme("mine".into()), b"third").unwrap();
+        storage
+            .write(&Key::Theme("mine.v2".into()), b"other")
+            .unwrap();
+        let mut themes = storage.list(Listing::Themes).unwrap();
+        themes.sort();
+        assert_eq!(themes, ["mine", "mine.v2"]);
+        storage
+            .remove(&Key::Theme("mine".into()), Removal::All)
+            .unwrap();
+        assert_eq!(storage.list(Listing::Themes).unwrap(), ["mine.v2"]);
+        storage
+            .remove(&Key::Theme("mine.v2".into()), Removal::Value)
+            .unwrap();
         storage.remove(&Key::Saved, Removal::All).unwrap();
         storage.remove(&Key::Notes, Removal::All).unwrap();
         assert!(!storage.exists(&Key::Saved) && !storage.exists(&Key::Notes));
