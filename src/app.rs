@@ -45,7 +45,6 @@ pub use playback::{AudioState, AudioView};
 pub use voice::{RecordingView, TakePhase};
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -108,6 +107,9 @@ pub enum OsRequest {
     /// Our window to the front: a desktop notification was clicked. The
     /// `notification_click_command` setting (see `focus`).
     RaiseWindow(String),
+    /// The icon files written for desktop notifications go, and so does whatever is
+    /// still on its way to be written: the session ended.
+    ClearNoticeIcons,
 }
 
 /// Hand-written: a link, a file's path and a command line are the user's.
@@ -116,6 +118,7 @@ impl std::fmt::Debug for OsRequest {
         f.write_str(match self {
             Self::Open(_) => "Open",
             Self::RaiseWindow(_) => "RaiseWindow",
+            Self::ClearNoticeIcons => "ClearNoticeIcons",
         })
     }
 }
@@ -244,7 +247,6 @@ pub struct ReadyNotices {
     pub items: Vec<(crate::matrix::Notice, crate::notify::NotifyIcon)>,
     pub mode: crate::notify::NotifyMode,
     pub preview: bool,
-    pub icon_cache: Option<(Arc<crate::shell::terminal::icon_cache::IconCache>, u64)>,
     /// Reminders that came due: shown under a title and text of their own.
     pub reminders: Vec<(crate::notify::DueReminder, crate::notify::NotifyIcon)>,
 }
@@ -348,8 +350,6 @@ pub struct App {
     session_started: Option<Instant>,
     /// Notifications on their way out; the event loop shows them.
     pub pending_notices: Vec<crate::matrix::Notice>,
-    /// Ephemeral PNG cache for desktop notification avatars, wiped on logout/exit.
-    notify_icons: Option<Arc<crate::shell::terminal::icon_cache::IconCache>>,
     /// The `download_dir` setting; empty means the desktop's download folder.
     download_dir: String,
     /// The `notification_click_command` setting (see `focus`). `None` where no
@@ -735,7 +735,6 @@ impl App {
             logged_out: false,
             session_started: None,
             pending_notices: Vec::new(),
-            notify_icons: None,
             download_dir: String::new(),
             notification_click_command: None,
             saving: Default::default(),
@@ -948,7 +947,7 @@ impl App {
             .into_iter()
             .filter_map(|request| match request {
                 OsRequest::Open(target) => Some(target),
-                OsRequest::RaiseWindow(_) => None,
+                OsRequest::RaiseWindow(_) | OsRequest::ClearNoticeIcons => None,
             })
             .collect()
     }
@@ -1587,11 +1586,6 @@ impl App {
         }
     }
 
-    /// Attaches the ephemeral desktop notification icon cache managed by the event loop.
-    pub fn set_notify_icons(&mut self, cache: Arc<crate::shell::terminal::icon_cache::IconCache>) {
-        self.notify_icons = Some(cache);
-    }
-
     /// Hands the waiting notifications to the event loop (test helper).
     #[cfg(test)]
     pub fn take_notices(
@@ -1634,8 +1628,8 @@ impl App {
         crate::notify::tile_icon(&self.theme, tile_name)
     }
 
-    /// Notifications ready for delivery together with their resolved desktop icons and
-    /// icon cache epoch.
+    /// Notifications ready for delivery together with their resolved desktop icons (the
+    /// shell writes the icon files).
     pub fn take_notices_with_icons(&mut self) -> ReadyNotices {
         let waiting = std::mem::take(&mut self.pending_notices);
         let mut items = Vec::with_capacity(waiting.len());
@@ -1655,15 +1649,10 @@ impl App {
             reminders.push((reminder, icon));
         }
         self.send_avatar_requests();
-        let icon_cache = self
-            .notify_icons
-            .as_ref()
-            .map(|c| (Arc::clone(c), c.epoch()));
         ReadyNotices {
             items,
             mode: self.notify_mode,
             preview: self.notification_preview,
-            icon_cache,
             reminders,
         }
     }
@@ -1700,9 +1689,8 @@ impl App {
         self.sidebar.people_only = false;
         self.session_started = None;
         self.pending_notices.clear();
-        if let Some(cache) = &self.notify_icons {
-            cache.clear();
-        }
+        // So do the icon files of its desktop notifications, the shell's.
+        self.os_requests.push(OsRequest::ClearNoticeIcons);
         self.count_notices.clear();
         self.detailed_notices.clear();
         self.shown_notices.clear();
@@ -9071,8 +9059,8 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&temp_dir);
-        let cache = Arc::new(IconCache::new(temp_dir.clone()));
-        app.set_notify_icons(Arc::clone(&cache));
+        // The shell's: it writes the files of the icons the app resolved.
+        let cache = IconCache::new(temp_dir.clone());
         app.notify_mode = NotifyMode::Desktop;
 
         let mut beta = summary("!b", "#beta", RoomCategory::Room, 0);
@@ -9110,15 +9098,14 @@ mod tests {
             Ok(MatrixCmd::FetchAvatar { url }) if url == "mxc://example.org/beta"
         ));
         assert!(drain(&mut commands).is_empty());
-        let (icon_cache, epoch) = ready.icon_cache.unwrap();
-        let tile_path = icon_cache.ensure_file(&ready.items[0].1, epoch).unwrap();
+        let tile_path = cache.ensure_file(&ready.items[0].1, cache.epoch()).unwrap();
         assert!(tile_path.exists());
 
         // 2. Deliver avatar -> next notice uses the real Picture and writes PNG to cache.
         app.on_matrix(MatrixEvent::Avatar {
             url: "mxc://example.org/beta".into(),
             result: Ok(Decoded {
-                pixels: Arc::new(image::DynamicImage::new_rgba8(96, 96)),
+                pixels: std::sync::Arc::new(image::DynamicImage::new_rgba8(96, 96)),
                 original: (96, 96),
             }),
         });
@@ -9141,26 +9128,21 @@ mod tests {
         assert!(matches!(ready.items[0].1, NotifyIcon::Tile { ch: 'I', .. }));
         assert!(drain(&mut commands).is_empty());
 
-        // 4. Logout clears the cache directory and invalidates the old epoch.
-        let pre_logout_epoch = cache.epoch();
+        // 4. Logout: the shell is asked to clear the icon files (which also invalidates
+        // the old epoch, see the shell's test).
+        let _ = app.take_os_requests();
         app.reset_session();
-        assert!(!temp_dir.exists());
-        assert_eq!(cache.ensure_file(&ready.items[0].1, pre_logout_epoch), None);
+        assert_eq!(app.take_os_requests(), [OsRequest::ClearNoticeIcons]);
+        cache.clear();
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
-    fn hidden_preview_and_terminal_mode_skip_icon_fetch_and_cache() {
+    fn hidden_preview_and_terminal_mode_skip_icon_fetch() {
         use crate::notify::{NotifyIcon, NotifyMode};
-        use crate::shell::terminal::icon_cache::IconCache;
 
         let (mut app, _terminal, mut commands) = connected();
         let _ = drain(&mut commands);
-        let temp_dir =
-            std::env::temp_dir().join(format!("matrix-rat-app-notify-skip-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let cache = Arc::new(IconCache::new(temp_dir.clone()));
-        app.set_notify_icons(Arc::clone(&cache));
 
         let mut beta = summary("!b", "Beta", RoomCategory::Room, 0);
         beta.avatar = Some("mxc://example.org/never-fetch".into());
@@ -9181,7 +9163,7 @@ mod tests {
             })
         };
 
-        // Preview off in Desktop mode: Generic icon, no FetchAvatar, no cache files.
+        // Preview off in Desktop mode: Generic icon, no FetchAvatar.
         app.notify_mode = NotifyMode::Desktop;
         app.notification_preview = false;
         app.on_matrix(make_notice());
@@ -9189,9 +9171,8 @@ mod tests {
         assert_eq!(ready.items.len(), 1);
         assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
         assert!(drain(&mut commands).is_empty());
-        assert!(!temp_dir.exists());
 
-        // Terminal mode even with preview on: Generic icon, no FetchAvatar, no cache files.
+        // Terminal mode even with preview on: Generic icon, no FetchAvatar.
         app.shown_notices.clear();
         app.notification_preview = true;
         app.notify_mode = NotifyMode::Terminal;
@@ -9200,7 +9181,6 @@ mod tests {
         assert_eq!(ready.items.len(), 1);
         assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
         assert!(drain(&mut commands).is_empty());
-        assert!(!temp_dir.exists());
 
         // `auto` is what the probes said it is here: the terminal's, as above...
         app.shown_notices.clear();

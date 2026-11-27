@@ -416,12 +416,14 @@ fn open_in_browser(url: &str) {
         .spawn();
 }
 
-/// Does what the app asked of the desktop.
-fn carry_out(requests: Vec<OsRequest>) {
+/// Does what the app asked of the desktop. `notice_icons`: the icon files of desktop
+/// notifications.
+fn carry_out(requests: Vec<OsRequest>, notice_icons: &icon_cache::IconCache) {
     for request in requests {
         match request {
             OsRequest::Open(target) => open_in_browser(&target),
             OsRequest::RaiseWindow(command) => crate::focus::raise_window(&command),
+            OsRequest::ClearNoticeIcons => notice_icons.clear(),
         }
     }
 }
@@ -517,7 +519,6 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         }
     }
     let _notify_cache_guard = NotifyCacheGuard(Arc::clone(&notify_icons));
-    app.set_notify_icons(notify_icons);
     let mut encoded_images = app.start_images(graphics);
     // Clicks on desktop notifications come back here, as the room to open.
     let (notice_clicks, mut clicked) =
@@ -547,7 +548,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let outcome = async {
         while !app.should_quit {
             // What the app asked of the desktop, as soon as it asked.
-            carry_out(app.take_os_requests());
+            carry_out(app.take_os_requests(), &notify_icons);
             if app.suspend_requested {
                 app.suspend_requested = false;
                 // What played or recorded was told to stop: wait for them to end, and abort
@@ -651,13 +652,16 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 copy_to_clipboard(&text)?;
             }
             let ready = app.take_notices_with_icons();
+            // The icon files are written for the session they are made in: a job
+            // still waiting when the session ends writes none.
+            let icon_cache = Some((Arc::clone(&notify_icons), notify_icons.epoch()));
             for (notice, icon) in &ready.items {
                 crate::notify::show(
                     ready.mode,
                     notice,
                     ready.preview,
                     icon,
-                    ready.icon_cache.clone(),
+                    icon_cache.clone(),
                     Some(&notice_clicks),
                 );
             }
@@ -667,7 +671,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                     notice,
                     ready.preview,
                     icon,
-                    ready.icon_cache.clone(),
+                    icon_cache.clone(),
                     Some(&notice_clicks),
                 );
             }
@@ -942,5 +946,27 @@ mod tests {
         assert!(!super::drain_or_abort(&mut hung, std::time::Duration::from_millis(30)).await);
         assert!(dropped.load(Ordering::SeqCst));
         assert!(hung.is_empty());
+    }
+
+    /// When a session ends the app asks for the icon files of its desktop
+    /// notifications to go: the folder goes, and a file still waiting to be written
+    /// for that session is not written any more.
+    #[test]
+    fn the_end_of_a_session_clears_the_icon_files_of_notifications() {
+        use crate::notify::NotifyIcon;
+        let root = crate::notify::tests::TempDir::new("shell-notice-icons");
+        let dir = root.0.join("icons");
+        let cache = super::icon_cache::IconCache::new(dir.clone());
+        let tile = NotifyIcon::Tile {
+            ch: 'A',
+            bg: [10, 20, 30],
+            fg: [240, 240, 240],
+        };
+        let epoch = cache.epoch();
+        assert!(cache.ensure_file(&tile, epoch).is_some());
+        super::carry_out(vec![crate::app::OsRequest::ClearNoticeIcons], &cache);
+        assert!(!dir.exists());
+        assert_eq!(cache.ensure_file(&tile, epoch), None);
+        assert!(!dir.exists());
     }
 }
