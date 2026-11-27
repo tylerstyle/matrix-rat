@@ -173,6 +173,71 @@ pub struct Message {
     /// Why the message could not be decrypted (`kind` is `Undecryptable`). `None`
     /// for demo data.
     pub utd: Option<UtdWhy>,
+    /// Who deleted it and why (`kind` is `Redacted`). `None` for demo data; `body`
+    /// still says "Message deleted", for previews, replies, notifications and agents.
+    pub deleted: Option<Deletion>,
+}
+
+/// Who deleted a message, and why.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Deletion {
+    /// Made safe for one line and at most [`Deletion::REASON_MAX`] columns; `None`
+    /// where none was given. Someone else's text: never logged, never handed to agents.
+    pub reason: Option<String>,
+    pub by: DeletedBy,
+}
+
+/// Who deleted a message.
+#[derive(Clone, PartialEq, Eq)]
+pub enum DeletedBy {
+    /// Its sender, or someone not known: the server did not say.
+    Sender,
+    /// We did, someone else's message.
+    Us,
+    /// Someone else did: a moderator. `name` as the timeline shows names (with the
+    /// user ID where someone else goes by it too, see [`mark_namesakes`]); the user ID
+    /// until the name is known.
+    Other { user_id: String, name: String },
+}
+
+impl Deletion {
+    /// The longest reason kept, in columns.
+    pub const REASON_MAX: usize = 500;
+
+    /// The line a deleted message shows: "Message deleted: why", "Deleted by carol:
+    /// why", "Deleted by you".
+    pub fn line(&self) -> String {
+        let who = match &self.by {
+            DeletedBy::Sender => "Message deleted",
+            DeletedBy::Us => "Deleted by you",
+            DeletedBy::Other { name, .. } => &format!("Deleted by {name}"),
+        };
+        match &self.reason {
+            Some(reason) => format!("{who}: {reason}"),
+            None => who.to_owned(),
+        }
+    }
+}
+
+/// Hand-written: the reason and who deleted it stay out of logs.
+impl fmt::Debug for Deletion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Deletion")
+            .field("reason", &self.reason.is_some())
+            .field("by", &self.by)
+            .finish()
+    }
+}
+
+/// Hand-written: who it was stays out of logs.
+impl fmt::Debug for DeletedBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Sender => "Sender",
+            Self::Us => "Us",
+            Self::Other { .. } => "Other",
+        })
+    }
 }
 
 /// Hand-written: what it says, who sent it and which event it is stay out of logs.
@@ -195,6 +260,7 @@ impl fmt::Debug for Message {
             .field("send_error", &self.send_error.is_some())
             .field("shield", &self.shield)
             .field("utd", &self.utd)
+            .field("deleted", &self.deleted)
             .finish_non_exhaustive()
     }
 }
@@ -704,9 +770,18 @@ impl Message {
         }
     }
 
+    /// What a deleted message shows in place of its text: who deleted it and why, where
+    /// that is known (see [`Deletion::line`]).
+    pub fn deleted_line(&self) -> std::borrow::Cow<'_, str> {
+        match &self.deleted {
+            Some(deletion) => deletion.line().into(),
+            None => self.body.as_str().into(),
+        }
+    }
+
     /// The people the message names, each by their name as given (not told apart)
     /// and user ID: its sender, whom its line is about, whoever wrote what it quotes,
-    /// the latest reply of its thread, and its readers.
+    /// the latest reply of its thread, its readers, and whoever deleted it.
     fn people(&self) -> impl Iterator<Item = (&str, &str)> {
         let sender = self
             .sender_id
@@ -731,12 +806,20 @@ impl Message {
             let id = reader.id.as_deref()?;
             Some((reader.name.as_str(), id))
         });
+        let deleter = match &self.deleted {
+            Some(Deletion {
+                by: DeletedBy::Other { user_id, name },
+                ..
+            }) => Some((plain_name(name, user_id), user_id.as_str())),
+            _ => None,
+        };
         sender
             .into_iter()
             .chain(subject)
             .chain(quoted)
             .chain(latest)
             .chain(readers)
+            .chain(deleter)
     }
 
     /// True for non-interactive status or divider rows (`System` or `ReadMarker`).
@@ -1002,6 +1085,15 @@ impl Namesakes {
             {
                 reader.ambiguous = true;
             }
+        }
+        // Whoever deleted it, unless the name shown is the user ID itself.
+        if let Some(Deletion {
+            by: DeletedBy::Other { user_id, name },
+            ..
+        }) = &mut message.deleted
+            && name != user_id
+        {
+            tell(name, user_id);
         }
         // A line that begins with whom it is about ("bob joined").
         if let Some((name, id)) = &message.subject
@@ -1596,6 +1688,114 @@ mod tests {
         ];
         mark_namesakes(&mut alone);
         assert!(alone.iter().all(|m| !m.sender_ambiguous));
+    }
+
+    /// A moderator who deleted a message and shares a name with a sender in view is
+    /// named with their ID on the deleted line, and the sender too; a second pass
+    /// changes nothing. Alone with their name, they keep it as it is.
+    #[test]
+    fn a_moderator_who_shares_a_name_is_told_apart() {
+        let said = |id: &str, name: &str, user: &str| Message {
+            id: id.into(),
+            sender: name.into(),
+            sender_id: Some(user.into()),
+            body: format!("said {id}"),
+            ..Message::default()
+        };
+        let deleted_by = |name: &str, user: &str| {
+            let mut message = said("x", "bob", "@bob:example.org");
+            message.kind = MsgKind::Redacted;
+            message.body = "Message deleted".into();
+            message.deleted = Some(Deletion {
+                reason: Some("spam".into()),
+                by: DeletedBy::Other {
+                    user_id: user.into(),
+                    name: name.into(),
+                },
+            });
+            message
+        };
+        let mut messages = vec![
+            said("a", "carol", "@carol:elsewhere.org"),
+            deleted_by("carol", "@carol:example.org"),
+        ];
+        mark_namesakes(&mut messages);
+        assert_eq!(messages[0].sender_name(), "carol (@carol:elsewhere.org)");
+        assert_eq!(
+            messages[1].deleted_line(),
+            "Deleted by carol (@carol:example.org): spam"
+        );
+        let once = messages.clone();
+        mark_namesakes(&mut messages);
+        assert_eq!(messages[1].deleted, once[1].deleted);
+
+        let mut alone = vec![
+            said("a", "dave", "@dave:example.org"),
+            deleted_by("carol", "@carol:example.org"),
+        ];
+        mark_namesakes(&mut alone);
+        assert_eq!(alone[1].deleted_line(), "Deleted by carol: spam");
+        // A name that is the user ID is not told apart again.
+        let mut bare = [deleted_by("@carol:example.org", "@carol:example.org")];
+        let mut namesakes = Namesakes::default();
+        namesakes.learn(&said("a", "@carol:example.org", "@mallory:example.org"));
+        namesakes.learn(&bare[0]);
+        namesakes.mark(&mut bare[0]);
+        assert_eq!(
+            bare[0].deleted_line(),
+            "Deleted by @carol:example.org: spam"
+        );
+    }
+
+    /// What a deleted message shows, and that its Debug says nothing of who or why.
+    #[test]
+    fn a_deleted_line_names_who_and_why_and_debug_neither() {
+        let line = |reason: Option<&str>, by: DeletedBy| {
+            Deletion {
+                reason: reason.map(str::to_owned),
+                by,
+            }
+            .line()
+        };
+        assert_eq!(
+            line(Some("sent to the wrong room"), DeletedBy::Sender),
+            "Message deleted: sent to the wrong room"
+        );
+        assert_eq!(line(None, DeletedBy::Sender), "Message deleted");
+        assert_eq!(line(Some("oops"), DeletedBy::Us), "Deleted by you: oops");
+        let carol = || DeletedBy::Other {
+            user_id: "@carol:example.org".into(),
+            name: "carol".into(),
+        };
+        assert_eq!(
+            line(Some("spam link"), carol()),
+            "Deleted by carol: spam link"
+        );
+        assert_eq!(line(None, carol()), "Deleted by carol");
+        // Demo data without a deletion shows its body.
+        let demo = Message {
+            kind: MsgKind::Redacted,
+            body: "Message deleted".into(),
+            ..Message::default()
+        };
+        assert_eq!(demo.deleted_line(), "Message deleted");
+
+        let message = Message {
+            kind: MsgKind::Redacted,
+            deleted: Some(Deletion {
+                reason: Some("secret reason".into()),
+                by: carol(),
+            }),
+            ..Message::default()
+        };
+        let debug = format!("{message:?}");
+        for secret in ["secret", "carol", "example.org"] {
+            assert!(!debug.contains(secret), "{secret} in {debug}");
+        }
+        assert!(
+            debug.contains("Deletion { reason: true, by: Other }"),
+            "{debug}"
+        );
     }
 
     #[test]

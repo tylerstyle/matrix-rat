@@ -19,8 +19,8 @@ use matrix_sdk_ui::timeline::{
 };
 
 use crate::model::{
-    Attachment, AudioMeta, ImageInfo, ImageSource, ItemRef, MediaKind, MediaRef, Message, MsgKind,
-    Reaction, SendState, Shield, UtdWhy, disambiguated,
+    Attachment, AudioMeta, DeletedBy, Deletion, ImageInfo, ImageSource, ItemRef, MediaKind,
+    MediaRef, Message, MsgKind, Reaction, SendState, Shield, UtdWhy, disambiguated,
 };
 use crate::text::{sanitize, sanitize_line};
 
@@ -784,6 +784,18 @@ pub(super) fn event_message(
                     message.shield = None;
                     message.kind = MsgKind::Redacted;
                     message.body = "Message deleted".to_owned();
+                    message.deleted = Some(Deletion {
+                        reason: deletion_reason(event.redaction_reason()),
+                        by: match deleter(event, own) {
+                            Deleter::Sender => DeletedBy::Sender,
+                            Deleter::Us => DeletedBy::Us,
+                            // Named by `receipts::Names`, as readers are.
+                            Deleter::Other(user) => DeletedBy::Other {
+                                user_id: user.to_string(),
+                                name: sanitize_line(user.as_str()),
+                            },
+                        },
+                    });
                 }
                 MsgLikeKind::UnableToDecrypt(encrypted) => {
                     let why = utd_why(encrypted);
@@ -876,6 +888,66 @@ pub(super) fn event_message(
         reaction.key = sanitize_line(&reaction.key);
     }
     Some(message)
+}
+
+/// Who deleted a deleted event (see [`deleter`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Deleter {
+    /// Its sender, or someone not known.
+    Sender,
+    /// We did, someone else's event.
+    Us,
+    /// Someone else did.
+    Other(OwnedUserId),
+}
+
+/// Who deleted `event`, which is deleted. While a deletion of ours is on its way, it
+/// is ours. Otherwise the server's copy says: a deleted event carries the deletion in
+/// `unsigned.redacted_because`, with its sender (the SDK keeps only the reason, see
+/// `redaction_reason`). Where it does not say (some servers; a deletion that has just
+/// come in, before the event cache's copy), it counts as the sender's.
+pub(super) fn deleter(event: &EventTimelineItem, own: &UserId) -> Deleter {
+    #[derive(serde::Deserialize)]
+    struct Unsigned {
+        redacted_because: Option<Because>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Because {
+        sender: Option<OwnedUserId>,
+    }
+    if event.redaction_send_state().is_some() {
+        return if event.sender() == own {
+            Deleter::Sender
+        } else {
+            Deleter::Us
+        };
+    }
+    let said = event
+        .original_json()
+        .and_then(|raw| raw.get_field::<Unsigned>("unsigned").ok().flatten())
+        .and_then(|unsigned| unsigned.redacted_because?.sender);
+    match said {
+        Some(user) if user == event.sender() => Deleter::Sender,
+        Some(user) if user == own => Deleter::Us,
+        Some(user) => Deleter::Other(user),
+        None => Deleter::Sender,
+    }
+}
+
+/// The reason given for a deletion, made safe for one line: no control characters, no
+/// direction overrides, one space where there were several, at most
+/// [`Deletion::REASON_MAX`] columns. `None` for one that shows nothing.
+fn deletion_reason(reason: Option<&str>) -> Option<String> {
+    let line = sanitize_line(reason?);
+    let line = line
+        .split(' ')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if crate::text::is_blank(&line) {
+        return None;
+    }
+    Some(crate::text::truncate(&line, Deletion::REASON_MAX))
 }
 
 /// What the SDK advises to warn about, in its lenient mode: people who have never been

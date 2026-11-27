@@ -43,8 +43,8 @@ use super::{
 };
 use crate::images::Slot;
 use crate::model::{
-    Attachment, AudioMeta, ImageInfo, ImageSource, ItemRef, MediaRef, Message, PollAnswer,
-    PollInfo, Reaction, ReadBy, Reader, Room, RoomKind, ThreadSummary,
+    Attachment, AudioMeta, DeletedBy, Deletion, ImageInfo, ImageSource, ItemRef, MediaRef, Message,
+    PollAnswer, PollInfo, Reaction, ReadBy, Reader, Room, RoomKind, ThreadSummary,
 };
 use crate::notes::{Note, NoteKind, NoteState, Notes};
 use crate::previews::Preview;
@@ -612,6 +612,7 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
         mentions,
         read_by,
         utd,
+        deleted,
     } = message;
     id.hash(h);
     match item {
@@ -736,6 +737,22 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
         time.hash(h);
     }
     utd.map(|why| discriminant(&why)).hash(h);
+    match deleted {
+        None => 0u8.hash(h),
+        Some(Deletion { reason, by }) => {
+            1u8.hash(h);
+            reason.hash(h);
+            match by {
+                DeletedBy::Sender => 0u8.hash(h),
+                DeletedBy::Us => 1u8.hash(h),
+                DeletedBy::Other { user_id, name } => {
+                    2u8.hash(h);
+                    user_id.hash(h);
+                    name.hash(h);
+                }
+            }
+        }
+    }
 }
 
 fn hash_image(image: &ImageInfo, h: &mut impl Hasher) {
@@ -1595,6 +1612,18 @@ mod tests {
                 message.kind = MsgKind::Redacted;
                 message.body = "Message deleted".into();
                 message.html = None;
+                // Who deleted it and why, as it comes and as it is named.
+                message.deleted = (dice.below(4) > 0).then(|| Deletion {
+                    reason: (dice.below(2) == 0).then(|| format!("reason {made}")),
+                    by: match dice.below(3) {
+                        0 => DeletedBy::Sender,
+                        1 => DeletedBy::Us,
+                        _ => DeletedBy::Other {
+                            user_id: "@carol:example.org".into(),
+                            name: (*dice.pick(&["carol", "@carol:example.org"])).to_owned(),
+                        },
+                    },
+                });
             }
             6 => {
                 let thread = message.thread.get_or_insert_with(ThreadSummary::default);
