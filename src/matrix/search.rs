@@ -274,7 +274,7 @@ async fn run_search(
             }
         };
 
-        for (room_id, _score, event_id) in entries {
+        for (room_id, _timestamp, event_id) in entries {
             let Some(hit) = resolve_hit(
                 &client,
                 &ignored,
