@@ -131,14 +131,14 @@ impl App {
         }
     }
 
-    pub(crate) fn search_debounce_deadline(&self) -> Option<Instant> {
+    pub fn search_debounce_deadline(&self) -> Option<Instant> {
         match &self.modal {
             Some(Modal::GlobalSearch(state)) => state.pending_at.map(|at| at + SEARCH_DEBOUNCE),
             _ => None,
         }
     }
 
-    pub(crate) fn tick_global_search(&mut self) {
+    pub fn tick_global_search(&mut self) {
         let due = matches!(
             &self.modal,
             Some(Modal::GlobalSearch(state))

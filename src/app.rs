@@ -577,7 +577,7 @@ impl App {
         app
     }
 
-    pub(crate) fn new_in_scheme(
+    pub fn new_in_scheme(
         config: &Config,
         storage: Box<dyn Storage>,
         probes: Box<dyn Probes>,
@@ -2449,7 +2449,7 @@ impl App {
     }
 
     /// Opens `startup_target` once login/rooms/sync conditions allow it.
-    pub(crate) fn maybe_open_startup_target(&mut self) {
+    pub fn maybe_open_startup_target(&mut self) {
         let Some(raw) = self.startup_target.as_deref() else {
             return;
         };
@@ -5333,7 +5333,7 @@ impl App {
         }
     }
 
-    pub(crate) fn on_tick(&mut self) {
+    pub fn on_tick(&mut self) {
         self.verify_tick();
         self.maybe_open_startup_target();
         self.devices_watch();

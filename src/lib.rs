@@ -7,15 +7,17 @@
 // or the test-only allow below.
 #![warn(clippy::wildcard_enum_match_arm)]
 #![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
-// Public are only the names the command line uses (`cli`); the documentation is read with
-// `cargo doc --document-private-items`, where their links to the crate's own items lead
-// somewhere, as they did when the binary was the crate.
+// Public are only the names the command line uses (`cli`) and what a shell drives
+// (`core`); the documentation is read with `cargo doc --document-private-items`, where
+// their links to the crate's own items lead somewhere, as they did when the binary was
+// the crate.
 #![allow(rustdoc::private_intra_doc_links)]
 //! matrix-rat — a mouse-friendly Matrix client for the terminal.
 //!
 //! The client itself: the app, the Matrix worker, the terminal shell, `serve` and the
 //! clients of its socket. The `matrix-rat` command (`src/main.rs`) reads the command line
-//! and calls what [`cli`] makes public; every module stays the crate's own.
+//! and calls what [`cli`] makes public; a shell drives what [`core`] makes public; every
+//! module stays the crate's own.
 
 mod action;
 mod app;
@@ -88,6 +90,29 @@ mod portal;
 mod runtime;
 #[cfg(not(target_family = "wasm"))]
 mod watch;
+
+/// What a shell drives, in the browser as in the terminal: the app and the effects it
+/// asks for, the drawing, input, the Matrix worker, and the seams for what is kept and
+/// what the system has. The terminal's shell (`shell::terminal`) uses these items under
+/// their paths in the crate; the browser's (phase 2 of the web app) is to use only these.
+pub mod core {
+    pub use crate::app::{App, OsRequest};
+    pub use crate::config::Config;
+    pub use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MediaKeyCode, ModifierKeyCode,
+        MouseButton, MouseEvent, MouseEventKind,
+    };
+    pub use crate::matrix::{MatrixEvent, MatrixHandle, SecretStoreMode, spawn_with};
+    pub use crate::paths::Paths;
+    pub use crate::probes::Probes;
+    // The app's clock, and the timers its shell waits with: a tick for
+    // `App::on_tick`, and the debounce deadlines it gives (`App::search_debounce_deadline`).
+    pub use crate::rt::{MissedTickBehavior, interval, sleep_until};
+    pub use crate::storage::{Aside, Key, Listing, Removal, Storage};
+    pub use crate::theme::ColorScheme;
+    pub use crate::time::Instant;
+    pub use crate::ui::draw;
+}
 
 /// What the command line (`src/main.rs`) uses, under the paths it has inside the crate,
 /// and nothing else of those modules.

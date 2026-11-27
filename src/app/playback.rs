@@ -303,12 +303,12 @@ impl Sound {
 impl App {
     /// Where the copies of sounds go (the event loop has swept away what an earlier
     /// run left there).
-    pub(crate) fn set_audio_dir(&mut self, dir: PathBuf) {
+    pub fn set_audio_dir(&mut self, dir: PathBuf) {
         self.audio.dir = Some(dir);
     }
 
     /// A player for the event loop to start.
-    pub(crate) fn take_audio_start(&mut self) -> Option<audio::Request> {
+    pub fn take_audio_start(&mut self) -> Option<audio::Request> {
         self.audio.start.take()
     }
 
@@ -577,7 +577,7 @@ impl App {
     }
 
     /// Stops what plays, or gives up its download; nothing if nothing plays.
-    pub(crate) fn stop_audio(&mut self) {
+    pub fn stop_audio(&mut self) {
         // A player not started yet: its file goes with it.
         self.audio.start = None;
         let Some(sound) = self.audio.current.take() else {
@@ -664,7 +664,7 @@ impl App {
         });
     }
 
-    pub(crate) fn on_audio(&mut self, update: PlayerUpdate) {
+    pub fn on_audio(&mut self, update: PlayerUpdate) {
         let Some(Sound {
             phase: Phase::Playing(playing),
             ..

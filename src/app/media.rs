@@ -46,7 +46,7 @@ impl App {
 
     /// What tells the terminal to free the pictures that are no longer shown (`all`:
     /// every picture, before quitting), for the event loop to write between frames.
-    pub(crate) fn image_cleanup(&mut self, all: bool) -> String {
+    pub fn image_cleanup(&mut self, all: bool) -> String {
         self.images.cleanup_sequence(all)
     }
 

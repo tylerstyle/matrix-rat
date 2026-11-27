@@ -600,7 +600,7 @@ impl App {
     // ----- the demo --------------------------------------------------------------------
 
     /// A space for the demo to show: three of its rooms, and one it is not in.
-    pub(crate) fn add_demo_space(&mut self) {
+    pub fn add_demo_space(&mut self) {
         let children: Vec<String> = ["rust", "matrix-rat", "nixos", DEMO_OUTSIDE.0]
             .into_iter()
             .map(str::to_owned)

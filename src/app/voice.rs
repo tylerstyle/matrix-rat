@@ -246,7 +246,7 @@ impl App {
     }
 
     /// A recording for the event loop to start.
-    pub(crate) fn take_record_start(&mut self) -> Option<RecordRequest> {
+    pub fn take_record_start(&mut self) -> Option<RecordRequest> {
         self.audio.record_start.take()
     }
 
@@ -412,7 +412,7 @@ impl App {
     }
 
     /// Ends the recording and keeps nothing, at any moment of it. False if none ran.
-    pub(crate) fn cancel_recording(&mut self) -> bool {
+    pub fn cancel_recording(&mut self) -> bool {
         // Not started yet: it never is.
         self.audio.record_start = None;
         let Some(take) = self.audio.take.take() else {
@@ -435,7 +435,7 @@ impl App {
         }
     }
 
-    pub(crate) fn on_recording(&mut self, update: RecordUpdate) {
+    pub fn on_recording(&mut self, update: RecordUpdate) {
         // Of a recording given up meanwhile: a file that came with it goes with it.
         if self
             .audio
