@@ -875,6 +875,127 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 70, 26));
     }
 
+    /// Several messages of one person in a row (PLAN §6.1): each further one starts with
+    /// a muted dot under the header's `●`, on its first line only. A reaction row between
+    /// two of them changes nothing, a reply in a run has the dot in front of its quote,
+    /// and after the "new" line the sender's header comes again. Without colours
+    /// (`NO_COLOR`) and in 256 colours the dot is there all the same, and a selected
+    /// message keeps it on its highlight.
+    #[test]
+    fn several_messages_in_a_row() {
+        use crate::model::{Message, MsgKind, Reaction};
+        use crate::theme::{Role, Theme};
+        use ratatui::buffer::Cell;
+        use ratatui::style::{Color, Modifier};
+        let said = |sender: &str, body: &str| Message {
+            id: body.into(),
+            sender: sender.into(),
+            time: "12:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        };
+        let messages = vec![
+            said("alice", "Three in a row: the first,"),
+            said("alice", "the second,"),
+            said(
+                "alice",
+                "and the third, long enough to be wrapped onto a second row.",
+            ),
+            Message {
+                reactions: vec![Reaction {
+                    key: "👍".into(),
+                    count: 2,
+                    own: false,
+                }],
+                ..said("bob", "A reaction under this one.")
+            },
+            said("bob", "The next one is still bob's."),
+            Message {
+                reply_to: Some(("alice".into(), "the second,".into())),
+                ..said("bob", "A reply in the run.")
+            },
+            Message {
+                kind: MsgKind::ReadMarker,
+                ..Message::default()
+            },
+            said("bob", "After the new line, his header again."),
+            said("bob", "And a dot."),
+        ];
+        // `colours`: what is done to the theme's colours at the start (as for
+        // `NO_COLOR`, or a terminal with 256 colours).
+        let app_with = |colours: fn(&mut Theme)| {
+            let mut app = App::demo();
+            colours(&mut app.theme);
+            let room = &mut app.rooms[0];
+            room.typing = None;
+            room.messages = messages.clone();
+            app
+        };
+        // The cell of the dot in front of `text`, as drawn.
+        let dot_cell = |app: &mut App, text: &str| -> Cell {
+            let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+            terminal.draw(|frame| super::draw(frame, app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let want: Vec<String> = format!("· {text}").chars().map(String::from).collect();
+            for y in 0..buffer.area.height {
+                let cells: Vec<&str> = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                for x in 0..cells.len().saturating_sub(want.len()) {
+                    if want
+                        .iter()
+                        .zip(&cells[x..])
+                        .all(|(want, cell)| want == cell)
+                    {
+                        return buffer[(x as u16, y)].clone();
+                    }
+                }
+            }
+            panic!("no dot in front of {text:?}");
+        };
+        let select = |app: &mut App, at: usize| {
+            for _ in 0..messages.len() {
+                if app.timeline.selected == Some(at) {
+                    return;
+                }
+                app.perform(Action::SelectOlder);
+            }
+            assert_eq!(app.timeline.selected, Some(at));
+        };
+
+        let mut app = app_with(|_| {});
+        let wide = render(&mut app, 80, 30);
+        insta::assert_snapshot!("several_messages_in_a_row", wide);
+        insta::assert_snapshot!("several_messages_in_a_row_narrow", render(&mut app, 40, 30));
+        // Muted: the colour of the header's time.
+        let timestamp = app.theme.style(Role::Timestamp).fg.unwrap();
+        let dot = dot_cell(&mut app, "the second,");
+        assert_eq!(dot.fg, timestamp);
+        // Selected: on the highlight, still muted.
+        select(&mut app, 1);
+        let dot = dot_cell(&mut app, "the second,");
+        assert_eq!(dot.fg, timestamp);
+        assert_eq!(Some(dot.bg), app.theme.style(Role::MessageSelected).bg);
+
+        // Without colours: the same screen, the dot in it.
+        let mut app = app_with(Theme::strip_colors);
+        assert_eq!(render(&mut app, 80, 30), wide);
+        let dot = dot_cell(&mut app, "the second,");
+        assert_eq!((dot.fg, dot.bg), (Color::Reset, Color::Reset));
+        assert!(!dot.modifier.contains(Modifier::REVERSED));
+        // A selected message is reversed, the dot with it.
+        select(&mut app, 1);
+        let dot = dot_cell(&mut app, "the second,");
+        assert!(dot.modifier.contains(Modifier::REVERSED), "{dot:?}");
+
+        // In 256 colours: the nearest of them.
+        let mut app = app_with(Theme::downgrade_to_256);
+        assert_eq!(render(&mut app, 80, 30), wide);
+        let dot = dot_cell(&mut app, "the second,");
+        assert!(matches!(dot.fg, Color::Indexed(_)), "{dot:?}");
+    }
+
     #[test]
     fn formatted_messages() {
         use crate::model::Message;

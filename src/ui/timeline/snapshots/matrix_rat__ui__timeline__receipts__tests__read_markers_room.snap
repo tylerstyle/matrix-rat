@@ -8,7 +8,7 @@ expression: "lines(&busy, 44).join(\"\\n\")"
 
 ● you  12:00
   Yes, startup is instant now.    ✓ B C F +9
-  Back-pagination survives restarts too.
+· Back-pagination survives restarts too.
 
 ● dave  12:00
   Shipping a client on top of it this week

@@ -11,7 +11,7 @@ expression: text
 "│ People               ││● bob  21:44                                                              │"
 "│ B  bob            2  ││  Yes — startup is instant now. Room previews come straight from disk.    │"
 "│ C  carol             ││   👍────────────────────╮                                                │" Hidden by multi-width symbols: [(29, " ")]
-"│ Rooms                ││  Ba│ Reply        Enter │vives restarts, which is a big deal for large   │"
+"│ Rooms                ││· Ba│ Reply        Enter │vives restarts, which is a big deal for large   │"
 "│ D  design         5  ││  ro│ Reply in thread  t │e scrolling up used to refetch everything from  │"
 "│ N  nixos             ││  th│ React…           r │time.                                           │"
 "│ O  off-topic     12  ││────│ Edit             e │─────── Today ───────────────────────────────── │"

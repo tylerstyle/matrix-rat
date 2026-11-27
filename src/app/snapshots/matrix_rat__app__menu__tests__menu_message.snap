@@ -11,7 +11,7 @@ expression: text
 "│ People               ││● bob  21:44                                                              │"
 "│ B  bob            2  ││  Yes — startup is instant now. Room previews come straight from disk.    │"
 "│ C  carol             ││   👍 2   🎉 1                                                            │" Hidden by multi-width symbols: [(29, " "), (36, " ")]
-"│ Rooms                ││  Back-pagination also survives restarts, which is a big deal for large   │"
+"│ Rooms                ││· Back-pagination also survives restarts, which is a big deal for large   │"
 "│ D  design         5  ││  rooms like this one where scrolling up used to refetch everything from  │"
 "│ N  nixos             ││  the server every single time.                                           │"
 "│ O  off-topic     12  ││───────────────────────────────── Today ───────────────────────────────── │"

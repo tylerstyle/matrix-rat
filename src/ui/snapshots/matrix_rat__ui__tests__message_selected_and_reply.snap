@@ -9,7 +9,7 @@ expression: "render(&mut app, 100, 30)"
 "│▌R  rust              ││● bob  21:44                                                             ┃│"
 "│ M  matrix-rat        ││  Yes — startup is instant now. Room previews come straight from disk.   ┃│"
 "│ People               ││   👍 2   🎉 1                                                           ┃│" Hidden by multi-width symbols: [(29, " "), (36, " ")]
-"│ B  bob            2  ││  Back-pagination also survives restarts, which is a big deal for large  ┃│"
+"│ B  bob            2  ││· Back-pagination also survives restarts, which is a big deal for large  ┃│"
 "│ C  carol             ││  rooms like this one where scrolling up used to refetch everything from ┃│"
 "│ Rooms                ││  the server every single time.                                          ┃│"
 "│ D  design         5  ││───────────────────────────────── Today ─────────────────────────────────┃│"

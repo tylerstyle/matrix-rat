@@ -76,6 +76,8 @@ struct AudioPart {
     of: u16,
     /// Columns at the row's end that a read marker takes (see `receipts`): it stays.
     marker: u16,
+    /// The row starts with the dot of a further message of a run ([`DOT`]): it stays.
+    dot: bool,
 }
 
 /// Hand-written: the line is what the message says, and who sent it.
@@ -153,6 +155,30 @@ impl Row {
 
 const INDENT: &str = "  ";
 
+/// What the first line of a further message of a run of one sender's messages starts
+/// with in place of [`INDENT`]: a dot under the header's `●`, so that messages in a row
+/// are told apart without a row more. The dot says it, colour only mutes it: it is
+/// there without colours (`NO_COLOR`) too. As wide as the indent, so nothing moves.
+const DOT: &str = "· ";
+
+/// Puts the dot ([`DOT`]) in place of the indent `line` starts with, in the colour of
+/// a header's time. A line that does not start with the plain indent is left as it is.
+/// Whether it did.
+fn put_dot(line: &mut Line<'static>, theme: &Theme) -> bool {
+    match line.spans.first_mut() {
+        Some(first) if first.content == INDENT && first.style == Style::new() => {
+            // Foreground only, so the row's selection background shows through.
+            let muted = Style {
+                fg: theme.style(Role::Timestamp).fg,
+                ..Style::new()
+            };
+            *first = Span::styled(DOT, muted);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Whether a reaction is made with a custom emoji: its key is an `mxc://` address.
 fn is_mxc_key(key: &str) -> bool {
     key.trim_start()
@@ -220,7 +246,7 @@ fn sound_row(
         .audio
         .as_ref()
         .map_or(&[][..], |meta| meta.waveform.as_slice());
-    match (part.head, part.first) {
+    let mut line = match (part.head, part.first) {
         (true, _) => {
             let spinner = if view == crate::app::AudioView::Loading {
                 images.spinner()
@@ -240,7 +266,13 @@ fn sound_row(
         (false, false) => {
             super::audio::wave(view, waveform, INDENT, width, theme).map(|_| Line::default())
         }
+    };
+    if part.dot
+        && let Some(line) = &mut line
+    {
+        put_dot(line, theme);
     }
+    line
 }
 
 /// What decides whether a message gets a link preview under it.
@@ -461,11 +493,15 @@ struct Before {
     header: bool,
     /// An empty row goes first.
     gap: bool,
+    /// A further message of a run of one sender's messages, under the header of the
+    /// first: its first line starts with a dot ([`DOT`]) to tell it from the one before.
+    further: bool,
     /// The message before it, from the same sender, carries the same shield.
     repeated_shield: bool,
 }
 
-/// What the rows so far showed, to decide on day dividers and sender headers.
+/// What the rows so far showed, to decide on day dividers, sender headers and the dots
+/// of further messages of a run.
 #[derive(Default)]
 struct Flow<'a> {
     last_day: Option<&'a str>,
@@ -500,6 +536,8 @@ impl<'a> Flow<'a> {
             .is_some_and(|last| last.same_sender(message));
         let header = !is_emote && (day || !same);
         let gap = !day && (header || (is_emote && self.last_sender.is_some()));
+        // An action line names its sender itself, and never goes on a run: no dot.
+        let further = !is_emote && !header;
         self.last_day = Some(message.day.as_str());
         // An action line stands alone: whoever speaks next gets a header again.
         self.last_sender = (!is_emote).then_some(message);
@@ -507,6 +545,7 @@ impl<'a> Flow<'a> {
             day,
             header,
             gap,
+            further,
             repeated_shield,
         }
     }
@@ -605,6 +644,9 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
             row.free = Free::Nowhere;
             rows.push(row);
         }
+        // The message's own first line, whatever it shows: the quote it replies to, a
+        // picture's top row, the text, a poll's question.
+        let first_line = rows.len();
 
         if let Some((sender, quoted)) = &message.reply_to {
             let quoted = quoted.replace('\n', " ");
@@ -795,6 +837,8 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                         nth: n as u16,
                         of: head_rows,
                         marker: 0,
+                        // Set with the dot (see below).
+                        dot: false,
                     }),
                     1 if waveform => Some(AudioPart {
                         head: false,
@@ -802,6 +846,7 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                         nth: 0,
                         of: 1,
                         marker: 0,
+                        dot: false,
                     }),
                     _ => None,
                 });
@@ -993,6 +1038,16 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
         }
         if let Some(thread) = &message.thread {
             rows.push(thread_row(thread, i, body_width, theme));
+        }
+        // A further message of a run: the dot, on its first line only (the rows a long
+        // line is wrapped onto keep the indent).
+        if before.further
+            && let Some(row) = rows.get_mut(first_line)
+            && put_dot(&mut row.line, theme)
+            && let Some(part) = &mut row.audio
+        {
+            // A voice message that plays is drawn over: the dot stays (see `sound_row`).
+            part.dot = true;
         }
     }
     for row in &mut rows[start..] {
@@ -2747,5 +2802,274 @@ mod tests {
                 .iter()
                 .any(|h| matches!(h.2, HitId::PollAnswer(1, _)))
         }));
+    }
+
+    /// Whether `row` starts with the dot of a further message of a run.
+    fn dotted(row: &Row) -> bool {
+        row.line
+            .spans
+            .first()
+            .is_some_and(|span| span.content == DOT)
+    }
+
+    /// The rows of the message at `i`.
+    fn rows_of(rows: &[Row], i: usize) -> Vec<&Row> {
+        rows.iter().filter(|row| row.source == i).collect()
+    }
+
+    #[test]
+    fn the_dot_is_as_wide_as_the_indent() {
+        // Nothing moves: what follows the dot starts where it starts after the indent.
+        assert_eq!(width(DOT), INDENT.len());
+        assert!(DOT.starts_with('·'));
+    }
+
+    /// Several messages of one person in a row: the first under its header, each
+    /// further one with a dot in place of the indent of its first line, in the muted
+    /// colour of the header's time; the rows a long line is wrapped onto keep the
+    /// indent. At any width, nothing gets wider than the pane.
+    #[test]
+    fn further_messages_of_a_run_start_with_a_dot_on_their_first_line_only() {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let mut room = demo_rooms().remove(0);
+        let alice = "@alice:example.org";
+        room.messages = vec![
+            by(alice, "alice", "one"),
+            by(alice, "alice", "two"),
+            by(
+                alice,
+                "alice",
+                "three, which is long enough to be wrapped onto more rows than one",
+            ),
+        ];
+        let rows = build_rows(&room, 30, &theme, None, &images);
+        let text: Vec<String> = rows.iter().map(|row| row.line.to_string()).collect();
+        assert_eq!(
+            text,
+            [
+                "─────────── Today ────────────",
+                "● alice  12:00",
+                "  one",
+                "· two",
+                "· three, which is long enough",
+                "  to be wrapped onto more rows",
+                "  than one",
+            ]
+        );
+        let dot = rows[3].line.spans[0].style;
+        assert_eq!(
+            dot,
+            Style {
+                fg: theme.style(Role::Timestamp).fg,
+                ..Style::new()
+            },
+            "the colour of the header's time, and no background over a selection's"
+        );
+        assert!(dot.fg.is_some());
+        for max in [3, 4, 10, 20, 37, 80] {
+            let rows = build_rows(&room, max, &theme, None, &images);
+            for row in &rows {
+                assert!(row.line.width() <= max, "width {max}: {:?}", row.line);
+            }
+            for (i, dots) in [(0, 0), (1, 1), (2, 1)] {
+                let of = rows_of(&rows, i);
+                assert_eq!(of.iter().filter(|row| dotted(row)).count(), dots, "{max}");
+                if dots == 1 {
+                    assert!(dotted(of[0]), "width {max}: on the first line");
+                }
+            }
+        }
+    }
+
+    /// Whatever a further message's first line shows (the quote it replies to, a
+    /// picture's top row, a poll's question, a file, a deleted or undecryptable
+    /// message, an edited one, one with a thread), the dot is in front of it; a reaction
+    /// row between two messages of a run changes nothing. An action line (`/me`) names
+    /// its sender itself and stands alone: no dot, and a header again after it. So do
+    /// the "new" line, a day divider and a line of the room's (a join, say).
+    #[test]
+    fn the_dot_marks_every_kind_of_further_message_and_nothing_else() {
+        use crate::model::{PollAnswer, PollInfo, Reaction};
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let mut images = ImageStore::new(Graphics::halfblocks());
+        let picture = crate::images::testing::remote_image("mxc://example.org/cat", None);
+        images.begin_frame();
+        images.request(&picture);
+        images.on_loaded(
+            &picture.key,
+            false,
+            Ok(crate::images::testing::decoded(64, 32)),
+        );
+        let alice = "@alice:example.org";
+        let said = |body: &str| by(alice, "alice", body);
+        let mut room = demo_rooms().remove(0);
+        room.messages = vec![
+            // 0: the first of the run, with reactions under it.
+            Message {
+                reactions: vec![Reaction {
+                    key: "👍".into(),
+                    count: 2,
+                    own: false,
+                }],
+                ..said("first")
+            },
+            // 1: after the reaction row, still the same run.
+            said("after the reactions"),
+            // 2: a reply: the dot goes in front of the quote.
+            Message {
+                reply_to: Some(("carol".into(), "what carol said".into())),
+                ..said("a reply")
+            },
+            // 3: a picture: the dot is left of its top row.
+            Message {
+                image: Some(picture.clone()),
+                ..said("cat.png")
+            },
+            // 4, 5: deleted, and not decrypted.
+            Message {
+                kind: MsgKind::Redacted,
+                ..said("Message deleted")
+            },
+            Message {
+                kind: MsgKind::Undecryptable,
+                ..said("Unable to decrypt")
+            },
+            // 6: edited, with a thread under it.
+            Message {
+                edited: true,
+                thread: Some(ThreadSummary {
+                    replies: 2,
+                    ..ThreadSummary::default()
+                }),
+                ..said("edited, with a thread")
+            },
+            // 7: a poll: the dot is in front of its question.
+            Message {
+                poll: Some(PollInfo {
+                    question: "Lunch?".into(),
+                    disclosed: true,
+                    max_selections: 1,
+                    answers: vec![PollAnswer {
+                        id: "a".into(),
+                        text: "Yes".into(),
+                        votes: 0,
+                        own: false,
+                    }],
+                    total_voters: 0,
+                    ended: false,
+                    editable: false,
+                }),
+                ..said("📊 Lunch?")
+            },
+            // 8: an action line: no dot; 9: a header again after it.
+            Message {
+                kind: MsgKind::Emote,
+                ..said("waves")
+            },
+            said("after the action"),
+            // 10: a dot again.
+            said("on and on"),
+            // 11: the "new" line; 12: a header again, 13: a dot.
+            Message {
+                kind: MsgKind::ReadMarker,
+                ..Message::default()
+            },
+            said("after the new line"),
+            said("and on"),
+            // 14: a line of the room's; 15: a header again.
+            Message {
+                kind: MsgKind::System,
+                ..by("", "", "bob joined")
+            },
+            said("after bob joined"),
+            // 16: another day; 17: a dot.
+            Message {
+                day: "Tomorrow".into(),
+                ..said("the next day")
+            },
+            Message {
+                day: "Tomorrow".into(),
+                ..said("again")
+            },
+            // 18: someone else; 19: a dot.
+            by("@bob:example.org", "bob", "bob speaks"),
+            by("@bob:example.org", "bob", "bob again"),
+        ];
+        let further = [1, 2, 3, 4, 5, 6, 7, 10, 13, 17, 19];
+        for max in [12, 30, 80] {
+            let rows = build_rows(&room, max, &theme, None, &images);
+            let text: Vec<String> = rows.iter().map(|row| row.line.to_string()).collect();
+            for i in 0..room.messages.len() {
+                let of = rows_of(&rows, i);
+                let dots = of.iter().filter(|row| dotted(row)).count();
+                if further.contains(&i) {
+                    assert_eq!(dots, 1, "width {max}, message {i}: {text:#?}");
+                    assert!(dotted(of[0]), "width {max}, message {i}: {text:#?}");
+                } else {
+                    assert_eq!(dots, 0, "width {max}, message {i}: {text:#?}");
+                }
+            }
+            // What the dot goes in front of (the action line has an empty row before it).
+            let first = |i: usize| {
+                let row = rows.iter().find(|row| row.msg == Some(i));
+                row.map(|row| row.line.to_string()).unwrap_or_default()
+            };
+            assert!(first(2).starts_with("· ┃ carol: "), "{text:#?}");
+            assert!(first(7).starts_with("· 📊 "), "{text:#?}");
+            assert!(first(8).starts_with("  * alice"), "{text:#?}");
+            let top = rows_of(&rows, 3)[0];
+            assert_eq!(top.image.map(|slot| slot.row), Some(0), "{text:#?}");
+            assert_eq!(top.line.to_string(), "· ");
+            // The thread's line and the reaction row keep the indent.
+            let thread = rows_of(&rows, 6)
+                .into_iter()
+                .find(|row| row.hits.iter().any(|hit| hit.2 == HitId::Thread(6)));
+            assert!(thread.is_some_and(|row| !dotted(row)), "{text:#?}");
+        }
+    }
+
+    /// A voice message that is a further one of a run: its first line is drawn over
+    /// while it loads or plays, and the dot stays.
+    #[test]
+    fn a_further_voice_message_keeps_its_dot_while_it_plays() {
+        use crate::app::AudioView;
+        use matrix_sdk::ruma::events::room::MediaSource;
+        use matrix_sdk::ruma::mxc_uri;
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let mut images = ImageStore::new(Graphics::halfblocks());
+        let alice = "@alice:example.org";
+        let mut voice = by(alice, "alice", "🎤 note.ogg · 0:12 · 2 kB");
+        voice.file = Some(crate::model::Attachment {
+            key: "mxc://example.org/v".into(),
+            name: "note.ogg".into(),
+            size: Some(2000),
+            kind: crate::model::MediaKind::Voice,
+            source: Box::new(MediaSource::Plain(
+                mxc_uri!("mxc://example.org/v").to_owned(),
+            )),
+            audio: None,
+        });
+        let mut room = demo_rooms().remove(0);
+        room.messages = vec![by(alice, "alice", "listen"), voice];
+        let rows = build_rows(&room, 60, &theme, None, &images);
+        let head = rows_of(&rows, 1)[0];
+        assert!(dotted(head), "{:?}", head.line);
+        let part = head.audio.expect("the first line of a sound");
+        assert!(part.dot);
+        for view in [
+            AudioView::Loading,
+            AudioView::Playing {
+                position: std::time::Duration::from_secs(3),
+                length: Some(std::time::Duration::from_secs(12)),
+                paused: false,
+            },
+        ] {
+            let line = sound_row(part, view, &room.messages[1], (58, 60), &theme, &mut images)
+                .expect("drawn over");
+            assert!(line.to_string().starts_with("· ■ "), "{line:?}");
+        }
+        // The first message's rows have no part of a sound, and no dot.
+        assert!(rows_of(&rows, 0).iter().all(|row| !dotted(row)));
     }
 }

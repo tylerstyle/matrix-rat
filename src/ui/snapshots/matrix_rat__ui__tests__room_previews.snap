@@ -11,7 +11,7 @@ expression: "render(&mut app, 100, 30)"
 "│  M   matrix-rat      ││● bob  21:44                                                              │"
 "│      alice: Welcome… ││  Yes — startup is instant now. Room previews come straight from disk.    │"
 "│ People               ││   👍 2   🎉 1                                                            │" Hidden by multi-width symbols: [(29, " "), (36, " ")]
-"│  B   bob          2  ││  Back-pagination also survives restarts, which is a big deal for large   │"
+"│  B   bob          2  ││· Back-pagination also survives restarts, which is a big deal for large   │"
 "│      bob: are you c… ││  rooms like this one where scrolling up used to refetch everything from  │"
 "│  C   carol           ││  the server every single time.                                           │"
 "│      See you tomorr… ││───────────────────────────────── Today ───────────────────────────────── │"
