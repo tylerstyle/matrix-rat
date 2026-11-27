@@ -167,8 +167,12 @@ SDK's sweep on the dev server. It changes what this design expected of `run_sear
   measurement). Its `Foreground` pacing still cost a second per room and week, up to 13 × the
   rooms: about 21 min for 100 rooms, at no data, with "Fetching older messages…" in the search
   box all that time and our walk waiting behind it. So once a run of the profile has gone
-  through (`history-done`, a mark of ours in the search index's folder, written at Done), a
-  later start leaves the sweep out (`plan` in `src/matrix/search_history.rs`). The walk reads
+  through clean (`history-done`, a mark of ours in the search index's folder), a later start
+  leaves the sweep out (`plan` in `src/matrix/search_history.rs`). Clean (on matrix-agy's
+  second review): the run finished, no room's walk failed (an outage, a refused request), and
+  the sync had no outage meanwhile; the session writes the mark when such a run ends, as the
+  rules count it done. A failed or offline first run is Done for the session all the same, and
+  the profile's first run, paced, comes again at the next start. The walk reads
   each room's stored part back from disk (up to 130 batches a room) and asks the server only
   where the store has a gap (after an outage, say) or ends before 13 weeks, in the same order
   the sweep would. It waits its second only after a room it fetched for, or whose batch failed
@@ -659,7 +663,11 @@ Size **M**, and **S** for the measuring test and its relay.
   the box says Done at once. A session that ends before then (quit, logout, a crash, the
   setting turned off) leaves it, and the session's first run then removes `reindexed-v1`, so
   the SDK indexes all that is stored again: CPU only, no data, and what the index has already
-  is skipped. Logout takes the folder and the marks with it, `prune_search_dir` removes room
+  is skipped. On matrix-agy's second review: a run cancelled at its work (past its start
+  delay, not yet through) writes the mark as it is cancelled, for a batch still on its way
+  that the run never heard of (a later start writes it only on its first batch from the
+  server); and the look for leftovers counts as done once a run has begun, so a first run
+  stopped in its start delay (the setting off and on again) leaves it to the next run. Logout takes the folder and the marks with it, `prune_search_dir` removes room
   folders only, and in the browser there are no marks (no files). Tested with an on-disk store
   and index (`what_the_index_missed_is_indexed_at_the_next_start`), and measured (step 4).
 - **An open room gets older events added at the top while the user reads it.** The paging state
