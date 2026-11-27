@@ -38,9 +38,9 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   a room a second, so that search across all rooms (`Ctrl-G`) finds them, encrypted ones
   too once their keys are there. The search box says how far it has got ("Fetching older
   messages, back to 28 Aug…", then "back to about 28 Aug"). It costs data and disk: the
-  first run fetches the most, later ones mostly read what is stored. **Search history** in
-  the settings (`search_history = false`) turns it off, at once; `matrix-rat serve` never
-  fetches. Built on matrix-sdk 0.20's search backfill.
+  first run fetches the most, later ones read what is stored, in seconds, and fetch only
+  what is missing. **Search history** in the settings (`search_history = false`) turns it
+  off, at once; `matrix-rat serve` never fetches. Built on matrix-sdk 0.20's search backfill.
 
 ## Changed
 
@@ -126,10 +126,14 @@ Through matrix-sdk 0.20:
 - Search history: reworded the upgrade note above (the run indexes the stored events once,
   then pages back). Measured on the dev server, 2026-11-27 (`search_history_cost`,
   docs/DESIGN-1.1.md §1 "Measured"): 9 101 events in 9 rooms took 189 `/messages`, 2.3 MB
-  down, 54 s and 12.4 MB of disk (2.3 KB per event); a later start asked the server nothing.
-  For 100 000 events in 100 rooms: about 3 400 requests and 230 MB, 29 min at 0.5 s a request
-  plus up to 23 min of pacing; within the gate (1 GB, 1 h), so on by default. matrix-sdk
-  0.20's sweep alone stops at about 300 events a room (its batch cap counts what it reads back
+  down, 57 s and 12.8 MB of disk (2.3 KB per event); a later start asked the server nothing
+  and was done in 1 s (4 s when the index is redone). For 100 000 events in 100 rooms: about
+  3 400 requests and 236 MB, 29 min at 0.5 s a request plus up to 23 min of pacing on the
+  first run; within the gate (1 GB, 1 h), so on by default. Later starts leave the SDK's
+  sweep out: it fetches nothing then, but its pacing cost a second per room and week (about
+  21 min for 100 rooms) before. What the SDK had not indexed when a session ended is indexed
+  at the next start (a mark of ours, `history-indexing`, removes the SDK's `reindexed-v1`).
+  matrix-sdk 0.20's sweep alone stops at about 300 events a room (its batch cap counts what it reads back
   from disk); our own walk takes each room the rest of the way (at most 3 900 events). With
   search history off, the start still costs the latest-event and read-receipt backfills (87
   `/messages` in the test, 67 of them one room of 2 000 topic changes).

@@ -549,11 +549,13 @@ There is no command that lists or removes profiles; a profile is its two folders
   after the room list is in: a room at a time, a second apart, the most recently active
   rooms first, and no more than about 4 000 messages of a room. The search box says how far it
   has got ("Fetching older messages, back to 28 Aug…", then "back to about 28 Aug"); a
-  search while it fetches finds what has come so far. The first run fetches the most;
-  later ones mostly read what is already stored and ask the server only for what is
-  missing. What is fetched stays in the encrypted message store and the search index
-  (see **Several accounts** for where they are), and takes disk space. Encrypted
-  messages are found once their keys are there (from the key backup or another device).
+  search while it fetches finds what has come so far. The first run fetches the most and
+  takes a while; later ones read what is already stored, in seconds, and ask the server
+  only for what is missing. What is fetched stays in the encrypted message store and the
+  search index (see **Several accounts** for where they are), and takes disk space. If
+  matrix-rat is closed before the search index has taken it all in, the next start indexes
+  the stored messages again (some CPU, no data). Encrypted messages are found once their
+  keys are there (from the key backup or another device).
   "Search history" in the settings (`search_history = false`) turns it off, also in the
   middle of a run; `matrix-rat serve` never fetches.
 - **Bridged chats** (Signal, WhatsApp…) show a quiet "sent on the sender's behalf" remark:

@@ -162,10 +162,26 @@ SDK's sweep on the dev server. It changes what this design expected of `run_sear
   the other two backfills by priority; it comes after the sweep, whose first week does. A panic
   in the SDK while it pages (matrix-rust-sdk #5416, see `src/matrix/paging.rs`) is caught as
   in `paging::backwards`, logged as a kind, and ends the walk for this session.
-- **Later starts.** The walk reads each room's stored part back from disk again, up to 130
-  batches a room, and asks the server only where the store has a gap (after an outage, say)
-  or ends before 13 weeks. The sweep itself already reads up to 13 × 10 batches a room from
-  disk at every start.
+- **Later starts: the walk alone** (on matrix-agy's review). The sweep cannot get past the 10
+  batches a room it has stored, so at a later start it fetched nothing (0 requests in the
+  measurement). Its `Foreground` pacing still cost a second per room and week, up to 13 × the
+  rooms: about 21 min for 100 rooms, at no data, with "Fetching older messages…" in the search
+  box all that time and our walk waiting behind it. So once a run of the profile has gone
+  through (`history-done`, a mark of ours in the search index's folder, written at Done), a
+  later start leaves the sweep out (`plan` in `src/matrix/search_history.rs`). The walk reads
+  each room's stored part back from disk (up to 130 batches a room) and asks the server only
+  where the store has a gap (after an outage, say) or ends before 13 weeks, in the same order
+  the sweep would. It waits its second only after a room it fetched for: a room read from the
+  store alone asked nothing. It tells the two apart by the room's updates while it holds it
+  (`EventsOrigin::Pagination` is a batch from the server, `Cache` one from the store).
+  - The sweep's one other work, indexing the stored events once, is reached only through
+    `run_search_backfill` in 0.20. When it is due (`reindexed-v1` missing, see the risks), the
+    sweep runs `Background`: the same work without the pacing, which reads mostly the store.
+  - A first run, or a run of a profile none of whose runs has gone through, is paced as
+    designed.
+  - The cost of it: a profile back after weeks away fills room by room, the most recent first,
+    rather than every room's last week first. Each room's newest part comes with the sync
+    anyway.
 
 ### When it runs, and its bounds
 
@@ -199,8 +215,9 @@ SDK's sweep on the dev server. It changes what this design expected of `run_sear
   cap of each week's request counts the batches read back from disk too (as for the
   read-receipt backfill), so a week's request that starts below what is stored asks the server
   for less, and in a busy room nothing. The other two go first (High and Normal beat Low), so
-  at start the search waits behind them. Then our walk: a room a second, one request at a
-  time, at most 130 batches a room, stored ones included.
+  at start the search waits behind them. Then our walk: one request at a time, a second after
+  each room it fetched for, at most 130 batches a room, stored ones included. A later start
+  walks alone (see [As built](#as-built-the-sdks-sweep-stops-at-about-300-events-a-room)).
 - **Time limit.** Our task gives up after 6 h; see the risks: a panic in a queue task makes
   `join()` wait for ever.
 - **The dev server in tests.** Only the tests about it turn it on, through the worker options
@@ -234,7 +251,9 @@ dev-server measurement in the next section, before the release.
   open in the app keeps what was fetched for it while it is open.
 - **Duration.** Foreground with 100 rooms: at most 100 s of pacing per week, so at most about
   22 minutes for a first run, plus the requests themselves. It gets shorter week by week as
-  rooms reach their start.
+  rooms reach their start. (As built: that pacing was paid again at every later start, at no
+  data, since the sweep never gets past what it has stored; a later start now leaves the sweep
+  out, see [As built](#as-built-the-sdks-sweep-stops-at-about-300-events-a-room).)
 
 ### Measuring before the release, on the dev server
 
@@ -304,33 +323,46 @@ release notes:
 *As built*, with our walk: requests 100 000 / 30 + one short batch a room ≈ 3 433, one after
 another (the walk takes a room at a time), so the time is requests × 0.5 s, and the measured
 server time per request beside it; the pacing apart, up to (13 + 1) × 99 s ≈ 23 min for 100
-rooms, which costs no data.
+rooms on the first run, which costs no data. A later start has no sweep, and the walk's
+second only after a room it fetched for.
 
 **The gate.** "Measure before release" stays, on the dev server: the test runs before the 1.1.0
 release and its numbers replace the guesses above. Proposed: if 100 000 events come to more than
 1 GB of disk or more than an hour at 0.5 s a request, the default goes back to the user before
 the release.
 
-**Measured** (2026-11-27, branch `search-backfill`; the test built for tests on hpfury, the dev
-server on hpserver through fury-check's tunnel; 9 101 events in 9 rooms, filled in 156 s):
+**Measured** (2026-11-27, branch `search-backfill` with matrix-agy's review fixed; the test
+built for tests on hpfury, the dev server on hpserver through fury-check's tunnel; 9 101 events
+in 9 rooms, filled in 53 s):
 
 | Step | `/messages` (busy, medium a, medium b, 5 quiet, state-only) | Other requests | Down | Time | Profile |
 |---|---|---|---|---|---|
-| 1. Off, previews on | 87 (0, 0, 20, 0 each, 67) | 5 sync, 4 keys, 21 other | 1.4 MB | quiet after 6 s | 12.4 MB |
-| 2. Turned on | 189 (130, 34, 14, 2 each, 1) | 4 sync | 2.3 MB | 54 s, Running to Done | +12.4 MB |
-| 3. A later start | 0 | 6 sync, 3 keys, 5 other | 9 KB | 45 s | +0 |
+| 1. Off, previews on | 87 (0, 0, 20, 0 each, 67) | 5 sync, 4 keys, 21 other | 1.4 MB | quiet after 4 s | 12.4 MB |
+| 2. Turned on | 189 (130, 34, 14, 2 each, 1) | 4 sync | 2.3 MB | 57 s, Running to Done | +12.8 MB |
+| 3. A later start | 0 | 4 sync, 2 keys, 5 other | 6 KB | 1 s | +0 |
+| 4. A later start, the index redone | 0 | 4 sync, 2 keys, 5 other | 6 KB | 4 s | — |
 
 - Step 1: the 20 are the read-receipt backfill of the room B has no receipt in (to its cap);
   the 67 are the latest-event backfill walking back through 2 000 topic changes.
 - Step 2: the busy room took its 130 batches (10 of the sweep's, 120 of our walk), the medium
   rooms went to their start, and search found the busy room's 3 000th message from the end,
-  both medium rooms' oldest and every quiet room's. The server took 0.03 s for a `/messages`
+  both medium rooms' oldest and every quiet room's. The server took 0.02 s for a `/messages`
   (local, a floor); 427 B came down and 2.3 KB went to disk per event fetched (the store and
-  the index). The index had caught up 7 s after the run's end.
-- Step 3: nothing from the server; the time is the sweep's pacing and the disk reads.
-- **For 100 000 events in 100 rooms:** about 3 433 requests and 229 MB of disk; 29 min at
-  0.5 s a request (2 min at the measured 0.03 s), plus up to 23 min of pacing, which costs
-  no data. **Within the gate**: the default stays on.
+  the index). The index had caught up 9 s after the run's end, and `history-indexing` went
+  30 s after it.
+- Step 3: nothing from the server, Done in 1 s: the walk alone, reading the store. Before
+  later starts left the sweep out, the same step took 45 s, all of it the sweep's pacing,
+  also with 0 requests.
+- Step 4: as after a session that ended before the index settled (`history-indexing` left): the
+  SDK indexed the stored events again in its `Background` sweep, then the walk; 0 requests,
+  4 s, and search found as far back as after step 2.
+- **For 100 000 events in 100 rooms:** about 3 433 requests and 236 MB of disk; 29 min at
+  0.5 s a request (1 min at the measured 0.02 s), plus up to 23 min of pacing on the first run,
+  which costs no data. **Within the gate**: the default stays on. A later start reads the store
+  and fetches only what is missing.
+- An earlier run of the same test, before the review's fixes (later starts with the sweep),
+  gave the same requests in steps 1 and 2, step 2 in 54 s and +12.4 MB, and the 45 s of step
+  3 above.
 - **Before our walk** (the SDK's sweep alone, the same test): each room of 1 000 events or more
   got exactly 10 `/messages`, a room of 1 000 was found back to its 100th message and not its
   500th, and a later start asked nothing. That is the [As
@@ -340,7 +372,8 @@ server on hpserver through fury-check's tunnel; 9 101 events in 9 rooms, filled 
   indexed: after the restart, search still missed the busy room's 3 000th message and the medium
   rooms' oldest. The SDK indexes what is fetched in a task of its own, from a queue that goes
   with the client, and it reindexes the stored events only once per profile. Resting half as
-  long as each batch took brought the lag down to the 7 s above; see the risks.
+  long as each batch took brought the lag down to the seconds above; what is left of it is
+  fixed by `history-indexing`, see the risks.
 
 ### Encrypted rooms
 
@@ -615,14 +648,19 @@ Size **M**, and **S** for the measuring test and its relay.
   - The queue may run with fewer slots for the rest of the session. Nothing more can be done
     from outside.
 - **Disk grows without a cap.** Store sizes come to the doctor in 1.3.
-- **What the SDK has not indexed when the session ends is never indexed** (found while
-  measuring, see Measured). Its index takes fetched events from an in-memory queue, one batch
-  at a time, and its reindex of the stored events runs once per profile. Our walk rests half as
-  long as each batch took, which kept the lag to 7 s on the dev server; quitting within those
-  seconds of the run, or during it, can leave the last batches out of the index for good. A
-  slower server means a smaller lag. Not fixed here: nothing public tells how far the index has
-  got. A fix would delete the SDK's reindex marker (`reindexed-v1`) when a session ends with a
-  run going, so the next start reindexes all that is stored (CPU, no data).
+- **What the SDK has not indexed when the session ends would never be indexed** (found while
+  measuring, see Measured). Its index takes fetched events from an in-memory queue, a batch at
+  a time, and it indexes the stored events only once per profile (`reindexed-v1`). Our walk
+  rests half as long as each batch took, which keeps the lag to seconds on the dev server, but
+  a quit during a run or in the seconds after it could leave the last batches out for good.
+  *Fixed* (matrix-agy's review, its recommended fix): a run writes `history-indexing` in the
+  search index's folder before its first fetch and removes it `SETTLE` (30 s) after it ends;
+  the box says Done at once. A session that ends before then (quit, logout, a crash, the
+  setting turned off) leaves it, and the session's first run then removes `reindexed-v1`, so
+  the SDK indexes all that is stored again: CPU only, no data, and what the index has already
+  is skipped. Logout takes the folder and the marks with it, `prune_search_dir` removes room
+  folders only, and in the browser there are no marks (no files). Tested with an on-disk store
+  and index (`what_the_index_missed_is_indexed_at_the_next_start`), and measured (step 4).
 - **An open room gets older events added at the top while the user reads it.** The paging state
   (`src/matrix/paging.rs`) and the selection must stay right. The server test opens the room
   while the run fetches it.
@@ -1314,7 +1352,7 @@ Size **M**.
 | `verify-keys` | 4 | M | `src/verify.rs`, `src/ui/verify.rs` (+ snapshots), `src/app/verify.rs` (`verify_tick`), `src/app/devices.rs`, `src/matrix/verify.rs` (tests included), README (encryption) |
 | `deletion-reason` | 3 | S–M | `src/model.rs` (`people`, `mark_among`), `src/matrix/convert.rs`, `src/matrix/receipts.rs` (`plan`, `annotate`), `src/matrix/rooms.rs` (fake-server tests), `src/ui/timeline.rs`, `src/ui/timeline/memo.rs`, `src/details.rs`, `src/menu.rs`, `src/keymap.rs`, `src/palette.rs`, `src/app.rs`, `src/app/moderation.rs`, snapshots, README |
 | `send-retry` | 2 | M | `src/model.rs`, `src/matrix/convert.rs`, `src/matrix/rooms.rs` (`prepare_messages`, `Retry`, `Discard`, `Redact`), `src/matrix/mod.rs` (`MatrixCmd`, the sync arm), `src/ui/timeline.rs`, `src/ui/timeline/memo.rs`, `src/ui/status.rs`, `src/details.rs`, `src/menu.rs`, `src/palette.rs`, `src/app.rs`, `src/app/palette.rs`, snapshots, README |
-| `search-backfill` | 1 | M (+ S) | `src/matrix/session.rs`, `src/matrix/auth.rs`, `src/matrix/mod.rs` (`spawn`, `spawn_with`, `Worker`, protocol, session loop, a server test's options), new `src/matrix/search_history.rs` (with `short_date`, the measuring test and its relay), `src/matrix/rooms.rs` (two server tests' options), `src/agent/serve.rs`, `src/shell/terminal.rs`, `src/matrix/agent.rs` (test call), `src/config.rs`, `src/modal.rs`, `src/app.rs`, `src/ui/global_search.rs` (+ snapshots), README, release notes. *As built* also: `src/matrix/search_history.rs` holds our walk past the SDK's sweep (see [As built](#as-built-the-sdks-sweep-stops-at-about-300-events-a-room)); `src/app/global_search.rs` (test), `src/ui/mod.rs` (snapshot tests), `src/lib.rs` (`WorkerOptions` for the engine), `src/ui/modal.rs`, `src/app/notes.rs`, `src/app/palette.rs` (the Settings row), and one match arm each in `src/app/thread.rs`, `src/shell/terminal/external_editor.rs` |
+| `search-backfill` | 1 | M (+ S) | `src/matrix/session.rs`, `src/matrix/auth.rs`, `src/matrix/mod.rs` (`spawn`, `spawn_with`, `Worker`, protocol, session loop, a server test's options), new `src/matrix/search_history.rs` (with `short_date`, the measuring test and its relay), `src/matrix/rooms.rs` (two server tests' options), `src/agent/serve.rs`, `src/shell/terminal.rs`, `src/matrix/agent.rs` (test call), `src/config.rs`, `src/modal.rs`, `src/app.rs`, `src/ui/global_search.rs` (+ snapshots), README, release notes. *As built* also: `src/matrix/search_history.rs` holds our walk past the SDK's sweep (see [As built](#as-built-the-sdks-sweep-stops-at-about-300-events-a-room)); `src/app/global_search.rs` (test), `src/ui/mod.rs` (snapshot tests), `src/lib.rs` (`WorkerOptions` for the engine), `src/ui/modal.rs`, `src/app/notes.rs`, `src/app/palette.rs` (the Settings row), and one match arm each in `src/app/thread.rs`, `src/shell/terminal/external_editor.rs`; on matrix-agy's review, the marks `history-indexing` and `history-done` in the search index's folder (later starts walk alone) and `session::offline_client` open to the module's test |
 
 `verify-keys` leaves `src/app.rs` alone: `on_tick` already calls `verify_tick`, and
 `reset_session` resets the whole `VerifyState`, `done_at` included. Only its tests may go there.
