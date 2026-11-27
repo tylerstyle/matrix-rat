@@ -41,6 +41,14 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   both open a popup with **Verify again** (with another device: this time the keys come
   along) and **Enter recovery key**. The Done screen of a verification offers the same
   when the keys did not come.
+- **A deleted message says why, and who deleted it.** "Message deleted: sent to the wrong
+  room" when the sender gave a reason, "Deleted by carol: spam link" when a moderator
+  deleted it, "Deleted by you" for one you deleted. The details (`i`) show the whole
+  reason and the user ID of whoever deleted it. The reason is shown as it was written, on
+  one line: no links, no formatting.
+- **Delete with a reason…** in the menu of your own messages and in the command palette
+  asks for a reason before it deletes; `Del` still deletes at once. It has no key by
+  default (`delete_with_reason` under `[keys.timeline]` gives it one).
 
 ## Changed
 

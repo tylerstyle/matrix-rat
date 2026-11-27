@@ -962,6 +962,48 @@ mod tests {
         assert!(!App::can_forward_message(&app.messages()[2]));
     }
 
+    /// Our own message with a reason: the menu entry opens the reason popup, which sends
+    /// the deletion with the reason. Del still deletes at once, without one.
+    #[test]
+    fn our_own_message_is_deleted_with_a_reason() {
+        let (mut app, mut terminal, mut commands) = connected();
+        drain_cmds(&mut commands);
+        app.perform(Action::Focus(Pane::Timeline));
+        app.timeline.selected = app.messages().iter().position(|m| m.id == "e2");
+        app.perform(Action::ContextMenu);
+        let text = screen(&mut app, &mut terminal);
+        let (col, row) = find(&text, "Delete with a reason…");
+        app.on_event(click(col, row));
+        assert!(matches!(app.modal, Some(Modal::ReasonConfirm(_))));
+        assert!(drain_cmds(&mut commands).is_empty());
+        let text = screen(&mut app, &mut terminal);
+        find(&text, "Delete message");
+        type_text(&mut app, "sent to the wrong room");
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        let sent = drain_cmds(&mut commands);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [MatrixCmd::Redact { room_id, item: ItemRef::Event(id), reason: Some(r) }]
+                    if room_id == ROOM_A && id == "$e2:example.org" && r == "sent to the wrong room"
+            ),
+            "{sent:?}"
+        );
+
+        // The action itself, as from the palette or a key of the user's: the same popup.
+        app.perform(Action::DeleteWithReason);
+        assert!(matches!(app.modal, Some(Modal::ReasonConfirm(_))));
+        app.on_event(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert!(drain_cmds(&mut commands).is_empty());
+        // Someone else's message: not ours to give a reason for this way.
+        app.perform(Action::SelectOlder);
+        assert_eq!(app.messages()[app.timeline.selected.unwrap()].id, "e1");
+        app.perform(Action::ContextMenu);
+        assert!(!menu_labels(&app).contains(&"Delete with a reason…"));
+    }
+
     /// Where two members go by one name, a ban, a deletion and a report name the
     /// member with their user ID: whom they are about is not left to a guess.
     #[test]

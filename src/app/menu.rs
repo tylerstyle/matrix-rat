@@ -895,7 +895,8 @@ mod tests {
                 "Save for later",
                 "Remind me…",
                 "Message details",
-                "Delete"
+                "Delete",
+                "Delete with a reason…"
             ]
         );
         assert!(same_line(&text, "│ Delete ", " Del │"), "{text}");
@@ -1059,7 +1060,9 @@ mod tests {
         sent(&mut commands);
         // ... and acts on it, wherever it is now.
         app.on_event(key(KeyCode::End));
-        assert_eq!(open_menu(&app).items.last().unwrap().label, "Delete");
+        app.on_event(key(KeyCode::Up));
+        let menu = open_menu(&app);
+        assert_eq!(menu.items[menu.selected].label, "Delete");
         app.on_event(key(KeyCode::Enter));
         assert!(sent(&mut commands).is_empty());
         app.on_event(key(KeyCode::Enter));
@@ -1361,8 +1364,9 @@ mod tests {
         assert!(sent(&mut commands).is_empty());
         // Its menu now asks before deleting.
         right_click(&mut app, &mut terminal, "on its way");
-        assert_eq!(labels(&app).last().unwrap(), "Delete");
+        assert_eq!(labels(&app).last().unwrap(), "Delete with a reason…");
         app.on_event(key(KeyCode::End));
+        app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Enter));
         assert!(sent(&mut commands).is_empty());
         app.on_event(key(KeyCode::Esc));
@@ -1404,10 +1408,11 @@ mod tests {
         let (mut app, mut terminal, mut commands) = connected(vec![message.clone()]);
         sent(&mut commands);
         right_click(&mut app, &mut terminal, "soon gone");
-        // Armed, even.
+        // Armed, even (Delete, above "Delete with a reason…").
         app.on_event(key(KeyCode::End));
+        app.on_event(key(KeyCode::Up));
         app.on_event(key(KeyCode::Enter));
-        assert_eq!(open_menu(&app).armed, Some(open_menu(&app).items.len() - 1));
+        assert_eq!(open_menu(&app).armed, Some(open_menu(&app).items.len() - 2));
         let mut deleted = message;
         deleted.kind = crate::model::MsgKind::Redacted;
         deleted.body = "Message deleted".into();
@@ -1527,17 +1532,18 @@ mod tests {
         let text = screen(&mut app, &mut terminal);
         let (rect, first) = open_menu(&app).place(app.screen).unwrap();
         assert!(first > 0);
-        // What is shown now can be clicked: the last entry, Delete, gets armed.
-        let last = labels(&app).pop().unwrap();
-        assert_eq!(last, "Delete");
+        // What is shown now can be clicked: Delete, above the last entry, gets armed.
+        let mut entries = labels(&app);
+        assert_eq!(entries.pop().unwrap(), "Delete with a reason…");
+        assert_eq!(entries.pop().unwrap(), "Delete");
         assert!(text.contains("│ Delete "), "{text}");
-        app.on_event(left(rect.x + 2, rect.bottom() - 2));
-        assert_eq!(open_menu(&app).armed, Some(count - 1));
+        app.on_event(left(rect.x + 2, rect.bottom() - 3));
+        assert_eq!(open_menu(&app).armed, Some(count - 2));
         // Moving the pointer over another entry or outside the menu changes nothing.
         app.dirty = false;
         app.on_event(mouse_event(MouseEventKind::Moved, rect.x + 2, rect.y + 1));
-        assert_eq!(open_menu(&app).selected, count - 1);
-        assert_eq!(open_menu(&app).armed, Some(count - 1));
+        assert_eq!(open_menu(&app).selected, count - 2);
+        assert_eq!(open_menu(&app).armed, Some(count - 2));
         assert!(!app.dirty);
         app.on_event(mouse_event(MouseEventKind::Moved, 0, 0));
         assert!(!app.dirty);

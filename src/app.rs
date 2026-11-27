@@ -3324,6 +3324,12 @@ impl App {
                     self.delete_message(i);
                 }
             }
+            // The reason popup, for one's own message too (Del deletes it at once).
+            Action::DeleteWithReason => {
+                if let Some(i) = self.timeline.selected {
+                    self.open_redact_confirm(i);
+                }
+            }
             Action::Copy => {
                 let text = self
                     .timeline

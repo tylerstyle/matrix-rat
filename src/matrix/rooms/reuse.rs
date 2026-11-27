@@ -32,8 +32,8 @@ use super::measure::{ROOM, client_of, sample_room, show_all};
 use crate::matrix::convert::{Reuse, convert_at};
 use crate::matrix::spaces::fake;
 use crate::model::{
-    Attachment, AudioMeta, ImageInfo, ImageSource, ItemRef, MediaRef, Message, PollAnswer,
-    PollInfo, Reaction, ReadBy, Reader, ThreadSummary,
+    Attachment, AudioMeta, DeletedBy, Deletion, ImageInfo, ImageSource, ItemRef, MediaRef, Message,
+    PollAnswer, PollInfo, Reaction, ReadBy, Reader, ThreadSummary,
 };
 
 /// Messages in the sample room.
@@ -861,6 +861,7 @@ fn whole(message: &Message) -> String {
         mentions,
         read_by,
         utd,
+        deleted,
     } = message;
     let item = item.as_ref().map(|item| match item {
         ItemRef::Event(id) => format!("event {id}"),
@@ -960,6 +961,15 @@ fn whole(message: &Message) -> String {
              }| format!("{name} {id:?} {ambiguous} {time}"),
         )
         .collect();
+    // Written out whole: `Deletion`'s `Debug` leaves out who and why.
+    let deleted = deleted.as_ref().map(|Deletion { reason, by }| {
+        let by = match by {
+            DeletedBy::Sender => "sender".to_owned(),
+            DeletedBy::Us => "us".to_owned(),
+            DeletedBy::Other { user_id, name } => format!("{name} {user_id}"),
+        };
+        format!("{reason:?} by {by}")
+    });
     format!(
         "id {id}; item {item:?}; kind {kind:?}; state {state:?}; sender {sender} \
          {sender_id:?} {sender_ambiguous}; time {time} {day} {sent_at:?}; encrypted {encrypted}; body {body}; \
@@ -967,7 +977,7 @@ fn whole(message: &Message) -> String {
          reply {reply_to:?} {reply_sender:?} {reply_event:?}; subject {subject:?}; reactions {reactions:?}; image {image:?}; \
          file {file:?}; thread {thread:?}; poll {poll:?}; upload {upload:?}; \
          send error {send_error:?}; shield {shield:?}; mentions {mentions:?}; \
-         read by {readers:?} {total}; utd {utd:?}"
+         read by {readers:?} {total}; utd {utd:?}; deleted {deleted:?}"
     )
 }
 

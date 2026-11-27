@@ -7,7 +7,7 @@ use std::fmt::Display;
 use chrono::{DateTime, Local, TimeZone};
 
 use crate::matrix::{EventSource, SOURCE_MAX, SourceKind};
-use crate::model::{ItemRef, Message, MsgKind, SendState, Shield};
+use crate::model::{DeletedBy, ItemRef, Message, MsgKind, SendState, Shield};
 use crate::text::sanitize_line;
 
 /// Which page of the popup is shown.
@@ -48,6 +48,8 @@ pub struct DetailsPopup {
     sender: String,
     sender_id: Option<String>,
     sent: String,
+    /// Who deleted it ("by carol (@carol:example.org)"), and why, for a deleted message.
+    deleted: Option<(String, Option<String>)>,
     edited: bool,
     /// When the latest edit was sent, once the source has said.
     edited_at: Option<String>,
@@ -111,6 +113,25 @@ impl DetailsPopup {
         } else {
             (Vec::new(), 0)
         };
+        // Plain text: someone else's reason and name, never Markdown.
+        let deleted = message.deleted.as_ref().map(|deletion| {
+            let by = match &deletion.by {
+                DeletedBy::Sender => "yes".to_owned(),
+                DeletedBy::Us => "by you".to_owned(),
+                DeletedBy::Other { user_id, name } => {
+                    // With the user ID always; the name may carry it already.
+                    let id = sanitize_line(user_id);
+                    let name = sanitize_line(name);
+                    let name = name.strip_suffix(&format!(" ({id})")).unwrap_or(&name);
+                    if name == id {
+                        format!("by {id}")
+                    } else {
+                        format!("by {name} ({id})")
+                    }
+                }
+            };
+            (by, deletion.reason.as_deref().map(sanitize_line))
+        });
         Self {
             request,
             sender: sanitize_line(&message.sender),
@@ -125,6 +146,7 @@ impl DetailsPopup {
                 },
                 |at| exact(&at),
             ),
+            deleted,
             edited: message.edited,
             edited_at: None,
             event_id: event_id.map(|id| sanitize_line(&id)),
@@ -168,6 +190,12 @@ impl DetailsPopup {
             out.push(fact("", id.clone(), Tone::Muted));
         }
         out.push(fact("Sent", self.sent.clone(), Tone::Normal));
+        if let Some((by, reason)) = &self.deleted {
+            out.push(fact("Deleted", by.clone(), Tone::Normal));
+            if let Some(reason) = reason {
+                out.push(fact("Reason", reason.clone(), Tone::Normal));
+            }
+        }
         if self.edited {
             let when = match (&self.edited_at, &self.source) {
                 (Some(at), _) => at.clone(),
@@ -503,6 +531,66 @@ mod tests {
             popup.source_lines(),
             [("This message is no longer loaded".to_owned(), Tone::Muted)]
         );
+    }
+
+    /// A deleted message says who deleted it, with their user ID, and why, right after
+    /// when it was sent; the reason as plain text, whole.
+    #[test]
+    fn a_deleted_message_says_who_and_why() {
+        use crate::model::Deletion;
+        let deleted = |by: DeletedBy, reason: Option<&str>| {
+            let message = Message {
+                kind: crate::model::MsgKind::Redacted,
+                body: "Message deleted".into(),
+                deleted: Some(Deletion {
+                    reason: reason.map(Into::into),
+                    by,
+                }),
+                ..message()
+            };
+            DetailsPopup::new(&message, false, true, 1)
+        };
+        let reason = "spam link; see the room rules pinned at the top for what is allowed here";
+        let carol = || DeletedBy::Other {
+            user_id: "@carol:example.org".into(),
+            name: "carol".into(),
+        };
+        let popup = deleted(carol(), Some(reason));
+        let labels: Vec<&str> = popup.facts().iter().map(|fact| fact.label).collect();
+        let sent = labels.iter().position(|label| *label == "Sent").unwrap();
+        assert_eq!(labels[sent + 1..sent + 3], ["Deleted", "Reason"]);
+        assert_eq!(value(&popup, "Deleted"), "by carol (@carol:example.org)");
+        assert_eq!(value(&popup, "Reason"), reason);
+        // A name told apart already carries the ID: it is not said twice.
+        let told_apart = DeletedBy::Other {
+            user_id: "@carol:example.org".into(),
+            name: "carol (@carol:example.org)".into(),
+        };
+        let popup = deleted(told_apart, None);
+        assert_eq!(value(&popup, "Deleted"), "by carol (@carol:example.org)");
+        assert!(popup.facts().iter().all(|fact| fact.label != "Reason"));
+        // Known by the ID only.
+        let unnamed = DeletedBy::Other {
+            user_id: "@carol:example.org".into(),
+            name: "@carol:example.org".into(),
+        };
+        assert_eq!(
+            value(&deleted(unnamed, None), "Deleted"),
+            "by @carol:example.org"
+        );
+        assert_eq!(value(&deleted(DeletedBy::Us, None), "Deleted"), "by you");
+        assert_eq!(value(&deleted(DeletedBy::Sender, None), "Deleted"), "yes");
+        // Someone else's text, made safe for one line; nothing of it in Debug.
+        let popup = deleted(carol(), Some("red\u{1b}[31m\u{202e}text"));
+        assert_eq!(value(&popup, "Reason"), "red[31mtext");
+        let debug = format!("{popup:?}");
+        assert!(
+            !debug.contains("red") && !debug.contains("carol"),
+            "{debug}"
+        );
+        // Not deleted: no such facts.
+        let popup = DetailsPopup::new(&message(), false, true, 1);
+        assert!(popup.facts().iter().all(|fact| fact.label != "Deleted"));
     }
 
     #[test]

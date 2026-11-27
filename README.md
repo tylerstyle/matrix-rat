@@ -242,6 +242,10 @@ you can manage ignored users under **Settings → Ignored users** (`F2`). Where 
 permissions allow, the message menu and Room info also let you pin or delete other members'
 messages with a reason, ban users (`Alt-B`; `Del` on a banned member lifts the ban), and change roles (`Alt-R`); `P` opens
 pinned messages, and `Forward…` copies a message to another room without its reply or thread context.
+`Del` deletes a message of yours at once; **Delete with a reason…** in its menu (or the command
+palette) asks for a reason first. A deleted message says why, when a reason was given, and who
+deleted it when that was not the sender: "Deleted by carol: spam link", or "Deleted by you";
+`i` (details) shows the whole reason and the user ID of whoever deleted it.
 
 **Saved messages and reminders.** `b` on a message (or **Save for later** in its menu or the
 command palette) saves it for later and marks it `(saved)`; `b` again takes it off the list.
@@ -418,7 +422,7 @@ Entries placed directly under `[keys]` (outside `[keys.<context>]`) apply to eac
 
 - **Everywhere (`global`)**: `quit`, `suspend`, `focus_next`, `focus_prev`, `focus_sidebar`, `focus_timeline`, `focus_composer`, `focus_left`, `focus_right`, `focus_up`, `focus_down`, `focus_room_filter`, `help`, `cycle_theme`, `toggle_sidebar`, `back`, `page_up`, `page_down`, `emoji`, `attach`, `record_voice`, `search`, `search_all`, `space_next`, `space_prev`, `space_info` (unbound by default), `room_prev`, `room_next`, `room_active`, `settings`, `palette`, `new_room`, `room_info`, `leave_room`, `invite_user`, `accept_invite`, `decline_invite`, `withdraw_knock`, `start_verification`, `close_thread`, `context_menu`, `jump_to_unread`, `toggle_unread`, `mark_all_read`, `close_chat` (unbound by default: close the chat and show the room list, what a click on **Rooms** in the rooms bar does), `doctor`, `archive_room`, `catch_up` (these three unbound by default), `filter_unread`, `filter_people`, `create_poll`, `stickers` (these two unbound by default).
 - **Room list (`sidebar`)**: `sidebar_up`, `sidebar_down`, `sidebar_top`, `sidebar_bottom`, `sidebar_open`.
-- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `save_for_later`, `remind_me` (unbound by default), `saved_messages`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`, `transcribe`, `translate`, `transcribe_again`, `translate_again` (these two unbound by default).
+- **Messages (`timeline`)**: `select_older`, `select_newer`, `reply`, `edit`, `react`, `delete`, `delete_with_reason` (unbound by default), `copy`, `copy_code`, `save`, `open`, `open_external`, `open_thread`, `jump_to_reply`, `pin_message`, `forward_message`, `user_info` (unbound by default), `message_details`, `open_pinned`, `threads`, `save_for_later`, `remind_me` (unbound by default), `saved_messages`, `retry_decryption`, `jump_to_newest`, `jump_to_oldest`, `play_audio`, `pause_audio`, `audio_back`, `audio_forward`, `transcribe`, `translate`, `transcribe_again`, `translate_again` (these two unbound by default).
 - **Composer (`composer`)**: `send`, `newline`, `cancel_compose`, `compose_in_editor`, `paste_picture`, `play_voice_note`, `edit_last` (edit your last message; no key by default, so use "Edit your last message" in the command palette (`Ctrl-P`), or give it one, e.g. `edit_last = "f8"` under `[keys.composer]`; `Esc` cancels the edit, with the `vim` preset `Ctrl-C`).
 
 Many of these have no key by default and are reached from menus or `Ctrl-P` (open `F1` or **Settings → Key bindings** to see which ones are bound); give any of them a key here.

@@ -196,6 +196,7 @@ action_table! {
     Action::Edit => ("edit", Context::Timeline, "Edit (own messages)"),
     Action::React => ("react", Context::Timeline, "React with an emoji"),
     Action::Delete => ("delete", Context::Timeline, "Delete message"),
+    Action::DeleteWithReason => ("delete_with_reason", Context::Timeline, "Delete with a reason…"),
     Action::Copy => ("copy", Context::Timeline, "Copy text"),
     Action::CopyCode => ("copy_code", Context::Timeline, "Copy code block"),
     Action::Save => ("save", Context::Timeline, "Save file or picture"),

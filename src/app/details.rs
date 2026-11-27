@@ -342,6 +342,37 @@ mod tests {
         assert!(text.contains("\"line 0\""), "{text}");
     }
 
+    /// The details of a message a moderator deleted: who, with their ID, and the whole
+    /// reason, wrapped, after "Sent".
+    #[test]
+    fn a_deleted_message_snapshot() {
+        use crate::model::{DeletedBy, Deletion};
+        let (mut app, mut terminal, _commands) = connected();
+        let mut deleted = message("e1", false, ItemRef::Event("$e1:example.org".into()));
+        deleted.kind = MsgKind::Redacted;
+        deleted.body = "Message deleted".into();
+        deleted.deleted = Some(Deletion {
+            reason: Some(
+                "spam link; see the room rules pinned at the top for what is allowed here".into(),
+            ),
+            by: DeletedBy::Other {
+                user_id: "@carol:example.org".into(),
+                name: "carol".into(),
+            },
+        });
+        app.on_matrix(MatrixEvent::Timeline {
+            room_id: ROOM.into(),
+            generation: app.generation,
+            messages: vec![deleted],
+            reached_start: false,
+            detached: None,
+        });
+        app.perform(Action::Focus(crate::action::Pane::Timeline));
+        app.timeline.selected = Some(0);
+        app.perform(Action::MessageDetails);
+        insta::assert_snapshot!("deleted_message_details", screen(&mut app, &mut terminal));
+    }
+
     #[test]
     fn snapshots_on_a_small_terminal() {
         let (mut app, mut terminal, _commands) = connected();

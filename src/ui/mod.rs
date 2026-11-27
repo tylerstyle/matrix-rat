@@ -875,6 +875,40 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 70, 26));
     }
 
+    /// Deleted messages say why, and who deleted them when it was not the sender: by the
+    /// sender, by a moderator with a reason, by a moderator without one, and by us.
+    #[test]
+    fn deleted_reasons() {
+        use crate::model::{DeletedBy, Deletion, Message, MsgKind};
+        let mut app = App::demo();
+        let carol = || DeletedBy::Other {
+            user_id: "@carol:example.org".into(),
+            name: "carol".into(),
+        };
+        let deleted = |time: &str, reason: Option<&str>, by: DeletedBy| Message {
+            sender: "bob".into(),
+            sender_id: Some("@bob:example.org".into()),
+            time: time.into(),
+            day: "Today".into(),
+            body: "Message deleted".into(),
+            kind: MsgKind::Redacted,
+            deleted: Some(Deletion {
+                reason: reason.map(Into::into),
+                by,
+            }),
+            ..Message::default()
+        };
+        let room = &mut app.rooms[0];
+        room.typing = None;
+        room.messages = vec![
+            deleted("12:00", Some("sent to the wrong room"), DeletedBy::Sender),
+            deleted("12:01", Some("spam link"), carol()),
+            deleted("12:02", None, carol()),
+            deleted("12:03", Some("off topic"), DeletedBy::Us),
+        ];
+        insta::assert_snapshot!(render(&mut app, 70, 20));
+    }
+
     /// Several messages of one person in a row (PLAN §6.1): each further one starts with
     /// a muted dot under the header's `●`, on its first line only. A reaction row between
     /// two of them changes nothing, a reply in a run has the dot in front of its quote,
@@ -1207,7 +1241,7 @@ mod tests {
         };
         let mut menu = Menu::new(target, "A title", items, Anchor::at(u16::MAX, u16::MAX))?;
         if armed {
-            let delete = menu.items.len() - 1;
+            let delete = menu.items.iter().position(|item| item.label == "Delete")?;
             assert!(!menu.confirmed(delete));
         }
         Some(crate::modal::Modal::Menu(menu))

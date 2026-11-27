@@ -5066,6 +5066,161 @@ mod tests {
         drop(server);
     }
 
+    /// A deleted message says who deleted it and why: what the stored copy of the event
+    /// says in `unsigned.redacted_because`. The reason is made safe for one line and
+    /// bounded, a blank one is none; a moderator is named from the member list, though no
+    /// receipt changed; a deletion of ours on its way is ours. The body stays "Message
+    /// deleted".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deleted_message_says_who_deleted_it_and_why() {
+        use crate::matrix::MatrixCmd;
+        use crate::matrix::spaces::fake;
+        use crate::model::{DeletedBy, Deletion, ItemRef, MsgKind};
+        use serde_json::json;
+
+        let room = "!deleted:localhost";
+        let (bob, carol) = ("@bob:localhost", "@carol:localhost");
+        let deleted = |id: &str, sender: &str, by: Option<&str>, reason: Option<&str>| {
+            let mut because = json!({
+                "type": "m.room.redaction", "room_id": room, "event_id": format!("{id}-r"),
+                "origin_server_ts": 2_000, "redacts": id, "content": {},
+            });
+            if let Some(by) = by {
+                because["sender"] = by.into();
+            }
+            if let Some(reason) = reason {
+                because["content"]["reason"] = reason.into();
+            }
+            json!({
+                "type": "m.room.message", "room_id": room, "event_id": id, "sender": sender,
+                "origin_server_ts": 1_000, "content": {},
+                "unsigned": { "redacted_because": because },
+            })
+        };
+        let long = "x".repeat(2_000);
+        let mut carol_joined = fake::state(
+            "m.room.member",
+            carol,
+            json!({ "membership": "join", "displayname": "Carol M." }),
+        );
+        carol_joined["sender"] = carol.into();
+        // A member without a display name goes by the first part of the ID.
+        let dave = "@dave:localhost";
+        let mut dave_joined = fake::state("m.room.member", dave, json!({ "membership": "join" }));
+        dave_joined["sender"] = dave.into();
+        let mut joined = fake::joined(false, vec![carol_joined, dave_joined]);
+        joined["timeline"]["events"] = json!([
+            deleted(
+                "$escape:localhost",
+                bob,
+                Some(bob),
+                Some("\u{1b}[31mred\nline")
+            ),
+            deleted("$long:localhost", bob, Some(bob), Some(&long)),
+            deleted("$blank:localhost", bob, Some(bob), Some(" \u{200b}\n\t ")),
+            deleted("$carol:localhost", bob, Some(carol), Some("spam  link")),
+            deleted("$dave:localhost", bob, Some(dave), None),
+            deleted("$us:localhost", bob, Some(fake::ME), None),
+            deleted("$own:localhost", fake::ME, Some(fake::ME), Some("typo")),
+            deleted("$unknown:localhost", bob, None, Some("no sender")),
+            said(room, "$pending:localhost", bob, "to be deleted", None),
+        ]);
+        // Our deletion goes out and is never answered: it stays on its way.
+        let server = fake::Server::answering(
+            json!({ "join": { room: joined } }),
+            Box::new(|request| {
+                request
+                    .path
+                    .contains("/redact/")
+                    .then_some(fake::Reply::Never)
+            }),
+        )
+        .await;
+        let client = fake_client_with_cache(&server.url).await;
+        let (mut timelines, mut events, _watches) =
+            live_timelines_of(client.clone(), &crate::matrix::left::LeftRooms::default());
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: room.to_owned(),
+                generation: 1,
+            })
+            .await;
+        let deletion = |messages: &[crate::model::Message], id: &str| {
+            let message = message_of(messages, id).unwrap_or_else(|| panic!("no {id}"));
+            assert_eq!(message.kind, MsgKind::Redacted, "{id}");
+            assert_eq!(message.body, "Message deleted", "{id}");
+            message
+                .deleted
+                .clone()
+                .unwrap_or_else(|| panic!("{id} not deleted"))
+        };
+        let named = |messages: &[crate::model::Message], id: &str, wanted: &str| {
+            message_of(messages, id).is_some_and(|message| {
+                matches!(&message.deleted, Some(Deletion { by: DeletedBy::Other { name, .. }, .. })
+                    if name == wanted)
+            })
+        };
+        let messages = timeline_where(&mut events, room, 1, |messages| {
+            named(messages, "$carol:localhost", "Carol M.")
+                && named(messages, "$dave:localhost", "dave")
+        })
+        .await;
+
+        // No escape character, no line break: the rest of the sequence is plain text.
+        let escape = deletion(&messages, "$escape:localhost");
+        let reason = escape.reason.as_deref().unwrap();
+        assert!(
+            !reason.contains('\u{1b}') && !reason.contains('\n'),
+            "{reason:?}"
+        );
+        assert_eq!(reason, "[31mred line");
+        assert_eq!(escape.by, DeletedBy::Sender);
+        let long = deletion(&messages, "$long:localhost").reason.unwrap();
+        assert_eq!(crate::text::width(&long), Deletion::REASON_MAX);
+        assert!(long.starts_with("xxx") && long.ends_with('…'));
+        assert_eq!(deletion(&messages, "$blank:localhost").reason, None);
+        assert_eq!(
+            deletion(&messages, "$carol:localhost"),
+            Deletion {
+                reason: Some("spam link".into()),
+                by: DeletedBy::Other {
+                    user_id: carol.into(),
+                    name: "Carol M.".into()
+                },
+            }
+        );
+        let us = deletion(&messages, "$us:localhost");
+        assert_eq!((us.reason, us.by), (None, DeletedBy::Us));
+        // Our own message, deleted by us: by its sender.
+        assert_eq!(deletion(&messages, "$own:localhost").by, DeletedBy::Sender);
+        // Where the server does not say who: as by the sender.
+        let unknown = deletion(&messages, "$unknown:localhost");
+        assert_eq!(unknown.reason.as_deref(), Some("no sender"));
+        assert_eq!(unknown.by, DeletedBy::Sender);
+
+        // Our deletion of bob's message, on its way.
+        timelines
+            .handle(MatrixCmd::Redact {
+                room_id: room.to_owned(),
+                item: ItemRef::Event("$pending:localhost".into()),
+                reason: Some("off topic".into()),
+            })
+            .await;
+        let messages = timeline_where(&mut events, room, 1, |messages| {
+            message_of(messages, "$pending:localhost")
+                .is_some_and(|message| message.kind == MsgKind::Redacted)
+        })
+        .await;
+        assert_eq!(
+            deletion(&messages, "$pending:localhost"),
+            Deletion {
+                reason: Some("off topic".into()),
+                by: DeletedBy::Us,
+            }
+        );
+        drop(server);
+    }
+
     /// What a command left running (a send, a reaction, a lookup) holds the session's
     /// client: it is given up when the session ends, so that nothing of the session
     /// outlives it (a logout clears its stores right after).

@@ -45,6 +45,7 @@ impl App {
                     .is_empty();
                 MessageCaps {
                     has_selection: true,
+                    own: m.own,
                     can_edit: m.editable(),
                     can_copy: !m.body.is_empty(),
                     can_copy_code: m.has_code(),
