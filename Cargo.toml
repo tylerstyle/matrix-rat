@@ -63,6 +63,9 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-sy
 web-time = "1"
 # The browser's clock for chrono's `Local`/`Utc::now`.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "wasmbind"] }
+# The browser's tasks and timers for `crate::rt`: the versions matrix-sdk-common uses there.
+gloo-timers = { version = "0.4.1", features = ["futures"] }
+wasm-bindgen-futures = "0.4.80"
 
 [dev-dependencies]
 insta = "1"
