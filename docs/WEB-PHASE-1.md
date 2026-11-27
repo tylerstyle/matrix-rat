@@ -142,6 +142,23 @@ today's code paths: the new names re-export what is used now.
    whether desktop notices are on, or resolves the icons when it sends them), the WAV copy a
    transcription makes (`TempAudio::create` in `app/notes.rs`), mpv's socket name
    (`audio::socket_path` in `app/playback.rs`), and `Graphics::detect_with_term`.
+   **Done** (2026-11-27, `e822212..927c5c8`): `src/shell.rs` with `shell/terminal.rs` (the old
+   `terminal.rs`, its panic hook and tests unchanged, plus the event loop `run`, `carry_out`,
+   `flush_images`), `shell/terminal/termquery.rs`, `shell/terminal/external_editor.rs` (the
+   worker's news held during the editor's turn; `App`'s half stays in
+   `app/external_editor.rs`) and `shell/terminal/icon_cache.rs`. `main.rs` calls
+   `shell::terminal::run`. What the loop calls of `App` is `pub(crate)`, nothing renamed.
+   The loop alone holds the icon cache (`App` asks for its clearing with
+   `OsRequest::ClearNoticeIcons`), names mpv's socket and makes the WAV file of a
+   transcription (`take_wav_requests`/`on_wav_file`); what `auto` notifications are here is
+   a new probe, `Probes::notify_auto`. `Graphics::detect_with_term` went with `run`.
+   Deliberately not moved: the runner halves from step 5 (`audio::run`,
+   `audio::record::run`, `textcmd::run`, `catchup::run`, `editor`, `clipboard`), `notify`'s
+   senders, `portal`, `watch`, `focus` and `images/detect.rs`. Only the shell calls them now;
+   moving their files would be renames that 7b's `cfg` makes unnecessary. Left in `App` for 7b, as
+   listed there: the key file checks (`app/devices.rs`), the saved download's
+   `path.exists()` (`app/files.rs`), the `upload` checks and `files::display`/`resolve_dir`,
+   and the images' encoder thread (`images/store.rs`).
 7. **Native-only behind `cfg`, as a library, with the gate.** Two parts, each reviewed:
    - **7a, on native only:** the modules move from `main.rs` into `src/lib.rs`, which takes the
      crate-level attributes (`recursion_limit`, the two test-only allows, the
