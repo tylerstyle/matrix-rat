@@ -230,24 +230,52 @@ today's code paths: the new names re-export what is used now.
      `Box<dyn Error>`), so `anyhow` cannot take them: `matrix/sdk_error.rs` gives 25 places
      `.sdk()?`/`.sdk_context(..)`, which are `?`/`.context` on native and copy the error
      (texts, causes, `logsafe`'s `Why`) in the browser; `LeftRooms` uses matrix-sdk's
-     `BoxFuture`; `logsafe` has no `is_connect` there. Left compiled, not `cfg`'d: the key
-     file checks (`app/devices.rs`) and `path.exists()` (`app/files.rs`), as std answers
-     "unsupported" in the browser and the worker refuses anyway; `App::image_cleanup`.
-     `App::start_images`/`on_image_encoded` (the encoder thread) are native only.
-     `matrix_rat::core` is public on both builds: `App`, `OsRequest`, `Config`, `Paths`,
+     `BoxFuture`; `logsafe` has no `is_connect` there. Left compiled, not `cfg`'d:
+     `path.exists()` (`app/files.rs`), never asked in the browser, where no download is
+     saved. The key file checks (`app/devices.rs`) are native only, so in the browser the
+     export and the import reach the worker's stand-in and its words. The encoder thread is
+     the terminal's: `App::start_images`/`on_image_encoded`, `EncodeDone`, `ImageStore`'s
+     encoder, `set_encoder`, `on_encoded` and the `std::thread::spawn` are not in the
+     browser build; there the viewer says "pictures are not drawn in the browser yet" once
+     the pixels are there, instead of preparing the picture for ever.
+     `matrix_rat::engine` is public on both builds: what a shell outside the crate drives
+     (phase 2's web crate, in a workspace with the core library and the terminal app);
+     `shell::terminal` uses the same items. It holds `App`, `OsRequest`, `ReadyNotices`
+     (with `Notice`, `DueReminder`, `NotifyIcon`, `NotifyMode`), `Config`, `Paths`,
      `SecretStoreMode`, the input types, `spawn_with`/`MatrixHandle`/`MatrixEvent`,
-     `Storage` (with its key types), `Probes`, `ui::draw`, `ColorScheme`, `time::Instant` and
-     rt's `interval`, `MissedTickBehavior`, `sleep_until`; the `App` methods the shell calls
-     became `pub`. The remaining dead code in the browser was runner-only helpers, now under
-     `cfg(any(not(target_family = "wasm"), test))`, plus three `expect(dead_code)` for the
-     browser (`EncodeDone`, `RestoreOutcome`, `threads::SUPPORT`) and three
+     `Storage` (with its key types), `Probes` and `NothingHere` (the browser's probes:
+     nothing found, the same answers everywhere; the tests use it too), `ui::draw`,
+     `ColorScheme`, `time::Instant` and rt's `interval`, `MissedTickBehavior`,
+     `sleep_until`. `App`'s fields are `pub(crate)`, and its `pub` methods are exactly what
+     a shell calls, every type in them named in `engine` or std: `new_in_scheme`; at start
+     `set_config_stored`, `set_saved_stored`, `set_startup_target`, `set_keyboard_enhanced`,
+     `keep_notes_stored`, `add_demo_space`, `maybe_open_startup_target`; each turn
+     `on_event`, `on_matrix`, `on_tick`, `take_dirty`/`mark_dirty`, `take_repaint`,
+     `after_draw`, `take_os_requests`, `take_notices_with_icons`, `take_pending_copy`,
+     `take_window_title`/`window_title_lost`, `mouse_on`, `window_title_on`,
+     `reload_theme`, `on_color_scheme`, the three search debounces and their ticks; at the
+     end `should_quit`/`quit`, `sends_out`, `shut_down_worker`. What only the terminal
+     carries out (players, recorders, note and summary programs, the WAV file, the editor,
+     the clipboard's tools, `image_cleanup`) is `pub(crate)` and, with what only it and the
+     runners use, native only. `MatrixHandle::send` is `pub(crate)` too (`MatrixCmd` is the
+     crate's). The rest of the browser's dead code was runner-only helpers, under
+     `cfg(any(not(target_family = "wasm"), test))`, plus targeted
+     `expect(dead_code)` for the browser, each with its reason: `RestoreOutcome`,
+     `threads::SUPPORT`, the requests' fields only a runner reads (`audio::Request`,
+     `RecordRequest`, `catchup::Request`, `textcmd::Request`, `WavRequest`, a note run's
+     `one_paragraph` and `Phase::Converting`) and the states only a runner's answer makes
+     (`CatchUpStage::Done`, `TakePhase::Running`, `clipboard::Failure`); and three
      `expect(unreachable_code)` after an uninhabited `NewFile` or `Encoded`. No
      `.cargo/config.toml`: getrandom 0.4 takes its backend from the `wasm_js` feature, which
      matrix-sdk's `js` turns on (and 0.2's `js`). The gate runs with `-D warnings` in
-     `check.sh` and in a `browser` job in `checks.yml`; nixpkgs' rustc 1.99.1 has the browser
+     `check.sh` and in a `browser` job in `checks.yml`, there on Rust 1.96.0 (the MSRV, so a
+     new release's lints do not fail it unannounced); nixpkgs' rustc 1.99.1 has the browser
      std, so `shell.nix` is unchanged. `cargo deny check` passes (its graph is the native
      targets); for the browser's graph it reports `derivative` unmaintained
-     (RUSTSEC-2024-0388, via matrix-sdk-indexeddb), not ignored. 1670 passed and 62 ignored.
+     (RUSTSEC-2024-0388, via matrix-sdk-indexeddb), not ignored (see "Not in phase 1").
+     Reviewed by matrix-agy (`.claude/agy/review-web-step7b.md`): three medium findings (the
+     public surface, the key file checks, the encoder thread and the viewer) and the CI
+     toolchain, fixed in `36d4750..77e31cb`. 1672 passed and 62 ignored.
 
 ## Not in phase 1
 
@@ -259,8 +287,11 @@ today's code paths: the new names re-export what is used now.
   `Storage` in the browser (phase 2, from the phase 0 test build), and the ratzilla shell.
 - The search index (`experimental-search`, tantivy): native only; the browser goes without
   local search at first.
-- A crate split into a workspace: not needed for the gate; can come later if `cfg` gets
-  crowded.
+- A crate split into a workspace: not needed for the gate. Phase 2 makes one (the core
+  library, the terminal app, the web crate); the web crate drives `matrix_rat::engine`.
+- `cargo deny` for the browser's graph: when the web build ships, `deny.toml` gets
+  `wasm32-unknown-unknown` among its targets and a decision on RUSTSEC-2024-0388
+  (`derivative`, unmaintained, via matrix-sdk-indexeddb).
 
 ## Open questions
 
