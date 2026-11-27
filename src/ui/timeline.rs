@@ -228,6 +228,57 @@ fn marker(message: &Message, repeated_shield: bool) -> Option<(String, Role)> {
     }
 }
 
+/// Columns the line of a deleted message keeps beside its marker at least (as wide as
+/// "Message deleted"); with fewer the marker goes on a row of its own.
+const DELETED_KEEPS: usize = 15;
+
+/// The rows of a deleted message: who deleted it and why, in one row cut to the width,
+/// with its marker after it. The reason and the name are someone else's text: drawn as
+/// one plain span, never as Markdown, with no links and no colours of code. A long
+/// reason is cut to leave room for the marker; where too little would be left of the
+/// line, the marker gets a row of its own.
+fn deleted_rows(i: usize, message: &Message, repeated_shield: bool, lay: &Lay) -> Vec<Row> {
+    let Lay {
+        body_width, theme, ..
+    } = *lay;
+    let line = message.deleted_line();
+    // What goes after the line, each part in its own role, joined by spaces.
+    let parts: Vec<(String, Role)> = marker(message, repeated_shield).into_iter().collect();
+    let after = parts.iter().map(|(part, _)| width(part) + 1).sum::<usize>();
+    let room = body_width.saturating_sub(after);
+    let beside = after == 0 || room >= DELETED_KEEPS.min(width(&line));
+    let mut spans = vec![
+        Span::raw(INDENT),
+        Span::styled(
+            truncate(&line, if beside { room } else { body_width }),
+            theme.style(Role::ReplyQuote),
+        ),
+    ];
+    let mut rows = Vec::new();
+    if beside {
+        for (part, role) in parts {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(part, theme.style(role)));
+        }
+        rows.push(Row::plain(Line::from(spans), Some(i)));
+    } else {
+        rows.push(Row::plain(Line::from(spans), Some(i)));
+        let mut own = vec![Span::raw(INDENT)];
+        let mut left = body_width;
+        for (n, (part, role)) in parts.into_iter().enumerate() {
+            if n > 0 && left > 1 {
+                own.push(Span::raw(" "));
+                left -= 1;
+            }
+            let part = truncate(&part, left);
+            left -= width(&part);
+            own.push(Span::styled(part, theme.style(role)));
+        }
+        rows.push(Row::plain(Line::from(own), Some(i)));
+    }
+    rows
+}
+
 /// What a row of the sound's message shows while it loads or plays, in `width`
 /// columns (`full`: those of a row without a read marker); `None` where the row stays
 /// as it is. A name too long for the first row goes on over the rows the first line
@@ -677,9 +728,9 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
             });
         }
 
-        if let Some(poll) = &message.poll
-            && message.kind != MsgKind::Redacted
-        {
+        if message.kind == MsgKind::Redacted {
+            rows.extend(deleted_rows(i, message, repeated_shield, lay));
+        } else if let Some(poll) = &message.poll {
             push_poll_rows(
                 rows,
                 i,
@@ -2346,6 +2397,147 @@ mod tests {
         let ignored = BTreeSet::from([alice.to_owned()]);
         let (layout, _) = emoji_layout(emoji_message(alice, ("", "")), &images, &ignored, None);
         assert!(layout.emote_wants.is_empty());
+    }
+
+    /// A deleted message `by`, with `reason`.
+    fn deleted(reason: &str, by: crate::model::DeletedBy) -> Message {
+        Message {
+            kind: MsgKind::Redacted,
+            deleted: Some(crate::model::Deletion {
+                reason: Some(reason.into()),
+                by,
+            }),
+            ..by_bob("Message deleted")
+        }
+    }
+
+    fn by_bob(body: &str) -> Message {
+        by("@bob:example.org", "bob", body)
+    }
+
+    /// The reason and the name are someone else's text: a link, bold and code in them
+    /// are shown as written, in one plain span: nothing to click, nothing bold, no
+    /// link preview wanted.
+    #[test]
+    fn a_deletion_reason_is_drawn_as_it_is_written() {
+        use crate::model::DeletedBy;
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let reason = "see [x](https://example.org), **b** and `c` <b>html</b>";
+        let mut room = demo_rooms().remove(0);
+        room.messages = vec![
+            deleted(reason, DeletedBy::Sender),
+            deleted(
+                reason,
+                DeletedBy::Other {
+                    user_id: "@carol:example.org".into(),
+                    name: "**carol** [me](https://example.org)".into(),
+                },
+            ),
+        ];
+        let view = PreviewView {
+            store: &PreviewStore::default(),
+            mode: LinkPreviews::All,
+            encrypted: false,
+            ignored: &BTreeSet::new(),
+        };
+        let emotes = EmoteView {
+            catalog: &EmoteCatalog::default(),
+            ignored: &BTreeSet::new(),
+        };
+        let layout = build_layout(&room, 140, &theme, None, &images, Some(&view), &emotes);
+        assert!(layout.wants.is_empty(), "no link preview");
+        let text: Vec<String> = layout.rows.iter().map(|row| row.line.to_string()).collect();
+        assert!(
+            text.contains(&format!("  Message deleted: {reason}")),
+            "{text:#?}"
+        );
+        // The second in a run of bob's, after the dot.
+        assert!(
+            text.contains(&format!(
+                "· Deleted by **carol** [me](https://example.org): {reason}"
+            )),
+            "{text:#?}"
+        );
+        let lines: Vec<&Row> = layout
+            .rows
+            .iter()
+            .filter(|row| row.line.to_string().contains("eleted"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for row in lines {
+            assert!(
+                row.hits
+                    .iter()
+                    .all(|(_, _, hit)| !matches!(hit, HitId::Link(..))),
+                "{row:?}"
+            );
+            // One span after the indent, in the muted look of a deleted message.
+            assert_eq!(row.line.spans.len(), 2, "{row:?}");
+            let style = row.line.spans[1].style;
+            assert_eq!(style, theme.style(Role::ReplyQuote));
+            assert!(!style.add_modifier.contains(Modifier::BOLD));
+        }
+    }
+
+    /// A reason as long as one can be is cut to the width, and leaves room for the
+    /// marker after it on the same row; where too little of the line would be left
+    /// beside it, the marker gets a row of its own. Without a marker the line takes the
+    /// whole width.
+    #[test]
+    fn a_long_reason_keeps_the_marker_in_view() {
+        use crate::model::DeletedBy;
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let reason = "y".repeat(crate::model::Deletion::REASON_MAX);
+        let mut message = deleted(&reason, DeletedBy::Us);
+        message.saved = true;
+        message.pinned = true;
+        let mut room = demo_rooms().remove(0);
+        room.messages = vec![message.clone()];
+        // The rows after the day and the header.
+        let message_rows = |room: &Room, max: usize| -> Vec<Row> {
+            let rows = build_rows(room, max, &theme, None, &images);
+            for row in &rows {
+                assert!(row.line.width() <= max, "width {max}: {row:?}");
+            }
+            let header = rows
+                .iter()
+                .position(|row| row.line.spans.first().is_some_and(|s| s.content == "● "))
+                .unwrap();
+            rows[header + 1..].to_vec()
+        };
+        let text =
+            |rows: &[Row]| -> Vec<String> { rows.iter().map(|row| row.line.to_string()).collect() };
+        for max in [40, 60, 120] {
+            let rows = message_rows(&room, max);
+            // One row: the line, cut, with its marker.
+            assert_eq!(rows.len(), 1, "width {max}: {:?}", text(&rows));
+            let line = rows[0].line.to_string();
+            assert!(line.starts_with("  Deleted by you: yyy"), "{line}");
+            assert!(line.ends_with("y… (pinned) (saved)"), "{line}");
+            assert_eq!(rows[0].line.width(), max);
+            assert_eq!(rows[0].msg, Some(0));
+        }
+        // Too narrow for both: the line, cut, then the marker on a row of its own.
+        let rows = message_rows(&room, 24);
+        assert_eq!(
+            text(&rows),
+            ["  Deleted by you: yyyyy…", "  (pinned) (saved)"]
+        );
+        // No marker: the whole width for the line.
+        room.messages[0].saved = false;
+        room.messages[0].pinned = false;
+        let rows = message_rows(&room, 40);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line.width(), 40);
+        assert!(rows[0].line.to_string().ends_with("y…"));
+        // A short line and its marker side by side, uncut.
+        let mut short = deleted("oops", DeletedBy::Sender);
+        short.saved = true;
+        room.messages = vec![short];
+        let rows = message_rows(&room, 40);
+        assert_eq!(text(&rows), ["  Message deleted: oops (saved)"]);
     }
 
     #[test]
