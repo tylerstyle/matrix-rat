@@ -363,8 +363,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::action::Pane;
-    use crate::app::{ComposeMode, ui};
+    use crate::app::ComposeMode;
     use crate::input::{InputEvent, MouseButton, MouseEvent, MouseEventKind};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

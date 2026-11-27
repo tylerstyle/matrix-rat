@@ -512,11 +512,12 @@ pub(super) fn mentions_empty(mentions: &Option<Mentions>) -> bool {
 mod tests {
     use super::*;
     use crate::action::Action;
-    use crate::app::{Config, MatrixHandle, ui};
+    use crate::app::{Config, MatrixHandle};
     use crate::complete::Kind;
     use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::{MatrixEvent, RoomCategory, RoomSummary};
     use crate::model::{ItemRef, Message};
+    use crate::ui;
     use crate::ui::hit::HitId;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

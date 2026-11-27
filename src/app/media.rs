@@ -140,6 +140,7 @@ mod tests {
     use super::*;
     use crate::images::testing::{decoded, kitty, remote_image};
     use crate::model::{ImageInfo, RoomKind};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;

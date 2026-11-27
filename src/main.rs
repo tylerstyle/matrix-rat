@@ -324,7 +324,12 @@ fn main() -> Result<std::process::ExitCode> {
     let result = if serve {
         runtime.block_on(agent::serve::run(&paths, config.secret_store))
     } else {
-        runtime.block_on(app::run(&paths, &config, args.demo, args.target))
+        runtime.block_on(shell::terminal::run(
+            &paths,
+            &config,
+            args.demo,
+            args.target,
+        ))
     };
     if let Err(err) = &result {
         tracing::error!(why = %logsafe::kind_any(err), "exited with error");

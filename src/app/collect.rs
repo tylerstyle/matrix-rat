@@ -838,10 +838,10 @@ mod tests {
 
     use super::*;
     use crate::action::{Action, Pane};
-    use crate::app::ui;
     use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::{LAST_EVENTS, MatrixHandle};
     use crate::model::{Room, RoomKind};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

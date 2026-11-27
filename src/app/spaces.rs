@@ -751,7 +751,6 @@ mod tests {
 
     use super::*;
     use crate::action::{Action, Pane};
-    use crate::app::ui;
     use crate::input::{
         InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -760,6 +759,7 @@ mod tests {
         ManageEvent, MatrixCmd, MatrixEvent, MatrixHandle, PreviewJoinRule, PreviewMembership,
         RoomCategory, RoomPreview, RoomSummary,
     };
+    use crate::ui;
 
     const SPACE: &str = "!work:example.org";
     const FUN: &str = "!fun:example.org";

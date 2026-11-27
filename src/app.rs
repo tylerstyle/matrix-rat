@@ -1,4 +1,4 @@
-//! Application state, input handling and the event loop.
+//! Application state and input handling. The event loop is the shell's (`shell::terminal`).
 
 mod attach;
 mod code;
@@ -49,10 +49,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::EventStream;
-use futures::StreamExt;
 use ratatui::layout::Rect;
-use tokio::signal::unix::{SignalKind, signal};
 
 use crate::action::{Action, Dir, Pane};
 use crate::composer::Composer;
@@ -65,8 +62,7 @@ use crate::input::{
 use crate::keymap::{self, Context, Keymap};
 use crate::lineedit::{EditKeys, EditOutcome, LineEdit};
 use crate::matrix::{
-    self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
-    SyncStatus,
+    MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary, SyncStatus,
 };
 use crate::modal::{
     EmojiPicker, LoginForm, Modal, Pick, RecoveryForm, ReportForm, Setting, SettingsMenu,
@@ -74,15 +70,12 @@ use crate::modal::{
 use crate::model::{
     ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, SendState, demo_rooms,
 };
-use crate::paths::Paths;
 use crate::probes::Probes;
-use crate::rt::{self, MissedTickBehavior};
-use crate::shell::terminal::{self, TerminalGuard};
 use crate::storage::{Key, Storage};
 use crate::theme::{ColorScheme, DEFAULT_THEME, Theme};
 use crate::time::Instant;
 use crate::ui::hit::{Button, HitId, HitMap, InputTarget};
-use crate::ui::{self, SIDEBAR_MIN, max_sidebar};
+use crate::ui::{SIDEBAR_MIN, max_sidebar};
 
 const TOAST_TIME: Duration = Duration::from_secs(3);
 /// How long a count-based notification waits for a detailed one to take its place,
@@ -106,8 +99,8 @@ pub enum ComposeMode {
     Edit(usize),
 }
 
-/// What `App` asks of the desktop. The shell does it (see `run`): `App` starts no
-/// program and touches no window itself.
+/// What `App` asks of the desktop. The shell does it (see `shell::terminal::run`):
+/// `App` starts no program and touches no window itself.
 #[derive(Clone, PartialEq, Eq)]
 pub enum OsRequest {
     /// A link, or a saved file, for the desktop's program for it (`xdg-open`).
@@ -561,13 +554,6 @@ pub(super) fn take_due_search_debounce(debounce: &mut Option<Instant>) -> bool {
         true
     } else {
         false
-    }
-}
-
-async fn wait_deadline(deadline: Option<Instant>) {
-    match deadline {
-        Some(at) => rt::sleep_until(at).await,
-        None => std::future::pending().await,
     }
 }
 
@@ -5456,367 +5442,10 @@ pub(super) fn validate_avatar_path(raw: &str, limit: Option<u64>) -> Result<Path
     Ok(path.clone())
 }
 
-/// Hands a link or a file to the desktop's program for it. Best effort; the login
-/// form also shows the address to open by hand.
-fn open_in_browser(url: &str) {
-    use std::process::{Command, Stdio};
-    let _ = Command::new("xdg-open")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-}
-
-/// Does what the app asked of the desktop.
-fn carry_out(requests: Vec<OsRequest>) {
-    for request in requests {
-        match request {
-            OsRequest::Open(target) => open_in_browser(&target),
-            OsRequest::RaiseWindow(command) => crate::focus::raise_window(&command),
-        }
-    }
-}
-
-/// Tells the terminal to free the pictures that are no longer shown (`all`: every
-/// picture, before quitting). Written between frames, never during a draw.
-fn flush_images(app: &mut App, all: bool) {
-    use std::io::Write;
-    let sequence = app.image_cleanup(all);
-    if !sequence.is_empty() {
-        let mut out = std::io::stdout();
-        let _ = out.write_all(sequence.as_bytes());
-        let _ = out.flush();
-    }
-}
-
-/// Waits up to `grace` for `tasks` to end on their own. Returns `false` if any task
-/// outlived the grace and had to be aborted (after aborting, drains briefly so drop
-/// handlers — such as killing child process groups — run before returning).
-async fn drain_or_abort(tasks: &mut rt::JoinSet<()>, grace: Duration) -> bool {
-    if tasks.is_empty() {
-        return true;
-    }
-    let done = async { while tasks.join_next().await.is_some() {} };
-    if rt::timeout(grace, done).await.is_ok() {
-        return true;
-    }
-    tasks.abort_all();
-    let aborted = async { while tasks.join_next().await.is_some() {} };
-    let _ = rt::timeout(Duration::from_millis(500), aborted).await;
-    false
-}
-
-pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<String>) -> Result<()> {
-    let (portal_scheme, mut scheme_watch) = crate::portal::SchemeWatch::start().await;
-    let guard = TerminalGuard::enter(config.mouse, config.window_title)?;
-    // Terminal queries (image protocol, background colour) go here: on the alternate
-    // screen, where a terminal that prints a question instead of answering does no
-    // harm, but before mouse and focus reports are on and before the event stream.
-    guard.alternate_screen()?;
-    let (graphics, term_reply) =
-        crate::images::Graphics::detect_with_term(config.images, portal_scheme.is_none());
-    let initial_scheme = crate::portal::resolve_initial_scheme(portal_scheme, term_reply);
-    let mut terminal = guard.activate()?;
-    let mut events = EventStream::new();
-    let mut tick = rt::interval(Duration::from_millis(250));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Without these, a kill or a closed terminal window would skip all cleanup.
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sighup = signal(SignalKind::hangup())?;
-    // Before the worker starts, as the signals above: an error from here on is returned
-    // only after the worker was shut down (see `outcome` below).
-    let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
-    let (matrix, mut matrix_events) = if demo {
-        (None, None)
-    } else {
-        let (handle, events) = matrix::spawn_with(paths.clone(), config.secret_store);
-        (Some(handle), Some(events))
-    };
-    let mut app = App::new_in_scheme(
-        config,
-        Box::new(crate::storage::FsStorage::new(paths)),
-        Box::new(crate::probes::NativeProbes),
-        matrix.clone(),
-        initial_scheme,
-    );
-    // As the terminal answered before the event stream existed: never asked again.
-    app.found.keyboard_enhanced = Some(guard.keyboard_enhanced());
-    // The demo is for looking around: what is changed there is not written into the
-    // real configuration.
-    if !demo {
-        app.config_stored = true;
-        // Read when a session is up: whose list it is must be known first.
-        app.bookmarks.stored = true;
-    }
-    app.startup_target = target;
-    // Copies of sounds and mpv's sockets; what an earlier run left there goes now.
-    crate::audio::remove_leftovers(&paths.audio_dir());
-    app.set_audio_dir(paths.audio_dir());
-    // The demo keeps no notes in a file, as it writes no settings.
-    if !demo {
-        app.keep_notes_stored(paths.audio_dir());
-    }
-    if demo {
-        app.add_demo_space();
-        app.maybe_open_startup_target();
-    }
-    let notify_icons = Arc::new(crate::notify::IconCache::new(paths.notify_icons_dir()));
-    struct NotifyCacheGuard(Arc<crate::notify::IconCache>);
-    impl Drop for NotifyCacheGuard {
-        fn drop(&mut self) {
-            self.0.clear();
-        }
-    }
-    let _notify_cache_guard = NotifyCacheGuard(Arc::clone(&notify_icons));
-    app.set_notify_icons(notify_icons);
-    let mut encoded_images = app.start_images(graphics);
-    // Clicks on desktop notifications come back here, as the room to open.
-    let (notice_clicks, mut clicked) =
-        tokio::sync::mpsc::unbounded_channel::<crate::notify::Click>();
-    // Pictures read from the clipboard come back here.
-    let (pasted, mut pasted_back) = tokio::sync::mpsc::unbounded_channel();
-    // What the audio players say comes back here; their tasks end with them.
-    let (player_news, mut player_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut players = rt::JoinSet::new();
-    // And what a recording says; kept separate so releasing the terminal for `$EDITOR`
-    // can drain recordings without disturbing playback.
-    let (record_news, mut record_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut recorders = rt::JoinSet::new();
-    // So do the programs that transcribe and translate, and what they wrote.
-    let (note_news, mut note_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut note_programs = rt::JoinSet::new();
-    // The same for the summary command of "catch up".
-    let (summary_news, mut summary_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut summaries = rt::JoinSet::new();
-    // What the worker said while the external editor had the terminal.
-    let mut held_events = terminal::external_editor::HeldEvents::default();
-
-    // An error ends the loop, not the function: what runs after it (players stopped,
-    // the worker shut down cleanly) runs for an error too, and the error is returned
-    // then. Returned at once, it dropped the runtime under the worker, whose store
-    // write in flight was cancelled; matrix-sdk-sqlite panics over that.
-    let outcome = async {
-        while !app.should_quit {
-            // What the app asked of the desktop, as soon as it asked.
-            carry_out(app.take_os_requests());
-            if app.suspend_requested {
-                app.suspend_requested = false;
-                // What played or recorded was told to stop: wait for them to end, and abort
-                // any that outlive the grace so no child process group stays alive across
-                // SIGTSTP (they are not stopped with the terminal).
-                let _ = drain_or_abort(&mut players, Duration::from_secs(1)).await;
-                if !drain_or_abort(&mut recorders, Duration::from_secs(2)).await {
-                    app.cancel_recording();
-                }
-                // The terminal frees its copies of the pictures now, in case we are
-                // never resumed; they are sent again when drawn.
-                flush_images(&mut app, true);
-                terminal::suspend(&mut terminal)?;
-                // The shell's title was put back meanwhile.
-                app.window_title_lost();
-                app.dirty = true;
-            }
-            if let Some(request) = app.take_editor_request() {
-                // A running recording was told to stop when the editor was requested; wait
-                // for it to finish (or kill it) before giving the terminal to the editor.
-                if !drain_or_abort(&mut recorders, Duration::from_secs(2)).await {
-                    app.cancel_recording();
-                }
-                // As for Ctrl-Z: the terminal frees its copies of the pictures now.
-                flush_images(&mut app, true);
-                // Its reader thread would take the keys meant for the editor: the stream
-                // is dropped, and a new one is read from once we are back.
-                drop(std::mem::replace(&mut events, EventStream::new()));
-                rt::sleep(Duration::from_millis(50)).await;
-                terminal::absorb_reader_wake();
-                terminal::release();
-                let dir = paths.runtime_dir.clone();
-                // A blocking child: the worker, a task of its own, goes on syncing; what it
-                // says meanwhile is held, each snapshot once, and handled when we are back.
-                let editor = tokio::task::spawn_blocking(move || {
-                    crate::editor::edit(&request, &dir, crate::editor::run_command)
-                });
-                let outcome = terminal::external_editor::hold_events_while(
-                    editor,
-                    matrix_events.as_mut(),
-                    &mut held_events,
-                )
-                .await
-                .unwrap_or(crate::editor::Outcome::Failed(
-                    crate::editor::Failure::Launch,
-                ));
-                terminal::absorb_reader_wake();
-                let resumed = terminal::resume(&mut terminal);
-                // The screen was cleared: pictures are sent again when drawn. The title
-                // from before was put back for the editor: ours is written again too.
-                app.images.forget_encoded();
-                app.window_title_lost();
-                app.finish_editor(outcome);
-                resumed?;
-            }
-            if let Some(request) = app.take_paste_request() {
-                // Off the UI thread: the tool may take its time (up to its limit), and the
-                // picture is decoded to check it. Messages and keys are handled meanwhile.
-                let dir = paths.runtime_dir.clone();
-                let back = pasted.clone();
-                rt::spawn(async move {
-                    let id = request.id;
-                    let result = tokio::task::spawn_blocking(move || {
-                        crate::clipboard::paste(&request, &dir, crate::clipboard::run_tool)
-                    })
-                    .await
-                    .unwrap_or(Err(crate::clipboard::Failure::Failed));
-                    // Nobody to take it only once the app has ended: then the picture's
-                    // file is removed as the answer is dropped.
-                    let _ = back.send(crate::clipboard::Done { id, result });
-                });
-            }
-            if let Some(request) = app.take_audio_start() {
-                // A task on the async threads, which live as long as the app: the player is
-                // started from there (see `audio::play`).
-                players.spawn(crate::audio::run(request, player_news.clone()));
-            }
-            if let Some(request) = app.take_record_start() {
-                // As the players: the programs are tied to the thread that starts them.
-                recorders.spawn(crate::audio::record::run(request, record_news.clone()));
-            }
-            while players.try_join_next().is_some() {}
-            while recorders.try_join_next().is_some() {}
-            for request in app.take_note_starts() {
-                note_programs.spawn(crate::textcmd::run(request, note_news.clone()));
-            }
-            while note_programs.try_join_next().is_some() {}
-            if let Some(request) = app.take_summary_start() {
-                summaries.spawn(crate::catchup::run(request, summary_news.clone()));
-            }
-            while summaries.try_join_next().is_some() {}
-            terminal::set_mouse(app.mouse)?;
-            terminal::set_window_title(app.window_title)?;
-            if std::mem::take(&mut app.repaint) {
-                // As after a resize: pictures are sent again with the fresh screen.
-                app.images.forget_encoded();
-                terminal::clear(&mut terminal)?;
-                app.dirty = true;
-            }
-            if let Some(text) = app.pending_copy.take() {
-                terminal::copy_to_clipboard(&text)?;
-            }
-            let ready = app.take_notices_with_icons();
-            for (notice, icon) in &ready.items {
-                crate::notify::show(
-                    ready.mode,
-                    notice,
-                    ready.preview,
-                    icon,
-                    ready.icon_cache.clone(),
-                    Some(&notice_clicks),
-                );
-            }
-            for (notice, icon) in &ready.reminders {
-                crate::notify::show_reminder(
-                    ready.mode,
-                    notice,
-                    ready.preview,
-                    icon,
-                    ready.icon_cache.clone(),
-                    Some(&notice_clicks),
-                );
-            }
-            if app.dirty {
-                app.dirty = false;
-                terminal.draw(|frame| ui::draw(frame, &mut app))?;
-                app.after_draw();
-                flush_images(&mut app, false);
-                // Only when the count changed, and never with the setting off.
-                if let Some(title) = app.take_window_title() {
-                    terminal::write_window_title(&title)?;
-                }
-            }
-            tokio::select! {
-                event = events.next() => match event {
-                    Some(Ok(event)) => app.on_event(event.into()),
-                    Some(Err(err)) => return Err(err.into()),
-                    None => break,
-                },
-                Some(event) = terminal::external_editor::next_matrix_event(
-                    &mut held_events,
-                    matrix_events.as_mut(),
-                ) => app.on_matrix(event),
-                Some(click) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked {
-                    room_id: click.room_id,
-                    event: click.event,
-                }),
-                Some(done) = pasted_back.recv() => app.finish_paste(done),
-                Some(update) = player_back.recv() => app.on_audio(update),
-                Some(done) = note_back.recv() => app.on_note_done(done),
-                Some(done) = summary_back.recv() => app.on_summary(done),
-                Some(update) = record_back.recv() => app.on_recording(update),
-                _ = theme_watch.changed() => app.reload_theme(),
-                scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
-                Some(done) = encoded_images.recv() => app.on_image_encoded(done),
-                _ = wait_deadline(app.search_debounce_deadline()) => app.tick_global_search(),
-                _ = wait_deadline(app.user_search_debounce_deadline()) => app.tick_user_search(),
-                _ = wait_deadline(app.dir_search_debounce_deadline()) => app.tick_dir_search(),
-                _ = tick.tick() => app.on_tick(),
-                _ = tokio::signal::ctrl_c() => app.should_quit = true,
-                _ = sigterm.recv() => app.should_quit = true,
-                _ = sighup.recv() => app.should_quit = true,
-            }
-        }
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    flush_images(&mut app, true);
-    // What plays stops with the app, and its file goes; a player that does not end in
-    // time is killed as its task is dropped.
-    app.stop_audio();
-    // So do the programs that transcribe and translate, and a recording.
-    app.stop_notes();
-    app.cancel_recording();
-    let stopped = async {
-        while players.join_next().await.is_some() {}
-        while recorders.join_next().await.is_some() {}
-        while note_programs.join_next().await.is_some() {}
-    };
-    let _ = rt::timeout(Duration::from_secs(2), stopped).await;
-    drop(players);
-    drop(recorders);
-    drop(note_programs);
-    // A summary command that still runs is killed as its task is dropped.
-    drop(summaries);
-    // Let the worker finish handing any queued files to the send queue and stop
-    // syncing cleanly, while `app` stays alive so temporary voice and picture files
-    // stay on disk until the worker has read them.
-    if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
-        let wait = if app.attach.sends_out() {
-            Duration::from_secs(7)
-        } else {
-            Duration::from_secs(3)
-        };
-        // The worker takes commands in order: the draft is written before it stops.
-        app.shut_down_worker();
-        // Close every command sender so the worker also sees the channel end.
-        drop(matrix);
-        let drained = async {
-            while let Some(event) = events.recv().await {
-                // A logout that ends while the app closes still takes along what the
-                // account kept here.
-                if matches!(event, MatrixEvent::LoggedOut) {
-                    app.on_matrix(event);
-                }
-            }
-        };
-        let _ = rt::timeout(wait, drained).await;
-    }
-    drop(app);
-    crate::audio::remove_leftovers(&paths.audio_dir());
-    outcome
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -11467,42 +11096,6 @@ mod tests {
                 assert!(!text.contains(private), "{private} in {text}");
             }
         }
-    }
-
-    #[tokio::test]
-    async fn drain_or_abort_waits_for_quick_tasks_and_aborts_hung_ones() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        struct OnDrop(Arc<AtomicBool>);
-        impl Drop for OnDrop {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let mut quick = tokio::task::JoinSet::new();
-        let finished = Arc::new(AtomicBool::new(false));
-        let mark = Arc::clone(&finished);
-        quick.spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            mark.store(true, Ordering::SeqCst);
-        });
-        assert!(drain_or_abort(&mut quick, Duration::from_secs(1)).await);
-        assert!(finished.load(Ordering::SeqCst));
-
-        let mut hung = tokio::task::JoinSet::new();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let guard = OnDrop(Arc::clone(&dropped));
-        hung.spawn(async move {
-            let _guard = guard;
-            std::future::pending::<()>().await;
-        });
-        // Let the spawned task start so the drop guard lives inside its future.
-        tokio::task::yield_now().await;
-        assert!(!drain_or_abort(&mut hung, Duration::from_millis(30)).await);
-        assert!(dropped.load(Ordering::SeqCst));
-        assert!(hung.is_empty());
     }
 
     #[test]

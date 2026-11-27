@@ -144,11 +144,11 @@ impl App {
 mod tests {
     use super::*;
     use crate::action::Action;
-    use crate::app::ui;
     use crate::config::Config;
     use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::{MatrixEvent, MatrixHandle, RoomCategory, RoomSummary, SourceKind};
     use crate::model::{Message, MsgKind, SendState};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;

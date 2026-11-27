@@ -3568,9 +3568,9 @@ fn display_user_label(name: &str, user_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ui;
     use crate::input::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use crate::matrix::{MatrixEvent, MatrixHandle, RoomCategory, RoomSummary};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;

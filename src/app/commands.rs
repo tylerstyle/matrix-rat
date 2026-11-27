@@ -960,9 +960,7 @@ mod tests {
             assert!(app.composer.is_empty());
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-            terminal
-                .draw(|f| crate::app::ui::draw(f, &mut app))
-                .unwrap();
+            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
             let text = format!("{}", terminal.backend());
             assert!(text.contains("Remove this member from the room?"), "{text}");
             assert!(text.contains("Bob (@bob:example.org)"), "{text}");

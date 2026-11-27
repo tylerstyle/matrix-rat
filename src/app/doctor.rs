@@ -124,10 +124,10 @@ impl App {
 mod tests {
     use super::*;
     use crate::action::{Action, Pane};
-    use crate::app::ui;
     use crate::config::Config;
     use crate::input::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use crate::matrix::MatrixHandle;
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
