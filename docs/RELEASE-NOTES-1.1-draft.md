@@ -92,5 +92,10 @@ Through matrix-sdk 0.20:
   §6.1 ("Search reaches back three months") ships with 1.1.0, it refills the index on its
   own (`EventCache::run_search_backfill` indexes the stored events once, then pages back);
   reword then.
+- Upgrade tested on the dev homeserver on 2026-11-27: profiles made with the 0.19.1 build
+  (one without cross-signing, one verified with an encrypted room) opened with the 0.20
+  build: the session was restored, history showed and decrypted, search found the old
+  messages (newest first) after the index was rebuilt, and the verification state stayed.
+  The SDK logs one warning per room while it rebuilds ("Recreating the search index").
 - The test with the user's real 1.0.3 profile is still to come before release (PLAN §6.1).
 -->
