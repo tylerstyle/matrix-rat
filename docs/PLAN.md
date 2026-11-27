@@ -65,7 +65,7 @@ pinned exactly (every minor release breaks APIs); `ratatui` 0.30 on `crossterm` 
 for code colours; `nucleo-matcher` for fuzzy search; `toml` and `toml_edit` for the config
 (comments survive a write-back); `zbus` and `notify-rust` for the desktop; `notify` for watching
 theme files; `insta` for snapshots.
-Rust 1.96 or newer.
+Rust 1.99 or newer.
 
 **The two halves.**
 
@@ -182,7 +182,8 @@ the dot. `--mobile` is dropped (§6.4). Building starts once all is talked throu
   doing yet more work, get us up to date"): Rust 1.96 → **1.99**, the newest nixpkgs has (the
   Nix package builds with it; 1.100.0, out on 2026-11-12, is not in nixpkgs yet, not even
   unstable; the release binaries on GitHub already build with the newest stable); every
-  compatible update (29 crates on 2026-11-27, more once 1.96 no longer holds them back); the
+  compatible update (26 crates on top of matrix-sdk 0.20 on 2026-11-27; behind are only
+  generic-array and matchit, pinned exactly by others); the
   breaking ones: matrix-sdk 0.20 (below), notify 9 (below) and signal-hook 0.4 (one call, the
   terminal's suspend); the CI actions (cargo-deny-action 2.1.4). New features of 1.1.0 wait
   until this is merged.

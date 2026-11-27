@@ -2,7 +2,7 @@
 name = "matrix-rat"
 version = "1.0.3"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.99"
 license = "Apache-2.0"
 description = "A mouse-friendly, themeable Matrix client for the terminal"
 repository = "https://github.com/tylerstyle/matrix-rat"
@@ -40,9 +40,9 @@ nucleo-matcher = "0.3.1"
 mime = "0.3"
 # Wipes passwords and passphrases from memory when they are dropped; the version the SDK uses.
 zeroize = "1"
-comrak = { version = "1.0.0", default-features = false }
+comrak = { version = "1.2.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-toml_edit = "0.25.19"
+toml_edit = "0.25.21"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }
 
@@ -65,17 +65,17 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # Support
 clap = { version = "4", features = ["derive"] }
 etcetera = "0.11"
-signal-hook = "0.3"
+signal-hook = "0.4"
 # Splits $VISUAL / $EDITOR into words the way a shell does; already in the tree.
 shlex = "2"
 libc = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-notify = "8"
+notify = "9"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 notify-rust = { version = "4.19.0", default-features = false, features = ["z"] }
 # Same version & features notify-rust already pulls in, to watch XDG portal appearance.
-zbus = { version = "6.3.0", default-features = false, features = ["default-rt", "proxy"] }
+zbus = { version = "6.5.0", default-features = false, features = ["default-rt", "proxy"] }
 
 # The browser (`wasm32-unknown-unknown`).
 [target.'cfg(target_family = "wasm")'.dependencies]

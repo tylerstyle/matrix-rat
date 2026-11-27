@@ -26,11 +26,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
+      - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
         with:
           command: check
           # The toolchain the package asks for (rust-version in Cargo.toml).
-          rust-version: "1.96.0"
+          rust-version: "1.99.0"
 
   browser:
     name: core builds for the browser
@@ -45,7 +45,7 @@ jobs:
       # new release's lints would otherwise fail the check with no change here.
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
-          toolchain: "1.96.0"
+          toolchain: "1.99.0"
           targets: wasm32-unknown-unknown
 
       # The library only: the command line (src/main.rs) is the terminal's. A check

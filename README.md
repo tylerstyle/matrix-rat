@@ -8,7 +8,7 @@
 
 [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
 [![Matrix](https://img.shields.io/badge/chat-Matrix-0dbd8b?logo=matrix&logoColor=white)](https://matrix.org)
-[![Rust 1.96+](https://img.shields.io/badge/rust-1.96%2B-b7410e?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust 1.99+](https://img.shields.io/badge/rust-1.99%2B-b7410e?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
 
 <img src="docs/screenshots/chat.svg" alt="matrix-rat showing the room list, a chat with an inline picture, and the composer" width="860">
@@ -79,7 +79,7 @@ in {
 If you already use the NUR, `pkgs.nur.repos.tylerstyle.matrix-rat` is the same package; pin
 the tarball as you pin your other sources. Two things to know: the cache settings must be
 active before the package is installed, so on a first setup rebuild once with only the
-`nix.settings` lines; and matrix-rat needs Rust 1.96 or newer, so it is not offered for
+`nix.settings` lines; and matrix-rat needs Rust 1.99 or newer, so it is not offered for
 `nixos-26.05`. If your nixpkgs is older than the cache's, Nix builds it locally instead
 (about 20 minutes).
 
@@ -110,7 +110,7 @@ The archive also holds the launcher entry and the icon (`share/`), to copy if yo
 them: see [`assets/`](assets/README.md). The binaries are built by the workflow in
 `.github/workflows/release-binaries.yml` from the tagged source.
 
-**With Cargo** (Rust 1.96 or newer, plus a C compiler, `make`, `cmake`, `perl` and `pkg-config`):
+**With Cargo** (Rust 1.99 or newer, plus a C compiler, `make`, `cmake`, `perl` and `pkg-config`):
 
 ```sh
 git clone https://github.com/tylerstyle/matrix-rat && cd matrix-rat

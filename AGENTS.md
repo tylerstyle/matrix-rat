@@ -1,6 +1,6 @@
 # AGENTS.md — `matrix-rat`
 
-`matrix-rat` is a mouse-friendly, keyboard-first, themeable Matrix terminal client (Ratatui + `matrix-sdk`, Rust 2024 edition, MSRV 1.96, Apache-2.0). It also provides an agent daemon (`matrix-rat serve`) and per-room MCP server (`matrix-rat mcp`).
+`matrix-rat` is a mouse-friendly, keyboard-first, themeable Matrix terminal client (Ratatui + `matrix-sdk`, Rust 2024 edition, MSRV 1.99, Apache-2.0). It also provides an agent daemon (`matrix-rat serve`) and per-room MCP server (`matrix-rat mcp`).
 
 ## Structure
 - `src/` — Rust TUI, Matrix client, audio/media, and `src/agent/` (`serve`, `mcp`, `send`/`read`/`listen`)

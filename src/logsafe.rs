@@ -381,6 +381,38 @@ mod tests {
     }
 
     #[test]
+    fn a_file_watch_error_keeps_its_kind_and_loses_its_paths_and_words() {
+        let folder = std::path::PathBuf::from("/home/alice/.config/matrix-rat/themes");
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "/home/alice");
+        for (err, expected) in [
+            (
+                notify::Error::path_not_found(),
+                Why::Io(std::io::ErrorKind::NotFound),
+            ),
+            (
+                notify::Error::io(denied),
+                Why::Io(std::io::ErrorKind::PermissionDenied),
+            ),
+            (
+                notify::Error::new(notify::ErrorKind::MaxFilesWatch),
+                Why::Word("too many watched files"),
+            ),
+            (
+                notify::Error::generic("cannot watch /home/alice"),
+                Why::Word("file watch"),
+            ),
+            (notify::Error::watch_not_found(), Why::Word("file watch")),
+        ] {
+            let err = anyhow::Error::from(err.add_path(folder.clone()))
+                .context("could not watch /home/alice/.config/matrix-rat");
+            let why = kind_any(&err);
+            assert_eq!(why, expected);
+            let text = shown(why);
+            assert!(!text.contains("alice"), "{text}");
+        }
+    }
+
+    #[test]
     fn a_chain_keeps_what_it_recognises_and_loses_its_context() {
         let err = std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,

@@ -18,10 +18,6 @@ updates:
       prefix: "Dependencies"
     ignore:
       - dependency-name: "matrix-sdk*"
-      # crossterm 0.29 still uses signal-hook 0.3: a 0.4 of ours would build a second copy
-      # for the one call we make (Ctrl-Z). Lift this when crossterm moves to 0.4.
-      - dependency-name: "signal-hook"
-        update-types: ["version-update:semver-major"]
     groups:
       compatible:
         update-types: [minor, patch]
