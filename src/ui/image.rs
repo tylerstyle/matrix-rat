@@ -3,9 +3,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+#[cfg(not(target_family = "wasm"))]
+use ratatui::style::Color;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear};
+#[cfg(not(target_family = "wasm"))]
 use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
 
 use super::hit::HitId;
@@ -188,6 +191,7 @@ pub fn avatar_tile(theme: &Theme, color_key: &str, name: &str) -> Span<'static> 
 
 /// Puts an encoded picture into the frame, leaving out the first `skip` rows and
 /// whatever does not fit into `area`.
+#[cfg(not(target_family = "wasm"))]
 fn render(frame: &mut Frame, theme: &Theme, encoded: &Encoded, area: Rect, skip: u16) {
     let position = SignedPosition {
         x: 0,
@@ -213,6 +217,12 @@ fn render(frame: &mut Frame, theme: &Theme, encoded: &Encoded, area: Rect, skip:
             }
         }
     }
+}
+
+/// The browser has no encoded pictures (see `images::store::SlicedProtocol`).
+#[cfg(target_family = "wasm")]
+fn render(_frame: &mut Frame, _theme: &Theme, encoded: &Encoded, _area: Rect, _skip: u16) {
+    match encoded.protocol {}
 }
 
 /// A frame the size of the picture, with its name in the middle.

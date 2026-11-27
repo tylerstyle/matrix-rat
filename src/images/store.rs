@@ -8,12 +8,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use image::DynamicImage;
+#[cfg(not(target_family = "wasm"))]
+use image::RgbaImage;
+#[cfg(not(target_family = "wasm"))]
 use image::imageops::FilterType;
-use image::{DynamicImage, RgbaImage};
+#[cfg(not(target_family = "wasm"))]
 use ratatui::layout::Size;
+#[cfg(not(target_family = "wasm"))]
 use ratatui_image::protocol::halfblocks::Halfblocks;
+#[cfg(not(target_family = "wasm"))]
 use ratatui_image::protocol::kitty::Kitty;
+#[cfg(not(target_family = "wasm"))]
 use ratatui_image::sliced::SlicedProtocol;
+#[cfg(not(target_family = "wasm"))]
 use ratatui_image::{FontSize, Resize};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -53,6 +61,12 @@ const COMPRESS_ABOVE: u32 = 512 * 512;
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// What the terminal is sent for a picture. The browser draws no picture into cells
+/// yet (phase 4 does): there it has no value, so no [`Encoded`] is ever made, and every
+/// picture keeps its placeholder.
+#[cfg(target_family = "wasm")]
+pub enum SlicedProtocol {}
+
 /// A picture turned into what the terminal draws, for one size in cells.
 pub struct Encoded {
     pub size: (u16, u16),
@@ -70,6 +84,7 @@ pub struct Encoded {
 
 /// Turns pixels into what the terminal draws. `None` if pictures are off or the
 /// encoding failed.
+#[cfg(not(target_family = "wasm"))]
 fn encode(
     pixels: &DynamicImage,
     size: (u16, u16),
@@ -112,6 +127,7 @@ fn encode(
 /// A room picture for `cells`, whichever size it is drawn at: cut to the shape of
 /// those cells around its middle, so that it fills them without being squeezed.
 /// `None` if pictures are not sent to the terminal, or for no cells at all.
+#[cfg(not(target_family = "wasm"))]
 fn encode_avatar(
     pixels: &DynamicImage,
     graphics: Graphics,
@@ -149,6 +165,7 @@ fn encode_avatar(
 }
 
 /// The largest part of a picture of `source` pixels that has the shape of `target`.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn cover_crop(source: (u32, u32), target: (u32, u32)) -> (u32, u32) {
     let (width, height) = (u64::from(source.0.max(1)), u64::from(source.1.max(1)));
     let (target_width, target_height) = (u64::from(target.0.max(1)), u64::from(target.1.max(1)));
@@ -169,6 +186,7 @@ fn cover_crop(source: (u32, u32), target: (u32, u32)) -> (u32, u32) {
 /// A custom emoji for its cells: scaled to fit them, proportions kept, in the middle of
 /// a transparent box of exactly their size. Nothing is cut off: a wide emoji is still
 /// the whole emoji.
+#[cfg(not(target_family = "wasm"))]
 fn encode_emote(
     pixels: &DynamicImage,
     graphics: Graphics,
@@ -202,6 +220,37 @@ fn encode_emote(
         bytes,
         drawn: 0,
     })
+}
+
+/// The browser encodes nothing (see [`SlicedProtocol`]).
+#[cfg(target_family = "wasm")]
+fn encode(
+    _pixels: &DynamicImage,
+    _size: (u16, u16),
+    _graphics: Graphics,
+    _kitty_id: u32,
+) -> Option<Encoded> {
+    None
+}
+
+#[cfg(target_family = "wasm")]
+fn encode_avatar(
+    _pixels: &DynamicImage,
+    _graphics: Graphics,
+    _kitty_id: u32,
+    _cells: (u16, u16),
+) -> Option<Encoded> {
+    None
+}
+
+#[cfg(target_family = "wasm")]
+fn encode_emote(
+    _pixels: &DynamicImage,
+    _graphics: Graphics,
+    _kitty_id: u32,
+    _cells: (u16, u16),
+) -> Option<Encoded> {
+    None
 }
 
 enum State {
@@ -653,6 +702,13 @@ impl ImageStore {
     /// It is made for each size it is drawn at, and kept for each: the room list draws
     /// it four cells by two with room previews on, everything else two by one, and the
     /// two are on screen together or take turns in a narrow window.
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            unreachable_code,
+            reason = "the browser's Encoded is never made (SlicedProtocol), so nothing gets past taking one out"
+        )
+    )]
     pub fn avatar(&mut self, url: &str, cells: (u16, u16), covered: bool) -> Option<&mut Encoded> {
         if !self.is_kitty() {
             return None;
@@ -1149,6 +1205,13 @@ impl ImageStore {
 
     /// [`ImageStore::settle`] for the one of a small picture's encodings that is made
     /// for `cells`.
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            unreachable_code,
+            reason = "the browser's Encoded is never made (SlicedProtocol), so nothing gets past taking one out"
+        )
+    )]
     fn settle_one(
         garbage: &mut Vec<u32>,
         encoded: &mut Vec<Encoded>,
