@@ -987,6 +987,8 @@ async fn await_own_signature(client: &Client, refresh: &Notify) {
             Ok(Some(device)) if device.is_cross_signed_by_owner()
         );
         if signed && has_signing_keys(client).await {
+            // The status shows both at once, now.
+            refresh.notify_one();
             return;
         }
         if !signed && delay <= 8 {
