@@ -80,6 +80,9 @@ mod tests {
             tracing::info!(target: "matrix_sdk::latest_events", "sdk note");
             tracing::info!(target: "matrix_rat::logging", "own note");
             tracing::warn!(target: "matrix_rat::matrix", "own warning");
+            // `main.rs` logs under the crate's bare name; the panic hook at error.
+            tracing::info!(target: "matrix_rat", "start note");
+            tracing::error!(target: "matrix_rat::shell::terminal", "own panic");
             tracing::debug!(target: "matrix_rat::matrix", "own detail");
         });
         let log = String::from_utf8(written.0.lock().expect("not poisoned").clone())
@@ -98,7 +101,7 @@ mod tests {
         ] {
             assert!(!log.contains(gone), "{gone} was logged");
         }
-        for kept in ["own note", "own warning"] {
+        for kept in ["own note", "own warning", "start note", "own panic"] {
             assert!(log.contains(kept), "{kept} was not logged");
         }
     }
