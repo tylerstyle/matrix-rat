@@ -166,7 +166,7 @@ impl AttachState {
     }
 
     /// A send was handed to the worker and not answered yet.
-    pub fn sends_out(&self) -> bool {
+    pub(crate) fn sends_out(&self) -> bool {
         !self.handed.is_empty()
     }
 
@@ -176,6 +176,7 @@ impl AttachState {
     }
 
     /// A recording joins the files waiting in `scope`.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub(super) fn add_voice(&mut self, scope: Scope, voice: super::voice::VoiceNote, size: u64) {
         self.pending.entry(scope).or_default().push(Chosen {
             path: voice.path().to_owned(),
@@ -187,13 +188,19 @@ impl AttachState {
 }
 
 impl App {
+    /// A send was handed to the worker and not answered yet: at the end, the shell
+    /// gives the worker longer to finish.
+    pub fn sends_out(&self) -> bool {
+        self.attach.sends_out()
+    }
+
     /// The files waiting to be sent to the open room.
-    pub fn attachments(&self) -> &[Chosen] {
+    pub(crate) fn attachments(&self) -> &[Chosen] {
         self.attach.files(self.attach_scope().as_ref())
     }
 
     /// The conversation files are attached to right now: the open thread, else the room.
-    pub fn attach_scope(&self) -> Option<Scope> {
+    pub(crate) fn attach_scope(&self) -> Option<Scope> {
         let room = self.room()?;
         Some((room.id.clone(), self.thread_key().map(str::to_owned)))
     }
@@ -332,6 +339,7 @@ impl App {
 
     /// Puts back the draft that `/upload` set aside for `scope` (or clears `/upload `),
     /// whether that conversation is still open or waiting in the background.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub(super) fn restore_draft_for(&mut self, scope: &Scope) {
         if self.attach_scope().as_ref() == Some(scope) {
             if upload::command_argument(self.composer.text()).is_some() {

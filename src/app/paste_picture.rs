@@ -10,7 +10,10 @@
 
 use super::App;
 use crate::action::Pane;
-use crate::clipboard::{Done, Failure, Request, Tool};
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::clipboard::Done;
+use crate::clipboard::{Failure, Request, Tool};
+#[cfg(any(not(target_family = "wasm"), test))]
 use crate::upload;
 
 impl App {
@@ -47,14 +50,16 @@ impl App {
     }
 
     /// What the run loop is to read, once.
-    pub fn take_paste_request(&mut self) -> Option<Request> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_paste_request(&mut self) -> Option<Request> {
         self.attach.paste_request.take()
     }
 
     /// The clipboard was read: the picture is attached to the conversation it was asked
     /// for, as a file picked by hand would be, or a toast says why not. An answer to a
     /// reading that was given up (by a logout) is dropped, and its file with it.
-    pub fn finish_paste(&mut self, done: Done) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn finish_paste(&mut self, done: Done) {
         self.dirty = true;
         let Some((_, scope)) = self.attach.reading.take_if(|(id, _)| *id == done.id) else {
             return;

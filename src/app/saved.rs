@@ -82,7 +82,7 @@ impl App {
     /// Called when a session is up, not before: whose list the file holds is not
     /// known until then, and nothing of it is shown or comes due. The demo keeps
     /// its list in memory.
-    pub fn load_saved(&mut self, owner: &str) {
+    pub(crate) fn load_saved(&mut self, owner: &str) {
         let now = self.bookmarks.clock.now_secs();
         // A small file of the profile, read on the interface thread once per login:
         // a few kilobytes, at most `MAX_FILE_BYTES`.
@@ -113,14 +113,14 @@ impl App {
     }
 
     /// How many reminders are due and not gone to yet, for the status line.
-    pub fn reminders_due(&self) -> usize {
+    pub(crate) fn reminders_due(&self) -> usize {
         self.bookmarks
             .store
             .due(self.bookmarks.clock.now_secs())
             .count()
     }
 
-    pub fn saved_room_label(&self, room_id: &str) -> RoomLabel {
+    pub(crate) fn saved_room_label(&self, room_id: &str) -> RoomLabel {
         match self.rooms.iter().find(|room| room.id == room_id) {
             Some(room) => RoomLabel::Name(room.name.clone()),
             None if self.matrix.is_some() && !self.rooms_received => RoomLabel::Unknown,

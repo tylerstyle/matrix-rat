@@ -21,9 +21,9 @@ use super::App;
 use super::attach::Scope;
 use crate::action::Action;
 use crate::audio::recorder::{NoRecorder, Recorder};
-use crate::audio::{
-    self, Control, End, NoPlayer, Player, PlayerEvent, PlayerUpdate, Reported, TempAudio,
-};
+use crate::audio::{self, Control, NoPlayer, Player, Reported, TempAudio};
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::audio::{End, PlayerEvent, PlayerUpdate};
 use crate::images::human_size;
 use crate::keymap::Context;
 use crate::matrix::MatrixCmd;
@@ -303,12 +303,14 @@ impl Sound {
 impl App {
     /// Where the copies of sounds go (the event loop has swept away what an earlier
     /// run left there).
-    pub fn set_audio_dir(&mut self, dir: PathBuf) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn set_audio_dir(&mut self, dir: PathBuf) {
         self.audio.dir = Some(dir);
     }
 
     /// A player for the event loop to start.
-    pub fn take_audio_start(&mut self) -> Option<audio::Request> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_audio_start(&mut self) -> Option<audio::Request> {
         self.audio.start.take()
     }
 
@@ -318,7 +320,7 @@ impl App {
         crate::doctor::Audio::from_choice(&self.audio.player)
     }
 
-    pub fn audio_caps(&self) -> AudioCaps {
+    pub(crate) fn audio_caps(&self) -> AudioCaps {
         let room_id = self.room_id();
         let selected = self
             .timeline
@@ -341,7 +343,7 @@ impl App {
     }
 
     /// The message of `room` that the sound belongs to, and what it shows there.
-    pub fn audio_in(&self, room: &Room) -> Option<(usize, AudioView)> {
+    pub(crate) fn audio_in(&self, room: &Room) -> Option<(usize, AudioView)> {
         let sound = self
             .audio
             .current
@@ -577,7 +579,7 @@ impl App {
     }
 
     /// Stops what plays, or gives up its download; nothing if nothing plays.
-    pub fn stop_audio(&mut self) {
+    pub(crate) fn stop_audio(&mut self) {
         // A player not started yet: its file goes with it.
         self.audio.start = None;
         let Some(sound) = self.audio.current.take() else {
@@ -664,7 +666,8 @@ impl App {
         });
     }
 
-    pub fn on_audio(&mut self, update: PlayerUpdate) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_audio(&mut self, update: PlayerUpdate) {
         let Some(Sound {
             phase: Phase::Playing(playing),
             ..

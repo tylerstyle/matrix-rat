@@ -45,6 +45,7 @@ impl Threads {
 
     /// Replaces a waiting thread draft with `replacement()` if it still holds `/upload`,
     /// removing the entry when that leaves it empty.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub(super) fn replace_draft_if_upload(
         &mut self,
         room_id: &str,
@@ -185,7 +186,7 @@ impl ThreadView {
 
 impl App {
     /// Whether the messages pane shows a thread.
-    pub fn thread_open(&self) -> bool {
+    pub(crate) fn thread_open(&self) -> bool {
         self.threads.open.is_some()
     }
 

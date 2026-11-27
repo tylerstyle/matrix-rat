@@ -11,7 +11,7 @@ use crate::action::Pane;
 
 impl App {
     /// The rooms with new notifications, the newest first, without the open one.
-    pub fn active_rooms(&self) -> Vec<usize> {
+    pub(crate) fn active_rooms(&self) -> Vec<usize> {
         let open = self.open_index();
         self.rooms
             .iter()

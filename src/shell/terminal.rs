@@ -499,15 +499,15 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         initial_scheme,
     );
     // As the terminal answered before the event stream existed: never asked again.
-    app.found.keyboard_enhanced = Some(guard.keyboard_enhanced());
+    app.set_keyboard_enhanced(guard.keyboard_enhanced());
     // The demo is for looking around: what is changed there is not written into the
     // real configuration.
     if !demo {
-        app.config_stored = true;
+        app.set_config_stored(true);
         // Read when a session is up: whose list it is must be known first.
-        app.bookmarks.stored = true;
+        app.set_saved_stored(true);
     }
-    app.startup_target = target;
+    app.set_startup_target(target);
     // Copies of sounds and mpv's sockets; what an earlier run left there goes now.
     crate::audio::remove_leftovers(&paths.audio_dir());
     app.set_audio_dir(paths.audio_dir());
@@ -554,7 +554,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // then. Returned at once, it dropped the runtime under the worker, whose store
     // write in flight was cancelled; matrix-sdk-sqlite panics over that.
     let outcome = async {
-        while !app.should_quit {
+        while !app.should_quit() {
             // What the app asked of the desktop, as soon as it asked.
             carry_out(app.take_os_requests(), &notify_icons);
             if app.suspend_requested {
@@ -572,7 +572,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 suspend(&mut terminal)?;
                 // The shell's title was put back meanwhile.
                 app.window_title_lost();
-                app.dirty = true;
+                app.mark_dirty();
             }
             if let Some(request) = app.take_editor_request() {
                 // A running recording was told to stop when the editor was requested; wait
@@ -654,15 +654,15 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 summaries.spawn(crate::catchup::run(request, summary_news.clone()));
             }
             while summaries.try_join_next().is_some() {}
-            set_mouse(app.mouse)?;
-            set_window_title(app.window_title)?;
-            if std::mem::take(&mut app.repaint) {
+            set_mouse(app.mouse_on())?;
+            set_window_title(app.window_title_on())?;
+            if app.take_repaint() {
                 // As after a resize: pictures are sent again with the fresh screen.
                 app.images.forget_encoded();
                 clear(&mut terminal)?;
-                app.dirty = true;
+                app.mark_dirty();
             }
-            if let Some(text) = app.pending_copy.take() {
+            if let Some(text) = app.take_pending_copy() {
                 copy_to_clipboard(&text)?;
             }
             let ready = app.take_notices_with_icons();
@@ -689,8 +689,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                     Some(&notice_clicks),
                 );
             }
-            if app.dirty {
-                app.dirty = false;
+            if app.take_dirty() {
                 terminal.draw(|frame| ui::draw(frame, &mut app))?;
                 app.after_draw();
                 flush_images(&mut app, false);
@@ -725,9 +724,9 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 _ = wait_deadline(app.user_search_debounce_deadline()) => app.tick_user_search(),
                 _ = wait_deadline(app.dir_search_debounce_deadline()) => app.tick_dir_search(),
                 _ = tick.tick() => app.on_tick(),
-                _ = tokio::signal::ctrl_c() => app.should_quit = true,
-                _ = sigterm.recv() => app.should_quit = true,
-                _ = sighup.recv() => app.should_quit = true,
+                _ = tokio::signal::ctrl_c() => app.quit(),
+                _ = sigterm.recv() => app.quit(),
+                _ = sighup.recv() => app.quit(),
             }
         }
         Ok::<(), anyhow::Error>(())
@@ -755,7 +754,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     // syncing cleanly, while `app` stays alive so temporary voice and picture files
     // stay on disk until the worker has read them.
     if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
-        let wait = if app.attach.sends_out() {
+        let wait = if app.sends_out() {
             Duration::from_secs(7)
         } else {
             Duration::from_secs(3)

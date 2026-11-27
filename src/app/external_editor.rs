@@ -10,7 +10,9 @@
 
 use super::App;
 use crate::action::Pane;
-use crate::editor::{Failure, Outcome, Request};
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::editor::Outcome;
+use crate::editor::{Failure, Request};
 
 impl App {
     /// `Action::ComposeInEditor`.
@@ -39,13 +41,15 @@ impl App {
     }
 
     /// What the run loop is to start, once.
-    pub fn take_editor_request(&mut self) -> Option<Request> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_editor_request(&mut self) -> Option<Request> {
         self.editor_request.take()
     }
 
     /// The editor is done: its text goes into the composer (not sent), or the draft stays
     /// as it was and a toast says why.
-    pub fn finish_editor(&mut self, outcome: Outcome) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn finish_editor(&mut self, outcome: Outcome) {
         self.dirty = true;
         match outcome {
             Outcome::Failed(failure) => self.show_toast(failure.message()),

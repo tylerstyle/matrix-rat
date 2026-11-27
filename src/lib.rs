@@ -8,7 +8,7 @@
 #![warn(clippy::wildcard_enum_match_arm)]
 #![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
 // Public are only the names the command line uses (`cli`) and what a shell drives
-// (`core`); the documentation is read with `cargo doc --document-private-items`, where
+// (`engine`); the documentation is read with `cargo doc --document-private-items`, where
 // their links to the crate's own items lead somewhere, as they did when the binary was
 // the crate.
 #![allow(rustdoc::private_intra_doc_links)]
@@ -16,8 +16,8 @@
 //!
 //! The client itself: the app, the Matrix worker, the terminal shell, `serve` and the
 //! clients of its socket. The `matrix-rat` command (`src/main.rs`) reads the command line
-//! and calls what [`cli`] makes public; a shell drives what [`core`] makes public; every
-//! module stays the crate's own.
+//! and calls what [`cli`] makes public; a shell drives what [`engine`] makes public;
+//! every module stays the crate's own.
 
 mod action;
 mod app;
@@ -91,20 +91,29 @@ mod runtime;
 #[cfg(not(target_family = "wasm"))]
 mod watch;
 
-/// What a shell drives, in the browser as in the terminal: the app and the effects it
-/// asks for, the drawing, input, the Matrix worker, and the seams for what is kept and
-/// what the system has. The terminal's shell (`shell::terminal`) uses these items under
-/// their paths in the crate; the browser's (phase 2 of the web app) is to use only these.
-pub mod core {
-    pub use crate::app::{App, OsRequest};
+/// What a shell outside this crate drives (the web app's shell in phase 2); the terminal
+/// shell inside the crate (`shell::terminal`) uses the same items. The app is made with
+/// [`App::new_in_scheme`](engine::App::new_in_scheme) from a [`Config`](engine::Config),
+/// a [`Storage`](engine::Storage) of the shell's, the [`Probes`](engine::Probes) (in
+/// the browser [`NothingHere`](engine::NothingHere): nothing there to run) and the
+/// Matrix worker; the shell sets what it decides at start, hands the app its input and
+/// the worker's events, draws it with [`draw`](engine::draw), and carries out what it
+/// asks: [`OsRequest`](engine::OsRequest)s, the notices
+/// ([`ReadyNotices`](engine::ReadyNotices)), the window title, the text to copy.
+/// `App`'s `pub` methods are exactly that; what only the terminal can carry out
+/// (players, recorders, programs, the editor, the clipboard's tools, the pictures'
+/// escape codes) stays the crate's.
+pub mod engine {
+    pub use crate::app::{App, OsRequest, ReadyNotices};
     pub use crate::config::Config;
     pub use crate::input::{
         InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MediaKeyCode, ModifierKeyCode,
         MouseButton, MouseEvent, MouseEventKind,
     };
-    pub use crate::matrix::{MatrixEvent, MatrixHandle, SecretStoreMode, spawn_with};
+    pub use crate::matrix::{MatrixEvent, MatrixHandle, Notice, SecretStoreMode, spawn_with};
+    pub use crate::notify::{DueReminder, NotifyIcon, NotifyMode};
     pub use crate::paths::Paths;
-    pub use crate::probes::Probes;
+    pub use crate::probes::{NothingHere, Probes};
     // The app's clock, and the timers its shell waits with: a tick for
     // `App::on_tick`, and the debounce deadlines it gives (`App::search_debounce_deadline`).
     pub use crate::rt::{MissedTickBehavior, interval, sleep_until};

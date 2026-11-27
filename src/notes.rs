@@ -27,10 +27,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::{Key, Removal, Storage};
-use crate::textcmd::{Command, Failure, MAX_OUTPUT, Step};
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::textcmd::Failure;
+use crate::textcmd::{Command, MAX_OUTPUT, Step};
 
 #[cfg(test)]
-pub use find::{transcriber, translator};
+pub use find::translator;
 #[cfg(not(target_family = "wasm"))]
 pub use find::{transcriber_here, translator_here};
 
@@ -395,6 +397,7 @@ pub fn clean(output: &str, one_paragraph: bool) -> String {
 
 /// What a note says of a run that brought no text; `None` where it was given up (the
 /// note goes).
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn failure_text(failure: Failure) -> Option<String> {
     match failure {
         Failure::Start => Some("the program could not be started".to_owned()),

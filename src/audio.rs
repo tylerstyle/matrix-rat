@@ -344,6 +344,7 @@ pub enum Control {
 
 /// How a player ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum End {
     /// By itself, after playing.
     Finished,
@@ -364,6 +365,7 @@ pub struct Reported {
 
 /// What the app hears of a player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum PlayerEvent {
     /// mpv answers on its control socket: the position is its own, pause and seek work.
     Controllable,
@@ -375,12 +377,20 @@ pub enum PlayerEvent {
 /// A [`PlayerEvent`] for the sound with this number. Nothing in it names a room, a
 /// message or a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct PlayerUpdate {
     pub id: u64,
     pub event: PlayerEvent,
 }
 
 /// A sound to play.
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "read by the terminal's player only: the browser plays nothing before phase 2"
+    )
+)]
 pub struct Request {
     /// The app's number for it, carried by every answer.
     pub id: u64,

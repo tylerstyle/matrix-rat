@@ -1259,6 +1259,7 @@ impl ImageStore {
 
     /// Escape sequences that make the terminal free the pictures no longer needed
     /// (`all`: every picture, when quitting). Empty unless the kitty protocol is used.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub fn cleanup_sequence(&mut self, all: bool) -> String {
         if all {
             self.forget_encoded();

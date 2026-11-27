@@ -9,7 +9,7 @@ use crate::previews::Raw;
 
 impl App {
     /// There is a worker to ask (the demo has none).
-    pub fn can_fetch_previews(&self) -> bool {
+    pub(crate) fn can_fetch_previews(&self) -> bool {
         self.matrix.is_some()
     }
 

@@ -16,10 +16,12 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::App;
 use super::attach::Scope;
-use crate::action::{Action, Pane};
-use crate::audio::record::{
-    Failure, Limits, RecordControl, RecordEvent, RecordRequest, RecordUpdate, Recording,
-};
+use crate::action::Action;
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::action::Pane;
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::audio::record::{Failure, RecordEvent, RecordUpdate, Recording};
+use crate::audio::record::{Limits, RecordControl, RecordRequest};
 use crate::audio::{self, TempAudio, recorder};
 use crate::keymap::Context;
 use crate::matrix::VoiceMeta;
@@ -32,6 +34,7 @@ use crate::ui::Mic;
 const HOLD: Duration = Duration::from_millis(400);
 /// What a recording is called among the waiting files; the room sees another, fixed
 /// name (the worker's).
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const VOICE_NAME: &str = "Voice message";
 
 /// The recording that runs.
@@ -62,6 +65,13 @@ impl fmt::Debug for Take {
 pub enum TakePhase {
     /// The programs were started; no sound has arrived.
     Starting,
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "set when the terminal's recorder reports: the browser records nothing before phase 2"
+        )
+    )]
     Running,
     /// Told to end: the encoder finishes, the file is written.
     Saving,
@@ -114,6 +124,7 @@ impl VoiceNote {
 }
 
 /// Why there is no recording, in the user's words.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn failure_text(failure: Failure) -> &'static str {
     match failure {
         Failure::Start => "The recorder could not be started",
@@ -246,7 +257,8 @@ impl App {
     }
 
     /// A recording for the event loop to start.
-    pub fn take_record_start(&mut self) -> Option<RecordRequest> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_record_start(&mut self) -> Option<RecordRequest> {
         self.audio.record_start.take()
     }
 
@@ -412,7 +424,7 @@ impl App {
     }
 
     /// Ends the recording and keeps nothing, at any moment of it. False if none ran.
-    pub fn cancel_recording(&mut self) -> bool {
+    pub(crate) fn cancel_recording(&mut self) -> bool {
         // Not started yet: it never is.
         self.audio.record_start = None;
         let Some(take) = self.audio.take.take() else {
@@ -435,7 +447,8 @@ impl App {
         }
     }
 
-    pub fn on_recording(&mut self, update: RecordUpdate) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_recording(&mut self, update: RecordUpdate) {
         // Of a recording given up meanwhile: a file that came with it goes with it.
         if self
             .audio
@@ -476,6 +489,7 @@ impl App {
     /// A finished recording joins the files waiting in the conversation it was begun
     /// in, also when that is not the open one any more. Where that conversation's room
     /// is gone, or the session, it is dropped, and its file with it.
+    #[cfg(any(not(target_family = "wasm"), test))]
     fn keep_recording(&mut self, scope: Scope, recording: Recording) {
         if self.logged_out || !self.rooms.iter().any(|room| room.id == scope.0) {
             return;

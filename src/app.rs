@@ -252,24 +252,24 @@ pub struct ReadyNotices {
 }
 
 pub struct App {
-    pub rooms: Vec<Room>,
-    pub active: usize,
-    pub focus: Pane,
-    pub sidebar: SidebarState,
-    pub timeline: TimelineState,
-    pub composer: Composer,
-    pub compose_mode: ComposeMode,
-    pub composer_view: ComposerView,
-    pub help_open: bool,
+    pub(crate) rooms: Vec<Room>,
+    pub(crate) active: usize,
+    pub(crate) focus: Pane,
+    pub(crate) sidebar: SidebarState,
+    pub(crate) timeline: TimelineState,
+    pub(crate) composer: Composer,
+    pub(crate) compose_mode: ComposeMode,
+    pub(crate) composer_view: ComposerView,
+    pub(crate) help_open: bool,
     /// Lines the help is scrolled down by, where it does not fit the window.
-    pub help_scroll: usize,
+    pub(crate) help_scroll: usize,
     /// A popup that takes all input while it is open.
-    pub modal: Option<Modal>,
+    pub(crate) modal: Option<Modal>,
     /// `None` in demo mode.
     matrix: Option<MatrixHandle>,
-    pub sync: Option<SyncStatus>,
-    pub user_id: Option<String>,
-    pub own_profile: Option<crate::matrix::OwnProfile>,
+    pub(crate) sync: Option<SyncStatus>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) own_profile: Option<crate::matrix::OwnProfile>,
     user_info_requests: u64,
     recovery_prompted: bool,
     /// Counts timeline requests; see `request_timeline`.
@@ -284,10 +284,10 @@ pub struct App {
     chat_closed: bool,
     /// The `esc_closes_chat` setting: `Esc` in the composer, with nothing left to
     /// cancel, closes the chat.
-    pub esc_closes_chat: bool,
+    pub(crate) esc_closes_chat: bool,
     /// The `rooms_bar` setting: with the room list out of sight, a line above the
     /// chat that leads back to it and shows the rooms with new notifications.
-    pub rooms_bar: bool,
+    pub(crate) rooms_bar: bool,
     /// The room the "newest room with notifications" key opened last, while it is
     /// still the open one: the key goes on from there (see `open_active_room`).
     active_from: Option<String>,
@@ -297,26 +297,26 @@ pub struct App {
     edit_stash: Option<String>,
     /// When we last told the room we are typing, if we did.
     typing_sent: Option<Instant>,
-    pub typing_notices: bool,
-    pub read_receipts: bool,
+    pub(crate) typing_notices: bool,
+    pub(crate) read_receipts: bool,
     /// No notifications for now, whatever the mode says.
-    pub do_not_disturb: bool,
+    pub(crate) do_not_disturb: bool,
     /// The `window_title` setting: the unread count in the terminal's title (see
     /// `title`); the event loop applies changes to the terminal.
-    pub window_title: bool,
+    pub(crate) window_title: bool,
     /// The title as last written; `None` before the first and after the terminal was
     /// handed back.
     title_written: Option<String>,
     /// What the app learned about where it runs, for the doctor's report.
     pub(crate) found: doctor::Found,
     /// Show who has read up to where (the `read_markers` setting).
-    pub read_markers: bool,
+    pub(crate) read_markers: bool,
     /// Whether clicks go to the app; the event loop applies changes to the terminal.
-    pub mouse: bool,
+    pub(crate) mouse: bool,
     /// Text on its way to the system clipboard; the event loop sends it.
-    pub pending_copy: Option<String>,
+    pub(crate) pending_copy: Option<String>,
     /// How notifications are shown, and the mode to return to when switched back on.
-    pub notify_mode: crate::notify::NotifyMode,
+    pub(crate) notify_mode: crate::notify::NotifyMode,
     notify_mode_on: crate::notify::NotifyMode,
     /// What `auto` notifications are here, as the probes said at start: the desktop's
     /// or the terminal's.
@@ -327,14 +327,14 @@ pub struct App {
     count_notices: Vec<(Instant, crate::matrix::Notice)>,
     detailed_notices: std::collections::HashMap<String, Instant>,
     /// Two lines per room in the room list, the second with the latest message.
-    pub room_previews: bool,
+    pub(crate) room_previews: bool,
     /// For which rooms the homeserver is asked to preview links (off by default).
-    pub link_previews: crate::config::LinkPreviews,
+    pub(crate) link_previews: crate::config::LinkPreviews,
     /// What the homeserver said about the links on screen.
-    pub previews: crate::previews::PreviewStore,
+    pub(crate) previews: crate::previews::PreviewStore,
     /// The user's spaces, and the one the room list is narrowed to (by id).
-    pub spaces: Vec<crate::matrix::SpaceSummary>,
-    pub space: Option<String>,
+    pub(crate) spaces: Vec<crate::matrix::SpaceSummary>,
+    pub(crate) space: Option<String>,
     /// Its position in `spaces`.
     space_at: Option<usize>,
     /// Rooms of the selected space, sub-spaces included.
@@ -343,13 +343,13 @@ pub struct App {
     shown_notices: Vec<(Instant, String)>,
     /// Ask the event loop to draw the whole screen afresh instead of only what
     /// changed, after the content of a pane was swapped wholesale.
-    pub repaint: bool,
+    pub(crate) repaint: bool,
     /// Between a logout (or expiry) and the next login.
     logged_out: bool,
     /// When this session's login was confirmed.
     session_started: Option<Instant>,
     /// Notifications on their way out; the event loop shows them.
-    pub pending_notices: Vec<crate::matrix::Notice>,
+    pub(crate) pending_notices: Vec<crate::matrix::Notice>,
     /// The `download_dir` setting; empty means the desktop's download folder.
     download_dir: String,
     /// The `notification_click_command` setting (see `focus`). `None` where no
@@ -363,7 +363,7 @@ pub struct App {
     confirm_large: Option<String>,
     /// Current colour scheme (`Dark` or `Light`), resolved at startup (portal, terminal
     /// query, `COLORFGBG`) and updated live via the desktop portal.
-    pub color_scheme: ColorScheme,
+    pub(crate) color_scheme: ColorScheme,
     /// Base `theme` setting from config (used when unpaired, or as fallback for an
     /// unset slot).
     base_theme: String,
@@ -383,43 +383,43 @@ pub struct App {
     config_theme_dark: Option<String>,
     config_theme_light: Option<String>,
     /// Bumped whenever a theme is loaded.
-    pub theme_rev: u64,
+    pub(crate) theme_rev: u64,
     /// Bumped whenever the open room's messages change, to invalidate `row_cache`.
-    pub timeline_rev: u64,
-    pub row_cache: Option<crate::ui::RowCache>,
+    pub(crate) timeline_rev: u64,
+    pub(crate) row_cache: Option<crate::ui::RowCache>,
     /// Encryption status and device verification.
-    pub verify: crate::verify::VerifyState,
-    pub theme: Theme,
+    pub(crate) verify: crate::verify::VerifyState,
+    pub(crate) theme: Theme,
     theme_names: Vec<String>,
     truecolor: bool,
     /// The user asked for no colours (`NO_COLOR`): every theme is shown without them.
     no_color: bool,
-    pub hits: HitMap,
+    pub(crate) hits: HitMap,
     dragging_splitter: bool,
-    pub toast: Option<(String, Instant)>,
-    pub toast_room: Option<(String, Instant)>,
-    pub screen: Rect,
-    pub should_quit: bool,
-    pub suspend_requested: bool,
+    pub(crate) toast: Option<(String, Instant)>,
+    pub(crate) toast_room: Option<(String, Instant)>,
+    pub(crate) screen: Rect,
+    pub(crate) should_quit: bool,
+    pub(crate) suspend_requested: bool,
     /// Set by `Action::ComposeInEditor`: the run loop hands the terminal to the editor.
-    pub editor_request: Option<crate::editor::Request>,
-    pub dirty: bool,
+    pub(crate) editor_request: Option<crate::editor::Request>,
+    pub(crate) dirty: bool,
     /// Pictures: the cache and the viewer.
-    pub images: crate::images::ImageStore,
+    pub(crate) images: crate::images::ImageStore,
     /// The thread shown in place of the room's messages, and thread drafts.
-    pub threads: thread::Threads,
+    pub(crate) threads: thread::Threads,
     /// Files waiting in the composer to be sent.
-    pub attach: attach::AttachState,
+    pub(crate) attach: attach::AttachState,
     /// What of the unsent text is in the store, to have it back after a restart.
     drafts: drafts::Drafts,
     /// The "new" line of the open room, and rooms marked as unread by hand.
     unread: unread::Unread,
     /// Composer completions and tracked mentions/room links.
-    pub complete: complete::CompleteState,
+    pub(crate) complete: complete::CompleteState,
     /// Joining, creating and leaving rooms.
     manage: rooms::ManageState,
     /// Active key bindings and preset.
-    pub keymap: Keymap,
+    pub(crate) keymap: Keymap,
     /// Monotonic counter for active/debounced global search requests.
     search_gen: u64,
     /// Cross-room / event jump waiting for worker `/context` load.
@@ -434,7 +434,7 @@ pub struct App {
     /// True once at least one `MatrixEvent::Rooms` list was received in this session.
     rooms_received: bool,
     /// Matrix user IDs currently ignored by this account (`m.ignored_user_list`).
-    pub ignored_users: std::collections::BTreeSet<String>,
+    pub(crate) ignored_users: std::collections::BTreeSet<String>,
     /// Monotonic counter for active/debounced user directory searches.
     pub(super) user_search_gen: u64,
     /// Deadline timer start for debounced user directory lookups in `NewPopup`.
@@ -444,13 +444,13 @@ pub struct App {
     /// Deadline timer start for debounced public room directory searches in `NewPopup`.
     pub(super) dir_search_debounce: Option<crate::time::Instant>,
     /// The account's sessions and the key backup, for their popups.
-    pub devices: crate::devices::DevicesState,
+    pub(crate) devices: crate::devices::DevicesState,
     /// The notification keywords popup's watch and requests (and the demo's list).
-    pub keywords: crate::keywords::KeywordsState,
+    pub(crate) keywords: crate::keywords::KeywordsState,
     /// The messages saved for later and their reminders.
-    pub bookmarks: crate::saved::SavedState,
+    pub(crate) bookmarks: crate::saved::SavedState,
     /// Custom emoji and stickers from image packs.
-    pub emotes: emotes::EmoteState,
+    pub(crate) emotes: emotes::EmoteState,
     /// Voice and audio played in here: the player, and the sound there is.
     pub(crate) audio: playback::AudioState,
     /// Transcripts and translations under messages, and the programs that make them.
@@ -564,7 +564,7 @@ pub(super) fn take_due_search_debounce(debounce: &mut Option<Instant>) -> bool {
 impl App {
     /// With `matrix` the app shows the account's rooms; without, built-in demo data.
     #[cfg(test)]
-    pub fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
+    pub(crate) fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
         let probes = Box::new(crate::probes::TestProbes::default());
         let storage = Box::new(crate::storage::FsStorage::default().with_themes(themes_dir));
         let mut app = Self::new_in_scheme(config, storage, probes, matrix, ColorScheme::Dark);
@@ -662,7 +662,7 @@ impl App {
 
     /// Demo data with fixed settings; also what the tests render.
     #[cfg(test)]
-    pub fn demo() -> Self {
+    pub(crate) fn demo() -> Self {
         let mut app = Self::with_theme(
             Theme::builtin(DEFAULT_THEME).expect("default theme"),
             Box::new(crate::probes::TestProbes::default()),
@@ -805,7 +805,7 @@ impl App {
     // ----- derived views -------------------------------------------------------------
 
     /// Rooms that pass the filter, in the order the sidebar shows them.
-    pub fn visible_rooms(&self) -> Vec<usize> {
+    pub(crate) fn visible_rooms(&self) -> Vec<usize> {
         let needle = (!self.sidebar.filter.is_empty()).then(|| self.sidebar.filter.to_lowercase());
         let open = self.open_index();
         let mut out = Vec::with_capacity(if needle.is_none() {
@@ -851,7 +851,7 @@ impl App {
         out
     }
 
-    pub fn sidebar_rows(&self) -> Vec<SideRow> {
+    pub(crate) fn sidebar_rows(&self) -> Vec<SideRow> {
         let mut rows = Vec::new();
         let mut section = None;
         for index in self.visible_rooms() {
@@ -869,7 +869,7 @@ impl App {
     }
 
     /// The room under the sidebar's keyboard cursor.
-    pub fn cursor_room(&self) -> Option<usize> {
+    pub(crate) fn cursor_room(&self) -> Option<usize> {
         let visible = self.visible_rooms();
         visible
             .get(self.sidebar.cursor.min(visible.len().saturating_sub(1)))
@@ -879,19 +879,19 @@ impl App {
     /// Where the open room is in `rooms`. `None` when there are no rooms (before the
     /// first sync) and while no chat is open. Everything that means "the open room"
     /// asks here (or `room`), never `active` itself.
-    pub fn open_index(&self) -> Option<usize> {
+    pub(crate) fn open_index(&self) -> Option<usize> {
         (!self.chat_closed && self.active < self.rooms.len()).then_some(self.active)
     }
 
     /// The open room. `None` when there are no rooms (before the first sync) and
     /// while no chat is open.
-    pub fn room(&self) -> Option<&Room> {
+    pub(crate) fn room(&self) -> Option<&Room> {
         self.open_index().and_then(|index| self.rooms.get(index))
     }
 
     /// The user closed the chat and has not opened one since: the chat area shows no
     /// room, and the room list has the focus.
-    pub fn chat_closed(&self) -> bool {
+    pub(crate) fn chat_closed(&self) -> bool {
         self.chat_closed
     }
 
@@ -917,6 +917,75 @@ impl App {
     /// What the desktop is to do, for the event loop.
     pub fn take_os_requests(&mut self) -> Vec<OsRequest> {
         std::mem::take(&mut self.os_requests)
+    }
+
+    // ----- what the shell decides at start, and what it carries out each turn -------
+
+    /// Changed settings are written to the storage, and a changed `theme` setting
+    /// there is noticed. Not in the demo, which changes nothing for good.
+    pub fn set_config_stored(&mut self, stored: bool) {
+        self.config_stored = stored;
+    }
+
+    /// The saved messages are kept in the storage, read once a session says whose
+    /// they are. Not in the demo.
+    pub fn set_saved_stored(&mut self, stored: bool) {
+        self.bookmarks.stored = stored;
+    }
+
+    /// A Matrix link or address to open once the rooms are there (the terminal's
+    /// comes from the command line).
+    pub fn set_startup_target(&mut self, target: Option<String>) {
+        self.startup_target = target;
+    }
+
+    /// Whether `Shift-Enter` is told from `Enter` here (in the terminal, its keyboard
+    /// protocol), for the doctor's report.
+    pub fn set_keyboard_enhanced(&mut self, enhanced: bool) {
+        self.found.keyboard_enhanced = Some(enhanced);
+    }
+
+    /// The app is to end: the user quit, or the shell ended it.
+    pub fn should_quit(&self) -> bool {
+        self.should_quit
+    }
+
+    /// Ends the app at the shell's next turn (a signal, a closed window).
+    pub fn quit(&mut self) {
+        self.should_quit = true;
+    }
+
+    /// Whether something changed since the last frame, cleared by asking: the shell
+    /// draws when it did.
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// The screen is to be drawn again: the shell had handed it to something else.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Whether the whole screen is to be drawn afresh, not only what changed, cleared
+    /// by asking.
+    pub fn take_repaint(&mut self) -> bool {
+        std::mem::take(&mut self.repaint)
+    }
+
+    /// Text for the system clipboard, for the shell to send.
+    pub fn take_pending_copy(&mut self) -> Option<String> {
+        self.pending_copy.take()
+    }
+
+    /// The `mouse` setting: whether clicks go to the app.
+    pub fn mouse_on(&self) -> bool {
+        self.mouse
+    }
+
+    /// The `window_title` setting: whether the window's title shows the unread count
+    /// ([`Self::take_window_title`]).
+    pub fn window_title_on(&self) -> bool {
+        self.window_title
     }
 
     /// For tests: the configuration is the file at `file`, written to as the
@@ -952,7 +1021,7 @@ impl App {
             .collect()
     }
 
-    pub fn show_toast(&mut self, text: impl Into<String>) {
+    pub(crate) fn show_toast(&mut self, text: impl Into<String>) {
         // Toasts often quote what a server or another person said.
         let text = crate::text::sanitize_line(&text.into());
         self.toast = Some((text, Instant::now()));
@@ -1196,7 +1265,7 @@ impl App {
     }
 
     /// What the settings menu shows next to a row.
-    pub fn setting_value(&self, setting: Setting) -> String {
+    pub(crate) fn setting_value(&self, setting: Setting) -> String {
         let switch = |on: bool| if on { "on" } else { "off" }.to_owned();
         match setting {
             Setting::Theme => self.wanted_theme.clone(),
@@ -1588,7 +1657,7 @@ impl App {
 
     /// Hands the waiting notifications to the event loop (test helper).
     #[cfg(test)]
-    pub fn take_notices(
+    pub(crate) fn take_notices(
         &mut self,
     ) -> (Vec<crate::matrix::Notice>, crate::notify::NotifyMode, bool) {
         (
@@ -1925,7 +1994,7 @@ impl App {
 
     /// The name of the selected space, for the room list's header. A space inside
     /// another is shown with its parent, so it is clear where it sits.
-    pub fn space_name(&self) -> Option<String> {
+    pub(crate) fn space_name(&self) -> Option<String> {
         self.space_display_name(self.space_at?)
     }
 
@@ -1962,25 +2031,25 @@ impl App {
     }
 
     /// Aggregated unread state across all non-muted rooms.
-    pub fn all_spaces_unread(&self) -> crate::model::SpaceUnread {
+    pub(crate) fn all_spaces_unread(&self) -> crate::model::SpaceUnread {
         self.aggregate_space_unread(|_| true)
     }
 
     /// Unread state for the space at `at` (sub-spaces count into their level-0 parent
     /// without internal double-counting; muted rooms excluded).
-    pub fn space_unread(&self, at: usize) -> crate::model::SpaceUnread {
+    pub(crate) fn space_unread(&self, at: usize) -> crate::model::SpaceUnread {
         let ids = self.space_room_ids(at);
         self.aggregate_space_unread(|room| ids.contains(room.id.as_str()))
     }
 
     /// Aggregated unread state for the currently selected space, if any.
-    pub fn selected_space_unread(&self) -> Option<crate::model::SpaceUnread> {
+    pub(crate) fn selected_space_unread(&self) -> Option<crate::model::SpaceUnread> {
         self.space_at.map(|at| self.space_unread(at))
     }
 
     /// Unread state for rooms in other spaces outside the currently selected space
     /// (muted rooms excluded). Empty when "All rooms" is active.
-    pub fn other_spaces_unread(&self) -> crate::model::SpaceUnread {
+    pub(crate) fn other_spaces_unread(&self) -> crate::model::SpaceUnread {
         if self.space_at.is_none() {
             return crate::model::SpaceUnread::default();
         }
@@ -1997,7 +2066,7 @@ impl App {
 
     /// Narrows the room list to the space at this position in `spaces` (`None`: all
     /// rooms). By position, not id: a space inside two others is listed twice.
-    pub fn select_space(&mut self, at: Option<usize>) {
+    pub(crate) fn select_space(&mut self, at: Option<usize>) {
         self.set_space(at);
         self.sidebar.cursor = 0;
         self.sidebar.scroll = 0;
@@ -2497,7 +2566,7 @@ impl App {
     }
 
     /// Whether the selected message is one of ours that could not be sent.
-    pub fn selected_failed(&self) -> bool {
+    pub(crate) fn selected_failed(&self) -> bool {
         self.timeline
             .selected
             .and_then(|i| self.messages().get(i))
@@ -2805,7 +2874,7 @@ impl App {
     /// The user's own latest message that can be edited, if the composer is free for
     /// it: empty, and neither answering nor editing. This is what `Action::EditLast`
     /// edits; it has no key unless the user gave it one.
-    pub fn last_editable(&self) -> Option<usize> {
+    pub(crate) fn last_editable(&self) -> Option<usize> {
         if !self.composer.is_empty() || self.compose_mode != ComposeMode::Normal {
             return None;
         }
@@ -2995,7 +3064,7 @@ impl App {
         self.compose_mode = ComposeMode::Normal;
     }
 
-    pub fn perform(&mut self, action: Action) {
+    pub(crate) fn perform(&mut self, action: Action) {
         self.dirty = true;
         if !matches!(
             action,
@@ -4561,7 +4630,7 @@ impl App {
     }
 
     /// Types into whatever has the focus: the room filter or the composer.
-    pub fn type_char(&mut self, c: char) {
+    pub(crate) fn type_char(&mut self, c: char) {
         match self.focus {
             Pane::Sidebar => {
                 self.cancel_pending_jump();
@@ -5588,7 +5657,7 @@ mod tests {
     /// nothing is there, the settings say so.
     #[test]
     fn the_machine_is_asked_through_the_probes_at_start_and_when_a_setting_changes() {
-        let probes = crate::probes::NothingHere::default();
+        let probes = crate::probes::Asked::default();
         let asked = std::rc::Rc::clone(&probes.asked);
         let take = || std::mem::take(&mut *asked.borrow_mut());
         let config = Config::default();

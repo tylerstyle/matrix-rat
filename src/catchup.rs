@@ -111,6 +111,13 @@ impl NoCommand {
 }
 
 /// A text to summarise.
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "read by the terminal's runner only: the browser runs no programs"
+    )
+)]
 pub struct Request {
     /// The app's number for it, carried by the answer.
     pub id: u64,
@@ -133,6 +140,7 @@ impl fmt::Debug for Request {
 
 /// Why there is no summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum Failure {
     /// The command could not be started.
     Start,
@@ -146,6 +154,7 @@ pub enum Failure {
     Empty,
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 impl Failure {
     pub fn message(self) -> &'static str {
         match self {
@@ -160,6 +169,7 @@ impl Failure {
 
 /// How a run ended.
 #[derive(Clone, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum Outcome {
     /// The summary, cleaned and bounded.
     Summary(String),
@@ -169,6 +179,7 @@ pub enum Outcome {
 }
 
 /// Hand-written: a summary says what a room was about.
+#[cfg(any(not(target_family = "wasm"), test))]
 impl fmt::Debug for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -181,6 +192,7 @@ impl fmt::Debug for Outcome {
 
 /// The last word of a run: the command is gone and waited for.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct Done {
     pub id: u64,
     pub outcome: Outcome,

@@ -36,6 +36,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 #[cfg(any(not(target_family = "wasm"), test))]
 use super::MAX_AMPLITUDE;
+#[cfg(any(not(target_family = "wasm"), test))]
 use super::TempAudio;
 use super::recorder::Tool;
 
@@ -93,6 +94,7 @@ pub enum RecordControl {
 
 /// Why there is no recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum Failure {
     /// One of the two programs could not be started.
     Start,
@@ -111,6 +113,7 @@ pub enum Failure {
 }
 
 /// A finished recording, waiting in a file of its own.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct Recording {
     /// Removed when this is dropped.
     pub file: TempAudio,
@@ -126,6 +129,7 @@ pub struct Recording {
 }
 
 /// Hand-written: the waveform is the shape of what was said.
+#[cfg(any(not(target_family = "wasm"), test))]
 impl fmt::Debug for Recording {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Recording")
@@ -138,6 +142,7 @@ impl fmt::Debug for Recording {
 
 /// What the app hears of a recording.
 #[derive(Debug)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum RecordEvent {
     /// The first sound arrived: the microphone is heard.
     Started,
@@ -155,12 +160,20 @@ pub enum RecordEvent {
 
 /// A [`RecordEvent`] for the recording with this number. Nothing in it names a room.
 #[derive(Debug)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct RecordUpdate {
     pub id: u64,
     pub event: RecordEvent,
 }
 
 /// A recording to make.
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "read by the terminal's recorder only: the browser records nothing before phase 2"
+    )
+)]
 pub struct RecordRequest {
     /// The app's number for it, carried by every answer.
     pub id: u64,

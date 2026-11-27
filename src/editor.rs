@@ -70,6 +70,7 @@ impl Failure {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum Outcome {
     /// The text to put into the composer instead of what is there. May be empty:
     /// the user deleted it all.
@@ -79,6 +80,7 @@ pub enum Outcome {
     Failed(Failure),
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 impl fmt::Debug for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

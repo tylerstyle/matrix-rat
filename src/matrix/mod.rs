@@ -1409,7 +1409,7 @@ impl MatrixHandle {
         (Self { commands }, receiver)
     }
 
-    pub fn send(&self, command: MatrixCmd) {
+    pub(crate) fn send(&self, command: MatrixCmd) {
         // A closed channel means the worker is gone, which only happens at shutdown.
         let _ = self.commands.send(command);
     }

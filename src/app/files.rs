@@ -20,11 +20,11 @@ impl App {
     }
 
     /// Whether the status line should offer saving.
-    pub fn can_save(&self) -> bool {
+    pub(crate) fn can_save(&self) -> bool {
         self.current_attachment().is_some()
     }
 
-    pub fn download_dir(&self) -> PathBuf {
+    pub(crate) fn download_dir(&self) -> PathBuf {
         files::resolve_dir(&self.download_dir)
     }
 

@@ -3,10 +3,11 @@
 //! start and again when a setting changes what is to be found (or when the user asks
 //! for something that needs it). On this system [`NativeProbes`] looks as the app
 //! always has: the same variables, the same `PATH` look-ups, the same files. A shell
-//! without programs to run (the browser's) answers that nothing is there.
+//! without programs to run (the browser's) answers that nothing is there:
+//! [`NothingHere`].
 
 use crate::audio::recorder::{NoRecorder, Recorder};
-use crate::audio::{NoPlayer, Player};
+use crate::audio::{NoPlayer, Player, is_auto};
 use crate::catchup::{self, NoCommand};
 use crate::notes::{NoTranscriber, NoTranslator, Transcriber, Translator};
 use crate::notify::NotifyMode;
@@ -176,88 +177,192 @@ impl Probes for TestProbes {
     }
 }
 
-/// A machine where nothing is found, as a shell without programs answers: no player,
-/// no recorder, no programs for notes or summaries, no editor, no clipboard tools, no
-/// desktop to notify on.
-/// Records what it was asked, for the tests that look at when the app asks.
-#[cfg(test)]
-#[derive(Debug, Default)]
-pub struct NothingHere {
-    pub asked: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
-}
+/// A machine where nothing is found, as a shell without programs answers (the
+/// browser's): no player, no recorder, no programs for notes or summaries, no editor,
+/// no clipboard tools, no desktop to notify on, and not over SSH; colours are drawn as
+/// the theme has them. What a setting names is not found here, and `auto` finds none.
+/// Nothing is looked at, so the answers are the same everywhere (the tests use it too).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NothingHere;
 
-#[cfg(test)]
-impl NothingHere {
-    fn ask(&self, what: &'static str) {
-        self.asked.borrow_mut().push(what);
-    }
-}
-
-#[cfg(test)]
 impl Probes for NothingHere {
     fn truecolor(&self) -> bool {
-        self.ask("truecolor");
         true
     }
 
     fn no_color(&self) -> bool {
-        self.ask("no_color");
         false
     }
 
     fn ssh(&self) -> bool {
-        self.ask("ssh");
         false
     }
 
     fn notify_auto(&self) -> NotifyMode {
-        self.ask("notify_auto");
         NotifyMode::Terminal
     }
 
     fn player(&self, setting: &str) -> Result<Player, NoPlayer> {
-        self.ask("player");
-        audio::choose(setting, None, None)
+        Err(if is_auto(setting) {
+            NoPlayer::NoneFound
+        } else {
+            NoPlayer::Missing
+        })
     }
 
     fn recorder(&self, setting: &str, ssh: bool) -> Result<Recorder, NoRecorder> {
-        self.ask("recorder");
-        recorder::choose(
-            setting,
-            &recorder::Env {
-                ssh,
-                ..recorder::Env::default()
-            },
-        )
+        Err(match (is_auto(setting), ssh) {
+            (true, true) => NoRecorder::OverSsh,
+            (true, false) => NoRecorder::NoMicrophone,
+            (false, _) => NoRecorder::Missing,
+        })
     }
 
-    fn transcriber(&self, command: &str, model: &str) -> Result<Transcriber, NoTranscriber> {
-        self.ask("transcriber");
-        notes::transcriber(command, model, None, None)
+    fn transcriber(&self, command: &str, _model: &str) -> Result<Transcriber, NoTranscriber> {
+        Err(if is_auto(command) {
+            NoTranscriber::NoProgram
+        } else {
+            NoTranscriber::Missing
+        })
     }
 
     fn translator(&self, command: &str) -> Result<Translator, NoTranslator> {
-        self.ask("translator");
-        notes::translator(command, None, None)
+        Err(if command.trim().is_empty() {
+            NoTranslator::NotSet
+        } else {
+            NoTranslator::Missing
+        })
     }
 
     fn summary(&self, setting: &str) -> Result<catchup::Command, NoCommand> {
-        self.ask("summary");
-        catchup::choose(setting, None, None)
+        Err(if setting.trim().is_empty() {
+            NoCommand::NotSet
+        } else {
+            NoCommand::Missing
+        })
     }
 
     fn editor(&self) -> Result<Vec<String>, crate::editor::Failure> {
-        self.ask("editor");
-        crate::editor::command(None, None)
+        Err(crate::editor::Failure::NotSet)
     }
 
     fn clipboard_tools(&self) -> Vec<crate::clipboard::Tool> {
-        self.ask("clipboard_tools");
-        crate::clipboard::tools(None, None)
+        Vec::new()
     }
 
     fn environment(&self) -> crate::doctor::Facts {
-        self.ask("environment");
-        crate::doctor::sample()
+        crate::doctor::Facts::nothing_here()
+    }
+}
+
+/// [`NothingHere`], noting what it was asked, for the tests that look at when the app
+/// asks.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct Asked {
+    pub asked: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+}
+
+#[cfg(test)]
+impl Asked {
+    fn ask(&self, what: &'static str) -> NothingHere {
+        self.asked.borrow_mut().push(what);
+        NothingHere
+    }
+}
+
+#[cfg(test)]
+impl Probes for Asked {
+    fn truecolor(&self) -> bool {
+        self.ask("truecolor").truecolor()
+    }
+
+    fn no_color(&self) -> bool {
+        self.ask("no_color").no_color()
+    }
+
+    fn ssh(&self) -> bool {
+        self.ask("ssh").ssh()
+    }
+
+    fn notify_auto(&self) -> NotifyMode {
+        self.ask("notify_auto").notify_auto()
+    }
+
+    fn player(&self, setting: &str) -> Result<Player, NoPlayer> {
+        self.ask("player").player(setting)
+    }
+
+    fn recorder(&self, setting: &str, ssh: bool) -> Result<Recorder, NoRecorder> {
+        self.ask("recorder").recorder(setting, ssh)
+    }
+
+    fn transcriber(&self, command: &str, model: &str) -> Result<Transcriber, NoTranscriber> {
+        self.ask("transcriber").transcriber(command, model)
+    }
+
+    fn translator(&self, command: &str) -> Result<Translator, NoTranslator> {
+        self.ask("translator").translator(command)
+    }
+
+    fn summary(&self, setting: &str) -> Result<catchup::Command, NoCommand> {
+        self.ask("summary").summary(setting)
+    }
+
+    fn editor(&self) -> Result<Vec<String>, crate::editor::Failure> {
+        self.ask("editor").editor()
+    }
+
+    fn clipboard_tools(&self) -> Vec<crate::clipboard::Tool> {
+        self.ask("clipboard_tools").clipboard_tools()
+    }
+
+    fn environment(&self) -> crate::doctor::Facts {
+        self.ask("environment").environment()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where nothing is there, every program is missing and `auto` finds none, whatever
+    /// the setting says; nothing of the machine the test runs on counts.
+    #[test]
+    fn nothing_here_finds_nothing_whatever_the_settings_say() {
+        let here = NothingHere;
+        assert!(here.truecolor() && !here.no_color() && !here.ssh());
+        assert_eq!(here.notify_auto(), NotifyMode::Terminal);
+        assert_eq!(here.player("auto").err(), Some(NoPlayer::NoneFound));
+        assert_eq!(here.player(" ").err(), Some(NoPlayer::NoneFound));
+        assert_eq!(here.player("sh").err(), Some(NoPlayer::Missing));
+        assert_eq!(
+            here.recorder("auto", false).err(),
+            Some(NoRecorder::NoMicrophone)
+        );
+        assert_eq!(here.recorder("", true).err(), Some(NoRecorder::OverSsh));
+        assert_eq!(
+            here.recorder("sh -c true", true).err(),
+            Some(NoRecorder::Missing)
+        );
+        assert_eq!(
+            here.transcriber("auto", "/").err(),
+            Some(NoTranscriber::NoProgram)
+        );
+        assert_eq!(
+            here.transcriber("sh", "").err(),
+            Some(NoTranscriber::Missing)
+        );
+        assert_eq!(here.translator(" ").err(), Some(NoTranslator::NotSet));
+        assert_eq!(here.translator("sh").err(), Some(NoTranslator::Missing));
+        assert_eq!(here.summary("").err(), Some(NoCommand::NotSet));
+        assert_eq!(here.summary("sh").err(), Some(NoCommand::Missing));
+        assert_eq!(here.editor(), Err(crate::editor::Failure::NotSet));
+        assert!(here.clipboard_tools().is_empty());
+        let facts = here.environment();
+        assert!(facts.term.is_empty() && facts.size.is_none() && !facts.ssh);
+        assert!(!facts.session_bus && !facts.wayland && !facts.x11);
+        assert!(!facts.wl_paste && !facts.xclip && !facts.opener && !facts.editor_set);
+        assert_eq!(facts.version, env!("CARGO_PKG_VERSION"));
     }
 }

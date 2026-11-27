@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use tokio::sync::oneshot;
 
 use super::App;
-use crate::catchup::{self, NoCommand, Outcome};
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::catchup::Outcome;
+use crate::catchup::{self, NoCommand};
 use crate::collect::{Cut, SUMMARY_MESSAGES, Span};
 use crate::files;
 use crate::input::{KeyCode, KeyModifiers};
@@ -174,6 +176,13 @@ pub enum CatchUpStage {
         of: Of,
     },
     /// The summary, for the user alone.
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "made from what the summary command answers, and only the terminal runs it"
+        )
+    )]
     Done {
         summary: String,
         messages: usize,
@@ -620,7 +629,8 @@ impl App {
     /// A summary command to start, once. Also the place where a command whose popup
     /// is gone (closed, or another one took its place) is stopped: the event loop
     /// asks here on every turn.
-    pub fn take_summary_start(&mut self) -> Option<catchup::Request> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_summary_start(&mut self) -> Option<catchup::Request> {
         let wanted = match (&self.modal, &self.collect.running) {
             (Some(Modal::Collect(Popup::CatchUp(popup))), Some((running, _))) => {
                 matches!(popup.stage, CatchUpStage::Summarising { run, .. } if run == *running)
@@ -642,7 +652,8 @@ impl App {
     }
 
     /// The summary command has ended.
-    pub fn on_summary(&mut self, done: catchup::Done) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_summary(&mut self, done: catchup::Done) {
         self.dirty = true;
         if !matches!(&self.collect.running, Some((running, _)) if *running == done.id) {
             return;

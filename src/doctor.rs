@@ -139,6 +139,51 @@ pub enum Summary {
     Missing,
 }
 
+impl Facts {
+    /// What a machine with nothing to find tells the doctor (`probes::NothingHere`,
+    /// the browser's): no terminal, desktop, helpers or programs, not over SSH, and
+    /// everything else a plain default for the app to fill in from what it knows.
+    pub fn nothing_here() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            term: String::new(),
+            term_program: String::new(),
+            size: None,
+            truecolor: true,
+            no_color: false,
+            multiplexer: false,
+            ssh: false,
+            keyboard_enhanced: None,
+            focus_reports: None,
+            mouse: true,
+            image_mode: ImageMode::Auto,
+            graphics: None,
+            placeholders_broken: false,
+            notifications: NotifyMode::Auto,
+            do_not_disturb: false,
+            session_bus: false,
+            wayland: false,
+            x11: false,
+            wl_paste: false,
+            xclip: false,
+            opener: false,
+            audio: Audio::NoneFound,
+            recording: Recording::NoMicrophone,
+            transcribe: crate::notes::TranscribeFound::Not(crate::notes::NoTranscriber::NoProgram),
+            translate: crate::notes::TranslateFound::Not(crate::notes::NoTranslator::NotSet),
+            summary: Summary::NotSet,
+            editor_set: false,
+            secret_store: SecretStoreMode::File,
+            own_theme: false,
+            key_preset: String::new(),
+            key_problems: 0,
+            unbound: Vec::new(),
+            ignored_settings: Vec::new(),
+            config_broken: false,
+        }
+    }
+}
+
 impl Summary {
     pub fn from_choice(
         choice: &Result<crate::catchup::Command, crate::catchup::NoCommand>,

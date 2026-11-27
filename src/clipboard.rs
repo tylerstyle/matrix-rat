@@ -143,6 +143,13 @@ fn choose(list: &[u8]) -> Option<Kind> {
 
 /// Why nothing was attached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "most are what the tools answer, and only the terminal runs them"
+    )
+)]
 pub enum Failure {
     /// Neither Wayland nor X11: a console, or SSH without a forwarded display.
     NoDesktop,
@@ -199,6 +206,7 @@ pub struct Request {
 
 /// What a reading came to, for the app.
 #[derive(Debug)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct Done {
     pub id: u64,
     pub result: Result<TempPicture, Failure>,

@@ -108,6 +108,13 @@ struct Run {
     kind: NoteKind,
     phase: Phase,
     /// The program's lines are joined into one paragraph (see `notes::clean`).
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "read when the program's output comes back: in the browser none runs"
+        )
+    )]
     one_paragraph: bool,
 }
 
@@ -127,6 +134,13 @@ enum Phase {
     Fetching,
     /// The sound is fetched and the program known; the shell makes the file the
     /// converted sound goes to (see [`WavRequest`]).
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "read when the terminal's shell has made the file: the browser runs no programs"
+        )
+    )]
     Converting {
         sound: TempAudio,
         transcriber: Transcriber,
@@ -138,6 +152,13 @@ enum Phase {
 /// An empty file for a transcription's converted sound, asked of the shell: in `dir`,
 /// the private folder of sounds, next to the fetched one and under the same kind of
 /// name; it goes with the run. Answered with [`App::on_wav_file`].
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "made into a file by the terminal's shell only: the browser runs no programs"
+    )
+)]
 pub struct WavRequest {
     /// The run it is for.
     pub id: u64,
@@ -274,7 +295,8 @@ impl App {
     }
 
     /// Programs for the event loop to start.
-    pub fn take_note_starts(&mut self) -> Vec<textcmd::Request> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_note_starts(&mut self) -> Vec<textcmd::Request> {
         std::mem::take(&mut self.notes.starts)
     }
 
@@ -287,7 +309,7 @@ impl App {
     }
 
     /// The notes, for drawing.
-    pub fn notes(&self) -> &Notes {
+    pub(crate) fn notes(&self) -> &Notes {
         &self.notes.notes
     }
 
@@ -324,7 +346,12 @@ impl App {
     /// that was edited since or into another language than the one set, and nothing
     /// under a deleted message. A stale note is as good as none: it is not drawn, and
     /// the action makes it anew.
-    pub fn note_current(&self, message: &Message, kind: NoteKind, note: &notes::Note) -> bool {
+    pub(crate) fn note_current(
+        &self,
+        message: &Message,
+        kind: NoteKind,
+        note: &notes::Note,
+    ) -> bool {
         if message.kind == MsgKind::Redacted {
             return false;
         }
@@ -337,7 +364,7 @@ impl App {
     }
 
     /// What the action of `kind` would do with `message` now.
-    pub fn note_offer(&self, message: &Message, kind: NoteKind) -> NoteOffer {
+    pub(crate) fn note_offer(&self, message: &Message, kind: NoteKind) -> NoteOffer {
         let Some(event) = message.event_id() else {
             return NoteOffer::NotThis;
         };
@@ -380,7 +407,7 @@ impl App {
     /// What the two actions would do with the selected message, for the palette, the
     /// menu and the hints. With no message for it selected: why it is not set up, if
     /// it is not.
-    pub fn note_caps(&self) -> NoteCaps {
+    pub(crate) fn note_caps(&self) -> NoteCaps {
         let selected = self
             .timeline
             .selected
@@ -681,7 +708,7 @@ impl App {
 
     /// Stops every program: each is told to end (or its download given up) and its
     /// "…ing" note goes. Finished notes stay. The app ends, or the account goes.
-    pub fn stop_notes(&mut self) {
+    pub(crate) fn stop_notes(&mut self) {
         let running: Vec<(String, NoteKind)> = self
             .notes
             .runs
@@ -732,13 +759,15 @@ impl App {
 
     /// The files for converted sounds the shell is to make, each answered with
     /// [`Self::on_wav_file`].
-    pub fn take_wav_requests(&mut self) -> Vec<WavRequest> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_wav_requests(&mut self) -> Vec<WavRequest> {
         std::mem::take(&mut self.notes.wavs)
     }
 
     /// The shell made the file for a converted sound, or could not: the program starts,
     /// or the note says why not.
-    pub fn on_wav_file(&mut self, request: WavRequest, wav: std::io::Result<TempAudio>) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_wav_file(&mut self, request: WavRequest, wav: std::io::Result<TempAudio>) {
         let Some(at) = self.notes.runs.iter().position(|run| run.id == request.id) else {
             // Given up meanwhile: the file goes with the answer.
             return;
@@ -784,7 +813,8 @@ impl App {
     }
 
     /// A program's last word: its text becomes the note.
-    pub fn on_note_done(&mut self, done: textcmd::Done) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_note_done(&mut self, done: textcmd::Done) {
         let Some(at) = self.notes.runs.iter().position(|run| run.id == done.id) else {
             // Stopped meanwhile.
             return;

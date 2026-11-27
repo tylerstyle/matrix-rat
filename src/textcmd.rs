@@ -71,6 +71,13 @@ pub struct Step {
 }
 
 /// Programs to run one after the other.
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "read by the terminal's runner only: the browser runs no programs"
+    )
+)]
 pub struct Request {
     /// The app's number for the run, carried by the answer.
     pub id: u64,
@@ -94,6 +101,7 @@ impl fmt::Debug for Request {
 
 /// What the last program wrote to its standard output.
 #[derive(Clone, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct Output {
     /// Not yet made safe for the screen: it is whatever the program wrote.
     pub text: String,
@@ -102,6 +110,7 @@ pub struct Output {
 }
 
 /// Hand-written: the text is a message's, or says what one said.
+#[cfg(any(not(target_family = "wasm"), test))]
 impl fmt::Debug for Output {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Output")
@@ -113,6 +122,7 @@ impl fmt::Debug for Output {
 
 /// Why a run brought no text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum Failure {
     /// A program could not be started at all.
     Start,
@@ -125,6 +135,7 @@ pub enum Failure {
 
 /// The last word of a run: its programs are gone and waited for, its files removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct Done {
     pub id: u64,
     pub result: Result<Output, Failure>,
