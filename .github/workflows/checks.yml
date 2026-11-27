@@ -1,8 +1,9 @@
 # Holds the dependencies to deny.toml: no known vulnerability, only the licences
 # allowed there, nothing from outside crates.io. Runs for every change, and once a
-# week for advisories that were published since.
+# week for advisories that were published since. And checks that the core still builds
+# for the browser (docs/WEB-PHASE-1.md), as scripts/check.sh does.
 #
-# The action is pinned to an exact commit: a tag can be moved, a commit cannot.
+# The actions are pinned to exact commits: a tag can be moved, a commit cannot.
 name: Checks
 
 on:
@@ -30,3 +31,24 @@ jobs:
           command: check
           # The toolchain the package asks for (rust-version in Cargo.toml).
           rust-version: "1.96.0"
+
+  browser:
+    name: core builds for the browser
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # As the release binaries are built, plus the browser's standard library.
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      # The library only: the command line (src/main.rs) is the terminal's. A check
+      # needs no linker. Warnings are errors, as in scripts/check.sh.
+      - name: cargo check for wasm32-unknown-unknown
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check --lib --target wasm32-unknown-unknown --locked
