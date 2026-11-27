@@ -5104,7 +5104,11 @@ mod tests {
             json!({ "membership": "join", "displayname": "Carol M." }),
         );
         carol_joined["sender"] = carol.into();
-        let mut joined = fake::joined(false, vec![carol_joined]);
+        // A member without a display name goes by the first part of the ID.
+        let dave = "@dave:localhost";
+        let mut dave_joined = fake::state("m.room.member", dave, json!({ "membership": "join" }));
+        dave_joined["sender"] = dave.into();
+        let mut joined = fake::joined(false, vec![carol_joined, dave_joined]);
         joined["timeline"]["events"] = json!([
             deleted(
                 "$escape:localhost",
@@ -5115,6 +5119,7 @@ mod tests {
             deleted("$long:localhost", bob, Some(bob), Some(&long)),
             deleted("$blank:localhost", bob, Some(bob), Some(" \u{200b}\n\t ")),
             deleted("$carol:localhost", bob, Some(carol), Some("spam  link")),
+            deleted("$dave:localhost", bob, Some(dave), None),
             deleted("$us:localhost", bob, Some(fake::ME), None),
             deleted("$own:localhost", fake::ME, Some(fake::ME), Some("typo")),
             deleted("$unknown:localhost", bob, None, Some("no sender")),
@@ -5149,11 +5154,15 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| panic!("{id} not deleted"))
         };
-        let messages = timeline_where(&mut events, room, 1, |messages| {
-            message_of(messages, "$carol:localhost").is_some_and(|message| {
+        let named = |messages: &[crate::model::Message], id: &str, wanted: &str| {
+            message_of(messages, id).is_some_and(|message| {
                 matches!(&message.deleted, Some(Deletion { by: DeletedBy::Other { name, .. }, .. })
-                    if name == "Carol M.")
+                    if name == wanted)
             })
+        };
+        let messages = timeline_where(&mut events, room, 1, |messages| {
+            named(messages, "$carol:localhost", "Carol M.")
+                && named(messages, "$dave:localhost", "dave")
         })
         .await;
 

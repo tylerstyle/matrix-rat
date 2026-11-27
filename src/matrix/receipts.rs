@@ -127,8 +127,10 @@ impl Names {
             }
             for user in self.wanted(&needed, &speakers) {
                 let (name, ambiguous) = match room.get_member_no_sync(user).await {
+                    // A member without a display name goes by the first part of their
+                    // ID, as in the timeline: found all the same, not a stand-in.
                     Ok(Some(member)) => (
-                        member.display_name().map(str::to_owned),
+                        Some(member.display_name().unwrap_or_default().to_owned()),
                         member.name_ambiguous(),
                     ),
                     _ => (None, false),
