@@ -175,18 +175,7 @@ impl App {
     /// What `setting` comes to on this machine as it is now. Nothing is run. Over
     /// SSH is what the player goes by too.
     fn look_for_recorder(&self, setting: &str) -> Result<recorder::Recorder, recorder::NoRecorder> {
-        #[cfg(not(test))]
-        let env = recorder::Env::here();
-        // Tests name their own machine: an empty one unless they say otherwise.
-        #[cfg(test)]
-        let env = self.audio.recorder_env.clone();
-        recorder::choose(
-            setting,
-            &recorder::Env {
-                ssh: self.audio.ssh,
-                ..env
-            },
-        )
+        self.probes.recorder(setting, self.audio.ssh)
     }
 
     /// Whether a voice message can be recorded into this chat; says why not. Where a
@@ -543,6 +532,12 @@ impl App {
             Err(why) => why.message().to_owned(),
         };
         self.show_toast(said);
+    }
+
+    /// For tests: the recorder is looked for on the machine `env` describes.
+    #[cfg(test)]
+    pub(crate) fn set_recorder_env(&mut self, env: recorder::Env) {
+        self.probes = Box::new(crate::probes::TestProbes { recorder_env: env });
     }
 
     /// For tests: recording is offered, with two programs that are never started
@@ -1165,7 +1160,7 @@ mod tests {
     fn a_refused_recording_looks_at_the_machine_again() {
         let bin = Bin::new("again", &["arecord"]);
         let mut app = App::demo();
-        app.audio.recorder_env = bin.env();
+        app.set_recorder_env(bin.env());
         // Set by the event loop: there is somewhere to keep a recording.
         app.audio.dir = Some(PathBuf::from("/nonexistent/matrix-rat-voice"));
         app.perform(Action::RecordVoice);
@@ -1189,7 +1184,7 @@ mod tests {
     fn over_ssh_recording_is_refused_as_playing_is_unless_the_user_names_a_recorder() {
         let bin = Bin::new("ssh", &["arecord", "ffmpeg"]);
         let mut app = App::demo();
-        app.audio.recorder_env = bin.env();
+        app.set_recorder_env(bin.env());
         app.set_audio_recorder("auto");
         assert_eq!(app.mic_button(), Mic::Idle);
 
@@ -1226,10 +1221,10 @@ mod tests {
             "auto: no microphone found"
         );
         // No microphone is seen on this machine: with a command that is not asked.
-        app.audio.recorder_env = Env {
+        app.set_recorder_env(Env {
             seen: Seen::default(),
             ..bin.env()
-        };
+        });
         let command = format!("{} --raw", bin.0.join("my-recorder").display());
         app.set_audio_recorder(&command);
         assert_eq!(app.audio.recorder_setting_text(), command);
@@ -1275,7 +1270,10 @@ mod tests {
         assert_eq!(app.audio.recorder_setting_text(), "auto: capture + encoder");
         // Debug output names neither the setting nor the programs nor the folders.
         app.audio.recorder_setting = "/home/alice/bin/secret-recorder".to_owned();
-        app.audio.recorder_env.path = Some("/home/alice/secret-bin".into());
+        app.set_recorder_env(Env {
+            path: Some("/home/alice/secret-bin".into()),
+            ..Env::default()
+        });
         app.set_test_recorder(tool("secret-capture"), tool("secret-encoder"));
         let shown = format!("{app:?}");
         assert!(shown.contains("recorder_auto: false"), "{shown}");

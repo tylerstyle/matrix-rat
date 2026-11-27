@@ -125,16 +125,13 @@ enum Phase {
 }
 
 impl NotesState {
-    /// For the app on this system, from the settings.
-    pub fn new(config: &crate::config::Config) -> Self {
+    /// For the app on this system, from the settings, as `probes` find the programs.
+    pub fn new(config: &crate::config::Config, probes: &dyn crate::probes::Probes) -> Self {
         Self {
-            transcriber: notes::transcriber_here(
-                &config.transcribe_command,
-                &config.transcribe_model,
-            ),
+            transcriber: probes.transcriber(&config.transcribe_command, &config.transcribe_model),
             transcribe_command: config.transcribe_command.clone(),
             transcribe_model: config.transcribe_model.clone(),
-            translator: notes::translator_here(&config.translate_command),
+            translator: probes.translator(&config.translate_command),
             translate_command: config.translate_command.clone(),
             translate_language: notes::language(&config.translate_language),
             keep: config.keep_notes,
@@ -793,8 +790,9 @@ impl App {
     }
 
     fn look_up_transcriber(&mut self) {
-        self.notes.transcriber =
-            notes::transcriber_here(&self.notes.transcribe_command, &self.notes.transcribe_model);
+        self.notes.transcriber = self
+            .probes
+            .transcriber(&self.notes.transcribe_command, &self.notes.transcribe_model);
         let said = match &self.notes.transcriber {
             Ok(Transcriber::Whisper {
                 ffmpeg: Some(_), ..
@@ -812,7 +810,7 @@ impl App {
 
     pub(super) fn set_translate_command(&mut self, text: &str) {
         let setting = text.trim().to_owned();
-        self.notes.translator = notes::translator_here(&setting);
+        self.notes.translator = self.probes.translator(&setting);
         self.notes.translate_command = setting.clone();
         self.save_setting("translate_command", setting);
         let said = match &self.notes.translator {
@@ -2031,7 +2029,10 @@ mod tests {
             translate_language: "-x".into(),
             ..Default::default()
         };
-        assert_eq!(NotesState::new(&config).translate_language, "en");
+        assert_eq!(
+            NotesState::new(&config, &crate::probes::TestProbes::default()).translate_language,
+            "en"
+        );
     }
 
     #[tokio::test]

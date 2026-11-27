@@ -19,6 +19,7 @@ use crate::input::{KeyCode, KeyModifiers};
 use crate::matrix::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, MatrixCmd, UnreadText};
 use crate::modal::Modal;
 use crate::model::MsgKind;
+use crate::probes::Probes;
 
 /// What a click in the popup is on (see `HitId::Collect`): a row of the "how far
 /// back" list by its place, or one of these.
@@ -81,13 +82,13 @@ impl CollectState {
     }
 
     /// Takes the setting and looks its program up.
-    pub(super) fn set_summary_setting(&mut self, setting: &str) {
+    pub(super) fn set_summary_setting(&mut self, setting: &str, probes: &dyn Probes) {
         self.summary_setting = setting.trim().to_owned();
-        self.look_up();
+        self.look_up(probes);
     }
 
-    fn look_up(&mut self) {
-        self.command = catchup::choose_here(&self.summary_setting);
+    fn look_up(&mut self, probes: &dyn Probes) {
+        self.command = probes.summary(&self.summary_setting);
     }
 }
 
@@ -421,7 +422,7 @@ impl App {
 
     /// Enter on the summary command row: the setting is kept, and looked up at once.
     pub(super) fn set_summary_command(&mut self, text: &str) {
-        self.collect.set_summary_setting(text);
+        self.collect.set_summary_setting(text, self.probes.as_ref());
         self.save_setting("summary_command", self.collect.summary_setting().to_owned());
         let said = match self.summary_command() {
             Ok(command) => format!(
@@ -489,7 +490,7 @@ impl App {
     /// been told why there is none.
     fn catch_up_target(&mut self) -> Option<(catchup::Command, usize)> {
         // The program may have come or gone since the setting was made.
-        self.collect.look_up();
+        self.collect.look_up(self.probes.as_ref());
         let command = match self.summary_command() {
             Ok(command) => command,
             Err(why) => {
@@ -890,7 +891,8 @@ mod tests {
     /// A summary command that is never started: `sh` is on every machine the tests
     /// run on, and only looked up.
     fn with_command(app: &mut App) {
-        app.collect.set_summary_setting("/bin/sh -c 'never run'");
+        app.collect
+            .set_summary_setting("/bin/sh -c 'never run'", app.probes.as_ref());
         assert!(app.summary_command().is_ok());
     }
 
@@ -1180,7 +1182,7 @@ mod tests {
         assert!(app.toast.clone().unwrap().0.contains("summary_command"));
 
         app.collect
-            .set_summary_setting("no-such-summary-program-anywhere");
+            .set_summary_setting("no-such-summary-program-anywhere", app.probes.as_ref());
         app.perform(Action::CatchUp);
         assert!(app.modal.is_none());
         assert!(app.toast.clone().unwrap().0.contains("was not found"));

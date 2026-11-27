@@ -75,9 +75,10 @@ use crate::model::{
     ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, SendState, demo_rooms,
 };
 use crate::paths::Paths;
+use crate::probes::Probes;
 use crate::rt::{self, MissedTickBehavior};
 use crate::terminal::{self, TerminalGuard};
-use crate::theme::{ColorScheme, DEFAULT_THEME, Theme, truecolor_supported};
+use crate::theme::{ColorScheme, DEFAULT_THEME, Theme};
 use crate::time::Instant;
 use crate::ui::hit::{Button, HitId, HitMap, InputTarget};
 use crate::ui::{self, SIDEBAR_MIN, max_sidebar};
@@ -437,6 +438,9 @@ pub struct App {
     notes: notes::NotesState,
     /// Archiving a room and catching up on it: the requests, and the summary command.
     collect: collect::CollectState,
+    /// What the machine has (colours, programs, SSH), asked of the shell's probes at
+    /// start and when a setting changes what is to be found.
+    probes: Box<dyn Probes>,
 }
 
 /// Hand-written: the app holds everything private there is (messages, drafts, ids,
@@ -542,7 +546,8 @@ impl App {
     /// With `matrix` the app shows the account's rooms; without, built-in demo data.
     #[cfg(test)]
     pub fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
-        let mut app = Self::new_in_scheme(config, themes_dir, matrix, ColorScheme::Dark);
+        let probes = Box::new(crate::probes::TestProbes::default());
+        let mut app = Self::new_in_scheme(config, themes_dir, probes, matrix, ColorScheme::Dark);
         // Tests may well run inside a desktop that would obey: no window is raised.
         app.notification_click_command = None;
         // Nor do they depend on the players and recorders the machine has, or on
@@ -554,18 +559,20 @@ impl App {
     pub(crate) fn new_in_scheme(
         config: &Config,
         themes_dir: PathBuf,
+        probes: Box<dyn Probes>,
         matrix: Option<MatrixHandle>,
         color_scheme: ColorScheme,
     ) -> Self {
-        let truecolor = truecolor_supported();
-        let mut app = Self::with_theme(Theme::builtin(DEFAULT_THEME).expect("default theme"));
+        let truecolor = probes.truecolor();
+        let default_theme = Theme::builtin(DEFAULT_THEME).expect("default theme");
+        let mut app = Self::with_theme(default_theme, probes);
         if matrix.is_some() {
             app.rooms.clear();
             app.sync = Some(SyncStatus::Connecting);
         }
         app.matrix = matrix;
         app.truecolor = truecolor;
-        app.no_color = crate::theme::no_color_wanted();
+        app.no_color = app.probes.no_color();
         if app.no_color {
             app.theme.strip_colors();
         }
@@ -585,9 +592,14 @@ impl App {
         app.found.secret_store = config.secret_store;
         app.found.ignored_settings = config.ignored.clone();
         app.download_dir = config.download_dir.clone();
-        app.audio = playback::AudioState::new(&config.audio_player, &config.audio_recorder);
-        app.notes = notes::NotesState::new(config);
-        app.collect.set_summary_setting(&config.summary_command);
+        app.audio = playback::AudioState::new(
+            app.probes.as_ref(),
+            &config.audio_player,
+            &config.audio_recorder,
+        );
+        app.notes = notes::NotesState::new(config, app.probes.as_ref());
+        app.collect
+            .set_summary_setting(&config.summary_command, app.probes.as_ref());
         app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
         app.link_previews = config.link_previews;
@@ -630,13 +642,16 @@ impl App {
     /// Demo data with fixed settings; also what the tests render.
     #[cfg(test)]
     pub fn demo() -> Self {
-        let mut app = Self::with_theme(Theme::builtin(DEFAULT_THEME).expect("default theme"));
+        let mut app = Self::with_theme(
+            Theme::builtin(DEFAULT_THEME).expect("default theme"),
+            Box::new(crate::probes::TestProbes::default()),
+        );
         // Not the machine's own folder, so screens look the same everywhere.
         app.download_dir = "~/Downloads".to_owned();
         app
     }
 
-    fn with_theme(theme: Theme) -> Self {
+    fn with_theme(theme: Theme, probes: Box<dyn Probes>) -> Self {
         Self {
             rooms: demo_rooms(),
             active: 0,
@@ -760,6 +775,7 @@ impl App {
             audio: Default::default(),
             notes: Default::default(),
             collect: Default::default(),
+            probes,
         }
     }
 
@@ -5406,7 +5422,13 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         let (handle, events) = matrix::spawn_with(paths.clone(), config.secret_store);
         (Some(handle), Some(events))
     };
-    let mut app = App::new_in_scheme(config, paths.themes_dir(), matrix.clone(), initial_scheme);
+    let mut app = App::new_in_scheme(
+        config,
+        paths.themes_dir(),
+        Box::new(crate::probes::NativeProbes),
+        matrix.clone(),
+        initial_scheme,
+    );
     // As the terminal answered before the event stream existed: never asked again.
     app.found.keyboard_enhanced = Some(guard.keyboard_enhanced());
     // The demo is for looking around: what is changed there is not written into the
@@ -5678,6 +5700,87 @@ mod tests {
 
     fn key(code: KeyCode) -> InputEvent {
         InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn test_probes() -> Box<dyn Probes> {
+        Box::new(crate::probes::TestProbes::default())
+    }
+
+    /// The machine is asked what it has at start, and again for the one thing a
+    /// setting changes (or an action needs), never looked at by the app itself; where
+    /// nothing is there, the settings say so.
+    #[test]
+    fn the_machine_is_asked_through_the_probes_at_start_and_when_a_setting_changes() {
+        let probes = crate::probes::NothingHere::default();
+        let asked = std::rc::Rc::clone(&probes.asked);
+        let take = || std::mem::take(&mut *asked.borrow_mut());
+        let config = Config::default();
+        let mut app = App::new_in_scheme(
+            &config,
+            PathBuf::new(),
+            Box::new(probes),
+            None,
+            ColorScheme::Dark,
+        );
+        let mut at_start = take();
+        at_start.sort_unstable();
+        assert_eq!(
+            at_start,
+            [
+                "no_color",
+                "player",
+                "recorder",
+                "ssh",
+                "summary",
+                "transcriber",
+                "translator",
+                "truecolor"
+            ]
+        );
+        assert_eq!(app.setting_value(Setting::AudioPlayer), "auto: none found");
+        assert_eq!(
+            app.setting_value(Setting::AudioRecorder),
+            "auto: no microphone found"
+        );
+        assert_eq!(app.setting_value(Setting::TranslateCommand), "(not set)");
+        assert_eq!(app.setting_value(Setting::SummaryCommand), "not set");
+        assert!(
+            app.setting_value(Setting::TranscribeCommand)
+                .starts_with("auto: ")
+        );
+
+        app.set_audio_player("mpv");
+        assert_eq!(take(), ["player"]);
+        assert_eq!(app.setting_value(Setting::AudioPlayer), "mpv (not found)");
+        app.set_audio_recorder("auto");
+        assert_eq!(take(), ["recorder"]);
+        app.set_transcribe_command("whisper");
+        assert_eq!(take(), ["transcriber"]);
+        app.set_transcribe_model("model.bin");
+        assert_eq!(take(), ["transcriber"]);
+        app.set_translate_command("translate {lang}");
+        assert_eq!(take(), ["translator"]);
+        assert_eq!(
+            app.setting_value(Setting::TranslateCommand),
+            "translate {lang} (not found)"
+        );
+        app.set_summary_command("summarise");
+        assert_eq!(take(), ["summary"]);
+        app.set_translate_language("de");
+        app.change_setting(Setting::Mouse, 0);
+        assert!(take().is_empty(), "other settings ask nothing");
+
+        app.request_editor();
+        assert_eq!(take(), ["editor"]);
+        app.request_paste_picture();
+        assert_eq!(take(), ["clipboard_tools"]);
+        app.modal = None;
+        app.open_doctor();
+        assert_eq!(take(), ["environment"]);
+        // Catching up looks for the program again: it may have come since.
+        app.modal = None;
+        app.perform(Action::CatchUp);
+        assert_eq!(take(), ["summary"]);
     }
 
     fn key_mod(code: KeyCode, mods: KeyModifiers) -> InputEvent {
@@ -8414,7 +8517,7 @@ mod tests {
         .unwrap();
         let cfg = Config::load(&file).unwrap();
 
-        let mut app = App::new_in_scheme(&cfg, themes_dir, None, ColorScheme::Dark);
+        let mut app = App::new_in_scheme(&cfg, themes_dir, test_probes(), None, ColorScheme::Dark);
         app.config_file = Some(file.clone());
         assert_eq!(app.color_scheme, ColorScheme::Dark);
         assert_eq!(app.theme.name, dark_name);
@@ -8462,7 +8565,13 @@ mod tests {
 
         std::fs::write(&file, "theme = \"terminal\"\n").unwrap();
         let cfg = Config::load(&file).unwrap();
-        let mut term_app = App::new_in_scheme(&cfg, themes_dir.clone(), None, ColorScheme::Dark);
+        let mut term_app = App::new_in_scheme(
+            &cfg,
+            themes_dir.clone(),
+            test_probes(),
+            None,
+            ColorScheme::Dark,
+        );
         term_app.config_file = Some(file.clone());
         assert_eq!(term_app.theme.name, "terminal");
         term_app.on_color_scheme(ColorScheme::Light);
@@ -8475,7 +8584,8 @@ mod tests {
         let gen_file = dir.join("gen.toml");
         std::fs::write(&gen_file, "theme = \"generated\"\n").unwrap();
         let gen_cfg = Config::load(&gen_file).unwrap();
-        let mut gen_app = App::new_in_scheme(&gen_cfg, themes_dir, None, ColorScheme::Dark);
+        let mut gen_app =
+            App::new_in_scheme(&gen_cfg, themes_dir, test_probes(), None, ColorScheme::Dark);
         gen_app.config_file = Some(gen_file.clone());
         assert_eq!(gen_app.wanted_theme, "generated");
         gen_app.on_color_scheme(ColorScheme::Light);

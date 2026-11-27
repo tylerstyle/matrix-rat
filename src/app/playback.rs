@@ -46,9 +46,6 @@ pub struct AudioState {
     pub(super) take: Option<super::voice::Take>,
     /// A recording to start; the event loop takes it (see [`App::take_record_start`]).
     pub(super) record_start: Option<audio::record::RecordRequest>,
-    /// Where tests look for the recorder: nothing of the machine they run on.
-    #[cfg(test)]
-    pub(super) recorder_env: audio::recorder::Env,
     /// Over SSH a sound would play on the far machine, and its microphone would
     /// record: neither is offered.
     pub(super) ssh: bool,
@@ -73,8 +70,6 @@ impl Default for AudioState {
             recorder: Err(NoRecorder::NoMicrophone),
             take: None,
             record_start: None,
-            #[cfg(test)]
-            recorder_env: audio::recorder::Env::default(),
             ssh: false,
             dir: None,
             next_id: 0,
@@ -200,14 +195,15 @@ pub enum AudioView {
 
 impl AudioState {
     /// For the app on this system: the settings, the player and the recorder they
-    /// name, and whether this is a session over SSH.
-    pub fn new(setting: &str, recorder_setting: &str) -> Self {
+    /// name, and whether this is a session over SSH, as `probes` find them.
+    pub fn new(probes: &dyn crate::probes::Probes, setting: &str, recorder_setting: &str) -> Self {
+        let ssh = probes.ssh();
         Self {
             setting: setting.to_owned(),
-            player: audio::choose_here(setting),
+            player: probes.player(setting),
             recorder_setting: recorder_setting.to_owned(),
-            recorder: audio::recorder::choose_here(recorder_setting),
-            ssh: crate::portal::in_ssh_session(),
+            recorder: probes.recorder(recorder_setting, ssh),
+            ssh,
             ..Self::default()
         }
     }
@@ -750,7 +746,7 @@ impl App {
         } else {
             text.trim().to_owned()
         };
-        self.audio.player = audio::choose_here(&setting);
+        self.audio.player = self.probes.player(&setting);
         self.audio.setting = setting.clone();
         self.save_setting("audio_player", setting);
         // What plays goes on with the player it has.

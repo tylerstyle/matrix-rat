@@ -14,7 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::App;
 use crate::action::Pane;
-use crate::editor::{self, Failure, Outcome, Request};
+use crate::editor::{Failure, Outcome, Request};
 use crate::matrix::MatrixEvent;
 
 /// What the worker says while the editor has the terminal. None of it reaches the app
@@ -229,7 +229,7 @@ pub async fn next_matrix_event(
 impl App {
     /// `Action::ComposeInEditor`.
     pub(super) fn request_editor(&mut self) {
-        self.request_editor_with(editor::command_from_env());
+        self.request_editor_with(self.probes.editor());
     }
 
     /// With the editor command already worked out (a test passes its own).

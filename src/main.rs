@@ -51,6 +51,7 @@ mod paths;
 mod people;
 mod portal;
 mod previews;
+mod probes;
 mod rich;
 mod rt;
 mod saved;

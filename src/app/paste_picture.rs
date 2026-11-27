@@ -10,13 +10,13 @@
 
 use super::App;
 use crate::action::Pane;
-use crate::clipboard::{self, Done, Failure, Request, Tool};
+use crate::clipboard::{Done, Failure, Request, Tool};
 use crate::upload;
 
 impl App {
     /// `Action::PastePicture`.
     pub(super) fn request_paste_picture(&mut self) {
-        self.request_paste_with(clipboard::tools_from_env());
+        self.request_paste_with(self.probes.clipboard_tools());
     }
 
     /// With the tools already worked out (a test passes its own).
@@ -103,7 +103,7 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::app::ComposeMode;
-    use crate::clipboard::Ran;
+    use crate::clipboard::{self, Ran};
     use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
     use crate::matrix::{MatrixCmd, MatrixEvent, MatrixHandle};
     use crate::model::{ItemRef, Message, Room, RoomKind};
