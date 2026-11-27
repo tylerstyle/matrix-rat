@@ -252,6 +252,7 @@ pub(super) fn utd_why(encrypted: &EncryptedMessage) -> UtdWhy {
         UtdCause::HistoricalMessageAndDeviceIsUnverified => UtdWhy::HistoryNeedsVerification,
         UtdCause::WithheldForUnverifiedOrInsecureDevice => UtdWhy::WithheldUnverified,
         UtdCause::WithheldBySender => UtdWhy::Withheld,
+        UtdCause::Malformed => UtdWhy::Malformed,
     }
 }
 
@@ -610,8 +611,10 @@ pub(super) fn event_message(
     match event.content() {
         TimelineItemContent::MsgLike(content) => {
             message.thread = super::threads::summary(content, ignored);
-            message.reactions = content
-                .reactions
+            // Since matrix-sdk-ui 0.20 any event can carry reactions; they are shown
+            // under messages only, as before, and those on other events are left out.
+            message.reactions = event
+                .reactions()
                 .iter()
                 .filter_map(|(key, senders)| {
                     let count = senders
@@ -1154,7 +1157,7 @@ fn convert_poll_parts(
     disclosed: bool,
     max_selections: u64,
     raw_answers: Vec<(String, String)>,
-    votes_by_answer: &std::collections::HashMap<String, Vec<String>>,
+    votes_by_answer: &std::collections::HashMap<String, Vec<OwnedUserId>>,
     ended: bool,
     has_been_edited: bool,
     editable: bool,
@@ -1172,7 +1175,7 @@ fn convert_poll_parts(
             .collect()
     };
     let question = cut(raw_question);
-    let mut voters: HashSet<String> = HashSet::new();
+    let mut voters: HashSet<&UserId> = HashSet::new();
     let answers: Vec<crate::model::PollAnswer> = raw_answers
         .into_iter()
         .filter(|(id, _)| !id.is_empty() && id.len() <= ID_BYTES)
@@ -1182,16 +1185,14 @@ fn convert_poll_parts(
             let mut own_voted = false;
             if let Some(list) = votes_by_answer.get(&id) {
                 for uid in list {
-                    let is_ignored =
-                        <&UserId>::try_from(uid.as_str()).is_ok_and(|u| ignored.contains(u));
-                    if is_ignored {
+                    if ignored.contains(uid) {
                         continue;
                     }
                     votes = votes.saturating_add(1);
-                    if uid == own.as_str() {
+                    if uid == own {
                         own_voted = true;
                     }
-                    voters.insert(uid.clone());
+                    voters.insert(uid);
                 }
             }
             crate::model::PollAnswer {
@@ -1263,6 +1264,7 @@ mod tests {
                 UtdWhy::WithheldUnverified,
             ),
             (UtdCause::WithheldBySender, UtdWhy::Withheld),
+            (UtdCause::Malformed, UtdWhy::Malformed),
         ];
         let mut texts = HashSet::new();
         for (cause, why) in causes {
@@ -1585,13 +1587,13 @@ mod tests {
         use std::collections::HashMap;
 
         let own = owned_user_id!("@alice:example.org");
-        let bob = "@bob:example.org".to_owned();
+        let bob = owned_user_id!("@bob:example.org");
         let eve = owned_user_id!("@eve:example.org");
         let ignored = HashSet::from([eve.clone()]);
 
         let mut votes = HashMap::new();
-        votes.insert("a1".to_owned(), vec![own.to_string(), eve.to_string()]);
-        votes.insert("a2".to_owned(), vec![bob.clone(), eve.to_string()]);
+        votes.insert("a1".to_owned(), vec![own.clone(), eve.clone()]);
+        votes.insert("a2".to_owned(), vec![bob.clone(), eve.clone()]);
 
         let mut msg = Message {
             own: true,

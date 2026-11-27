@@ -1031,7 +1031,7 @@ pub(super) mod probe {
             })
             .collect();
         let mut cache = Vec::new();
-        if let Ok((events, _drops)) = room.event_cache().await
+        if let Some((events, _drops)) = crate::matrix::cache::room(room).await
             && let Ok(events) = events.events().await
         {
             use matrix_sdk::ruma::events::{

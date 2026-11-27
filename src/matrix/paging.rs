@@ -114,7 +114,10 @@ pub(super) async fn backwards(timeline: &Timeline, count: u16) -> Result<bool, P
 /// end.
 async fn clear_caches(client: matrix_sdk::Client) -> bool {
     let clear = rt::spawn(async move {
-        match client.event_cache().clear_all_rooms().await {
+        let Some(cache) = super::cache::of(&client) else {
+            return false;
+        };
+        match cache.clear_all_rooms().await {
             Ok(()) => true,
             Err(err) => {
                 tracing::warn!(why = %logsafe::kind(&err), "could not clear the event cache after a panic");

@@ -297,7 +297,7 @@ impl Stage {
                         .content()
                         .as_message()
                         .is_some_and(|message| message.body().len() > 3 && !message.is_edited())
-                    && event.content().reactions().is_none_or(|r| r.is_empty())
+                    && event.reactions().is_empty()
             })
             .nth(n)
             .map(|event| {
@@ -408,8 +408,7 @@ impl Stage {
             .await;
         self.until("reactions", |items| {
             event(items, &target)
-                .and_then(|event| event.content().reactions())
-                .and_then(|reactions| reactions.get("🦀"))
+                .and_then(|event| event.reactions().get("🦀"))
                 .map(|by| by.len())
                 == Some(2)
         })

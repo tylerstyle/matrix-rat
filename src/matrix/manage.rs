@@ -1806,7 +1806,9 @@ pub(super) async fn cleanup_left_room(client: &Client, room: &Room) {
     // inside `room.forget()` to fail with `ClientDropped` and leave a stale cache entry
     // that breaks later `clear_all_rooms()` calls on ignore/unignore.
     if matches!(room.state(), RoomState::Left | RoomState::Banned) {
-        let _ = client.event_cache().forget_room(room.room_id()).await;
+        if let Some(cache) = super::cache::of(client) {
+            let _ = cache.forget_room(room.room_id()).await;
+        }
         if let Err(err) = room.forget().await {
             tracing::warn!(
                 why = %crate::logsafe::kind(&err),

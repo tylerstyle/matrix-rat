@@ -1189,8 +1189,6 @@ mod tests {
             }))
             .await
             .unwrap();
-        // Before the sync, so that the room's events reach its timeline.
-        client.event_cache().subscribe().unwrap();
         client.sync_once(SyncSettings::default()).await.unwrap();
         let room = client.get_room(<&RoomId>::try_from(SAID).unwrap()).unwrap();
         (server, room)

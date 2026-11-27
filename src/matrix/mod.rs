@@ -4,6 +4,7 @@
 #[cfg(not(target_family = "wasm"))]
 mod agent;
 mod auth;
+mod cache;
 mod collect;
 mod convert;
 mod devices;
@@ -1896,8 +1897,6 @@ impl Worker {
             .build()
             .await
             .sdk_context("could not set up sync")?;
-        // Start listening for redecryption reports before sync begins so any
-        // newly decrypted UTDs are forwarded into the search index.
         let mut searcher = search::Searcher::new(
             client.clone(),
             self.events.clone(),
@@ -2174,7 +2173,7 @@ impl Worker {
                     }
                     own_members.ensure(&rooms, left).await;
                     // The SDK works out a room's latest message only for rooms it was
-                    // asked to; ask once for each (it needs the event cache running).
+                    // asked to; ask once for each (from the event cache).
                     previews.listen(client, &rooms, left);
                     _notices.arm();
                     self.emit(MatrixEvent::Rooms(
@@ -2324,7 +2323,7 @@ impl Worker {
         agent.stop();
         collector.stop();
         emote_mgr.stop();
-        searcher.stop();
+        searcher.cancel();
         user_searcher.stop();
         dir_searcher.stop();
         ignore_tracker.stop();
@@ -2475,11 +2474,13 @@ impl Previews {
         }
         let client = client.clone();
         self.tasks.spawn(async move {
-            // The latest messages come from the event cache, which must be running.
-            if client.event_cache().subscribe().is_err() {
+            // The latest messages come from the event cache, which is always on.
+            if cache::of(&client).is_none() {
                 return;
             }
-            let latest = client.latest_events().await;
+            let Some(latest) = client.latest_events().await else {
+                return;
+            };
             for id in new {
                 if let Err(err) = latest.listen_to_room(&id).await {
                     tracing::debug!(why = %crate::logsafe::kind(&err), "no latest message for a room");

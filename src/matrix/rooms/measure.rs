@@ -351,7 +351,7 @@ async fn wait_indexed(room: &matrix_sdk::Room) {
         if room
             .search(MARKER, 1, None)
             .await
-            .is_ok_and(|hits| !hits.is_empty())
+            .is_ok_and(|hits| !hits.events.is_empty())
         {
             return;
         }
@@ -360,7 +360,7 @@ async fn wait_indexed(room: &matrix_sdk::Room) {
     panic!("the sample room was not indexed within a minute");
 }
 
-/// A client of `server`, signed in as `ME`, with the event cache subscribed to (as the
+/// A client of `server`, signed in as `ME`, with its event cache (always on, as the
 /// app has it) and synced once; and the sample room. The event cache stores what a sync
 /// brings on a task of its own, after the sync has returned: this waits until it has the
 /// sample room's messages, as the tests take for granted. (A room opened before that
@@ -373,7 +373,10 @@ pub(super) async fn client_of(
     search: SearchIndexStoreKind,
 ) -> (Client, matrix_sdk::Room) {
     let client = signed_in(server, search).await;
-    let mut stored = client.event_cache().subscribe_to_room_generic_updates();
+    let mut stored = client
+        .event_cache()
+        .expect("the event cache is on")
+        .subscribe_to_room_generic_updates();
     client.sync_once(SyncSettings::default()).await.unwrap();
     tokio::time::timeout(Duration::from_secs(60), async {
         while stored.recv().await.unwrap().room_id.as_str() != ROOM {}
@@ -385,7 +388,7 @@ pub(super) async fn client_of(
     (client, room)
 }
 
-/// A client of `server`, signed in as `ME`, with the event cache subscribed to (as the
+/// A client of `server`, signed in as `ME`, with its event cache (always on, as the
 /// app has it); not synced yet.
 async fn signed_in(server: &fake::Server, search: SearchIndexStoreKind) -> Client {
     let client = Client::builder()
@@ -408,7 +411,6 @@ async fn signed_in(server: &fake::Server, search: SearchIndexStoreKind) -> Clien
         }))
         .await
         .unwrap();
-    client.event_cache().subscribe().unwrap();
     client
 }
 
@@ -672,8 +674,7 @@ async fn measure_worker_cost_of_an_open_room() {
         tokio::time::sleep(Duration::from_secs(1)).await;
         heap_in_use()
     }
-    let events_before = room
-        .event_cache()
+    let events_before = crate::matrix::cache::room(room)
         .await
         .unwrap()
         .0
@@ -688,8 +689,7 @@ async fn measure_worker_cost_of_an_open_room() {
     let h6 = settled().await;
     drop(first);
     let h7 = settled().await;
-    let events_after = room
-        .event_cache()
+    let events_after = crate::matrix::cache::room(room)
         .await
         .unwrap()
         .0
@@ -780,7 +780,7 @@ async fn measure_event_cache_of_a_room_never_opened() {
         per(grew(start, synced), events)
     );
     // A subscriber that goes away lets the event cache shrink the room.
-    let (cache, _drop_handles) = room.event_cache().await.unwrap();
+    let (cache, _drop_handles) = crate::matrix::cache::room(&room).await.unwrap();
     let (loaded, subscriber) = cache.subscribe().await.unwrap();
     let in_memory = loaded.len();
     drop((loaded, subscriber));
@@ -880,6 +880,7 @@ async fn measure_search_index_of_a_room() {
                 .search("release", 20, None)
                 .await
                 .unwrap()
+                .events
                 .len()
         })
         .await;
@@ -1623,10 +1624,7 @@ async fn messages_that_come_in_while_the_first_page_waits_are_all_shown() {
     let client = signed_in(&server, SearchIndexStoreKind::InMemory).await;
     client.sync_once(SyncSettings::default()).await.unwrap();
     let room_id = <&matrix_sdk::ruma::RoomId>::try_from(ROOM).unwrap();
-    let (cache, _cache_handles) = client
-        .get_room(room_id)
-        .unwrap()
-        .event_cache()
+    let (cache, _cache_handles) = crate::matrix::cache::room(&client.get_room(room_id).unwrap())
         .await
         .unwrap();
     let mut status = cache.pagination().status();
@@ -1702,10 +1700,15 @@ async fn messages_that_come_in_while_the_page_after_a_clear_waits_are_all_shown(
     )
     .await;
     let (client, room) = client_of(&server, SearchIndexStoreKind::InMemory).await;
-    let (cache, _cache_handles) = room.event_cache().await.unwrap();
+    let (cache, _cache_handles) = crate::matrix::cache::room(&room).await.unwrap();
     let mut status = cache.pagination().status();
     let mut opened = Opened::new(client.clone()).await;
-    client.event_cache().clear_all_rooms().await.unwrap();
+    client
+        .event_cache()
+        .expect("the event cache is on")
+        .clear_all_rooms()
+        .await
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         while status.get() != PaginationStatus::Paginating {
             status.next().await;
@@ -1803,7 +1806,7 @@ async fn measure_idle_timeline_given_back() {
         heap_in_use()
     }
     let in_memory = async || {
-        let (cache, _drop_handles) = room.event_cache().await.unwrap();
+        let (cache, _drop_handles) = crate::matrix::cache::room(&room).await.unwrap();
         cache.events().await.unwrap().len()
     };
     let h0 = settled(&mut opened).await;
