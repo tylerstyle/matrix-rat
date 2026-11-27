@@ -88,7 +88,39 @@ pub(super) async fn backwards(timeline: &Timeline, count: u16) -> Result<bool, P
         reason = "the one place it is called, with its panic caught"
     )]
     let page = timeline.paginate_backwards(count);
-    unpanicked(page, LOOK_AGAIN).await
+    let answer = unpanicked(page, LOOK_AGAIN).await;
+    static LAST_CLEAR: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if matches!(answer, Err(PageError::Panicked))
+        && clear_due(&LAST_CLEAR, std::time::Instant::now())
+    {
+        // The room's events in memory and in the store disagree, and stay so (later pages
+        // panic too, the room's new events are refused by the store): all the caches are
+        // cleared and loaded anew, as the SDK itself does when the ignore list changes
+        // (0.19.1 has no public way to clear one room). Open rooms then page again.
+        let client = timeline.room().client();
+        if let Err(err) = client.event_cache().clear_all_rooms().await {
+            tracing::warn!(why = %logsafe::kind(&err), "could not clear the event cache after a panic");
+        }
+    }
+    answer
+}
+
+/// The least time between two clears of the event cache after a panic: a page that
+/// panics again after one does not clear the caches over and over (each clear makes the
+/// open rooms page again).
+const CLEAR_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// Whether the caches may be cleared after a panic at `now`, the last clear being kept in
+/// `last`; if so, `now` is kept, and the next time is [`CLEAR_EVERY`] later.
+fn clear_due(last: &std::sync::Mutex<Option<std::time::Instant>>, now: std::time::Instant) -> bool {
+    let mut last = last
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.is_some_and(|at| now.saturating_duration_since(at) < CLEAR_EVERY) {
+        return false;
+    }
+    *last = Some(now);
+    true
 }
 
 /// `page`'s answer, or [`PageError::Panicked`] if it panicked, looked at again every
@@ -278,5 +310,20 @@ mod tests {
         // The caller logs it as it logged the timeline's own error.
         assert_eq!(logsafe::kind(&err).to_string(), "pagination");
         assert_eq!(format!("{err:?}"), "Timeline(pagination)");
+    }
+
+    /// The caches are cleared after a panic at most once in [`super::CLEAR_EVERY`].
+    #[test]
+    fn the_caches_are_cleared_at_most_once_in_a_while() {
+        let last = std::sync::Mutex::new(None);
+        let start = std::time::Instant::now();
+        assert!(super::clear_due(&last, start));
+        assert!(!super::clear_due(&last, start));
+        assert!(!super::clear_due(
+            &last,
+            start + super::CLEAR_EVERY - Duration::from_secs(1)
+        ));
+        assert!(super::clear_due(&last, start + super::CLEAR_EVERY));
+        assert!(!super::clear_due(&last, start + super::CLEAR_EVERY));
     }
 }
