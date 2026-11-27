@@ -2,7 +2,8 @@
 
 A draft of the release notes for 1.1.0, in the form of the GitHub releases of 1.0.x, kept
 up to date while 1.1.0 is built. So far: the move to matrix-sdk 0.20, every other
-dependency brought up to date, and a mark between messages of one person in a row.
+dependency brought up to date, a mark between messages of one person in a row, and a
+log without the libraries' lines.
 
 matrix-rat now builds on matrix-sdk 0.20: search lists the newest matches first, a
 handful of fixes from the SDK, and the SQLite in the release archives is current again.
@@ -42,6 +43,10 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   said that its key had not arrived. No key will make it readable.
 - **The room list orders rooms without messages by their activity** among the others,
   instead of after all rooms with messages.
+- **The log keeps the libraries out.** By default it holds only matrix-rat's own notes;
+  the lines of matrix-sdk and the other libraries, many of which carry room, user or
+  device ids or an error as it came, no longer go in. `MATRIX_RAT_LOG` still lets them in
+  to look into a problem (see **Good to know** in the README).
 - **Theme files are watched more calmly** (notify 9): reading a theme no longer wakes the
   watch, and when the system's queue of file events runs over, the theme is reloaded,
   since any file may have changed.
@@ -111,5 +116,12 @@ Through matrix-sdk 0.20:
   build: the session was restored, history showed and decrypted, search found the old
   messages (newest first) after the index was rebuilt, and the verification state stayed.
   The SDK logs one warning per room while it rebuilds ("Recreating the search index").
-- The test with the user's real 1.0.3 profile is still to come before release (PLAN §6.1).
+- The user's real 1.0.3 profile (352 MB), 2026-11-27, with a release build of main `8776aa3`
+  (SDK 0.20 + all updates): a consistent copy (SQLite backup, integrity ok) on hpfury, opened
+  OFFLINE only (no network namespace: a copy that synced would be the user's device and take
+  to-device keys meant for the real client), with its own HOME. First start: no login form, no
+  panic, stores migrated and opened in under 0.5 s, verification state kept (device verified,
+  signing keys, backup on), message cache emptied as expected (its 87 MB file keeps its size
+  until SQLite reuses the pages); quit cleanly. Second start: 0.1 s to the same state. The copy
+  was deleted afterwards. To repeat with the release candidate before release.
 -->
