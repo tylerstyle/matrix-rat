@@ -181,8 +181,21 @@ the dot. `--mobile` is dropped (§6.4). Building starts once all is talked throu
   about 19 breaking changes in matrix-sdk and more in matrix-sdk-ui. It fixes the race that
   put a batch of messages twice into a timeline (PR #7284; our `dup-block` fix stays as a safety
   net) and an event-cache panic after shrinking a room's chunks (#7389); our catch of the
-  "chunk not found" panic (#5416) stays unless that is fixed too. To check with it: the SQLite
-  advisory in §7. Pinned exactly again (`=0.20.x`), for terminal and web at once.
+  "chunk not found" panic (#5416) stays unless that is fixed too. Pinned exactly again
+  (`=0.20.x`), for terminal and web at once. From a survey of its changelogs against our code
+  (2026-11-27, not yet compiled): about 7 real changes over ~40 places, mostly mechanical, 1.5
+  to 2.5 days with tests; the largest: `Client::event_cache()` (and `latest_events()`) answer an
+  `Option` and the cache is always on (~25 places), `Room::event_cache()` is gone, reactions
+  move back to the event item. ruma 0.17 → 0.18, MSRV unchanged, all our features remain.
+  - It fixes the SQLite advisory of §7 (rusqlite 0.41 → libsqlite3-sys 0.39 bundles SQLite
+    3.54.0), and the cause our panic catch names (all caches cleared at the start with an
+    ignore list, #7397); #5416 itself is not named, so the catch stays until it no longer
+    happens on the dev homeserver.
+  - **No way back:** the stores are migrated (the event cache is emptied once and fetched
+    again; the search index is rebuilt, its key no longer stretched, which is fine with our
+    random 256-bit passphrase), and keys exported or backed up by 0.20 read differently on
+    0.19.1. A profile used with 1.1.0 should not be opened with 1.0.x again; the release notes
+    say so. Tested with a real 1.0.3 profile before release.
 
 - **notify 9** (published 2026-11-21; the file watcher behind theme reloading): kept out of
   1.0.2, which took only compatible updates. Its breaking changes reach how watch errors are
