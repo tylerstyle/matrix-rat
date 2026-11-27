@@ -21,7 +21,7 @@ and likewise for `matrix-sdk-ui`, `matrix-sdk-crypto`, `matrix-sdk-base` and
 
 | Item | Today | What 0.20 offers |
 |---|---|---|
-| 1. Search history | `Ctrl-G` finds what this device has loaded: what the syncs bring (20 events per room at start, `src/matrix/mod.rs:1894`) and what the user scrolled back to. The 0.20 migration empties the event cache and rebuilds the index, so search finds less than before (`docs/RELEASE-NOTES-1.1-draft.md:18-23`). | `EventCache::run_search_backfill` (`matrix-sdk/src/event_cache/search_backfill.rs:94`): indexes what is stored, once, then pages every joined room back 13 weeks. Needs the client's back-pagination queue, which is off by default. |
+| 1. Search history | `Ctrl-G` finds what this device has loaded: what the syncs bring (20 events per room at start, `src/matrix/mod.rs:1894`) and what the user scrolled back to. The 0.20 migration empties the event cache and rebuilds the index, so search finds less than before (`docs/RELEASE-NOTES-1.1.md:18-23`). | `EventCache::run_search_backfill` (`matrix-sdk/src/event_cache/search_backfill.rs:94`): indexes what is stored, once, then pages every joined room back 13 weeks. Needs the client's back-pagination queue, which is off by default. |
 | 2. Failed changes | A failed message shows "✕ not sent"; Enter tries again, Del discards. A failed edit, reaction or deletion shows nothing: it looks sent, and it blocks every later send in that room, across restarts, with no way out in the app. | The send state of each kind on the item (`edit_send_state()`, `redaction_send_state()`, `ReactionInfo::send_state`) and `Timeline::retry_send`/`abort_send` with a `SendTarget`. Discarding the last pending edit puts the old text back. |
 | 3. Deletion reason | "Message deleted", nothing more. Deleting someone else's message asks for a reason; deleting our own cannot take one. | `EventTimelineItem::redaction_reason()` (`matrix-sdk-ui/src/timeline/event_item/mod.rs:266`), also for events that were deleted before we saw them. |
 | 4. Verified without keys | A new device whose verification the old device confirmed first can end up verified but without the private signing keys and the backup key (an SDK race). The app says "this device is verified" and offers nothing. The server test `a_chosen_session_is_verified` fails about 1 run in 8 from the same race. | Nothing public asks for the secrets again; a new verification does (see item 4). |
@@ -547,7 +547,7 @@ leave it off.
 8. **Docs.**
    - README: the search and settings parts.
    - Release notes: "Until messages are loaded again, search finds fewer of them"
-     (`docs/RELEASE-NOTES-1.1-draft.md:22-23`, note at `:91-94`) becomes: the first start
+     (`docs/RELEASE-NOTES-1.1.md:22-23`, note at `:91-94`) becomes: the first start
      indexes the stored messages again and fetches three months of history in the background
      (with the costs measured on the dev server, and how to turn it off).
 

@@ -1,12 +1,13 @@
-# matrix-rat 1.1.0 (draft)
+# matrix-rat 1.1.0
 
-A draft of the release notes for 1.1.0, in the form of the GitHub releases of 1.0.x, kept
-up to date while 1.1.0 is built. So far: the move to matrix-sdk 0.20, every other
-dependency brought up to date, a mark between messages of one person in a row, and a
-log without the libraries' lines.
+Search that reaches back three months, edits, reactions and deletions that say when they
+could not be sent (and can be tried again), deleted messages that say why, and the move
+to matrix-sdk 0.20.
 
 matrix-rat now builds on matrix-sdk 0.20: search lists the newest matches first, a
-handful of fixes from the SDK, and the SQLite in the release archives is current again.
+handful of fixes come from the SDK, and the SQLite in the release archives is current
+again. Read **Before you upgrade** first: a profile opened with 1.1.0 should not go back
+to 1.0.x.
 
 ## Before you upgrade
 
@@ -27,6 +28,36 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
 
 ## New
 
+- **Search reaches back three months.** Once a session, about ten seconds after the room
+  list is in, matrix-rat fetches three months of every room's messages in the background,
+  a room a second, so that search across all rooms (`Ctrl-G`) finds them, encrypted ones
+  too once their keys are there. The search box says how far it has got ("Fetching older
+  messages, back to 28 Aug…", then "back to about 28 Aug"). It costs data and disk, mostly
+  once: on our test server about 2.3 KB of disk per message, so 100,000 messages take
+  about 230 MB and half an hour on the first run; later starts read what is stored, in
+  seconds, and fetch only what is missing. If the app is closed in the middle of it, what
+  was fetched but not yet searchable is made searchable at the next start. **Search
+  history** in the settings (`search_history = false`) turns it off, at once;
+  `matrix-rat serve` never fetches. Built on matrix-sdk 0.20's search backfill.
+- **An edit, a deletion or a reaction that could not be sent says so, and can be tried
+  again or thrown away.** It showed nothing: it looked sent, and everything you sent after
+  it in that room stayed "◌ sending", even after a restart. Now the message shows
+  "✕ edit not sent: not allowed in this room" or "✕ deletion not sent", your reaction's
+  chip a `✕`, and what waits behind it "◌ waiting". `Enter` tries again, as for a message
+  that was not sent, and `Del` throws away what did not go out: a discarded edit brings
+  back the text before it, a discarded deletion keeps the message, a discarded reaction
+  is gone. This works on someone else's message too (your reaction, or your deletion as a
+  moderator); the status line, the menu and the details (`i`) say what failed. What
+  failed because the connection was lost now goes out by itself once the app is back
+  online.
+- **A deleted message says why, and who deleted it.** "Message deleted: sent to the wrong
+  room" when the sender gave a reason, "Deleted by carol: spam link" when a moderator
+  deleted it, "Deleted by you" for one you deleted. The details (`i`) show the whole
+  reason and the user ID of whoever deleted it. The reason is shown as it was written, on
+  one line: no links, no formatting.
+- **Delete with a reason…** in the menu of your own messages and in the command palette
+  asks for a reason before it deletes; `Del` still deletes at once. It has no key by
+  default (`delete_with_reason` under `[keys.timeline]` gives it one).
 - **Several messages of one person in a row are told apart.** Each one after the first
   starts with a muted `·` under the `●` of the line with the name and time, on its first
   line only: no row more, and it is there without colours (`NO_COLOR`) and in 256 colours
@@ -42,34 +73,6 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   both open a popup with **Verify again** (with another device: this time the keys come
   along) and **Enter recovery key**. The Done screen of a verification offers the same
   when the keys did not come.
-- **A deleted message says why, and who deleted it.** "Message deleted: sent to the wrong
-  room" when the sender gave a reason, "Deleted by carol: spam link" when a moderator
-  deleted it, "Deleted by you" for one you deleted. The details (`i`) show the whole
-  reason and the user ID of whoever deleted it. The reason is shown as it was written, on
-  one line: no links, no formatting.
-- **An edit, a deletion or a reaction that could not be sent says so, and can be tried
-  again or thrown away.** It showed nothing: it looked sent, and everything you sent after
-  it in that room stayed "◌ sending", even after a restart. Now the message shows
-  "✕ edit not sent: not allowed in this room" or "✕ deletion not sent", your reaction's
-  chip a `✕`, and what waits behind it "◌ waiting". `Enter` tries again, as for a message
-  that was not sent, and `Del` throws away what did not go out: a discarded edit brings
-  back the text before it, a discarded deletion keeps the message, a discarded reaction
-  is gone. This works on someone else's message too (your reaction, or your deletion as a
-  moderator); the status line, the menu and the details (`i`) say what failed. What
-  failed because the connection was lost now goes out by itself once the app is back
-  online.
-- **Delete with a reason…** in the menu of your own messages and in the command palette
-  asks for a reason before it deletes; `Del` still deletes at once. It has no key by
-  default (`delete_with_reason` under `[keys.timeline]` gives it one).
-
-- **Search reaches back three months.** Once a session, about ten seconds after the room
-  list is in, matrix-rat fetches three months of every room's messages in the background,
-  a room a second, so that search across all rooms (`Ctrl-G`) finds them, encrypted ones
-  too once their keys are there. The search box says how far it has got ("Fetching older
-  messages, back to 28 Aug…", then "back to about 28 Aug"). It costs data and disk: the
-  first run fetches the most, later ones read what is stored, in seconds, and fetch only
-  what is missing. **Search history** in the settings (`search_history = false`) turns it
-  off, at once; `matrix-rat serve` never fetches. Built on matrix-sdk 0.20's search backfill.
 
 ## Changed
 
@@ -104,6 +107,15 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   since any file may have changed.
 
 ## Fixed
+
+- **Setting your name for one room** failed with "Local cache doesn't contain all
+  necessary data" in a room whose state the sync had not brought yet, a room just created
+  for one. The name is now set from what the server holds.
+- **A panic in matrix-sdk while loading older messages** ("The chunk is not found",
+  matrix-rust-sdk #5416) no longer ends the task that asked (the room said "loading older
+  messages" for good, an agent's listener never got ready) and no longer hands the
+  terminal back while the app goes on: the page counts as not loaded, and is asked for
+  again.
 
 Through matrix-sdk 0.20:
 
@@ -157,33 +169,3 @@ Through matrix-sdk 0.20:
 - **Rust 1.99 or newer** is needed to build matrix-rat (was 1.96).
 - notify 9 (from 8) for watching theme files, signal-hook 0.4 (from 0.3) for suspending
   with `Ctrl-Z`, and every other dependency at its newest compatible version.
-
-<!-- Notes for the final text, not for the release:
-- Search history: reworded the upgrade note above (the run indexes the stored events once,
-  then pages back). Measured on the dev server, 2026-11-27 (`search_history_cost`,
-  docs/DESIGN-1.1.md §1 "Measured"): 9 101 events in 9 rooms took 189 `/messages`, 2.3 MB
-  down, 57 s and 12.8 MB of disk (2.3 KB per event); a later start asked the server nothing
-  and was done in 1 s (4 s when the index is redone). For 100 000 events in 100 rooms: about
-  3 400 requests and 236 MB, 29 min at 0.5 s a request plus up to 23 min of pacing on the
-  first run; within the gate (1 GB, 1 h), so on by default. Later starts leave the SDK's
-  sweep out: it fetches nothing then, but its pacing cost a second per room and week (about
-  21 min for 100 rooms) before. What the SDK had not indexed when a session ended is indexed
-  at the next start (a mark of ours, `history-indexing`, removes the SDK's `reindexed-v1`).
-  matrix-sdk 0.20's sweep alone stops at about 300 events a room (its batch cap counts what it reads back
-  from disk); our own walk takes each room the rest of the way (at most 3 900 events). With
-  search history off, the start still costs the latest-event and read-receipt backfills (87
-  `/messages` in the test, 67 of them one room of 2 000 topic changes).
-- Upgrade tested on the dev homeserver on 2026-11-27: profiles made with the 0.19.1 build
-  (one without cross-signing, one verified with an encrypted room) opened with the 0.20
-  build: the session was restored, history showed and decrypted, search found the old
-  messages (newest first) after the index was rebuilt, and the verification state stayed.
-  The SDK logs one warning per room while it rebuilds ("Recreating the search index").
-- The user's real 1.0.3 profile (352 MB), 2026-11-27, with a release build of main `8776aa3`
-  (SDK 0.20 + all updates): a consistent copy (SQLite backup, integrity ok) on hpfury, opened
-  OFFLINE only (no network namespace: a copy that synced would be the user's device and take
-  to-device keys meant for the real client), with its own HOME. First start: no login form, no
-  panic, stores migrated and opened in under 0.5 s, verification state kept (device verified,
-  signing keys, backup on), message cache emptied as expected (its 87 MB file keeps its size
-  until SQLite reuses the pages); quit cleanly. Second start: 0.1 s to the same state. The copy
-  was deleted afterwards. To repeat with the release candidate before release.
--->
