@@ -198,17 +198,28 @@ fn reaction_label(key: &str, emotes: &EmoteCatalog) -> String {
     }
 }
 
+/// How a reaction chip of ours that could not be sent ends: ✕ after its count.
+const FAILED_CHIP: &str = " ✕ ";
+
 /// The label that copies a code block, at the right end of its first line.
 const COPY_LABEL: &str = "copy";
 
-/// "(edited)", "sending" or "not sent", shown after a message's text.
+/// What is shown after a message's text, each part in its own role: "(edited)" and
+/// the other badges, "sending" or "not sent", and a change of ours to it that could not
+/// be sent. Empty for nothing.
 /// `repeated_shield`: the message before it, from the same sender, carries the same
 /// shield, which is then not said again (in a bridged room every line would say it).
-fn marker(message: &Message, repeated_shield: bool) -> Option<(String, Role)> {
+fn marker(message: &Message, repeated_shield: bool) -> Vec<(String, Role)> {
     let shield = message.shield.filter(|_| !repeated_shield);
+    let mut parts = Vec::new();
     match (message.state, message.edited, message.pinned) {
-        (SendState::Sending, _, _) => Some((message.sending_label(), Role::Muted)),
-        (SendState::Failed, _, _) => Some((message.failed_label(), Role::Error)),
+        // Behind something in the room that could not be sent: it goes once that is
+        // tried again or discarded.
+        (SendState::Sending, _, _) if message.held => {
+            parts.push(("◌ waiting".to_owned(), Role::Muted));
+        }
+        (SendState::Sending, _, _) => parts.push((message.sending_label(), Role::Muted)),
+        (SendState::Failed, _, _) => parts.push((message.failed_label(), Role::Error)),
         (SendState::Sent, edited, pinned) => {
             let role = match shield {
                 Some(shield) if shield.serious() => Role::Error,
@@ -216,16 +227,70 @@ fn marker(message: &Message, repeated_shield: bool) -> Option<(String, Role)> {
                 None if pinned => Role::StatusKey,
                 None => Role::Muted,
             };
-            let parts: Vec<&str> = shield
+            let badges: Vec<&str> = shield
                 .map(|shield| shield.label())
                 .into_iter()
                 .chain(pinned.then_some("(pinned)"))
                 .chain(message.saved.then_some("(saved)"))
                 .chain(edited.then_some("(edited)"))
                 .collect();
-            (!parts.is_empty()).then(|| (parts.join(" "), role))
+            if !badges.is_empty() {
+                parts.push((badges.join(" "), role));
+            }
         }
     }
+    let not_sent = |what: &str, why: &str| {
+        if why.is_empty() {
+            format!("✕ {what} not sent")
+        } else {
+            format!("✕ {what} not sent: {why}")
+        }
+    };
+    if let Some(why) = &message.edit_error {
+        parts.push((not_sent("edit", why), Role::Error));
+    }
+    if let Some(why) = &message.delete_error {
+        parts.push((not_sent("deletion", why), Role::Error));
+    }
+    parts
+}
+
+/// How wide the parts of a marker are, joined by spaces.
+fn marker_width(parts: &[(String, Role)]) -> usize {
+    parts.iter().map(|(part, _)| width(part)).sum::<usize>() + parts.len().saturating_sub(1)
+}
+
+/// The parts of a marker after what a row holds, each after a space.
+fn push_marker(
+    spans: &mut Vec<Span<'static>>,
+    parts: Vec<(String, Role)>,
+    style: impl Fn(Role) -> Style,
+) {
+    for (part, role) in parts {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(part, style(role)));
+    }
+}
+
+/// The parts of a marker on a row of their own, joined by spaces and cut to
+/// `body_width`.
+fn marker_line(
+    parts: Vec<(String, Role)>,
+    body_width: usize,
+    style: impl Fn(Role) -> Style,
+) -> Line<'static> {
+    let mut own = vec![Span::raw(INDENT)];
+    let mut left = body_width;
+    for (n, (part, role)) in parts.into_iter().enumerate() {
+        if n > 0 && left > 1 {
+            own.push(Span::raw(" "));
+            left -= 1;
+        }
+        let part = truncate(&part, left);
+        left -= width(&part);
+        own.push(Span::styled(part, style(role)));
+    }
+    Line::from(own)
 }
 
 /// Columns the line of a deleted message keeps beside its marker at least (as wide as
@@ -243,7 +308,7 @@ fn deleted_rows(i: usize, message: &Message, repeated_shield: bool, lay: &Lay) -
     } = *lay;
     let line = message.deleted_line();
     // What goes after the line, each part in its own role, joined by spaces.
-    let parts: Vec<(String, Role)> = marker(message, repeated_shield).into_iter().collect();
+    let parts = marker(message, repeated_shield);
     let after = parts.iter().map(|(part, _)| width(part) + 1).sum::<usize>();
     let room = body_width.saturating_sub(after);
     // Both fit: the marker, and as much of the line as it keeps (an empty line keeps
@@ -258,25 +323,14 @@ fn deleted_rows(i: usize, message: &Message, repeated_shield: bool, lay: &Lay) -
     ];
     let mut rows = Vec::new();
     if beside {
-        for (part, role) in parts {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(part, theme.style(role)));
-        }
+        push_marker(&mut spans, parts, |role| theme.style(role));
         rows.push(Row::plain(Line::from(spans), Some(i)));
     } else {
         rows.push(Row::plain(Line::from(spans), Some(i)));
-        let mut own = vec![Span::raw(INDENT)];
-        let mut left = body_width;
-        for (n, (part, role)) in parts.into_iter().enumerate() {
-            if n > 0 && left > 1 {
-                own.push(Span::raw(" "));
-                left -= 1;
-            }
-            let part = truncate(&part, left);
-            left -= width(&part);
-            own.push(Span::styled(part, theme.style(role)));
-        }
-        rows.push(Row::plain(Line::from(own), Some(i)));
+        rows.push(Row::plain(
+            marker_line(parts, body_width, |role| theme.style(role)),
+            Some(i),
+        ));
     }
     rows
 }
@@ -854,12 +908,10 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                 rich::wrap(&rich, body_width)
             } else {
                 // A picture without a caption; a marker still gets its row.
-                if let Some((label, role)) = marker(message, repeated_shield) {
+                let parts = marker(message, repeated_shield);
+                if !parts.is_empty() {
                     rows.push(Row::plain(
-                        Line::from(vec![
-                            Span::raw(INDENT),
-                            Span::styled(truncate(&label, body_width), theme.style(role)),
-                        ]),
+                        marker_line(parts, body_width, |role| theme.style(role)),
                         Some(i),
                     ));
                 }
@@ -951,19 +1003,19 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                 // "(edited)", "sending" and "not sent" go after the text, or on a row of
                 // their own when there is no room left.
                 let mut own_row = None;
-                if n == last
-                    && let Some((label, role)) = marker(message, repeated_shield)
-                {
-                    if col + 1 + width(&label) <= max_width {
-                        spans.push(Span::raw(" "));
-                        col += 1 + width(&label);
-                        spans.push(Span::styled(label, theme.style(role)));
+                let parts = if n == last {
+                    marker(message, repeated_shield)
+                } else {
+                    Vec::new()
+                };
+                if !parts.is_empty() {
+                    let label_width = marker_width(&parts);
+                    if col + 1 + label_width <= max_width {
+                        col += 1 + label_width;
+                        push_marker(&mut spans, parts, |role| theme.style(role));
                     } else {
                         own_row = Some(Row::plain(
-                            Line::from(vec![
-                                Span::raw(INDENT),
-                                Span::styled(truncate(&label, body_width), theme.style(role)),
-                            ]),
+                            marker_line(parts, body_width, |role| theme.style(role)),
                             Some(i),
                         ));
                     }
@@ -1033,13 +1085,15 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
             }
             // A chip too wide for the pane is cut short, and then has no room for
             // the picture: it shows the name instead, as much of it as fits.
-            let pictured = format!(" {} {} ", rich::EMOTE_BOX, reaction.count);
+            // One of ours that could not be sent says so after its count.
+            let failed = if reaction.failed { FAILED_CHIP } else { " " };
+            let pictured = format!(" {} {}{failed}", rich::EMOTE_BOX, reaction.count);
             let picture = wanted && images.emote_ready(key) && width(&pictured) <= body_width;
             let whole = if picture {
                 pictured
             } else {
                 format!(
-                    " {} {} ",
+                    " {} {}{failed}",
                     reaction_label(&reaction.key, emotes.catalog),
                     reaction.count
                 )
@@ -1070,7 +1124,18 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
             } else {
                 Role::Reaction
             };
-            spans.push(Span::styled(chip, theme.style(role)));
+            match chip.strip_suffix(FAILED_CHIP) {
+                Some(head) if reaction.failed => {
+                    spans.push(Span::styled(format!("{head} "), theme.style(role)));
+                    // Red, on the chip's own background.
+                    spans.push(Span::styled(
+                        "✕",
+                        theme.style(role).patch(theme.style(Role::Error)),
+                    ));
+                    spans.push(Span::styled(" ", theme.style(role)));
+                }
+                _ => spans.push(Span::styled(chip, theme.style(role))),
+            }
             hits.push((col as u16, (col + chip_width) as u16, HitId::Reaction(i, r)));
             col += chip_width;
             if col < max_width {
@@ -1368,25 +1433,15 @@ fn push_poll_rows(
     let meta_text = truncate(&meta.join(" · "), body_width);
     let mut footer_spans = vec![Span::raw(INDENT), Span::styled(meta_text.clone(), muted)];
     let col = INDENT.len() + width(&meta_text);
-    match marker(message, repeated_shield) {
-        Some((label, role)) if col + 1 + width(&label) <= max_width => {
-            footer_spans.push(Span::raw(" "));
-            footer_spans.push(Span::styled(label, fg_only(role)));
-            rows.push(Row::plain(Line::from(footer_spans), Some(i)));
-        }
-        Some((label, role)) => {
-            rows.push(Row::plain(Line::from(footer_spans), Some(i)));
-            rows.push(Row::plain(
-                Line::from(vec![
-                    Span::raw(INDENT),
-                    Span::styled(truncate(&label, body_width), fg_only(role)),
-                ]),
-                Some(i),
-            ));
-        }
-        None => {
-            rows.push(Row::plain(Line::from(footer_spans), Some(i)));
-        }
+    let parts = marker(message, repeated_shield);
+    if parts.is_empty() {
+        rows.push(Row::plain(Line::from(footer_spans), Some(i)));
+    } else if col + 1 + marker_width(&parts) <= max_width {
+        push_marker(&mut footer_spans, parts, fg_only);
+        rows.push(Row::plain(Line::from(footer_spans), Some(i)));
+    } else {
+        rows.push(Row::plain(Line::from(footer_spans), Some(i)));
+        rows.push(Row::plain(marker_line(parts, body_width, fg_only), Some(i)));
     }
 }
 
@@ -2124,27 +2179,27 @@ mod tests {
             body: "hello".into(),
             ..Message::default()
         };
-        assert_eq!(marker(&message, false), None);
+        assert_eq!(marker(&message, false), []);
         message.shield = Some(Shield::UnverifiedDevice);
         message.edited = true;
         assert_eq!(
             marker(&message, false),
-            Some((
+            [(
                 "⚠ from an unverified device (edited)".to_owned(),
                 Role::Error
-            ))
+            )]
         );
         // Said once for a run of messages from the same sender, not on every line.
         assert_eq!(
             marker(&message, true),
-            Some(("(edited)".to_owned(), Role::Muted))
+            [("(edited)".to_owned(), Role::Muted)]
         );
         // Not a warning, only a remark; and it shows up in the laid-out rows.
         message.shield = Some(Shield::NotEncrypted);
         message.edited = false;
         assert_eq!(
             marker(&message, false),
-            Some(("not encrypted".to_owned(), Role::Muted))
+            [("not encrypted".to_owned(), Role::Muted)]
         );
         let theme = Theme::builtin(DEFAULT_THEME).unwrap();
         let mut room = demo_rooms().remove(0);
@@ -2201,6 +2256,7 @@ mod tests {
                 key: key.into(),
                 count: 2,
                 own: false,
+                failed: false,
             })
             .collect(),
             ..Message::default()
@@ -2239,6 +2295,7 @@ mod tests {
                 key: PARTY.into(),
                 count: 2,
                 own: false,
+                failed: false,
             }],
             ..Message::default()
         }
@@ -2540,6 +2597,36 @@ mod tests {
         assert_eq!(message_rows(&room, 30), ["   (pinned) (saved)"]);
     }
 
+    /// The ✕ of a reaction of ours that could not be sent is red on the chip's own
+    /// background, not a hole in the chip.
+    #[test]
+    fn a_failed_reaction_chip_keeps_its_background() {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let mut room = demo_rooms().remove(0);
+        room.messages = vec![Message {
+            body: "Ship it".into(),
+            own: true,
+            reactions: vec![crate::model::Reaction {
+                key: "👍".into(),
+                count: 1,
+                own: true,
+                failed: true,
+            }],
+            ..Message::default()
+        }];
+        let rows = build_rows(&room, 40, &theme, None, &images);
+        let chip = rows
+            .iter()
+            .flat_map(|row| &row.line.spans)
+            .find(|span| span.content == "✕")
+            .expect("the chip's ✕");
+        let own = theme.style(Role::ReactionOwn);
+        assert_eq!(chip.style, own.patch(theme.style(Role::Error)));
+        assert_eq!(chip.style.bg, own.bg);
+        assert_eq!(chip.style.fg, theme.style(Role::Error).fg);
+    }
+
     #[test]
     fn a_long_reason_keeps_the_marker_in_view() {
         use crate::model::DeletedBy;
@@ -2549,6 +2636,8 @@ mod tests {
         let mut message = deleted(&reason, DeletedBy::Us);
         message.saved = true;
         message.pinned = true;
+        // Our deletion of it could not be sent, besides.
+        message.delete_error = Some(String::new());
         let mut room = demo_rooms().remove(0);
         room.messages = vec![message.clone()];
         // The rows after the day and the header.
@@ -2565,25 +2654,36 @@ mod tests {
         };
         let text =
             |rows: &[Row]| -> Vec<String> { rows.iter().map(|row| row.line.to_string()).collect() };
-        for max in [40, 60, 120] {
+        for max in [60, 120, 500] {
             let rows = message_rows(&room, max);
             // One row: the line, cut, with its marker.
             assert_eq!(rows.len(), 1, "width {max}: {:?}", text(&rows));
             let line = rows[0].line.to_string();
             assert!(line.starts_with("  Deleted by you: yyy"), "{line}");
-            assert!(line.ends_with("y… (pinned) (saved)"), "{line}");
+            assert!(
+                line.ends_with("y… (pinned) (saved) ✕ deletion not sent"),
+                "{line}"
+            );
             assert_eq!(rows[0].line.width(), max);
             assert_eq!(rows[0].msg, Some(0));
+            // "✕ deletion not sent" in its own colour.
+            let error = rows[0].line.spans.last().unwrap();
+            assert_eq!(error.content, "✕ deletion not sent");
+            assert_eq!(error.style, theme.style(Role::Error));
         }
         // Too narrow for both: the line, cut, then the marker on a row of its own.
-        let rows = message_rows(&room, 24);
+        let rows = message_rows(&room, 44);
         assert_eq!(
             text(&rows),
-            ["  Deleted by you: yyyyy…", "  (pinned) (saved)"]
+            [
+                "  Deleted by you: yyyyyyyyyyyyyyyyyyyyyyyyy…",
+                "  (pinned) (saved) ✕ deletion not sent"
+            ]
         );
         // No marker: the whole width for the line.
         room.messages[0].saved = false;
         room.messages[0].pinned = false;
+        room.messages[0].delete_error = None;
         let rows = message_rows(&room, 40);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].line.width(), 40);
@@ -3159,6 +3259,7 @@ mod tests {
                     key: "👍".into(),
                     count: 2,
                     own: false,
+                    failed: false,
                 }],
                 ..said("first")
             },

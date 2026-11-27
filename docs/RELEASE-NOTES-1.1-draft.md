@@ -47,6 +47,17 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   deleted it, "Deleted by you" for one you deleted. The details (`i`) show the whole
   reason and the user ID of whoever deleted it. The reason is shown as it was written, on
   one line: no links, no formatting.
+- **An edit, a deletion or a reaction that could not be sent says so, and can be tried
+  again or thrown away.** It showed nothing: it looked sent, and everything you sent after
+  it in that room stayed "◌ sending", even after a restart. Now the message shows
+  "✕ edit not sent: not allowed in this room" or "✕ deletion not sent", your reaction's
+  chip a `✕`, and what waits behind it "◌ waiting". `Enter` tries again, as for a message
+  that was not sent, and `Del` throws away what did not go out: a discarded edit brings
+  back the text before it, a discarded deletion keeps the message, a discarded reaction
+  is gone. This works on someone else's message too (your reaction, or your deletion as a
+  moderator); the status line, the menu and the details (`i`) say what failed. What
+  failed because the connection was lost now goes out by itself once the app is back
+  online.
 - **Delete with a reason…** in the menu of your own messages and in the command palette
   asks for a reason before it deletes; `Del` still deletes at once. It has no key by
   default (`delete_with_reason` under `[keys.timeline]` gives it one).

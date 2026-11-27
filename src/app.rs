@@ -2588,12 +2588,24 @@ impl App {
         }
     }
 
-    /// Whether the selected message is one of ours that could not be sent.
+    /// Whether something of the selected message could not be sent: the message itself
+    /// (one of ours), or a change of ours to it (an edit, a deletion, a reaction).
     pub(crate) fn selected_failed(&self) -> bool {
         self.timeline
             .selected
             .and_then(|i| self.messages().get(i))
-            .is_some_and(|m| m.state == SendState::Failed)
+            .is_some_and(Message::failed_any)
+    }
+
+    /// Which change of ours to the selected message could not be sent, if it is on the
+    /// server (what Del throws away, see [`Message::failed_change`]). Of what is shown:
+    /// the open thread's messages while one is open.
+    pub(crate) fn selected_failed_change(&self) -> Option<crate::model::FailedChange> {
+        self.timeline
+            .selected
+            .and_then(|i| self.messages().get(i))
+            .filter(|message| message.state == SendState::Sent)
+            .and_then(Message::failed_change)
     }
 
     /// System lines and the "new" marker cannot be selected.
@@ -2902,9 +2914,10 @@ impl App {
             return None;
         }
         let last = self.messages().iter().rposition(Message::editable)?;
-        // One that could not be sent wants sending again or discarding first, which
-        // is offered on the message itself; an older one is not "the last".
-        (self.messages()[last].state != SendState::Failed).then_some(last)
+        // One that could not be sent (or a change to it) wants sending again or
+        // discarding first, which is offered on the message itself; an older one is not
+        // "the last".
+        (!self.messages()[last].failed_any()).then_some(last)
     }
 
     /// Starts editing the message at `index` with its text in the composer.
@@ -3012,6 +3025,7 @@ impl App {
                 key: key.to_owned(),
                 count: 1,
                 own: true,
+                failed: false,
             }),
         }
     }
@@ -3019,6 +3033,19 @@ impl App {
     fn delete_message(&mut self, index: usize) {
         match self.messages().get(index) {
             None => return,
+            // A change of ours that could not be sent is discarded, on anyone's message:
+            // our reaction, or our deletion as a moderator, sits on someone else's.
+            Some(message)
+                if message.state == SendState::Sent && message.failed_change().is_some() =>
+            {
+                let item = message.item.clone();
+                if self.matrix.is_some()
+                    && let (Some(item), Some(room_id)) = (item, self.room_id())
+                {
+                    self.send_matrix(MatrixCmd::Discard { room_id, item });
+                }
+                return;
+            }
             Some(message) if !message.own => {
                 if self.room().is_some_and(|r| r.power.can_redact_other)
                     && message.state == SendState::Sent
@@ -3272,7 +3299,7 @@ impl App {
                         .timeline
                         .selected
                         .and_then(|i| self.messages().get(i))
-                        .is_some_and(|m| m.state == SendState::Failed) =>
+                        .is_some_and(Message::failed_any) =>
             {
                 let item = self
                     .timeline
@@ -3323,7 +3350,7 @@ impl App {
                         .messages()
                         .iter()
                         .rfind(|message| message.editable())
-                        .is_some_and(|message| message.state == SendState::Failed) =>
+                        .is_some_and(Message::failed_any) =>
                     {
                         self.perform(Action::SelectOlder)
                     }
@@ -6027,6 +6054,14 @@ mod tests {
         app.perform(Action::Focus(Pane::Composer));
         app.perform(Action::EditLast);
         assert_eq!(app.compose_mode, ComposeMode::Edit(1));
+
+        // So does one with an edit that could not be sent.
+        let mut app = with_messages(&[(true, "sent"), (true, "edit not sent")]);
+        app.rooms[0].messages[1].edit_error = Some("not allowed in this room".into());
+        app.perform(Action::EditLast);
+        assert_eq!(app.compose_mode, ComposeMode::Normal);
+        assert_eq!(app.focus, Pane::Timeline);
+        assert_eq!(app.timeline.selected, Some(1));
     }
 
     #[test]
@@ -7780,6 +7815,65 @@ mod tests {
         app.typing_notices = false;
         app.on_event(key(KeyCode::Esc));
         type_text(&mut app, "quiet");
+        assert!(drain(&mut commands).is_empty());
+    }
+
+    /// A change of ours that could not be sent, on our own message or someone else's
+    /// (our reaction, our deletion as a moderator): Enter tries it again and Del throws
+    /// it away, not the reason popup nor the "only your own" toast; the status line
+    /// names what Del throws away.
+    #[test]
+    fn failed_changes_are_tried_again_or_discarded() {
+        let (mut app, mut terminal, mut commands) = connected();
+        let mut edited = remote("1", "me", "Fixed the typo");
+        edited.edited = true;
+        edited.edit_error = Some("not allowed in this room".into());
+        let mut reacted = remote("2", "ann", "Ship it");
+        reacted.reactions = vec![Reaction {
+            key: "👍".into(),
+            count: 1,
+            own: true,
+            failed: true,
+        }];
+        let mut deleted = remote("3", "ann", "Message deleted");
+        deleted.kind = MsgKind::Redacted;
+        deleted.delete_error = Some("not allowed in this room".into());
+        let mut both = remote("4", "me", "Two things");
+        both.edit_error = Some("not allowed in this room".into());
+        both.reactions = reacted.reactions.clone();
+        app.on_matrix(timeline(&app, vec![edited, reacted, deleted, both]));
+        // Someone else's message would ask for a reason here.
+        app.rooms[app.active].power.can_redact_other = true;
+        drain(&mut commands);
+        app.on_event(key(KeyCode::Up));
+        for (index, hint) in [
+            (3, "discard"),
+            (2, "keep message"),
+            (1, "remove reaction"),
+            (0, "discard edit"),
+        ] {
+            app.timeline.selected = Some(index);
+            redraw(&mut app, &mut terminal);
+            let screen = format!("{}", terminal.backend());
+            let status = screen.lines().last().unwrap();
+            assert!(status.contains("try again"), "{status}");
+            assert!(status.contains(&format!("Del {hint}")), "{status}");
+            app.on_event(key(KeyCode::Enter));
+            app.on_event(key(KeyCode::Delete));
+            assert_eq!(
+                drain(&mut commands),
+                ["Retry(!a)", "Discard(!a)"],
+                "{index}"
+            );
+            assert!(app.modal.is_none(), "no reason popup");
+            assert!(app.toast.is_none(), "no toast");
+            assert_eq!(app.compose_mode, ComposeMode::Normal);
+        }
+        // Once nothing failed, Del on someone else's message asks for a reason again.
+        app.rooms[app.active].messages[1].reactions[0].failed = false;
+        app.timeline.selected = Some(1);
+        app.on_event(key(KeyCode::Delete));
+        assert!(app.modal.is_some());
         assert!(drain(&mut commands).is_empty());
     }
 

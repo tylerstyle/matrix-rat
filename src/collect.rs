@@ -324,6 +324,7 @@ pub(crate) mod tests {
             key: "👍".to_owned(),
             count: 2,
             own: false,
+            failed: false,
         }];
         let entry = entry(&message).unwrap();
         assert_eq!(entry.at, Some(AT));

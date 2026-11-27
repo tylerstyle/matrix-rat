@@ -5,7 +5,7 @@ use crate::action::Action;
 use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::modal::{Modal, Setting, SettingsMenu};
-use crate::model::{MsgKind, RoomKind, SendState};
+use crate::model::{MsgKind, RoomKind};
 use crate::palette::{MessageCaps, Palette, PaletteContext, Pick, RoomItem, SpaceItem, Target};
 use crate::theme::Theme;
 
@@ -57,7 +57,7 @@ impl App {
                         && (self.matrix.is_none()
                             || matches!(m.item, Some(crate::model::ItemRef::Event(_)))),
                     can_jump_to_reply: m.reply_event.is_some(),
-                    failed_retry: self.matrix.is_some() && m.state == SendState::Failed,
+                    failed_retry: self.matrix.is_some() && m.failed_any(),
                     undecryptable: self.matrix.is_some()
                         && m.kind == MsgKind::Undecryptable
                         && m.utd.is_some(),

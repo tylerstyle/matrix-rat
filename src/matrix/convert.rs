@@ -608,6 +608,14 @@ pub(super) fn event_message(
         }
         _ => {}
     }
+    // Our changes to it that could not be sent: they wait for Enter or Del, and hold up
+    // what we send after them in the room (see `prepare_messages`).
+    if let Some(EventSendState::SendingFailed { error, .. }) = event.edit_send_state() {
+        message.edit_error = Some(super::upload::failure_reason(error));
+    }
+    if let Some(EventSendState::SendingFailed { error, .. }) = event.redaction_send_state() {
+        message.delete_error = Some(super::upload::failure_reason(error));
+    }
 
     #[expect(
         clippy::wildcard_enum_match_arm,
@@ -626,10 +634,14 @@ pub(super) fn event_message(
                         .keys()
                         .filter(|user| !ignored.contains(*user))
                         .count() as u32;
+                    let ours = senders.get(own);
                     (count > 0).then(|| Reaction {
                         key: key.clone(),
                         count,
-                        own: senders.contains_key(own),
+                        own: ours.is_some(),
+                        failed: ours.is_some_and(|info| {
+                            matches!(info.send_state, Some(EventSendState::SendingFailed { .. }))
+                        }),
                     })
                 })
                 .collect();
@@ -1794,6 +1806,7 @@ mod tests {
             key: "👍".to_owned(),
             count: 1,
             own: true,
+            failed: false,
         }];
         // SDK moved the receipt off the trailing copy; copy 1 held a stale receipt.
         e471_later.read_by = ReadBy::default();

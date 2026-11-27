@@ -566,6 +566,16 @@ There is no command that lists or removes profiles; a profile is its two folders
   middle of a run; `matrix-rat serve` never fetches.
 - **Bridged chats** (Signal, WhatsApp…) show a quiet "sent on the sender's behalf" remark:
   the bridge encrypts for the people on the other side.
+- **A message or a change that could not be sent** says so after the message:
+  `✕ not sent`, `✕ edit not sent` or `✕ deletion not sent`, with the reason where there is
+  one, or a `✕` on the chip of your reaction. It can be on someone else's message too:
+  your reaction, or your deletion as a moderator. Until it is dealt with, what you send
+  after it in that room waits (`◌ waiting`). On such a message `Enter` tries again and
+  `Del` throws away what did not go out: a discarded edit brings back the text before it,
+  a discarded deletion keeps the message (`Del` once more deletes it), a discarded
+  reaction is gone. The status line and the menu say which (`Del discard edit`,
+  `keep message`, `remove reaction`). What failed because the connection was lost goes
+  out by itself once matrix-rat is back online.
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
   once at start.
 - **Notification keywords** (Settings → Notification keywords, or `Ctrl-P` "keywords")

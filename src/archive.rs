@@ -480,11 +480,13 @@ mod tests {
                 key: "👍".to_owned(),
                 count: 2,
                 own: true,
+                failed: false,
             },
             Reaction {
                 key: "*".to_owned(),
                 count: 1,
                 own: false,
+                failed: false,
             },
         ];
         assert_eq!(

@@ -857,6 +857,9 @@ fn whole(message: &Message) -> String {
         poll,
         upload,
         send_error,
+        edit_error,
+        delete_error,
+        held,
         shield,
         mentions,
         read_by,
@@ -869,7 +872,14 @@ fn whole(message: &Message) -> String {
     });
     let reactions: Vec<String> = reactions
         .iter()
-        .map(|Reaction { key, count, own }| format!("{key} {count} {own}"))
+        .map(
+            |Reaction {
+                 key,
+                 count,
+                 own,
+                 failed,
+             }| format!("{key} {count} {own} {failed}"),
+        )
         .collect();
     let image = image.as_ref().map(
         |ImageInfo {
@@ -976,7 +986,8 @@ fn whole(message: &Message) -> String {
          own {own}; edited {edited}; pinned {pinned}; saved {saved}; html {html:?}; \
          reply {reply_to:?} {reply_sender:?} {reply_event:?}; subject {subject:?}; reactions {reactions:?}; image {image:?}; \
          file {file:?}; thread {thread:?}; poll {poll:?}; upload {upload:?}; \
-         send error {send_error:?}; shield {shield:?}; mentions {mentions:?}; \
+         send error {send_error:?}; edit error {edit_error:?}; delete error {delete_error:?}; \
+         held {held}; shield {shield:?}; mentions {mentions:?}; \
          read by {readers:?} {total}; utd {utd:?}; deleted {deleted:?}"
     )
 }

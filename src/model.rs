@@ -63,13 +63,30 @@ pub struct Reaction {
     pub key: String,
     pub count: u32,
     pub own: bool,
+    /// Ours, and it could not be sent: it waits to be tried again or removed.
+    pub failed: bool,
 }
 
 /// Hand-written: the key of a reaction can be any text.
 impl fmt::Debug for Reaction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Reaction(count: {}, own: {})", self.count, self.own)
+        write!(
+            f,
+            "Reaction(count: {}, own: {}, failed: {})",
+            self.count, self.own, self.failed
+        )
     }
+}
+
+/// What of a message that is on the server could not be sent (see
+/// [`Message::failed_change`]): what Del discards, and what the status line names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedChange {
+    Edit,
+    Deletion,
+    Reaction,
+    /// More than one of them.
+    Several,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -164,6 +181,13 @@ pub struct Message {
     pub upload: Option<(u64, u64)>,
     /// Why sending failed, in a few words.
     pub send_error: Option<String>,
+    /// Our edit of it could not be sent: why, in a few words.
+    pub edit_error: Option<String>,
+    /// Our deletion of it could not be sent: why, in a few words.
+    pub delete_error: Option<String>,
+    /// A message of ours on its way, held up behind a change that could not be sent
+    /// in the same room (see `prepare_messages`).
+    pub held: bool,
     /// A doubt about who really sent this (encrypted rooms only).
     pub shield: Option<Shield>,
     /// Mentions (`m.mentions`) carried by the message, used to preserve them on edit.
@@ -258,6 +282,9 @@ impl fmt::Debug for Message {
             .field("poll", &self.poll)
             .field("upload", &self.upload)
             .field("send_error", &self.send_error.is_some())
+            .field("edit_error", &self.edit_error.is_some())
+            .field("delete_error", &self.delete_error.is_some())
+            .field("held", &self.held)
             .field("shield", &self.shield)
             .field("utd", &self.utd)
             .field("deleted", &self.deleted)
@@ -835,6 +862,27 @@ impl Message {
             }
             _ if self.file.is_some() || self.image.is_some() => "◌ uploading…".to_owned(),
             _ => "◌ sending".to_owned(),
+        }
+    }
+
+    /// What of this message could not be sent, if anything: the message itself, or a
+    /// change of ours to it (an edit, a deletion, a reaction).
+    pub fn failed_any(&self) -> bool {
+        self.state == SendState::Failed || self.failed_change().is_some()
+    }
+
+    /// Which change of ours to this message could not be sent, if any. The message
+    /// may be someone else's: our reaction to it, or our deletion as a moderator.
+    pub fn failed_change(&self) -> Option<FailedChange> {
+        let reactions = self.reactions.iter().filter(|r| r.failed).count();
+        let edit = usize::from(self.edit_error.is_some());
+        let deletion = usize::from(self.delete_error.is_some());
+        match (edit, deletion, reactions) {
+            (0, 0, 0) => None,
+            (1, 0, 0) => Some(FailedChange::Edit),
+            (0, 1, 0) => Some(FailedChange::Deletion),
+            (0, 0, 1) => Some(FailedChange::Reaction),
+            _ => Some(FailedChange::Several),
         }
     }
 
@@ -1469,11 +1517,13 @@ pub fn demo_rooms() -> Vec<Room> {
             key: "👍".into(),
             count: 2,
             own: false,
+            failed: false,
         },
         Reaction {
             key: "🎉".into(),
             count: 1,
             own: true,
+            failed: false,
         },
     ];
     rust.messages[4].reply_to = Some((
@@ -1830,6 +1880,7 @@ mod tests {
                 key: "secret".into(),
                 count: 1,
                 own: false,
+                failed: false,
             }],
             thread: Some(ThreadSummary {
                 replies: 2,
