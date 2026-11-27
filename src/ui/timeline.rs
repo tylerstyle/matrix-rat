@@ -795,16 +795,17 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
                 }
             }
 
-            let playable = message.is_playable()
-                && message.kind != MsgKind::Redacted
-                && message.state != SendState::Failed;
+            let playable = message.is_playable() && message.state != SendState::Failed;
             let (body_style, intro) = match message.kind {
                 MsgKind::Emote => (
                     Style::new().fg(theme.user_color(message.sender_key())),
                     Some(format!("* {} ", message.sender_name())),
                 ),
-                MsgKind::Redacted | MsgKind::Undecryptable => (theme.style(Role::ReplyQuote), None),
-                MsgKind::Text | MsgKind::System | MsgKind::ReadMarker => (text_style, None),
+                MsgKind::Undecryptable => (theme.style(Role::ReplyQuote), None),
+                // System lines, the read marker and deleted messages are drawn above.
+                MsgKind::Text | MsgKind::System | MsgKind::ReadMarker | MsgKind::Redacted => {
+                    (text_style, None)
+                }
             };
             let mut rich = Rich::of(message.html.as_deref(), body_text);
             cut_short = crate::highlight::colour(&mut rich);
