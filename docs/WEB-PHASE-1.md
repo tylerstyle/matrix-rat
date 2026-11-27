@@ -214,6 +214,40 @@ today's code paths: the new names re-export what is used now.
      `[target.wasm32-unknown-unknown]`) and 0.2 its `js` feature. The gate:
      `cargo check --lib --target wasm32-unknown-unknown`, in `scripts/check.sh` (nixpkgs' rustc
      has the browser std; `cargo check` needs no linker) and in CI.
+     **Done** (2026-11-27, `ea2b670..345d927`): `Cargo.toml` by target as written; the lock
+     gained one edge (`growable-bloom-filter` under matrix-sdk-indexeddb), and native
+     `cargo tree -e features` is the same as before for x86_64 and aarch64. Native only as
+     listed (`termquery` with `shell::terminal`); the runner halves with their re-exports.
+     Browser stand-ins: `matrix/auth.rs` holds the login types both builds share (and
+     `SecretStoreMode`; `session.rs` and `keyring.rs` re-export them) and the browser's
+     `session` (no session to restore, logins not available yet); a search ends at once with a
+     note; the picture encoders make nothing (`Encoded`'s protocol is an enum without
+     variants there), so every picture keeps its placeholder; `files::write_new`,
+     `NewFile::create`, `TempAudio::create`, the key export and import and `upload`'s disk
+     calls refuse; each `spawn_blocking` of the worker does its work in place; the media
+     download reads the body whole (reqwest has no `chunk` there). Beyond the plan:
+     matrix-sdk's errors are not `Send` in the browser (`Error::UnknownError` holds a
+     `Box<dyn Error>`), so `anyhow` cannot take them: `matrix/sdk_error.rs` gives 25 places
+     `.sdk()?`/`.sdk_context(..)`, which are `?`/`.context` on native and copy the error
+     (texts, causes, `logsafe`'s `Why`) in the browser; `LeftRooms` uses matrix-sdk's
+     `BoxFuture`; `logsafe` has no `is_connect` there. Left compiled, not `cfg`'d: the key
+     file checks (`app/devices.rs`) and `path.exists()` (`app/files.rs`), as std answers
+     "unsupported" in the browser and the worker refuses anyway; `App::image_cleanup`.
+     `App::start_images`/`on_image_encoded` (the encoder thread) are native only.
+     `matrix_rat::core` is public on both builds: `App`, `OsRequest`, `Config`, `Paths`,
+     `SecretStoreMode`, the input types, `spawn_with`/`MatrixHandle`/`MatrixEvent`,
+     `Storage` (with its key types), `Probes`, `ui::draw`, `ColorScheme`, `time::Instant` and
+     rt's `interval`, `MissedTickBehavior`, `sleep_until`; the `App` methods the shell calls
+     became `pub`. The remaining dead code in the browser was runner-only helpers, now under
+     `cfg(any(not(target_family = "wasm"), test))`, plus three `expect(dead_code)` for the
+     browser (`EncodeDone`, `RestoreOutcome`, `threads::SUPPORT`) and three
+     `expect(unreachable_code)` after an uninhabited `NewFile` or `Encoded`. No
+     `.cargo/config.toml`: getrandom 0.4 takes its backend from the `wasm_js` feature, which
+     matrix-sdk's `js` turns on (and 0.2's `js`). The gate runs with `-D warnings` in
+     `check.sh` and in a `browser` job in `checks.yml`; nixpkgs' rustc 1.99.1 has the browser
+     std, so `shell.nix` is unchanged. `cargo deny check` passes (its graph is the native
+     targets); for the browser's graph it reports `derivative` unmaintained
+     (RUSTSEC-2024-0388, via matrix-sdk-indexeddb), not ignored. 1670 passed and 62 ignored.
 
 ## Not in phase 1
 
